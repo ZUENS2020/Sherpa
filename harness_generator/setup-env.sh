@@ -84,11 +84,11 @@ ensure_tool git git
 ensure_tool docker docker.io
 ensure_tool "" libxapian-dev
 
-# The repository relies on the "codex" command-line tool.
-# Detect Codex – offer instructions for installing when missing.
-if ! command -v codex >/dev/null 2>&1; then
-    echo "Codex CLI not detected in PATH. It is required for harness generation."
-    echo "Follow the instructions in the Codex CLI repository for installation: https://github.com/openai/codex"
+# The repository relies on the "opencode" command-line tool.
+# Detect OpenCode – offer instructions for installing when missing.
+if ! command -v opencode >/dev/null 2>&1; then
+    echo "OpenCode CLI not detected in PATH. It is required for harness generation."
+    echo "Install it via npm: npm i -g opencode-ai"
 fi
 
 # libxapian-dev is handled by ensure_tool above.

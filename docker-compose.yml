@@ -33,7 +33,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.web
       args:
-        INSTALL_CODEX: "1"
+        INSTALL_OPENCODE: "1"
     ports:
       - "8000:8000"
     environment:
@@ -50,6 +50,8 @@ services:
       # Default OSS-Fuzz checkout path inside containers.
       # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
       SHERPA_DEFAULT_OSS_FUZZ_DIR: "/shared/oss-fuzz"
+      # CLI backend for code edits (opencode).
+      SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
       SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz"
@@ -72,8 +74,6 @@ services:
       # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
       - sherpa-oss-fuzz:/shared/oss-fuzz
 
-      # Optional: persist Codex login/auth cache so you don't have to re-login.
-      # - sherpa-codex:/root/.codex
 
       # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
       # - ./.env:/app/.env:ro
@@ -98,4 +98,3 @@ volumes:
   sherpa-tmp:
   sherpa-config:
   sherpa-oss-fuzz:
-  # sherpa-codex:

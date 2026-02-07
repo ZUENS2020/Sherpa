@@ -15,27 +15,13 @@ if [[ $(uname -m) == "arm64" ]]; then
     fi
 fi
 
-# Install codex binary if missing
-if ! command -v codex &> /dev/null; then
-    echo "codex not found. Installing..."
-    if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS
-        if command -v brew &> /dev/null; then
-            brew install codex
-        else
-            echo "Homebrew not found. Please install Homebrew first: https://brew.sh"
-            exit 1
-        fi
-    elif [[ "$(uname)" == "Linux" ]]; then
-        # Linux
-        if command -v apt &> /dev/null; then
-            sudo apt update && sudo apt install -y codex
-        else
-            echo "apt not found. Please install codex manually."
-            exit 1
-        fi
+# Install OpenCode CLI if missing
+if ! command -v opencode &> /dev/null; then
+    echo "opencode not found. Installing via npm..."
+    if command -v npm &> /dev/null; then
+        npm i -g opencode-ai
     else
-        echo "Unsupported OS. Please install codex manually."
+        echo "npm not found. Please install Node.js (which includes npm) and then run: npm i -g opencode-ai"
         exit 1
     fi
 fi

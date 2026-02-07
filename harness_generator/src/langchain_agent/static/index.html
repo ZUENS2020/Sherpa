@@ -3,8 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LangChain Agent - 智能助手</title>
+    <title>Sherpa / OSS-Fuzz 控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg: #f4f4f2;
+            --surface: #ffffff;
+            --ink: #101113;
+            --muted: #6d6f73;
+            --line: #d9d9d2;
+            --accent: #ff8a00;
+            --ok: #1f9d55;
+            --warn: #f97316;
+            --radius: 14px;
+            --radius-sm: 8px;
+            --shadow: 0 20px 40px rgba(10, 12, 14, 0.08);
+            --mono: "IBM Plex Mono", "Segoe UI", monospace;
+            --sans: "IBM Plex Sans", "Segoe UI", sans-serif;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -12,215 +31,299 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--ink);
             min-height: 100vh;
+            padding: 28px 20px 60px;
+        }
+
+        .app {
+            max-width: 1180px;
+            margin: 0 auto;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
+            gap: 22px;
+        }
+
+        .topbar {
+            display: flex;
             align-items: center;
-            padding: 20px;
+            justify-content: space-between;
+            padding: 18px 22px;
+            border: 1px solid var(--line);
+            background: var(--surface);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
         }
 
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 900px;
-            width: 100%;
-            overflow: hidden;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-
-        .header h1 {
-            font-size: 32px;
-            margin-bottom: 10px;
-        }
-
-        .header p {
+        .brand {
+            font-family: var(--mono);
+            font-weight: 600;
+            letter-spacing: 0.08em;
             font-size: 14px;
-            opacity: 0.9;
         }
 
-        .content {
-            padding: 40px;
-        }
-
-        .section {
-            margin-bottom: 40px;
-        }
-
-        .section-title {
-            font-size: 18px;
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 15px;
+        .status-line {
             display: flex;
             align-items: center;
+            gap: 10px;
+            font-size: 12px;
+            color: var(--muted);
+            font-family: var(--mono);
         }
 
-        .section-title::before {
-            content: '';
-            display: inline-block;
-            width: 4px;
-            height: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            margin-right: 10px;
-            border-radius: 2px;
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #999;
+        }
+
+        .dot.ok {
+            background: var(--ok);
+        }
+
+        .dot.warn {
+            background: var(--warn);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 20px;
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 20px 22px;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .panel-title {
+            font-family: var(--mono);
+            font-size: 12px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .panel h2 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .monitor-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .metric {
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            background: #fafafa;
+        }
+
+        .metric span {
+            font-size: 11px;
+            color: var(--muted);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .metric strong {
+            font-family: var(--mono);
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .metric.wide {
+            grid-column: span 3;
+        }
+
+        .jobs-list {
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            background: #fafafa;
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.6;
+            font-family: var(--mono);
+            white-space: pre-wrap;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
         }
 
         .form-group {
-            margin-bottom: 15px;
-        }
-
-        .row {
             display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
+            flex-direction: column;
+            gap: 8px;
         }
 
-        .row .form-group {
-            flex: 1;
-            min-width: 240px;
-        }
-
-        .hint {
-            font-size: 12px;
-            color: #666;
-            margin-top: 6px;
-            line-height: 1.4;
+        .form-group.full {
+            grid-column: 1 / -1;
         }
 
         label {
-            display: block;
-            font-size: 14px;
-            color: #555;
-            margin-bottom: 8px;
-            font-weight: 500;
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-family: var(--mono);
         }
 
         input[type="text"],
         textarea {
             width: 100%;
-            padding: 12px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
             font-size: 14px;
-            font-family: inherit;
-            transition: all 0.3s ease;
+            font-family: var(--sans);
+            background: #ffffff;
+            transition: border 0.2s ease, box-shadow 0.2s ease;
         }
 
         input[type="text"]:focus,
         textarea:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-color: #bcbcbc;
+            box-shadow: 0 0 0 3px rgba(255, 138, 0, 0.15);
         }
 
-        textarea {
-            resize: vertical;
-            min-height: 80px;
+        .hint {
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .checkbox-line {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .checkbox-line input {
+            transform: scale(1.1);
+            accent-color: var(--accent);
         }
 
         .button-group {
             display: flex;
-            gap: 10px;
-            margin-top: 20px;
+            gap: 12px;
         }
 
         button {
-            flex: 1;
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
+            border: 1px solid var(--line);
+            background: var(--ink);
+            color: white;
+            border-radius: 999px;
+            padding: 10px 18px;
+            font-size: 13px;
             font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: transform 0.2s ease, opacity 0.2s ease;
+            font-family: var(--mono);
+            letter-spacing: 0.04em;
         }
 
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+        button:hover:not(:disabled) {
+            transform: translateY(-1px);
         }
 
-        .btn-primary:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-
-        .btn-primary:disabled {
+        button:disabled {
             opacity: 0.6;
             cursor: not-allowed;
         }
 
-        button:active:not(:disabled) {
-            transform: translateY(0);
-        }
-
         .result-box {
-            background: #f8f9fa;
-            border: 1px solid #e9ecef;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 15px;
-            max-height: 300px;
-            overflow-y: auto;
-            font-size: 13px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            padding: 12px;
+            font-size: 12px;
             line-height: 1.6;
-            color: #333;
+            color: var(--ink);
+            background: #fafafa;
+            max-height: 260px;
+            overflow-y: auto;
         }
 
         .result-box.loading {
-            color: #667eea;
+            border-color: rgba(255, 138, 0, 0.5);
+            color: var(--ink);
+            background: rgba(255, 138, 0, 0.08);
         }
 
         .result-box.error {
-            background: #fff5f5;
-            border-color: #feb2b2;
-            color: #c53030;
+            border-color: rgba(220, 38, 38, 0.4);
+            color: #9b1c1c;
+            background: rgba(220, 38, 38, 0.08);
         }
 
         .result-box.success {
-            background: #f0fff4;
-            border-color: #9ae6b4;
-            color: #22543d;
+            border-color: rgba(31, 157, 85, 0.4);
+            color: #14532d;
+            background: rgba(31, 157, 85, 0.08);
         }
 
-        .status-icon {
-            margin-right: 8px;
-        }
-
-        .divider {
-            height: 1px;
-            background: #e9ecef;
-            margin: 40px 0;
-        }
-
-        .checkbox {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-            color: #444;
-        }
-
-        input[type="checkbox"] {
-            transform: scale(1.1);
-        }
-
-        @media (max-width: 600px) {
-            .header h1 {
-                font-size: 24px;
+        @media (max-width: 1200px) {
+            .grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
 
-            .content {
-                padding: 20px;
+            .monitor-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .metric.wide {
+                grid-column: span 2;
+            }
+        }
+
+        @media (max-width: 900px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 20px 14px 40px;
+            }
+
+            .topbar {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .monitor-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .metric.wide {
+                grid-column: span 1;
             }
 
             .button-group {
@@ -230,36 +333,117 @@
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🤖 LangChain 智能助手</h1>
-            <p>由 DeepSeek 模型驱动的多功能助手</p>
-        </div>
+    <div class="app">
+        <header class="topbar">
+            <div class="brand">SHERPA / OSS-FUZZ</div>
+            <div class="status-line">
+                <span id="system_status_dot" class="dot"></span>
+                <span id="system_status_text">等待连接</span>
+                <span id="system_time">--</span>
+            </div>
+        </header>
 
-        <div class="content">
-            <!-- 持久化配置部分 -->
-            <div class="section">
-                <div class="section-title">⚙️ 持久化配置</div>
+        <main class="grid">
+            <section class="panel">
+                <div class="panel-title">System Monitor</div>
+                <h2>系统状态</h2>
+                <div class="monitor-grid">
+                    <div class="metric">
+                        <span>Uptime</span>
+                        <strong id="system_uptime">--</strong>
+                    </div>
+                    <div class="metric">
+                        <span>Queued</span>
+                        <strong id="system_jobs_queued">--</strong>
+                    </div>
+                    <div class="metric">
+                        <span>Running</span>
+                        <strong id="system_jobs_running">--</strong>
+                    </div>
+                    <div class="metric">
+                        <span>Success</span>
+                        <strong id="system_jobs_success">--</strong>
+                    </div>
+                    <div class="metric">
+                        <span>Error</span>
+                        <strong id="system_jobs_error">--</strong>
+                    </div>
+                    <div class="metric">
+                        <span>Total</span>
+                        <strong id="system_jobs_total">--</strong>
+                    </div>
+                    <div class="metric wide">
+                        <span>Logs</span>
+                        <strong id="system_logs">--</strong>
+                    </div>
+                    <div class="metric wide">
+                        <span>OSS-Fuzz Dir</span>
+                        <strong id="system_ossfuzz_dir">--</strong>
+                    </div>
+                </div>
+                <div class="jobs-list" id="system_jobs_list">暂无运行中的任务</div>
+            </section>
 
-                <div class="row">
-                    <div class="form-group">
-                        <label for="openai_api_key">OpenAI API Key（用于 Codex / OpenAI）</label>
-                        <input type="text" id="openai_api_key" placeholder="OPENAI_API_KEY（会持久化保存）" />
-                        <div class="hint">用于 Codex CLI（生成/修复 harness）以及 fuzz 流程的自动化调用。</div>
+            <section class="panel">
+                <div class="panel-title">Run Fuzz</div>
+                <h2>触发模糊测试</h2>
+
+                <div class="form-grid">
+                    <div class="form-group full">
+                        <label for="code_url">代码仓库地址</label>
+                        <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
                     </div>
                     <div class="form-group">
-                        <label for="openai_base_url">OpenAI Base URL（第三方 OpenAI-compatible，可选）</label>
-                        <input type="text" id="openai_base_url" placeholder="例如：https://api.openai.com/v1 或 https://your-proxy.example.com/v1" />
-                        <div class="hint">会写入 OPENAI_BASE_URL；用于让 Codex 走你配置的 OpenAI-compatible 端点。</div>
+                        <label for="email">邮箱地址（可选）</label>
+                        <input type="text" id="email" placeholder="your-email@example.com">
                     </div>
                     <div class="form-group">
-                        <label for="openrouter_api_key">OpenRouter API Key</label>
-                        <input type="text" id="openrouter_api_key" placeholder="OPENROUTER_API_KEY（会持久化保存）" />
-                        <div class="hint">保留字段（当前 Web 已移除聊天功能）。</div>
+                        <label for="time_budget">运行时长（秒）</label>
+                        <input type="text" id="time_budget" value="900">
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-line">
+                            <input type="checkbox" id="use_docker" checked>
+                            在 Docker 中运行 fuzz
+                        </label>
+                        <div class="hint">Windows 推荐。需要 Docker Desktop 已启动。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="docker_image">Docker 镜像名</label>
+                        <input type="text" id="docker_image" value="auto">
+                        <div class="hint">auto 会按语言选择 cpp/java 镜像。</div>
                     </div>
                 </div>
 
-                <div class="row">
+                <div class="button-group">
+                    <button id="fuzz_btn">开始模糊测试</button>
+                </div>
+
+                <div id="fuzz_status" class="result-box" style="display: none;"></div>
+                <div id="fuzz_log" class="result-box" style="display: none; margin-top: 12px;"></div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-title">Persistent Config</div>
+                <h2>持久化配置</h2>
+                <div class="hint">保存后会写入本地配置文件，并同步作为 fuzz 默认参数。</div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="openai_api_key">OpenAI API Key</label>
+                        <input type="text" id="openai_api_key" placeholder="OPENAI_API_KEY（会持久化保存）" />
+                        <div class="hint">用于 OpenCode CLI 调用。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="openai_base_url">OpenAI Base URL</label>
+                        <input type="text" id="openai_base_url" placeholder="https://api.openai.com/v1 或自建代理" />
+                        <div class="hint">会写入 OPENAI_BASE_URL。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="openrouter_api_key">OpenRouter API Key</label>
+                        <input type="text" id="openrouter_api_key" placeholder="OPENROUTER_API_KEY" />
+                        <div class="hint">当前 Web 未使用该 Key。</div>
+                    </div>
                     <div class="form-group">
                         <label for="openrouter_model">OpenRouter 模型</label>
                         <input type="text" id="openrouter_model" placeholder="例如：anthropic/claude-3.5-sonnet" value="anthropic/claude-3.5-sonnet" />
@@ -268,39 +452,32 @@
                         <label for="openrouter_base_url">OpenRouter Base URL</label>
                         <input type="text" id="openrouter_base_url" placeholder="https://openrouter.ai/api/v1" value="https://openrouter.ai/api/v1" />
                     </div>
-                </div>
-
-                <div class="row">
                     <div class="form-group">
                         <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
                         <input type="text" id="cfg_time_budget" value="900" />
                     </div>
                     <div class="form-group">
-                        <label class="checkbox">
+                        <label class="checkbox-line">
                             <input type="checkbox" id="cfg_use_docker" checked>
-                            Fuzz 默认使用 Docker
+                            默认在 Docker 中运行 fuzz
                         </label>
+                        <div class="hint">Windows 推荐打开。</div>
                     </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="cfg_docker_image">Fuzz 默认 Docker 镜像名</label>
-                    <input type="text" id="cfg_docker_image" value="auto" />
-                </div>
-
-                <div class="form-group">
-                    <label for="sherpa_git_mirrors">Git 镜像列表（SHERPA_GIT_MIRRORS）</label>
-                    <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}" />
-                    <div class="hint">逗号分隔；支持 {url} 模板。</div>
-                </div>
-
-                <div class="form-group">
-                    <label for="oss_fuzz_dir">OSS-Fuzz 本地路径（oss_fuzz_dir）</label>
-                    <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz（docker-compose 模式）或 D:/oss-fuzz（本机模式）" />
-                    <div class="hint">必须是一个有效的 oss-fuzz checkout 根目录（包含 infra/helper.py）。docker-compose 模式下建议使用 <code>/shared/oss-fuzz</code>。</div>
-                </div>
-
-                <div class="row">
+                    <div class="form-group">
+                        <label for="cfg_docker_image">Fuzz 默认 Docker 镜像</label>
+                        <input type="text" id="cfg_docker_image" value="auto" />
+                        <div class="hint">auto 会按语言自动选择。</div>
+                    </div>
+                    <div class="form-group full">
+                        <label for="oss_fuzz_dir">OSS-Fuzz 本地路径</label>
+                        <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz 或 D:/oss-fuzz" />
+                        <div class="hint">必须指向包含 infra/helper.py 的 oss-fuzz checkout 根目录。</div>
+                    </div>
+                    <div class="form-group full">
+                        <label for="sherpa_git_mirrors">Git 镜像列表（SHERPA_GIT_MIRRORS）</label>
+                        <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}" />
+                        <div class="hint">逗号分隔，支持 {url} 模板。</div>
+                    </div>
                     <div class="form-group">
                         <label for="sherpa_docker_http_proxy">Docker HTTP Proxy</label>
                         <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891" />
@@ -309,9 +486,6 @@
                         <label for="sherpa_docker_https_proxy">Docker HTTPS Proxy</label>
                         <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891" />
                     </div>
-                </div>
-
-                <div class="row">
                     <div class="form-group">
                         <label for="sherpa_docker_no_proxy">Docker NO_PROXY</label>
                         <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1" />
@@ -323,55 +497,12 @@
                 </div>
 
                 <div class="button-group">
-                    <button class="btn-primary" id="cfg_save_btn">💾 保存配置</button>
+                    <button id="cfg_save_btn">保存配置</button>
                 </div>
 
                 <div id="cfg_status" class="result-box" style="display: none;"></div>
-            </div>
-
-            <!-- 模糊测试部分 -->
-            <div class="section">
-                <div class="section-title">🧪 代码模糊测试</div>
-                
-                <div class="form-group">
-                    <label for="code_url">代码仓库地址（Git URL）</label>
-                    <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
-                </div>
-
-                <div class="row">
-                    <div class="form-group">
-                        <label for="email">邮箱地址（可选）</label>
-                        <input type="text" id="email" placeholder="your-email@example.com">
-                    </div>
-                    <div class="form-group">
-                        <label for="time_budget">运行时长（秒）</label>
-                        <input type="text" id="time_budget" value="900">
-                    </div>
-                </div>
-
-                <div class="row">
-                    <div class="form-group">
-                        <label class="checkbox">
-                            <input type="checkbox" id="use_docker" checked>
-                            在 Docker 里构建/运行 fuzz（Windows 推荐）
-                        </label>
-                        <div class="hint">需要本机已安装并启动 Docker Desktop。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="docker_image">Docker 镜像名</label>
-                        <input type="text" id="docker_image" value="auto">
-                        <div class="hint">填 auto 将按语言选择 cpp/java 镜像；镜像不存在会自动 build。</div>
-                    </div>
-                </div>
-
-                <div class="button-group">
-                    <button class="btn-primary" id="fuzz_btn">🧠 开始模糊测试</button>
-                </div>
-
-                <div id="fuzz_status" class="result-box" style="display: none;"></div>
-                <div id="fuzz_log" class="result-box" style="display: none; margin-top: 12px;"></div>
-            </div>
-        </div>
+            </section>
+        </main>
     </div>
 
     <script src="/static/script.js"></script>

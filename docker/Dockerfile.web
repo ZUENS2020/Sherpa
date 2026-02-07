@@ -32,21 +32,23 @@ RUN python -m pip install -r /app/docker/requirements.web.txt
 
 COPY . /app
 
-# Optional: install Codex CLI. This requires network access during build.
+# Optional: install OpenCode CLI. This requires network access during build.
 # If you cannot reach external package registries from your build environment, rebuild with:
-#   --build-arg INSTALL_CODEX=0
-ARG INSTALL_CODEX=1
-RUN if [ "$INSTALL_CODEX" = "1" ]; then \
-            echo "Installing Node.js (for Codex CLI)..."; \
+#   --build-arg INSTALL_OPENCODE=0
+ARG INSTALL_OPENCODE=1
+RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
+            echo "Installing Node.js (for CLI tools)..."; \
             curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
             apt-get update && apt-get install -y --no-install-recommends nodejs; \
             npm --version; node --version; \
-            echo "Installing Codex CLI..."; \
-            npm i -g @openai/codex; \
-            codex --version || true; \
             rm -rf /var/lib/apt/lists/*; \
+        fi \
+    && if [ "$INSTALL_OPENCODE" = "1" ]; then \
+            echo "Installing OpenCode CLI..."; \
+            npm i -g opencode-ai; \
+            opencode --version || true; \
         else \
-            echo "Skipping Codex CLI install"; \
+            echo "Skipping OpenCode CLI install"; \
         fi
 
 # Run the FastAPI web UI (static + API) from its folder so relative imports work.

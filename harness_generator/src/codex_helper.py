@@ -26,7 +26,7 @@
 """harness_generator/src/codex_helper.py
 ──────────────────────────────────────
 
-Wrapper around the OpenAI Codex CLI.
+Wrapper around the OpenCode CLI.
 
 This helper preserves the public API and the success contract used throughout
 the codebase:
@@ -39,12 +39,13 @@ Key implementation goals:
     - Robust retry + timeout behavior.
     - Stream output live to stdout while capturing it.
 
-The CLI used is the Codex binary `codex` in non-interactive mode (`codex exec`).
+The CLI used is the OpenCode binary `opencode` in non-interactive mode (`opencode run`).
 """
 
 from __future__ import annotations
 
 import logging
+import json
 import os
 import queue
 import shutil
@@ -109,9 +110,9 @@ def _ensure_git_repo(path: Path) -> "Repo":
 
 
 class CodexHelper:
-    """Wrapper around Codex CLI with robust retry logic.
+    """Wrapper around OpenCode CLI with robust retry logic.
 
-    Note: the class name is kept for backward compatibility.
+    Note: the class name is kept for backward compatibility with older imports.
     """
 
     def __init__(
@@ -121,7 +122,7 @@ class CodexHelper:
         ai_key_path: str | None = None,
         copy_repo: bool = True,
         scratch_space: Path | None = None,
-        codex_cli: str = "codex",
+        codex_cli: str = "opencode",
         codex_model: str = "sonnet",
         approval_mode: str = "full-auto",
         dangerous_bypass: bool = False,
@@ -134,8 +135,8 @@ class CodexHelper:
             raise FileNotFoundError(f"Repository not found: {self.repo_path}")
 
         self.scratch_space = scratch_space or Path("/tmp")
-        # Keep names for compatibility with older config/env.
-        self.codex_cli = str(codex_cli or "codex")
+        # Keep attribute name for compatibility with older config/env.
+        self.codex_cli = str(codex_cli or "opencode")
         self.codex_model = codex_model
         self.approval_mode = approval_mode
 
@@ -168,18 +169,16 @@ class CodexHelper:
             self.repo = _ensure_git_repo(self.working_dir)
 
         # Optional: allow teams to store an API key in a local file.
-        # Codex CLI can authenticate via saved login or API key.
+        # OpenCode CLI can authenticate via OPENAI_API_KEY (OpenAI-compatible).
         if ai_key_path:
             key_path = Path(ai_key_path).expanduser()
             if key_path.is_file():
                 key = key_path.read_text(encoding="utf-8", errors="ignore").strip()
                 if key:
-                    # Prefer OPENAI_API_KEY to align with Codex docs and common tooling.
+                    # Prefer OPENAI_API_KEY to align with OpenCode/OpenAI-compatible tooling.
                     os.environ.setdefault("OPENAI_API_KEY", key)
-                    # `codex exec` also supports CODEX_API_KEY in automation contexts.
-                    os.environ.setdefault("CODEX_API_KEY", key)
 
-        LOGGER.debug("CodexHelper working directory: %s", self.working_dir)
+        LOGGER.debug("OpenCodeHelper working directory: %s", self.working_dir)
 
     def _docker_git(self, args: Sequence[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
         if not self.git_docker_image:
@@ -269,7 +268,7 @@ class CodexHelper:
         max_cli_retries: int = 3,
         initial_backoff: float = 3.0,
     ) -> str | None:
-        """Execute Codex with robust retry logic and return its stdout or *None*."""
+        """Execute OpenCode with robust retry logic and return its stdout or *None*."""
 
         SENTINEL = "done"
         RETRY_ERRORS = (
@@ -302,7 +301,7 @@ class CodexHelper:
             tasks = str(instructions)
 
         prompt_parts: List[str] = [
-            "You are Codex running in a local Git repository.",
+            "You are OpenCode running in a local Git repository.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "Do NOT run any build or test commands unless explicitly asked.",
             "When ALL tasks are complete:",
@@ -326,12 +325,23 @@ class CodexHelper:
 
         prompt = "\n".join(prompt_parts).strip()
 
+        def _resolve_opencode_model() -> str | None:
+            env_model = os.environ.get("OPENCODE_MODEL", "").strip()
+            if env_model:
+                return env_model
+            openrouter_model = os.environ.get("OPENROUTER_MODEL", "").strip()
+            if openrouter_model:
+                if openrouter_model.startswith("openrouter/"):
+                    return openrouter_model
+                return f"openrouter/{openrouter_model}"
+            return None
+
         # ----------------------------------------------------------------
         # Outer loop – retry full patch attempt if no diff produced.
         # ----------------------------------------------------------------
 
         for attempt in range(1, max_attempts + 1):
-            LOGGER.info("[CodexHelper] patch attempt %d/%d", attempt, max_attempts)
+            LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 
             done_path.unlink(missing_ok=True)
 
@@ -360,12 +370,12 @@ class CodexHelper:
 
             while cli_try < max_cli_retries:
                 cli_try += 1
-                LOGGER.info("[CodexHelper] launch #%d (backoff=%.1fs)", cli_try, backoff)
+                LOGGER.info("[OpenCodeHelper] launch #%d (backoff=%.1fs)", cli_try, backoff)
 
                 # Resolve CLI path early so missing executables produce an actionable error.
                 cli_exe = shutil.which(self.codex_cli)
                 if cli_exe is not None and os.name == "nt":
-                    # On Windows, npm sometimes provides both `codex` and `codex.cmd`.
+                    # On Windows, npm sometimes provides both `opencode` and `opencode.cmd`.
                     # The extension-less file may not be directly executable via CreateProcess
                     # and can trigger: [WinError 193] %1 is not a valid Win32 application.
                     p = Path(cli_exe)
@@ -375,49 +385,42 @@ class CodexHelper:
                     # Common location for npm global bin on Windows.
                     appdata = os.environ.get("APPDATA")
                     if appdata:
-                        for candidate in (Path(appdata) / "npm" / "codex.cmd", Path(appdata) / "npm" / "codex"):
+                        for candidate in (Path(appdata) / "npm" / "opencode.cmd", Path(appdata) / "npm" / "opencode"):
                             if candidate.is_file():
                                 cli_exe = str(candidate)
                                 break
 
                 if cli_exe is None:
                     raise FileNotFoundError(
-                        f"Codex CLI not found: '{self.codex_cli}'. "
-                        "Ensure 'codex' is installed and on PATH (e.g. npm global bin), "
+                        f"OpenCode CLI not found: '{self.codex_cli}'. "
+                        "Ensure 'opencode' is installed and on PATH (e.g. npm global bin), "
                         "or pass the full path via --codex-cli."
                     )
 
-                # Codex non-interactive mode.
-                # - We need write access to edit the repo.
-                # - Keep sandbox as narrow as possible; allow override.
-                sandbox = (self.sandbox_mode or "workspace-write").strip()
-                if self.dangerous_bypass:
-                    sandbox = "danger-full-access"
-
-                cmd: list[str] = [
-                    cli_exe,
-                    "exec",
-                    "--full-auto",
-                    "--sandbox",
-                    sandbox,
-                    prompt,
-                ]
+                cmd: list[str] = [cli_exe, "run"]
+                model = _resolve_opencode_model()
+                if model:
+                    cmd += ["--model", model]
+                cmd.append(prompt)
 
                 try:
+                    env = os.environ.copy()
+                    # Encourage non-interactive, tool-enabled mode.
+                    env.setdefault("OPENCODE_PERMISSION", json.dumps({"permission": "allow"}))
                     proc = subprocess.Popen(
                         cmd,
                         cwd=self.working_dir,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        env=os.environ.copy(),
+                        env=env,
                         text=True,
                         errors="replace",
                     )
                 except FileNotFoundError as e:
                     raise FileNotFoundError(
-                        f"Failed to launch Codex CLI: {cmd[0]} (cwd={self.working_dir}). "
-                        "Make sure Codex is installed and accessible to the server process."
+                        f"Failed to launch OpenCode CLI: {cmd[0]} (cwd={self.working_dir}). "
+                        "Make sure OpenCode is installed and accessible to the server process."
                     ) from e
 
                 start_time = time.time()
@@ -464,16 +467,16 @@ class CodexHelper:
                         elapsed = now - start_time
 
                         if elapsed > timeout:
-                            LOGGER.warning("[CodexHelper] hard timeout; killing codex")
+                            LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
                             saw_retry_error = True
-                            print(f"[CodexHelper] hard timeout after {elapsed:.0f}s; terminating agent")
+                            print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
                             _kill_proc()
                             break
 
                         # Heartbeat so job logs keep moving even if the agent is quiet.
                         if (now - last_heartbeat) > 10.0:
                             last_heartbeat = now
-                            print(f"[CodexHelper] running… elapsed={elapsed:.0f}s")
+                            print(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         # If Codex wrote files but forgot the sentinel, accept the diff and move on.
                         if accept_diff_without_done and (now - last_diff_check) > 2.0:
@@ -481,15 +484,15 @@ class CodexHelper:
                             try:
                                 current_diff = self._git_diff_head()
                                 if current_diff and current_diff != baseline_diff:
-                                    print("[CodexHelper] diff detected without sentinel; accepting and terminating")
+                                    print("[OpenCodeHelper] diff detected without sentinel; accepting and terminating")
                                     _kill_proc()
                                     break
                             except Exception:
                                 pass
 
                         if done_path.exists():
-                            LOGGER.info("[CodexHelper] done flag detected")
-                            print("[CodexHelper] done flag detected; terminating")
+                            LOGGER.info("[OpenCodeHelper] done flag detected")
+                            print("[OpenCodeHelper] done flag detected; terminating")
                             _kill_proc()
                             break
 
@@ -505,7 +508,7 @@ class CodexHelper:
                             print(item, end="")
                             captured_chunks.append(item)
                             if any(err in item for err in RETRY_ERRORS):
-                                LOGGER.warning("[CodexHelper] retryable error detected → abort")
+                                LOGGER.warning("[OpenCodeHelper] retryable error detected → abort")
                                 saw_retry_error = True
                                 _kill_proc()
                                 break
@@ -549,25 +552,25 @@ class CodexHelper:
 
             if not done_path.exists():
                 if accept_diff_without_done and diff_changed:
-                    LOGGER.info("[CodexHelper] diff produced without sentinel — accepting")
-                    print("[CodexHelper] diff produced without sentinel — accepting")
+                    LOGGER.info("[OpenCodeHelper] diff produced without sentinel — accepting")
+                    print("[OpenCodeHelper] diff produced without sentinel — accepting")
                     return "".join(captured_chunks)
 
-                LOGGER.warning("[CodexHelper] sentinel not created; next attempt")
-                print("[CodexHelper] sentinel not created; next attempt")
+                LOGGER.warning("[OpenCodeHelper] sentinel not created; next attempt")
+                print("[OpenCodeHelper] sentinel not created; next attempt")
                 continue  # outer attempt loop
 
             # Refresh repo to ensure it sees new changes.
             self._git_add_all()
 
             if diff_changed or self._git_diff_head() != baseline_diff:
-                LOGGER.info("[CodexHelper] diff produced — success")
+                LOGGER.info("[OpenCodeHelper] diff produced — success")
                 return "".join(captured_chunks)
 
-            LOGGER.info("[CodexHelper] sentinel present but no diff; next attempt")
-            print("[CodexHelper] sentinel present but no diff; next attempt")
+            LOGGER.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
+            print("[OpenCodeHelper] sentinel present but no diff; next attempt")
 
-        LOGGER.warning("[CodexHelper] exhausted attempts — no edits produced")
+        LOGGER.warning("[OpenCodeHelper] exhausted attempts — no edits produced")
         return None
 
 

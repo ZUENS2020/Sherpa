@@ -29,13 +29,13 @@ fuzz_unharnessed_repo.py (non-OSS-Fuzz, local workflow)
 
 Refactors the OSS-Fuzz-centric generator into a generic workflow that:
   • clones an arbitrary Git repo,
-  • has Codex plan targets, synthesize a local libFuzzer/Jazzer harness + build glue,
+  • has OpenCode plan targets, synthesize a local libFuzzer/Jazzer harness + build glue,
   • iteratively fixes build errors,
   • generates initial seeds,
   • runs the fuzzer locally,
   • triages any crash and packages a reproducible challenge bundle.
 
-Relies on the existing CodexHelper.
+Relies on the existing CodexHelper (OpenCode-backed).
 """
 
 from __future__ import annotations
@@ -446,7 +446,7 @@ class NonOssFuzzHarnessGenerator:
         *,
         ai_key_path: Path,
         sanitizer: str = DEFAULT_SANITIZER,
-        codex_cli: str = "codex",
+        codex_cli: str = "opencode",
         time_budget_per_target: int = 900,  # seconds for an initial run
         codex_dangerous: bool = False,
         codex_sandbox_mode: Optional[str] = None,
@@ -576,43 +576,50 @@ class NonOssFuzzHarnessGenerator:
             raise HarnessGeneratorError(f"Dockerfile not found: {dockerfile}")
 
         print(f"[*] Docker image '{image}' not found. Building it now …")
-        cmd = [
-            "docker",
-            "build",
-            "--progress=plain",
-            "-t",
-            image,
-            "-f",
-            str(dockerfile),
-            str(TOOL_ROOT),
-        ]
-        print(f"[*] ➜  {' '.join(cmd)}")
-        # IMPORTANT: in web mode we redirect Python's stdout/stderr to capture job logs.
-        # subprocess inherits the original OS-level stdout/stderr by default, so its output
-        # would not show up in the job log. Stream it explicitly.
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(TOOL_ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                bufsize=1,
-            )
-        except FileNotFoundError:
-            raise HarnessGeneratorError(
-                "Docker not found in PATH. Install Docker Desktop and ensure 'docker' is available."
-            )
+        def _run_build(build_cmd: list[str], *, buildkit: str | None = None) -> tuple[int, list[str]]:
+            print(f"[*] ➜  {' '.join(build_cmd)}")
+            try:
+                env = os.environ.copy()
+                if buildkit is not None:
+                    env["DOCKER_BUILDKIT"] = buildkit
+                else:
+                    env.setdefault("DOCKER_BUILDKIT", "1")
+                proc = subprocess.Popen(
+                    build_cmd,
+                    cwd=str(TOOL_ROOT),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    bufsize=1,
+                )
+            except FileNotFoundError:
+                raise HarnessGeneratorError(
+                    "Docker not found in PATH. Install Docker Desktop and ensure 'docker' is available."
+                )
 
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            # Ensure docker output is visible both in CLI and captured web job logs.
-            print(line, end="")
+            assert proc.stdout is not None
+            lines: list[str] = []
+            for line in proc.stdout:
+                lines.append(line)
+                print(line, end="")
+            rc = proc.wait()
+            return rc, lines
 
-        rc = proc.wait()
+        cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+        rc, lines = _run_build(cmd, buildkit="1")
         if rc != 0:
-            raise HarnessGeneratorError(f"Docker build failed (rc={rc}).")
+            # Older docker builders do not support --progress; retry without it.
+            if any("unknown flag: --progress" in ln for ln in lines):
+                cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                rc, lines = _run_build(cmd, buildkit="1")
+            # BuildKit can be enabled without buildx; retry with classic builder.
+            if rc != 0 and any("BuildKit is enabled" in ln or "buildx component is missing" in ln for ln in lines):
+                cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                rc, _ = _run_build(cmd, buildkit="0")
+            if rc != 0:
+                raise HarnessGeneratorError(f"Docker build failed (rc={rc}).")
 
     def _python_runner(self) -> str:
         # When executing build/run inside Docker, use the container's python.
@@ -696,13 +703,18 @@ class NonOssFuzzHarnessGenerator:
                 "MSAN_OPTIONS",
                 "LSAN_OPTIONS",
                 "TSAN_OPTIONS",
+                # Toolchain overrides
+                "CC",
+                "CXX",
+                "CFLAGS",
+                "CXXFLAGS",
+                "LDFLAGS",
                 # Jazzer/Java
                 "JAVA_TOOL_OPTIONS",
                 "JAZZER_JVM_ARGS",
                 # Keys (if used)
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
-                "CODEX_API_KEY",
             }
             allow_prefixes = (
                 "SHERPA_",
@@ -743,6 +755,10 @@ class NonOssFuzzHarnessGenerator:
         ]
 
         filtered_env = _filter_env(env)
+        if "CC" not in filtered_env:
+            filtered_env["CC"] = "clang"
+        if "CXX" not in filtered_env:
+            filtered_env["CXX"] = "clang++"
         if filtered_env:
             for k, v in filtered_env.items():
                 docker_cmd += ["-e", f"{k}={v}"]
@@ -915,6 +931,7 @@ class NonOssFuzzHarnessGenerator:
         build_py = self.fuzz_dir / "build.py"
         build_sh = self.fuzz_dir / "build.sh"
         build_dir = self.repo_root / "build"
+        fuzz_build_dir = self.repo_root / "fuzz" / "build"
 
         def _build_py_supports_clean_flag(path: Path) -> bool:
             try:
@@ -990,10 +1007,22 @@ class NonOssFuzzHarnessGenerator:
             )
 
         errors_accum = ""
+        build_env = os.environ.copy()
+        if self.docker_image:
+            # Ensure libFuzzer-compatible toolchain when running inside Docker.
+            build_env.setdefault("CC", "clang")
+            build_env.setdefault("CXX", "clang++")
+            # Avoid stale compiler choices in cached CMake dirs.
+            for stale_dir in (fuzz_build_dir, build_dir):
+                if stale_dir.exists():
+                    try:
+                        shutil.rmtree(stale_dir)
+                    except Exception:
+                        pass
         for attempt in range(1, self.max_build_retries + 1):
             print(f"[*] Build attempt {attempt}/{self.max_build_retries} → {' '.join(build_cmd)}")
 
-            rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root)
+            rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root, env=build_env)
 
             # Optional retry-with-clean for flaky/stale CMake caches.
             if rc != 0 and build_cmd_clean is not None:
@@ -1001,13 +1030,15 @@ class NonOssFuzzHarnessGenerator:
                 # Avoid looping: only retry clean once per attempt.
                 if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
                     print(f"[*] Build failed; retrying once with --clean → {' '.join(build_cmd_clean)}")
-                    rc2, out2, err2 = self._run_cmd(list(build_cmd_clean), cwd=self.repo_root)
-                    # If --clean itself is unsupported, keep original rc/out/err.
-                    combined2 = strip_ansi((out2 or "") + "\n" + (err2 or ""))
-                    if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
-                        print("[warn] build.py does not support --clean; continuing without it")
-                    else:
-                        rc, out, err = rc2, out2, err2
+                    rc2, out2, err2 = self._run_cmd(list(build_cmd_clean), cwd=self.repo_root, env=build_env)
+                else:
+                    rc2, out2, err2 = rc, out, err
+                # If --clean itself is unsupported, keep original rc/out/err.
+                combined2 = strip_ansi((out2 or "") + "\n" + (err2 or ""))
+                if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
+                    print("[warn] build.py does not support --clean; continuing without it")
+                else:
+                    rc, out, err = rc2, out2, err2
 
             # Detect two categories of issues:
             #   1. The build script exited with non-zero status (classic compilation failure).
@@ -1938,7 +1969,7 @@ def main() -> None:
     parser.add_argument("--workdir", type=Path, help="Existing directory to use as working tree (optional)")
     parser.add_argument("--ai-key-path", type=Path, default="./.env", help="Path to file with OPENAI_API_KEY (optional)")
     parser.add_argument("--sanitizer", default=DEFAULT_SANITIZER, help="Sanitizer for C/C++ (address, undefined, etc.)")
-    parser.add_argument("--codex-cli", default="codex", help="Codex CLI executable (kept as --codex-cli for compatibility)")
+    parser.add_argument("--codex-cli", default="opencode", help="OpenCode CLI executable (kept as --codex-cli for compatibility)")
     parser.add_argument(
         "--codex-no-sandbox",
         action="store_true",

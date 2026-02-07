@@ -6,7 +6,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 获�
 sys.path.append(parent_dir)  # 添加父文件夹路径
 from pathlib import Path
 
-from ossfuzz_auto import OssFuzzAutoInput, run_ossfuzz_auto
+from workflow_graph import FuzzWorkflowInput, run_fuzz_workflow
 
 load_dotenv()
 
@@ -49,17 +49,14 @@ def fuzz_logic(
     ai_key_path: Path | None = None,
     oss_fuzz_dir: str | None = None,
 ) -> str:
-    # NOTE: email/docker_image/max_len are currently not used in OSS-Fuzz mode.
-    oss_dir = (oss_fuzz_dir or "").strip()
-    if not oss_dir:
-        raise ValueError("oss_fuzz_dir is required. Configure it in Web: OSS-Fuzz 本地路径（oss_fuzz_dir）")
-
-    return run_ossfuzz_auto(
-        OssFuzzAutoInput(
+    return run_fuzz_workflow(
+        FuzzWorkflowInput(
             repo_url=repo_url,
-            oss_fuzz_dir=Path(oss_dir).expanduser().resolve(),
-            ai_key_path=(ai_key_path or _find_ai_key_path()),
+            email=email,
             time_budget=int(time_budget or 900),
+            max_len=int(max_len or 1024),
+            docker_image=docker_image,
+            ai_key_path=(ai_key_path or _find_ai_key_path()),
         )
     )
 

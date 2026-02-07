@@ -64,6 +64,98 @@ function gatherConfigFromForm() {
   };
 }
 
+// ===== 系统状态监控 =====
+let _systemPollTimer = null;
+
+function formatDuration(sec) {
+  if (!Number.isFinite(sec) || sec < 0) return "--";
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) return `${h}h ${m}m ${r}s`;
+  if (m > 0) return `${m}m ${r}s`;
+  return `${r}s`;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "--";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(1)} GB`;
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setStatus(ok, message) {
+  const dot = document.getElementById("system_status_dot");
+  const text = document.getElementById("system_status_text");
+  if (dot) {
+    dot.className = "dot" + (ok ? " ok" : " warn");
+  }
+  if (text) text.textContent = message;
+}
+
+async function pollSystemStatus() {
+  try {
+    const res = await fetch("/api/system");
+    if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
+    const data = await res.json();
+
+    setStatus(true, "联机");
+    setText("system_time", data.server_time_iso || "--");
+    setText("system_uptime", formatDuration(data.uptime_sec));
+
+    const jobs = data.jobs || {};
+    setText("system_jobs_total", String(jobs.total ?? "--"));
+    setText("system_jobs_queued", String(jobs.queued ?? "--"));
+    setText("system_jobs_running", String(jobs.running ?? "--"));
+    setText("system_jobs_success", String(jobs.success ?? "--"));
+    setText("system_jobs_error", String(jobs.error ?? "--"));
+
+    const logs = data.logs || {};
+    const logInfo = logs.exists ? `${logs.dir} (${formatBytes(logs.size_bytes)})` : "未创建";
+    setText("system_logs", logInfo);
+
+    const cfg = data.config || {};
+    setText("system_ossfuzz_dir", cfg.oss_fuzz_dir || "--");
+
+    const listEl = document.getElementById("system_jobs_list");
+    if (listEl) {
+      const items = data.active_jobs || [];
+      if (!items.length) {
+        listEl.textContent = "暂无运行中的任务";
+      } else {
+        const lines = items.map((j) => {
+          const id = (j.job_id || "").slice(0, 8);
+          const st = j.status || "unknown";
+          const repo = j.repo || "";
+          return `#${id} ${st} ${repo}`;
+        });
+        listEl.textContent = lines.join("\n");
+      }
+    }
+  } catch (err) {
+    setStatus(false, "离线");
+    setText("system_time", "--");
+  }
+}
+
+function startSystemPolling() {
+  if (_systemPollTimer) {
+    clearInterval(_systemPollTimer);
+  }
+  pollSystemStatus();
+  _systemPollTimer = setInterval(pollSystemStatus, 2000);
+}
+
 async function saveConfigFromForm() {
   const statusEl = document.getElementById("cfg_status");
   statusEl.style.display = "block";
@@ -100,6 +192,7 @@ document.getElementById("cfg_save_btn")?.addEventListener("click", async () => {
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadConfigIntoForm();
+  startSystemPolling();
 });
 
 // ===== 模糊测试功能 =====
@@ -134,15 +227,19 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
   logEl.innerHTML = "";
 
   try {
-    const res = await fetch("/fuzz_code", {
+    const res = await fetch("/api/task", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        code_url: codeUrl, 
-        email: email || null,
-        time_budget: timeBudget,
-        docker: useDocker,
-        docker_image: dockerImage
+      body: JSON.stringify({
+        jobs: [
+          {
+            code_url: codeUrl,
+            email: email || null,
+            time_budget: timeBudget,
+            docker: useDocker,
+            docker_image: dockerImage
+          }
+        ]
       }),
     });
 
@@ -162,18 +259,21 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
     // Poll status until finished.
     let lastLog = "";
     const poll = async () => {
-      const r = await fetch(`/api/fuzz/${encodeURIComponent(jobId)}`);
+      const r = await fetch(`/api/task/${encodeURIComponent(jobId)}`);
       if (!r.ok) throw new Error(`轮询失败 HTTP ${r.status}`);
       const j = await r.json();
       if (j.error === "job_not_found") throw new Error("任务不存在或已被清理");
 
       const st = j.status || "unknown";
-      const err = j.error;
-      const result = j.result;
-      const log = (j.log || "").toString();
+      const child = Array.isArray(j.children) && j.children.length ? j.children[0] : null;
+      const err = (child && child.error) || j.error;
+      const result = (child && child.result) || j.result;
+      const log = ((child && child.log) || j.log || "").toString();
+      const logFile = (child && child.log_file) || j.log_file;
       if (log !== lastLog) {
         lastLog = log;
-        logEl.innerHTML = `<strong>运行日志（末尾截断）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(log)}</pre>`;
+        const summary = summarizeLog(log, st, result, err, logFile);
+        logEl.innerHTML = `<strong>进度摘要（实时）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(summary)}</pre>`;
         logEl.scrollTop = logEl.scrollHeight;
       }
 
@@ -235,4 +335,42 @@ function getChecked(id) {
 function setChecked(id, checked) {
   const el = document.getElementById(id);
   if (el) el.checked = !!checked;
+}
+
+function summarizeLog(log, status, result, err, logFile) {
+  const lines = (log || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const important = [];
+  const wfRe = /^\[wf\b.*\]/;
+  const jobRe = /^\[job\b.*\]/;
+  const buildRe = /(build failed|linking|cmake|compile|error:|fatal|undefined reference)/i;
+  const crashRe = /(crash|artifact|asan|ubsan|msan|tsan|segmentation|sanitizer)/i;
+  const stepRe = /(->|<-|workflow end|pass [a-e]|ready)/i;
+
+  for (const line of lines) {
+    if (wfRe.test(line) && stepRe.test(line)) {
+      important.push(line);
+      continue;
+    }
+    if (jobRe.test(line) && (line.includes("start") || line.includes("params"))) {
+      important.push(line);
+      continue;
+    }
+    if (buildRe.test(line) || crashRe.test(line)) {
+      important.push(line);
+      continue;
+    }
+  }
+
+  const tail = important.slice(-10);
+  const header = [];
+  header.push(`Status: ${status || "unknown"}`);
+  if (result) header.push(`Result: ${result}`);
+  if (err) header.push(`Error: ${err}`);
+  if (logFile) header.push(`Log file: ${logFile}`);
+
+  if (!tail.length) {
+    tail.push("暂无可展示的摘要，任务仍在初始化或无关键事件。");
+  }
+
+  return header.concat(["", ...tail]).join("\n");
 }

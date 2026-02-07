@@ -15,10 +15,10 @@ class WebPersistentConfig(BaseModel):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "anthropic/claude-3.5-sonnet"
 
-    # Codex / OpenAI
+    # OpenCode / OpenAI
     openai_api_key: str | None = None
-    # Optional: point Codex's built-in OpenAI provider at an OpenAI-compatible proxy/router.
-    # See Codex docs: OPENAI_BASE_URL overrides default endpoint.
+    # Optional: point OpenCode's OpenAI provider at an OpenAI-compatible proxy/router.
+    # OPENAI_BASE_URL overrides the default endpoint.
     openai_base_url: str = ""
 
     # Fuzz defaults
@@ -51,9 +51,9 @@ def config_path() -> Path:
     return config_dir() / "web_config.json"
 
 
-def codex_env_path() -> Path:
+def opencode_env_path() -> Path:
     # Used by fuzz pipeline (CodexHelper reads from a file path).
-    return config_dir() / "web_codex.env"
+    return config_dir() / "web_opencode.env"
 
 
 def load_config() -> WebPersistentConfig:
@@ -119,7 +119,7 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     _set_env_if_value("OPENROUTER_BASE_URL", cfg.openrouter_base_url)
     _set_env_if_value("OPENROUTER_MODEL", cfg.openrouter_model)
 
-    # OpenAI / Codex
+    # OpenAI / OpenCode
     _set_env_if_value("OPENAI_API_KEY", cfg.openai_api_key)
     _set_env_if_value("OPENAI_BASE_URL", cfg.openai_base_url)
 
@@ -130,22 +130,21 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     _set_env_if_value("SHERPA_DOCKER_NO_PROXY", cfg.sherpa_docker_no_proxy)
     _set_env_if_value("SHERPA_DOCKER_PROXY_HOST", cfg.sherpa_docker_proxy_host)
 
-    # Keep the Codex key file in sync for fuzz pipeline.
-    write_codex_env_file(cfg)
+    # Keep the OpenCode key file in sync for fuzz pipeline.
+    write_opencode_env_file(cfg)
 
 
-def write_codex_env_file(cfg: WebPersistentConfig) -> None:
+def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
-    p = codex_env_path()
+    p = opencode_env_path()
 
     # Minimal env file used by CodexHelper(ai_key_path=...).
-    # Prefer OPENAI_API_KEY (common), also provide CODEX_API_KEY for `codex exec`.
+    # Prefer OPENAI_API_KEY (common, OpenAI-compatible).
     lines: list[str] = []
     if cfg.openai_api_key and cfg.openai_api_key.strip():
         key = cfg.openai_api_key.strip()
         lines.append(f"OPENAI_API_KEY={key}")
-        lines.append(f"CODEX_API_KEY={key}")
 
     if cfg.openai_base_url and cfg.openai_base_url.strip():
         lines.append(f"OPENAI_BASE_URL={cfg.openai_base_url.strip()}")

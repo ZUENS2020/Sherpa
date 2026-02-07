@@ -19,7 +19,7 @@ try:
 except Exception:  # pragma: no cover
     OpenAI = None  # type: ignore
 
-# We reuse CodexHelper for robust non-interactive Codex CLI runs.
+# We reuse CodexHelper for robust non-interactive OpenCode CLI runs.
 # NOTE: langchain_agent is not a package (no __init__.py), so we rely on sys.path
 # setup done by the web entrypoint to import from harness_generator/src.
 from codex_helper import CodexHelper  # type: ignore
@@ -286,7 +286,7 @@ def _read_key_from_env_file(path: Path) -> str:
         k, v = line.split("=", 1)
         k = k.strip()
         v = v.strip().strip("'\"")
-        if k in {"OPENAI_API_KEY", "CODEX_API_KEY"} and v:
+        if k in {"OPENAI_API_KEY"} and v:
             return v
     return ""
 
@@ -313,8 +313,6 @@ def _ensure_openai_env(ai_key_path: Path) -> None:
     env = _read_env_from_env_file(ai_key_path)
     if env.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = env["OPENAI_API_KEY"]
-    if env.get("CODEX_API_KEY") and not os.environ.get("CODEX_API_KEY"):
-        os.environ["CODEX_API_KEY"] = env["CODEX_API_KEY"]
     if env.get("OPENAI_BASE_URL") and not os.environ.get("OPENAI_BASE_URL"):
         os.environ["OPENAI_BASE_URL"] = env["OPENAI_BASE_URL"]
 
@@ -352,7 +350,7 @@ def _llm_generate_ossfuzz_project(
         raise OssFuzzAutoError("openai python package is not available for LLM fallback")
 
     _ensure_openai_env(ai_key_path)
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY") or _read_key_from_env_file(ai_key_path)
+    api_key = os.environ.get("OPENAI_API_KEY") or _read_key_from_env_file(ai_key_path)
     if not api_key:
         raise OssFuzzAutoError("Missing OPENAI_API_KEY for LLM fallback")
 
@@ -499,8 +497,8 @@ def run_ossfuzz_auto(inp: OssFuzzAutoInput) -> str:
                 "Unable to auto-detect a supported language for OSS-Fuzz project generation. Supported: C/C++ and Java."
             )
 
-        # Ask Codex to create a runnable OSS-Fuzz project directory.
-        # We keep Codex working on a small temp git repo containing ONLY:
+        # Ask OpenCode to create a runnable OSS-Fuzz project directory.
+        # We keep OpenCode working on a small temp git repo containing ONLY:
         # - ./target/ (cloned source for analysis)
         # - ./oss-fuzz-project/ (the output project files)
         prompt = textwrap.dedent(
@@ -561,9 +559,9 @@ def run_ossfuzz_auto(inp: OssFuzzAutoInput) -> str:
                 if not _try_generate_builtin_project(repo_url, project, target_dir, ossproj_dir):
                     if codex_err:
                         raise OssFuzzAutoError(
-                            f"Codex failed and LLM fallback also failed: codex_err={codex_err} fallback_err={e}"
+                            f"OpenCode failed and LLM fallback also failed: codex_err={codex_err} fallback_err={e}"
                         )
-                    raise OssFuzzAutoError(f"Codex did not generate required oss-fuzz files: {missing}; fallback_err={e}")
+                    raise OssFuzzAutoError(f"OpenCode did not generate required oss-fuzz files: {missing}; fallback_err={e}")
 
             missing = [str(p) for p in required if not p.is_file()]
             if missing:
@@ -581,7 +579,7 @@ def run_ossfuzz_auto(inp: OssFuzzAutoInput) -> str:
     if rc != 0:
         raise OssFuzzAutoError(f"oss-fuzz build_image failed (rc={rc})")
 
-    # Build fuzzers (retry loop with Codex fixes)
+    # Build fuzzers (retry loop with OpenCode fixes)
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         print(f"[*] OSS-Fuzz: build_fuzzers {project} (attempt {attempt}/{max_attempts})")
@@ -595,8 +593,8 @@ def run_ossfuzz_auto(inp: OssFuzzAutoInput) -> str:
                 f"oss-fuzz build_fuzzers failed after {max_attempts} attempts (rc={rc}), fuzzers_found={len(fuzzers)}"
             )
 
-        # Ask Codex to minimally fix the oss-fuzz project files.
-        print("[*] build failed; asking Codex to fix OSS-Fuzz project files…")
+        # Ask OpenCode to minimally fix the oss-fuzz project files.
+        print("[*] build failed; asking OpenCode to fix OSS-Fuzz project files…")
         proj_repo = CodexHelper(repo_path=(inp.oss_fuzz_dir / "projects" / project), ai_key_path=str(inp.ai_key_path), copy_repo=False)
         out_dir = inp.oss_fuzz_dir / "build" / "out" / project
         log_hint = "\n".join(

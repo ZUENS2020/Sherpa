@@ -118,7 +118,7 @@ class HarnessGenerator:
         *,
         ai_key_path: str,
         sanitizer: str = DEFAULT_SANITIZER,
-        codex_cli: str = "codex",
+        codex_cli: str = "opencode",
         scratch_space: Path | None = None,
         copy_repo: bool = False,
     ) -> None:
@@ -1166,8 +1166,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--codex-cli",
-        default="codex",
-        help="Executable name or path for the Codex CLI",
+        default="opencode",
+        help="Executable name or path for the OpenCode CLI (kept as --codex-cli for compatibility)",
     )
     parser.add_argument(
         "--scratch-space",
