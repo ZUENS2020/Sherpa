@@ -1,0 +1,57 @@
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# System deps:
+# - git: optional fallback when GitPython path is used
+# - curl/ca-certificates: install helpers (optional)
+# - docker.io: docker CLI (daemon comes from dind service)
+# - vim-common: provides xxd (nice-to-have)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        docker.io \
+        vim-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI (the Debian docker.io package may not include the client binary).
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.1.1.tgz -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /tmp \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && chmod +x /usr/local/bin/docker \
+    && rm -rf /tmp/docker /tmp/docker.tgz
+
+COPY docker/requirements.web.txt /app/docker/requirements.web.txt
+RUN python -m pip install -r /app/docker/requirements.web.txt
+
+COPY . /app
+
+# Optional: install Codex CLI. This requires network access during build.
+# If you cannot reach external package registries from your build environment, rebuild with:
+#   --build-arg INSTALL_CODEX=0
+ARG INSTALL_CODEX=1
+RUN if [ "$INSTALL_CODEX" = "1" ]; then \
+            echo "Installing Node.js (for Codex CLI)..."; \
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+            apt-get update && apt-get install -y --no-install-recommends nodejs; \
+            npm --version; node --version; \
+            echo "Installing Codex CLI..."; \
+            npm i -g @openai/codex; \
+            codex --version || true; \
+            rm -rf /var/lib/apt/lists/*; \
+        else \
+            echo "Skipping Codex CLI install"; \
+        fi
+
+# Run the FastAPI web UI (static + API) from its folder so relative imports work.
+WORKDIR /app/harness_generator/src/langchain_agent
+
+EXPOSE 8000
+
+CMD ["python", "main.py"]

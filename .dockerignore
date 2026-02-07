@@ -1,0 +1,41 @@
+.git
+.vscode
+
+# Local envs
+.venv
+myenv
+sherpa_venv
+
+# Python caches
+**/__pycache__
+**/*.pyc
+
+# Logs / caches / outputs
+config
+harness_generator/src/config
+config/logs
+config/cache
+
+# Large artifacts
+output_fixed
+# Keep Docker build context tiny
+.git
+**/__pycache__
+**/*.pyc
+
+# Local outputs
+jobs
+output*
+output_fixed
+sorted
+
+# Local envs
+.venv
+venv
+myenv
+sherpa_venv
+
+# Editor/OS
+.vscode
+.DS_Store
+Thumbs.db

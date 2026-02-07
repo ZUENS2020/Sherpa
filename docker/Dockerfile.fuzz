@@ -1,0 +1,35 @@
+# Minimal Linux environment for SHERPA non-OSS-fuzz local workflow.
+# Focus: build & run generated fuzzers inside Docker (useful on Windows hosts).
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    build-essential \
+    clang \
+    lld \
+    llvm \
+    cmake \
+    ninja-build \
+    pkg-config \
+    make \
+    autoconf \
+    automake \
+    libtool \
+    unzip \
+    zip \
+    openjdk-17-jdk \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Default command is a shell for debugging; real runs pass explicit commands.
+CMD ["bash"]

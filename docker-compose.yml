@@ -1,0 +1,101 @@
+services:
+  sherpa-oss-fuzz-init:
+    image: alpine/git:latest
+    restart: "no"
+    environment:
+      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz"
+    volumes:
+      - sherpa-oss-fuzz:/shared/oss-fuzz
+    entrypoint:
+      - sh
+      - -lc
+      - |
+        set -e
+        REPO="$$SHERPA_OSS_FUZZ_REPO_URL"
+        if [ -z "$$REPO" ]; then
+          REPO="https://github.com/google/oss-fuzz"
+        fi
+        echo "[*] Ensuring oss-fuzz checkout in /shared/oss-fuzz from $$REPO"
+        if [ -f /shared/oss-fuzz/infra/helper.py ]; then
+          echo "[*] oss-fuzz already present"
+          exit 0
+        fi
+        if [ -d /shared/oss-fuzz ] && [ "$(ls -A /shared/oss-fuzz 2>/dev/null || true)" != "" ]; then
+          echo "[!] /shared/oss-fuzz exists but is not a valid oss-fuzz checkout (missing infra/helper.py)" >&2
+          exit 1
+        fi
+        rm -rf /shared/oss-fuzz/*
+        git clone --depth 1 "$$REPO" /shared/oss-fuzz
+        test -f /shared/oss-fuzz/infra/helper.py
+
+  sherpa-web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+      args:
+        INSTALL_CODEX: "1"
+    ports:
+      - "8000:8000"
+    environment:
+      # Make Uvicorn bind for container networking (main.py reads these).
+      HOST: "0.0.0.0"
+      PORT: "8000"
+
+      # Ensure all temp repos land on the shared volume so Docker mounts work.
+      TMPDIR: "/shared/tmp"
+
+      # Route docker CLI calls to the dind daemon.
+      DOCKER_HOST: "tcp://sherpa-docker:2375"
+
+      # Default OSS-Fuzz checkout path inside containers.
+      # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
+      SHERPA_DEFAULT_OSS_FUZZ_DIR: "/shared/oss-fuzz"
+
+      # Optional override for oss-fuzz upstream (mirrors / forks).
+      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz"
+
+      # Optional (chat endpoint):
+      # OPENROUTER_API_KEY: "..."
+      # OPENROUTER_MODEL: "anthropic/claude-3.5-sonnet"
+      # OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"
+
+      # Optional (fuzz patching): where to read ANTHROPIC_API_KEY from.
+      # AI_KEY_PATH: "/app/.env"
+      # SHERPA_ACCEPT_DIFF_WITHOUT_DONE: "1"
+    volumes:
+      # Persist job logs/config inside a docker volume (fully self-hosted).
+      - sherpa-config:/app/config
+
+      # Shared temp volume (must be mounted into the Docker daemon container too).
+      - sherpa-tmp:/shared/tmp
+
+      # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
+      - sherpa-oss-fuzz:/shared/oss-fuzz
+
+      # Optional: persist Codex login/auth cache so you don't have to re-login.
+      # - sherpa-codex:/root/.codex
+
+      # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
+      # - ./.env:/app/.env:ro
+    depends_on:
+      sherpa-oss-fuzz-init:
+        condition: service_completed_successfully
+      sherpa-docker:
+        condition: service_started
+
+  sherpa-docker:
+    image: docker:27-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - sherpa-docker-data:/var/lib/docker
+      - sherpa-tmp:/shared/tmp
+      - sherpa-oss-fuzz:/shared/oss-fuzz
+
+volumes:
+  sherpa-docker-data:
+  sherpa-tmp:
+  sherpa-config:
+  sherpa-oss-fuzz:
+  # sherpa-codex:

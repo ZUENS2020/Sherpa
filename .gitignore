@@ -1,4 +1,20 @@
 __pycache__
 .venv
 
+myenv/
+sherpa_venv/
+
 jobs/
+
+oss-fuzz/
+
+# Runtime data / secrets
+config/
+harness_generator/src/config/
+_job_*.json
+_submit.json
+*.log
+*.sqlite3
+.env
+web_config.json
+web_codex.env

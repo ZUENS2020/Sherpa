@@ -76,6 +76,20 @@ export OPENAI_API_KEY="your-api-key-here"
 make leveldb
 ```
 
+## 🌐 Web UI (Docker Compose)
+
+This is the recommended path on Windows or when you want a self‑contained web flow.
+
+1. Copy `.env.example` to `.env` and fill in at least `OPENAI_API_KEY`.
+2. Start the stack: `docker compose up -d --build`
+3. Open `http://localhost:8000/` and configure:
+4. `oss_fuzz_dir` should be `/shared/oss-fuzz` when using Docker Compose.
+
+Notes:
+1. Persistent config is stored in `config/` at runtime. Use `config.example/` as a template for clean releases.
+2. OpenAI‑compatible endpoints are supported via `OPENAI_BASE_URL` or the Web UI config.
+3. The OSS‑Fuzz checkout is created inside the Docker volume at `/shared/oss-fuzz`.
+
 ## 🏗️ How It Works
 
 ```mermaid
@@ -370,6 +384,19 @@ python fuzz_unharnessed_repo.py --repo <git-url>
 
 # for example
 python fuzz_unharnessed_repo.py --repo https://github.com/syoyo/tinyexr.git
+```
+
+## ✅ Release Checklist
+1. Secret scan passes (no API keys or tokens in tracked files).
+2. Runtime data removed or ignored: `config/`, `harness_generator/src/config/`, `jobs/`, `_job_*.json`, `_submit.json`, `oss-fuzz/`, `*.log`, `*.sqlite3`, `.env`.
+3. Clean working tree: `git status --porcelain` shows only intended changes.
+4. Optional smoke test:
+
+```bash
+docker compose build
+docker compose up -d
+curl http://localhost:8000/
+curl http://localhost:8000/api/config
 ```
 
 ## 📜 License & Citation

@@ -46,18 +46,60 @@ import logging
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
 import time
+import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 from dotenv import load_dotenv
-from git import Repo, exc as git_exc
+
+try:
+    from git import Repo, exc as git_exc  # type: ignore
+except Exception:  # pragma: no cover
+    Repo = None  # type: ignore
+    git_exc = None  # type: ignore
+
+
+TOOL_ROOT = Path(__file__).resolve().parents[2]
+DOCKERFILE_FUZZ_CPP = TOOL_ROOT / "docker" / "Dockerfile.fuzz-cpp"
+DOCKERFILE_FUZZ_JAVA = TOOL_ROOT / "docker" / "Dockerfile.fuzz-java"
+
+DEFAULT_DOCKER_IMAGE_CPP = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
+DEFAULT_DOCKER_IMAGE_JAVA = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
+
+DEFAULT_GIT_DOCKER_IMAGE = os.environ.get("SHERPA_GIT_DOCKER_IMAGE", "alpine/git")
+
+# Clone reliability knobs (useful on restricted networks).
+GIT_CLONE_RETRIES = int(os.environ.get("SHERPA_GIT_CLONE_RETRIES", "2"))
+GIT_DOCKER_CLONE_TIMEOUT_SEC = int(os.environ.get("SHERPA_GIT_DOCKER_CLONE_TIMEOUT_SEC", "45"))
+GIT_HOST_CLONE_TIMEOUT_SEC = int(os.environ.get("SHERPA_GIT_HOST_CLONE_TIMEOUT_SEC", "90"))
+
+# Optional: GitHub mirror support for regions where github.com is unreachable.
+#
+# Configure via env:
+# - SHERPA_GITHUB_MIRROR: base URL used to replace "https://github.com/".
+#   Example: "https://gitclone.com/github.com/"
+# - SHERPA_GIT_MIRRORS: comma-separated list of mirror specs. Each item can be:
+#   - A template containing "{url}" (e.g., "https://ghproxy.com/{url}")
+#   - A base URL (e.g., "https://gitclone.com/github.com/")
+# NOTE: These are intentionally read at runtime (not import time) so a running
+# web server can apply updated config without restart.
+
+
+def _get_sherpa_github_mirror() -> str:
+    return os.environ.get("SHERPA_GITHUB_MIRROR", "").strip()
+
+
+def _get_sherpa_git_mirrors() -> str:
+    return os.environ.get("SHERPA_GIT_MIRRORS", "").strip()
 
 # Make CodexHelper discoverable in both "package" and "flat script" use.
 try:
@@ -72,7 +114,7 @@ except Exception:  # pragma: no cover
 
 DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
 MAX_BUILD_RETRIES = int(os.environ.get("SHERPA_MAX_BUILD_RETRIES", "3"))
-CODEX_ANALYSIS_MODEL = os.environ.get("CODEX_ANALYSIS_MODEL", "o3")
+CODEX_ANALYSIS_MODEL = os.environ.get("CODEX_ANALYSIS_MODEL", "sonnet")
 CODEX_APPROVAL_MODE = os.environ.get("CODEX_APPROVAL_MODE", "full-auto")
 
 FUZZ_DIR = "fuzz"
@@ -142,6 +184,240 @@ def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s)
 
 
+def _tail_lines(s: str, *, max_lines: int = 80) -> str:
+    s = (s or "").strip("\n")
+    if not s:
+        return ""
+    lines = strip_ansi(s).splitlines()
+    return "\n".join(lines[-max_lines:])
+
+
+def _run_cmd_capture(
+    cmd: Sequence[str],
+    *,
+    timeout: Optional[int] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str, str, bool]:
+    """Run a command capturing stdout/stderr for logging.
+
+    Returns: (rc, stdout, stderr, timed_out)
+    """
+
+    try:
+        proc = subprocess.run(
+            list(cmd),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
+        return proc.returncode, proc.stdout or "", proc.stderr or "", False
+    except subprocess.TimeoutExpired as te:
+        stdout = te.stdout or ""
+        stderr = te.stderr or ""
+        return (
+            124,
+            stdout if isinstance(stdout, str) else "",
+            stderr if isinstance(stderr, str) else "",
+            True,
+        )
+
+
+def _set_git_core_filemode_off_host(repo_dir: Path) -> None:
+    cmd = ["git", "-C", str(repo_dir), "config", "core.filemode", "false"]
+    rc, out, err, _ = _run_cmd_capture(cmd)
+    if rc != 0:
+        if (t := _tail_lines(err)):
+            print("[warn] (host/git) config core.filemode stderr (tail):\n" + textwrap.indent(t, "    "))
+        if (t := _tail_lines(out)):
+            print("[warn] (host/git) config core.filemode stdout (tail):\n" + textwrap.indent(t, "    "))
+
+
+def _set_git_core_filemode_off_docker(repo_dir: Path) -> None:
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        *_docker_proxy_env_args(),
+        "-v",
+        f"{str(repo_dir)}:/repo",
+        "-w",
+        "/repo",
+        DEFAULT_GIT_DOCKER_IMAGE,
+        "config",
+        "core.filemode",
+        "false",
+    ]
+    rc, out, err, _ = _run_cmd_capture(cmd)
+    if rc != 0:
+        if (t := _tail_lines(err)):
+            print("[warn] (docker/git) config core.filemode stderr (tail):\n" + textwrap.indent(t, "    "))
+        if (t := _tail_lines(out)):
+            print("[warn] (docker/git) config core.filemode stdout (tail):\n" + textwrap.indent(t, "    "))
+
+
+def _docker_proxy_env_args() -> List[str]:
+    """Return docker `-e` args for proxy-related env vars.
+
+    If the proxy points to localhost/127.0.0.1, rewrite it to a host-accessible
+    hostname for Docker Desktop (default: host.docker.internal).
+    """
+
+    docker_proxy_host = os.environ.get("SHERPA_DOCKER_PROXY_HOST", "host.docker.internal").strip()
+
+    def _pick_env(*names: str) -> str:
+        for n in names:
+            v = os.environ.get(n)
+            if v is not None and v.strip():
+                return v.strip()
+        return ""
+
+    http_proxy = _pick_env("SHERPA_DOCKER_HTTP_PROXY", "HTTP_PROXY", "http_proxy")
+    https_proxy = _pick_env("SHERPA_DOCKER_HTTPS_PROXY", "HTTPS_PROXY", "https_proxy")
+    no_proxy = _pick_env("SHERPA_DOCKER_NO_PROXY", "NO_PROXY", "no_proxy")
+
+    def _rewrite_localhost_proxy(value: str) -> str:
+        if not value:
+            return value
+        # Common patterns: http://127.0.0.1:7890, socks5://localhost:1080
+        return re.sub(r"(?i)(?<=://)(localhost|127\.0\.0\.1)(?=[:/]|$)", docker_proxy_host, value)
+
+    http_proxy = _rewrite_localhost_proxy(http_proxy)
+    https_proxy = _rewrite_localhost_proxy(https_proxy)
+
+    args: List[str] = []
+    if http_proxy:
+        args.extend(["-e", f"HTTP_PROXY={http_proxy}", "-e", f"http_proxy={http_proxy}"])
+    if https_proxy:
+        args.extend(["-e", f"HTTPS_PROXY={https_proxy}", "-e", f"https_proxy={https_proxy}"])
+    if no_proxy:
+        args.extend(["-e", f"NO_PROXY={no_proxy}", "-e", f"no_proxy={no_proxy}"])
+    return args
+
+
+def _host_git_proxy_override_args() -> List[str]:
+    """Return `git -c ...` overrides to avoid broken localhost proxy configs.
+
+    Some environments have `http.proxy/https.proxy` set to 127.0.0.1/localhost
+    but the proxy app isn't running. In that case, host `git clone` fails even
+    when direct network access would work.
+    """
+
+    disable = os.environ.get("SHERPA_GIT_DISABLE_PROXY", "").strip().lower() in {"1", "true", "yes"}
+
+    def _git_config_get(key: str) -> str:
+        try:
+            proc = subprocess.run(
+                ["git", "config", "--global", "--get", key],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    def _is_local_proxy_unreachable(proxy_value: str) -> bool:
+        if not proxy_value:
+            return False
+        raw = proxy_value.strip()
+        # If it's missing a scheme, urlparse won't pick up hostname/port.
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = (parsed.hostname or "").strip().lower()
+        port = parsed.port
+        if host not in {"127.0.0.1", "localhost"}:
+            return False
+        if port is None:
+            return False
+        try:
+            with socket.create_connection((host, port), timeout=0.3):
+                return False
+        except Exception:
+            return True
+
+    if not disable:
+        http_proxy = _git_config_get("http.proxy")
+        https_proxy = _git_config_get("https.proxy")
+        if _is_local_proxy_unreachable(http_proxy) or _is_local_proxy_unreachable(https_proxy):
+            disable = True
+
+    if not disable:
+        return []
+
+    return ["-c", "http.proxy=", "-c", "https.proxy="]
+
+
+def _candidate_clone_urls(url: str) -> List[str]:
+    """Return a prioritized list of clone URLs, including configured mirrors.
+
+    Mirrors are only applied to HTTPS GitHub URLs.
+    """
+
+    urls: List[str] = [url]
+    if not url.startswith("https://github.com/"):
+        return urls
+
+    mirror_specs: List[str] = []
+    sherpa_git_mirrors = _get_sherpa_git_mirrors()
+    if sherpa_git_mirrors:
+        mirror_specs.extend([p.strip() for p in sherpa_git_mirrors.split(",") if p.strip()])
+
+    sherpa_github_mirror = _get_sherpa_github_mirror()
+    if sherpa_github_mirror:
+        mirror_specs.append(sherpa_github_mirror)
+
+    # If the user didn't configure mirrors explicitly, still try a small set of
+    # common GitHub mirrors/proxies for restricted networks.
+    if not mirror_specs:
+        mirror_specs.extend(
+            [
+                "https://ghproxy.com/{url}",
+                "https://hub.gitmirror.com",
+                "https://gitclone.com/github.com/",
+            ]
+        )
+
+    gh_path = url[len("https://github.com/") :]
+    # Best-effort: try Gitee's popular "mirrors" namespace for GitHub projects.
+    # This often works better on mainland China networks.
+    try:
+        parts = gh_path.split("/")
+        if len(parts) >= 2:
+            repo_name = parts[1]
+            if repo_name.endswith(".git"):
+                repo_name = repo_name[: -len(".git")]
+            gitee_mirror = f"https://gitee.com/mirrors/{repo_name}.git"
+            if gitee_mirror not in urls:
+                urls.append(gitee_mirror)
+    except Exception:
+        pass
+
+    for spec in mirror_specs:
+        candidate = ""
+        if "{url}" in spec:
+            candidate = spec.replace("{url}", url)
+        else:
+            base = spec.rstrip("/")
+            # Most common patterns:
+            # - https://gitclone.com/github.com/<owner>/<repo>.git
+            # - https://hub.gitmirror.com/<owner>/<repo>.git
+            # If base already contains 'github.com', do not strip it.
+            if base.endswith("github.com") or base.endswith("github.com/"):
+                candidate = f"{base}/{gh_path}"
+            else:
+                candidate = f"{base}/{gh_path}"
+
+        if candidate and candidate not in urls:
+            urls.append(candidate)
+
+    return urls
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Core generator
 # ────────────────────────────────────────────────────────────────────────────
@@ -177,6 +453,7 @@ class NonOssFuzzHarnessGenerator:
         rss_limit_mb: int = 8192,
         max_len: int = 1024,
         max_build_retries: int = MAX_BUILD_RETRIES,
+        docker_image: Optional[str] = None,
     ) -> None:
         self.repo_spec = repo_spec
         self.sanitizer = sanitizer
@@ -185,6 +462,7 @@ class NonOssFuzzHarnessGenerator:
         self.rss_limit_mb = rss_limit_mb
         self.max_len = max_len
         self.max_build_retries = max_build_retries
+        self.docker_image = docker_image
         self.logger = logging.getLogger(__name__)
 
         # Index of the generation round for this repo (1 == first). The caller
@@ -192,6 +470,14 @@ class NonOssFuzzHarnessGenerator:
         self.round_index: int = 1
 
         self.repo_root: Path = self._clone_repo(repo_spec)
+
+        self._dockerfile_path: Optional[Path] = None
+        if self.docker_image:
+            self.docker_image, self._dockerfile_path = self._resolve_docker_image(self.docker_image)
+            self._ensure_docker_image(self.docker_image, dockerfile=self._dockerfile_path)
+
+        self._ensure_fuzz_dirs()
+
         self.patcher = CodexHelper(
             repo_path=self.repo_root,
             ai_key_path=str(ai_key_path),
@@ -201,8 +487,12 @@ class NonOssFuzzHarnessGenerator:
             approval_mode=CODEX_APPROVAL_MODE,
             dangerous_bypass=codex_dangerous,
             sandbox_mode=codex_sandbox_mode,
+            git_docker_image=self.docker_image if self.docker_image else None,
         )
 
+        print(f"[*] Ready (repo={self.repo_root})")
+
+    def _ensure_fuzz_dirs(self) -> None:
         self.fuzz_dir = self.repo_root / FUZZ_DIR
         self.fuzz_out_dir = self.repo_root / FUZZ_OUT_DIR
         self.fuzz_corpus_dir = self.repo_root / FUZZ_CORPUS_DIR
@@ -210,7 +500,256 @@ class NonOssFuzzHarnessGenerator:
         self.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
         self.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"[*] Ready (repo={self.repo_root})")
+    def _detect_repo_language(self) -> str:
+        """Best-effort language detection for choosing a fuzz runtime image.
+
+        Returns one of: 'java', 'cpp', or 'unknown'.
+
+        NOTE: We intentionally do NOT default to C/C++ anymore. Many repos are
+        Python/JS/etc; silently selecting a heavy C++ toolchain image leads to
+        confusing failures later.
+        """
+
+        # Strong Java signals
+        for marker in ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"):
+            if (self.repo_root / marker).is_file():
+                return "java"
+        if list(self.repo_root.rglob("*.java")):
+            return "java"
+
+        # C/C++ signals
+        for marker in ("CMakeLists.txt", "configure.ac", "configure.in"):
+            if (self.repo_root / marker).is_file():
+                return "cpp"
+        if list(self.repo_root.rglob("*.c")) or list(self.repo_root.rglob("*.cc")) or list(self.repo_root.rglob("*.cpp")) or list(self.repo_root.rglob("*.cxx")):
+            return "cpp"
+
+        return "unknown"
+
+    def _resolve_docker_image(self, docker_image: str) -> Tuple[str, Path]:
+        """Resolve docker image + dockerfile.
+
+        docker_image may be a concrete image tag, or 'auto' to pick language-specific defaults.
+        """
+
+        if docker_image.strip().lower() == "auto":
+            lang = self._detect_repo_language()
+            if lang == "java":
+                return DEFAULT_DOCKER_IMAGE_JAVA, DOCKERFILE_FUZZ_JAVA
+            if lang == "cpp":
+                return DEFAULT_DOCKER_IMAGE_CPP, DOCKERFILE_FUZZ_CPP
+            raise HarnessGeneratorError(
+                "Unable to auto-detect a supported fuzz toolchain for this repository. "
+                "Supported: C/C++ (libFuzzer) and Java (Jazzer). "
+                "Pass an explicit --docker-image (or set docker_image in the Web UI) to force a toolchain, "
+                "or target a C/C++/Java project."
+            )
+
+        # Explicit image tag: default to C/C++ dockerfile unless user overrides via env.
+        return docker_image, DOCKERFILE_FUZZ_CPP
+
+    def _ensure_docker_image(self, image: str, *, dockerfile: Path) -> None:
+        """Ensure the requested Docker image exists.
+
+        This lowers the barrier on Windows: user can enable Docker mode and the
+        tool will build the fuzz runtime image automatically if it's missing.
+        """
+
+        # Fast path: image exists.
+        try:
+            probe = subprocess.run(
+                ["docker", "image", "inspect", image],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+            )
+            if probe.returncode == 0:
+                return
+        except FileNotFoundError:
+            raise HarnessGeneratorError("Docker not found in PATH. Install Docker Desktop and ensure 'docker' is available.")
+        except Exception:
+            # Continue to build attempt; it will error with details.
+            pass
+
+        if not dockerfile.is_file():
+            raise HarnessGeneratorError(f"Dockerfile not found: {dockerfile}")
+
+        print(f"[*] Docker image '{image}' not found. Building it now …")
+        cmd = [
+            "docker",
+            "build",
+            "--progress=plain",
+            "-t",
+            image,
+            "-f",
+            str(dockerfile),
+            str(TOOL_ROOT),
+        ]
+        print(f"[*] ➜  {' '.join(cmd)}")
+        # IMPORTANT: in web mode we redirect Python's stdout/stderr to capture job logs.
+        # subprocess inherits the original OS-level stdout/stderr by default, so its output
+        # would not show up in the job log. Stream it explicitly.
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(TOOL_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            raise HarnessGeneratorError(
+                "Docker not found in PATH. Install Docker Desktop and ensure 'docker' is available."
+            )
+
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            # Ensure docker output is visible both in CLI and captured web job logs.
+            print(line, end="")
+
+        rc = proc.wait()
+        if rc != 0:
+            raise HarnessGeneratorError(f"Docker build failed (rc={rc}).")
+
+    def _python_runner(self) -> str:
+        # When executing build/run inside Docker, use the container's python.
+        return "python3" if self.docker_image else sys.executable
+
+    def _dockerize_cmd(self, cmd: Sequence[str], *, cwd: Path, env: Optional[Dict[str, str]]) -> List[str]:
+        if not self.docker_image:
+            return list(cmd)
+
+        def _docker_container_name(mount_src: str) -> str:
+            base = Path(mount_src).name
+            base = re.sub(r"[^a-zA-Z0-9_.-]+", "-", base).strip("-.").lower()
+            if not base:
+                base = "sherpa"
+            suffix = hashlib.sha1(mount_src.encode("utf-8", errors="ignore")).hexdigest()[:8]
+            name = f"{base}-{suffix}"
+            # Docker name limit is generous, but keep it short for readability.
+            return name[:63]
+
+        def _map_host_path_to_container(p: str) -> Optional[str]:
+            """Map a host path under repo_root to a container path under /work.
+
+            We mount repo_root into the container at /work, but many call sites naturally
+            construct absolute host paths (especially on Windows). When passed to docker
+            as the container argv, those host paths do not exist inside the container.
+            """
+            if not p:
+                return None
+            if p.startswith("/work/") or p == "/work":
+                return None
+            if not os.path.isabs(p):
+                return None
+
+            had_trailing_slash = p.endswith("/") or p.endswith("\\")
+
+            # Use normcase-based prefix matching for Windows (case-insensitive paths).
+            # Path.relative_to() is case-sensitive and will fail for e.g. 'C:\\' vs 'c:\\'.
+            repo_root_abs = os.path.abspath(str(self.repo_root.resolve()))
+            host_abs = os.path.abspath(p)
+
+            repo_norm = os.path.normcase(repo_root_abs)
+            host_norm = os.path.normcase(host_abs)
+
+            if host_norm == repo_norm:
+                rel_posix = "."
+            elif host_norm.startswith(repo_norm + os.sep):
+                rel = os.path.relpath(host_abs, repo_root_abs)
+                rel_posix = rel.replace("\\", "/")
+            else:
+                return None
+
+            container_path = "/work" if rel_posix in (".", "") else f"/work/{rel_posix}"
+            if had_trailing_slash and not container_path.endswith("/"):
+                container_path += "/"
+            return container_path
+
+        def _translate_arg(a: str) -> str:
+            # Handle flags like -artifact_prefix=C:\...\artifacts/
+            if "=" in a:
+                k, v = a.split("=", 1)
+                mapped = _map_host_path_to_container(v)
+                if mapped is not None:
+                    return f"{k}={mapped}"
+            mapped = _map_host_path_to_container(a)
+            return mapped if mapped is not None else a
+
+        def _filter_env(e: Optional[Dict[str, str]]) -> Dict[str, str]:
+            if not e:
+                return {}
+
+            allow_exact = {
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "no_proxy",
+                # Sanitizer tuning
+                "ASAN_OPTIONS",
+                "UBSAN_OPTIONS",
+                "MSAN_OPTIONS",
+                "LSAN_OPTIONS",
+                "TSAN_OPTIONS",
+                # Jazzer/Java
+                "JAVA_TOOL_OPTIONS",
+                "JAZZER_JVM_ARGS",
+                # Keys (if used)
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+            }
+            allow_prefixes = (
+                "SHERPA_",
+                "JAZZER_",
+            )
+
+            filtered: Dict[str, str] = {}
+            for k, v in e.items():
+                if v is None:
+                    continue
+                if k in allow_exact or k.startswith(allow_prefixes):
+                    filtered[k] = str(v)
+            return filtered
+
+        mount_src = str(self.repo_root.resolve())
+        rel = "."
+        try:
+            rel = os.path.relpath(str(cwd.resolve()), str(self.repo_root.resolve()))
+        except Exception:
+            rel = "."
+        rel = "." if rel in (".", "") else rel.replace("\\", "/")
+        workdir_in_container = "/work" if rel == "." else f"/work/{rel}"
+
+        docker_cmd: List[str] = [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            _docker_container_name(mount_src),
+            "--label",
+            f"sherpa.repo_root={Path(mount_src).name}",
+            "--label",
+            f"sherpa.repo_root_sha1={hashlib.sha1(mount_src.encode('utf-8', errors='ignore')).hexdigest()}",
+            "-v",
+            f"{mount_src}:/work",
+            "-w",
+            workdir_in_container,
+        ]
+
+        filtered_env = _filter_env(env)
+        if filtered_env:
+            for k, v in filtered_env.items():
+                docker_cmd += ["-e", f"{k}={v}"]
+
+        docker_cmd.append(self.docker_image)
+        docker_cmd += [_translate_arg(a) for a in cmd]
+        return docker_cmd
 
     # ────────────────────────────────────────────────────────────────────
     # Public entry
@@ -220,9 +759,6 @@ class NonOssFuzzHarnessGenerator:
         """
         Execute the end-to-end workflow.
         """
-        print("[*] Pass -A: generate output.dot …")
-        from test import run_analyzer
-        run_analyzer(input_dir=self.repo_root,output_path=self.repo_root/"output.dot")
         print("[*] Pass A: Planning candidate fuzz targets …")
         self._pass_plan_targets()
 
@@ -271,12 +807,9 @@ class NonOssFuzzHarnessGenerator:
         output_path = self.repo_root/"output.dot"
         N = 15
 
-        with output_path.open("r", encoding="utf-8") as f:
-            content = "".join([next(f) for _ in range(N) if not f.closed])
         instructions = textwrap.dedent(
             f"""
             **Goal:** Analyze this repository and produce a realistic fuzz plan.
-            first analyze the call graph in `output.dot`.{content}
             **Deliverables (create inside `{FUZZ_DIR}/`):**
             1) `PLAN.md` — brief rationale describing the top 3–10 *public, attacker-reachable*
                entrypoints (file/packet/string parsers) with justification for real-world reachability,
@@ -337,11 +870,12 @@ class NonOssFuzzHarnessGenerator:
                 }}
                 ```
               - **Java**: `<Name>Fuzzer.java` compatible with **Jazzer**.
-            - **`build.sh`**:
-              - Portable, non-interactive; detects CMake/Meson/Autotools/Make or creates a minimal out-of-tree build.
-              - For C/C++: use **clang/clang++** with `-fsanitize={self.sanitizer}` and `-fsanitize=fuzzer`.
-                Emit binaries into `{FUZZ_OUT_DIR}/`.
-              - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
+                        - **`build.py`**:
+                            - Cross-platform, non-interactive build script runnable as `python fuzz/build.py`.
+                            - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
+                            - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
+                            - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
+                            - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
             - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
@@ -351,10 +885,10 @@ class NonOssFuzzHarnessGenerator:
             - Perform **minimal real-world init** (contexts/handles via proper constructors).
             - Avoid harness mistakes (double-free, wrong types, lifetime bugs).
             - Do not vendor large third-party code; use the repo as-is.
-            - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.sh`.
+            - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
 
             **Acceptance criteria:**
-            - After `bash {FUZZ_DIR}/build.sh`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
+            - After `python {FUZZ_DIR}/build.py`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
             - The harness compiles with symbols; ASan/UBSan enabled for C/C++.
             - The harness reaches some code with a trivial input (will be tested soon).
 
@@ -378,16 +912,102 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _build_with_retries(self) -> None:
+        build_py = self.fuzz_dir / "build.py"
         build_sh = self.fuzz_dir / "build.sh"
-        if not build_sh.is_file():
-            raise HarnessGeneratorError(f"{build_sh} not found (Codex must create it).")
-        make_executable(build_sh)
+        build_dir = self.repo_root / "build"
+
+        def _build_py_supports_clean_flag(path: Path) -> bool:
+            try:
+                txt = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return False
+            # Best-effort heuristic. We intentionally keep this permissive and cheap.
+            return "--clean" in txt
+
+        def _list_static_libs_for_diagnostics() -> str:
+            """Return a short listing of built static libraries under build/.
+
+            This is intentionally concise (helps the agent fix path/name assumptions).
+            """
+
+            if not build_dir.exists():
+                return f"(no build dir at {build_dir})"
+
+            if self.docker_image:
+                # Keep output short and deterministic.
+                bash_script = (
+                    "set -e; "
+                    "if [ -d /work/build ]; then "
+                    "(find /work/build -maxdepth 4 -type f \\( "
+                    "-name '*.a' -o -name '*.lib' -o -name '*.so' -o -name '*.dylib' \\) "
+                    "-printf '%p (%s bytes)\\n' 2>/dev/null || true) | head -n 80; "
+                    "else echo '(no /work/build dir)'; fi"
+                )
+                cmd = ["bash", "-lc", bash_script]
+                rc, out, err = self._run_cmd(cmd, cwd=self.repo_root, timeout=120)
+                blob = (out or "") + ("\n" + err if err else "")
+                blob = strip_ansi(blob).strip()
+                return blob if blob else "(no static libs found or listing empty)"
+
+            # Host mode
+            try:
+                libs: List[str] = []
+                for p in build_dir.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() in {".a", ".lib", ".so", ".dylib"}:
+                        try:
+                            libs.append(f"{p.relative_to(self.repo_root)} ({p.stat().st_size} bytes)")
+                        except Exception:
+                            libs.append(str(p.relative_to(self.repo_root)))
+                    if len(libs) >= 80:
+                        break
+                return "\n".join(libs) if libs else "(no static libs found under build/)"
+            except Exception as e:
+                return f"(failed to list libs under build/: {e})"
+
+        if build_py.is_file():
+            if self.docker_image:
+                # Inside Docker, the repo is mounted at /work. Passing an absolute
+                # Windows host path will not resolve. Use a repo-relative path.
+                build_cmd = [self._python_runner(), f"{FUZZ_DIR}/build.py"]
+            else:
+                build_cmd = [self._python_runner(), str(build_py)]
+            build_cmd_clean: Optional[List[str]] = None
+            if _build_py_supports_clean_flag(build_py):
+                build_cmd_clean = list(build_cmd) + ["--clean"]
+        elif build_sh.is_file():
+            # Backwards compatibility (older harness scaffolds).
+            if self.docker_image:
+                build_cmd = ["bash", f"{FUZZ_DIR}/build.sh"]
+            else:
+                build_cmd = ["bash", str(build_sh)]
+            make_executable(build_sh)
+            build_cmd_clean = None
+        else:
+            raise HarnessGeneratorError(
+                f"Neither {build_py} nor {build_sh} was found (agent must create fuzz/build.py)."
+            )
 
         errors_accum = ""
         for attempt in range(1, self.max_build_retries + 1):
-            print(f"[*] Build attempt {attempt}/{self.max_build_retries} → {build_sh}")
+            print(f"[*] Build attempt {attempt}/{self.max_build_retries} → {' '.join(build_cmd)}")
 
-            rc, out, err = self._run_cmd(["bash", str(build_sh)], cwd=self.repo_root)
+            rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root)
+
+            # Optional retry-with-clean for flaky/stale CMake caches.
+            if rc != 0 and build_cmd_clean is not None:
+                combined = strip_ansi((out or "") + "\n" + (err or ""))
+                # Avoid looping: only retry clean once per attempt.
+                if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
+                    print(f"[*] Build failed; retrying once with --clean → {' '.join(build_cmd_clean)}")
+                    rc2, out2, err2 = self._run_cmd(list(build_cmd_clean), cwd=self.repo_root)
+                    # If --clean itself is unsupported, keep original rc/out/err.
+                    combined2 = strip_ansi((out2 or "") + "\n" + (err2 or ""))
+                    if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
+                        print("[warn] build.py does not support --clean; continuing without it")
+                    else:
+                        rc, out, err = rc2, out2, err2
 
             # Detect two categories of issues:
             #   1. The build script exited with non-zero status (classic compilation failure).
@@ -403,6 +1023,14 @@ class NonOssFuzzHarnessGenerator:
 
             # Prepare diagnostics for Codex – prefer stderr when non-zero rc, otherwise stdout.
             diag = err if rc != 0 else out
+            libs_diag = _list_static_libs_for_diagnostics()
+            if libs_diag:
+                diag = (
+                    (diag or "")
+                    + "\n\n=== build dir artifacts (static libs) ===\n"
+                    + libs_diag
+                    + "\n"
+                )
 
             print(
                 "[!] Build produced no runnable fuzzers." if rc == 0 else f"[!] Build failed (rc={rc}).",
@@ -417,14 +1045,14 @@ class NonOssFuzzHarnessGenerator:
                 {problem}
 
                 Read the diagnostics below and apply the **minimal** edits necessary so that running
-                `bash fuzz/build.sh` completes successfully **and** leaves at least one executable
+                `python fuzz/build.py` completes successfully **and** leaves at least one executable
                 fuzzer binary in `fuzz/out/` (files ending with `fuzz`, `_fuzzer`, or `Fuzzer`).
 
                 Do not refactor production code or add features; only fix the build glue or harness.
                 Modify files under `fuzz/` and the minimal build files elsewhere. Do **not** run the
                 build yourself; just output patches. Keep emitting binaries to `fuzz/out/`.
 
-                When done, write `fuzz/build.sh` into `./done`.
+                When done, write `fuzz/build.py` into `./done`.
                 """
             ).strip().format(problem=("Build finished with rc=0 but no binaries found" if rc == 0 else f"Non-zero exit code {rc}"))
 
@@ -434,7 +1062,7 @@ class NonOssFuzzHarnessGenerator:
                 raise HarnessGeneratorError("Codex failed to resolve build errors after retries.")
 
         # final build try
-        rc, out, err = self._run_cmd(["bash", str(build_sh)], cwd=self.repo_root)
+        rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root)
         if rc != 0:
             raise HarnessGeneratorError("Build still failing after Codex retries.")
 
@@ -611,29 +1239,25 @@ class NonOssFuzzHarnessGenerator:
         reproducer_ctx = "=== crash_info.md ===\n" + info + "\n\n=== crash_analysis.md ===\n" + analysis
 
         reproduce_prompt = textwrap.dedent(
-            f"""
-            Create `reproduce.sh` in repo root that:
-              • Assumes the fuzzer binary has already been built and placed in `{FUZZ_OUT_DIR}`.
-              • Locates the first executable in `{FUZZ_OUT_DIR}` (excluding `llvm-symbolizer`).
-              • Runs the fuzzer with the minimized crashing input to demonstrate the issue
-                (do not rely on the harness to be "the app" — if a direct library call via a tiny C/C++ or Java
-                 program better demonstrates the bug, generate that under `fuzz/` and call it).
-              • Wraps the fuzzer invocation in an **external timeout** (e.g., `timeout 120s …`) slightly
-                longer than any libFuzzer `-timeout` specified, so that infinite loops still terminate
-                and produce non-zero exit code.
-              • Exits nonzero on crash; otherwise zero.
+                        """
+                        Create `reproduce.py` in repo root that:
+                            • Assumes the fuzzer binary has already been built and placed in `fuzz/out/`.
+                            • Locates the first fuzzer executable in `fuzz/out/` (also consider `*.exe` on Windows).
+                            • Runs the fuzzer with the minimized crashing input to demonstrate the issue.
+                            • Wrap the invocation in an external timeout using Python's subprocess timeout, so hangs terminate.
+                            • Exit non-zero on crash/timeout; otherwise zero.
 
-            Only create `reproduce.sh`. Do not modify other files.
-            """
-        ).strip()
+                        Requirements:
+                            • Must run on native Windows (no bash/coreutils/ulimit).
+                            • Use only the Python standard library.
+
+                        Only create `reproduce.py`. Do not modify other files.
+                        """
+                ).strip()
 
         stdout = self.patcher.run_codex_command(reproduce_prompt, additional_context=reproducer_ctx)
         if stdout is None:
-            print("[!] Codex did not produce reproduce.sh")
-        else:
-            rp = self.repo_root / "reproduce.sh"
-            if rp.exists():
-                make_executable(rp)
+            print("[!] Agent did not produce reproduce.py")
 
         # 4b) Validate that the reproducer actually triggers the crash. If it does not or
         # if it fails prematurely with an AddressSanitizer shadow-memory error (common
@@ -682,7 +1306,7 @@ class NonOssFuzzHarnessGenerator:
             "crash_info.md",
             "crash_analysis.md",
             "true_positive_justification.md",
-            "reproduce.sh",
+            "reproduce.py",
         ]
 
         for rel in files_to_copy:
@@ -755,12 +1379,293 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _clone_repo(self, spec: RepoSpec) -> Path:
+        def _clone_with_host_git(dest: Path) -> Path:
+            dest_parent = dest.parent
+            dest_parent.mkdir(parents=True, exist_ok=True)
+
+            last_rc: Optional[int] = None
+            attempted: List[str] = []
+            for clone_url in _candidate_clone_urls(spec.url):
+                attempted.append(clone_url)
+                try:
+                    if dest.exists():
+                        shutil.rmtree(dest, ignore_errors=True)
+                except Exception:
+                    pass
+
+                print(f"[*] (host/git) Cloning {clone_url} → {dest}")
+                proxy_overrides = _host_git_proxy_override_args()
+                if proxy_overrides:
+                    print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
+                clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
+                print(f"[*] ➜  {' '.join(clone_cmd)}")
+                rc, out, err, timed_out = _run_cmd_capture(clone_cmd, timeout=GIT_HOST_CLONE_TIMEOUT_SEC)
+                last_rc = rc
+                if timed_out:
+                    if (t := _tail_lines(err)):
+                        print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                    if (t := _tail_lines(out)):
+                        print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                    print(
+                        f"[warn] (host/git) clone timed out after {GIT_HOST_CLONE_TIMEOUT_SEC}s (url={clone_url}); retrying next URL..."
+                    )
+                    continue
+                if rc == 0:
+                    break
+                if (t := _tail_lines(err)):
+                    print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                if (t := _tail_lines(out)):
+                    print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+            if last_rc != 0 or not dest.exists():
+                raise HarnessGeneratorError(
+                    "git clone failed on host. "
+                    + (f"Attempted: {attempted}. " if attempted else "")
+                    + (f"Last rc={last_rc}." if last_rc is not None else "")
+                )
+
+            if spec.ref:
+                proxy_overrides = _host_git_proxy_override_args()
+                checkout_cmd = ["git", *proxy_overrides, "-C", str(dest), "checkout", spec.ref]
+                print(f"[*] ➜  {' '.join(checkout_cmd)}")
+                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd)
+                if crc != 0:
+                    if (t := _tail_lines(cerr)):
+                        print("[warn] (host/git) checkout stderr (tail):\n" + textwrap.indent(t, "    "))
+                    if (t := _tail_lines(cout)):
+                        print("[warn] (host/git) checkout stdout (tail):\n" + textwrap.indent(t, "    "))
+                    fetch_cmd = ["git", *proxy_overrides, "-C", str(dest), "fetch", "origin", spec.ref]
+                    print(f"[*] ➜  {' '.join(fetch_cmd)}")
+                    frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd)
+                    if frc != 0:
+                        if (t := _tail_lines(ferr)):
+                            print("[warn] (host/git) fetch stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(fout)):
+                            print("[warn] (host/git) fetch stdout (tail):\n" + textwrap.indent(t, "    "))
+                        raise HarnessGeneratorError(f"git fetch failed on host (rc={frc}).")
+                    checkout_fh = ["git", *proxy_overrides, "-C", str(dest), "checkout", "FETCH_HEAD"]
+                    print(f"[*] ➜  {' '.join(checkout_fh)}")
+                    c2rc, c2out, c2err, _ = _run_cmd_capture(checkout_fh)
+                    if c2rc != 0:
+                        if (t := _tail_lines(c2err)):
+                            print("[warn] (host/git) checkout FETCH_HEAD stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(c2out)):
+                            print("[warn] (host/git) checkout FETCH_HEAD stdout (tail):\n" + textwrap.indent(t, "    "))
+                        raise HarnessGeneratorError(f"git checkout FETCH_HEAD failed on host (rc={c2rc}).")
+
+            # On Windows, mirrors may yield filemode-only diffs; ignore them.
+            _set_git_core_filemode_off_host(dest)
+
+            rev_cmd = ["git", "-C", str(dest), "rev-parse", "HEAD"]
+            rev = subprocess.run(rev_cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            commit = (rev.stdout or "").strip() if rev.returncode == 0 else "<unknown>"
+            print(f"[*] Checked out commit {commit}")
+            return dest
+
         root = spec.workdir or Path(tempfile.mkdtemp(prefix="sherpa-fuzz-"))
         root = root.resolve()
         if root.exists() and any(root.iterdir()):
             # If provided, allow using an existing working folder (e.g., dev)
             print(f"[*] Using existing working directory: {root}")
             return root
+
+        # If Docker mode is enabled, do clone/checkout via Docker too.
+        # This makes the host requirement minimal (no git installation needed).
+        if self.docker_image:
+            parent = root.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            name = root.name
+
+            attempted: List[str] = []
+            clone_success = False
+            last_rc: Optional[int] = None
+            for clone_url in _candidate_clone_urls(spec.url):
+                attempted.append(clone_url)
+                try:
+                    if root.exists():
+                        shutil.rmtree(root, ignore_errors=True)
+                except Exception:
+                    pass
+                print(f"[*] (docker/git) Cloning {clone_url} → {root}")
+                clone_cmd = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    *_docker_proxy_env_args(),
+                    "-v",
+                    f"{str(parent)}:/out",
+                    "-w",
+                    "/out",
+                    DEFAULT_GIT_DOCKER_IMAGE,
+                    "-c",
+                    "http.version=HTTP/1.1",
+                    "-c",
+                    "http.postBuffer=524288000",
+                    "clone",
+                    "--depth",
+                    "1",
+                    clone_url,
+                    name,
+                ]
+                print(f"[*] ➜  {' '.join(clone_cmd)}")
+                for attempt in range(1, max(1, GIT_CLONE_RETRIES) + 1):
+                    try:
+                        if root.exists():
+                            shutil.rmtree(root, ignore_errors=True)
+                    except Exception:
+                        pass
+                    try:
+                        rc, out, err, timed_out = _run_cmd_capture(clone_cmd, timeout=GIT_DOCKER_CLONE_TIMEOUT_SEC)
+                    except Exception as e:
+                        rc, out, err, timed_out = 1, "", f"{e}", False
+
+                    last_rc = rc
+
+                    if timed_out:
+                        if (t := _tail_lines(err)):
+                            print("[warn] (docker/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(out)):
+                            print("[warn] (docker/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                        print(
+                            f"[warn] (docker/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_DOCKER_CLONE_TIMEOUT_SEC}s); retrying..."
+                        )
+                        time.sleep(2 * attempt)
+                        continue
+
+                    if rc == 0:
+                        clone_success = True
+                        break
+
+                    if (t := _tail_lines(err)):
+                        print("[warn] (docker/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                    if (t := _tail_lines(out)):
+                        print("[warn] (docker/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                    print(
+                        f"[warn] (docker/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
+                    )
+                    time.sleep(2 * attempt)
+
+                if clone_success:
+                    break
+
+            if not clone_success:
+                print("[warn] (docker/git) clone failed after retries; falling back to host git.")
+                if attempted:
+                    print(f"[warn] (docker/git) attempted clone URLs: {attempted}")
+                if last_rc is not None:
+                    print(f"[warn] (docker/git) last clone rc={last_rc}")
+                try:
+                    if root.exists():
+                        shutil.rmtree(root, ignore_errors=True)
+                except Exception:
+                    pass
+                return _clone_with_host_git(root)
+
+            if spec.ref:
+                checkout_cmd = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    *_docker_proxy_env_args(),
+                    "-v",
+                    f"{str(root)}:/repo",
+                    "-w",
+                    "/repo",
+                    DEFAULT_GIT_DOCKER_IMAGE,
+                    "checkout",
+                    spec.ref,
+                ]
+                print(f"[*] ➜  {' '.join(checkout_cmd)}")
+                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd)
+                if crc != 0:
+                    if (t := _tail_lines(cerr)):
+                        print("[warn] (docker/git) checkout stderr (tail):\n" + textwrap.indent(t, "    "))
+                    if (t := _tail_lines(cout)):
+                        print("[warn] (docker/git) checkout stdout (tail):\n" + textwrap.indent(t, "    "))
+                    fetch_cmd = [
+                        "docker",
+                        "run",
+                        "--rm",
+                        *_docker_proxy_env_args(),
+                        "-v",
+                        f"{str(root)}:/repo",
+                        "-w",
+                        "/repo",
+                        DEFAULT_GIT_DOCKER_IMAGE,
+                        "-c",
+                        "http.version=HTTP/1.1",
+                        "-c",
+                        "http.postBuffer=524288000",
+                        "fetch",
+                        "origin",
+                        spec.ref,
+                    ]
+                    print(f"[*] ➜  {' '.join(fetch_cmd)}")
+                    fe = None
+                    for attempt in range(1, 4):
+                        frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd)
+                        if frc == 0:
+                            fe = type("_FE", (), {"returncode": 0})()  # type: ignore
+                            break
+                        if (t := _tail_lines(ferr)):
+                            print("[warn] (docker/git) fetch stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(fout)):
+                            print("[warn] (docker/git) fetch stdout (tail):\n" + textwrap.indent(t, "    "))
+                        print(f"[warn] (docker/git) fetch failed (attempt {attempt}/3, rc={frc}); retrying...")
+                        time.sleep(2 * attempt)
+                        fe = type("_FE", (), {"returncode": frc})()  # type: ignore
+                    assert fe is not None
+                    if fe.returncode != 0:
+                        raise HarnessGeneratorError(f"git fetch failed in docker (rc={fe.returncode}).")
+
+                    checkout_fh = [
+                        "docker",
+                        "run",
+                        "--rm",
+                        *_docker_proxy_env_args(),
+                        "-v",
+                        f"{str(root)}:/repo",
+                        "-w",
+                        "/repo",
+                        DEFAULT_GIT_DOCKER_IMAGE,
+                        "checkout",
+                        "FETCH_HEAD",
+                    ]
+                    print(f"[*] ➜  {' '.join(checkout_fh)}")
+                    co2 = subprocess.run(checkout_fh, check=False, text=True)
+                    if co2.returncode != 0:
+                        raise HarnessGeneratorError(f"git checkout FETCH_HEAD failed in docker (rc={co2.returncode}).")
+
+            # On Windows mounts, filemode diffs are common; ignore them.
+            _set_git_core_filemode_off_docker(root)
+
+            rev_cmd = [
+                "docker",
+                "run",
+                "--rm",
+                *_docker_proxy_env_args(),
+                "-v",
+                f"{str(root)}:/repo",
+                "-w",
+                "/repo",
+                DEFAULT_GIT_DOCKER_IMAGE,
+                "rev-parse",
+                "HEAD",
+            ]
+            rev = subprocess.run(rev_cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            commit = (rev.stdout or "").strip() if rev.returncode == 0 else "<unknown>"
+            print(f"[*] Checked out commit {commit}")
+            return root
+
+        # Fallback: clone on host.
+        # Prefer GitPython if available, otherwise use the git CLI.
+        if Repo is None or git_exc is None:
+            try:
+                return _clone_with_host_git(root)
+            except FileNotFoundError:
+                raise HarnessGeneratorError(
+                    "GitPython is not available and 'git' is not found in PATH. "
+                    "Enable Docker mode (--docker-image auto) or install Git."
+                )
 
         print(f"[*] Cloning {spec.url} → {root}")
         repo = Repo.clone_from(spec.url, root)
@@ -779,11 +1684,16 @@ class NonOssFuzzHarnessGenerator:
             return []
         bins: List[Path] = []
         for p in out.iterdir():
-            if p.is_file() and os.access(p, os.X_OK) and FUZZ_BIN_PAT.match(p.name):
+            is_exe = os.access(p, os.X_OK) or p.suffix.lower() == ".exe"
+            if p.is_file() and is_exe and FUZZ_BIN_PAT.match(p.name):
                 bins.append(p)
         if not bins:
             # Fallback: scan for any executable in fuzz/out
-            bins = [p for p in out.iterdir() if p.is_file() and os.access(p, os.X_OK)]
+            bins = [
+                p
+                for p in out.iterdir()
+                if p.is_file() and (os.access(p, os.X_OK) or p.suffix.lower() == ".exe")
+            ]
         return sorted(bins)
 
     def _locate_harness_source_for(self, fuzzer_name: str) -> Optional[Path]:
@@ -816,6 +1726,45 @@ class NonOssFuzzHarnessGenerator:
         extra_inputs: Optional[List[str]] = None,
         timeout: int = 7200,
     ) -> Tuple[int, str, str]:
+        def _redact_cmd(argv: Sequence[str]) -> List[str]:
+            """Redact sensitive values from commands before printing.
+
+            We frequently pass secrets (e.g., API keys) via `-e KEY=VALUE` to docker.
+            Never echo those values into logs.
+            """
+
+            def _is_sensitive_key(k: str) -> bool:
+                k_up = k.upper()
+                return any(tok in k_up for tok in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS"))
+
+            redacted: List[str] = []
+            i = 0
+            while i < len(argv):
+                a = str(argv[i])
+                if a == "-e" and i + 1 < len(argv):
+                    kv = str(argv[i + 1])
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        if _is_sensitive_key(k):
+                            redacted += [a, f"{k}=***"]
+                        else:
+                            redacted += [a, kv]
+                    else:
+                        redacted += [a, kv]
+                    i += 2
+                    continue
+
+                if "=" in a:
+                    k, v = a.split("=", 1)
+                    if _is_sensitive_key(k):
+                        redacted.append(f"{k}=***")
+                    else:
+                        redacted.append(a)
+                else:
+                    redacted.append(a)
+                i += 1
+            return redacted
+
         if extra_inputs:
             # If the last element is a directory (e.g., corpus), append after "--" for libFuzzer/Jazzer
             cmd = list(cmd)
@@ -823,14 +1772,20 @@ class NonOssFuzzHarnessGenerator:
                 cmd.append("--")
             cmd.extend(extra_inputs)
 
-        print(f"[*] ➜  {' '.join(cmd)}")
+        effective_env = env or os.environ.copy()
+        actual_cmd = self._dockerize_cmd(cmd, cwd=cwd, env=effective_env if self.docker_image else effective_env)
+
+        start_ts = time.time()
+        start_mono = time.monotonic()
+        print(f"[*] ➜  {' '.join(_redact_cmd(actual_cmd))}")
         proc = subprocess.Popen(
-            cmd,
+            actual_cmd,
             cwd=cwd,
-            env=env or os.environ.copy(),
+            env=None if self.docker_image else effective_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors="replace",
         )
         try:
             out, err = proc.communicate(timeout=timeout)
@@ -838,8 +1793,12 @@ class NonOssFuzzHarnessGenerator:
             proc.kill()
             out, err = proc.communicate()
             err = (err or "") + "\n[timeout] process exceeded limit and was killed."
+        elapsed = time.monotonic() - start_mono
         # Truncate verbose spam in the console but keep full logs if needed.
-        print(f"[*] Command rc={proc.returncode}. STDOUT (tail):\n" + "\n".join(out.splitlines()[-80:]))
+        print(
+            f"[*] Command rc={proc.returncode}. elapsed={elapsed:.1f}s. started_at={start_ts:.0f}" \
+            + ". STDOUT (tail):\n" + "\n".join(out.splitlines()[-80:])
+        )
         if err.strip():
             print("[*] STDERR (tail):\n" + "\n".join(err.splitlines()[-80:]))
         return proc.returncode, out, err
@@ -849,7 +1808,7 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _ensure_working_reproducer(self, *, max_retries: int = 3) -> bool:
-        """Run ./reproduce.sh and ensure it properly demonstrates the crash.
+        """Run reproduce.py/reproduce.sh and ensure it demonstrates the crash.
 
         Acceptable outcome:
           • The script exits with a *non-zero* status **and** stdout/stderr shows an
@@ -867,11 +1826,15 @@ class NonOssFuzzHarnessGenerator:
         or *max_retries* attempts have been exhausted.
         """
 
-        rp = self.repo_root / "reproduce.sh"
-        if not rp.exists():
-            raise HarnessGeneratorError("reproduce.sh not found after Codex generation")
-
-        make_executable(rp)
+        rp_py = self.repo_root / "reproduce.py"
+        rp_sh = self.repo_root / "reproduce.sh"
+        if rp_py.exists():
+            runner: Sequence[str] = [self._python_runner(), str(rp_py)]
+        elif rp_sh.exists():
+            runner = ["bash", str(rp_sh)]
+            make_executable(rp_sh)
+        else:
+            raise HarnessGeneratorError("No reproducer script found after agent generation")
 
         failure_patterns = [
             re.compile(r"AddressSanitizer failed to allocate", re.IGNORECASE),
@@ -882,7 +1845,7 @@ class NonOssFuzzHarnessGenerator:
         for attempt in range(1, max_retries + 1):
             print(f"[*] Validating reproducer (attempt {attempt}/{max_retries}) …")
 
-            rc, out, err = self._run_cmd(["bash", str(rp)], cwd=self.repo_root, timeout=600)
+            rc, out, err = self._run_cmd(list(runner), cwd=self.repo_root, timeout=600)
 
             combined = out + "\n" + err
 
@@ -921,9 +1884,9 @@ class NonOssFuzzHarnessGenerator:
 
             print("[!] Reproducer did not reproduce the intended crash. Sending diagnostics back to Codex …")
 
-            current_reproducer = read_text_safely(rp)
+            current_reproducer = read_text_safely(rp_py if rp_py.exists() else rp_sh)
             diag_context = (
-                "=== reproduce.sh (current) ===\n" + current_reproducer +
+                "=== reproducer (current) ===\n" + current_reproducer +
                 "\n\n=== run output ===\n" + strip_ansi(combined)
             )[-20000:]
 
@@ -933,19 +1896,18 @@ class NonOssFuzzHarnessGenerator:
                 Exit code: {rc}
 
                 Objectives:
-                  • reproduce.sh must exit *non-zero* due to the original bug (ASan/UBSan report),
+                                    • reproduce.py must exit *non-zero* due to the original bug (ASan/UBSan report),
                     a libFuzzer timeout (hang), or similar — but *not* due to allocation failures
                     or script errors.
                   • Ensure `<fuzz_target> -runs=1 <crashing_input>` runs with sane RLIMIT_AS or
                     LIBFUZZER options so that AddressSanitizer can allocate shadow memory.
-                  • If the bug is a **hang**, wrap the fuzzer invocation with `timeout` (or
-                    `ulimit -t`) slightly above libFuzzer's internal `-timeout` so the script
-                    terminates and returns a non-zero status instead of hanging indefinitely.
+                                    • If the bug is a **hang**, wrap the fuzzer invocation using Python subprocess timeout,
+                                        slightly above any libFuzzer internal `-timeout`, so the script terminates and returns non-zero.
                   • If memory limits are the issue, add `export ASAN_OPTIONS=allow_user_segv_handler=1` or
                     loosen the limit, or run the binary under `ulimit -v unlimited`.
 
-                Apply the minimal fix to `reproduce.sh` (and, only if absolutely required, small tweaks
-                under `fuzz/`).  Do not change unrelated files.  When done, write `reproduce.sh` into
+                                Apply the minimal fix to `reproduce.py` (and, only if absolutely required, small tweaks
+                                under `fuzz/`).  Do not change unrelated files.  When done, write `reproduce.py` into
                 `./done`.
                 """
             ).strip()
@@ -974,14 +1936,27 @@ def main() -> None:
 
     parser.add_argument("--ref", help="Git ref (branch, tag, or commit) (only with --repo)")
     parser.add_argument("--workdir", type=Path, help="Existing directory to use as working tree (optional)")
-    parser.add_argument("--ai-key-path", type=Path, default="./.env", help="Path to file with OPENAI_API_KEY")
+    parser.add_argument("--ai-key-path", type=Path, default="./.env", help="Path to file with OPENAI_API_KEY (optional)")
     parser.add_argument("--sanitizer", default=DEFAULT_SANITIZER, help="Sanitizer for C/C++ (address, undefined, etc.)")
-    parser.add_argument("--codex-cli", default="codex", help="Codex CLI executable")
-    parser.add_argument("--codex-no-sandbox", action="store_true", help="Run Codex with --dangerously-bypass-approvals-and-sandbox and -a never (EXTREMELY DANGEROUS).")
-    parser.add_argument("--codex-sandbox-mode", choices=["read-only","workspace-write","danger-full-access"], help="If set, pass --sandbox <mode> to Codex.")
+    parser.add_argument("--codex-cli", default="codex", help="Codex CLI executable (kept as --codex-cli for compatibility)")
+    parser.add_argument(
+        "--codex-no-sandbox",
+        action="store_true",
+        help="Use a broader Codex sandbox (danger-full-access). Use with caution.",
+    )
+    parser.add_argument(
+        "--codex-sandbox-mode",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        help="Codex sandbox mode override (default: workspace-write)",
+    )
     parser.add_argument("--time-budget", type=int, default=900, help="libFuzzer/Jazzer -max_total_time per target (seconds)")
     parser.add_argument("--rss-limit-mb", type=int, default=8192, help="RSS limit for runs (MB)")
     parser.add_argument("--max-len", type=int, default=1024, help="libFuzzer -max_len")
+    parser.add_argument(
+        "--docker-image",
+        default=None,
+        help="If set, run build/fuzz commands inside a Linux Docker image. Use 'auto' to choose per-language images (cpp/java) and auto-build if missing.",
+    )
     parser.add_argument("--max-retries", type=int, default=MAX_BUILD_RETRIES, help="Max build-fix rounds")
     parser.add_argument("--max-threads", type=int, default=1, help="Maximum repositories to process in parallel (only with --targets)")
     parser.add_argument("--rounds", type=int, default=1, help="Number of iterative harness-generation rounds to run per repository")
@@ -1083,6 +2058,7 @@ def main() -> None:
                     rss_limit_mb=args.rss_limit_mb,
                     max_len=args.max_len,
                     max_build_retries=args.max_retries,
+                    docker_image=args.docker_image,
                 )
                 # If not first round move old artifacts away before generating.
                 if rnd > 1:

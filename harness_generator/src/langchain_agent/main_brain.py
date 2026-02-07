@@ -9,14 +9,13 @@ When you respond, you must respond in the specified response format.
 """
 
 from dataclasses import dataclass
+import json
+import os
+
 from langchain.tools import tool, ToolRuntime
-from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain.agents import create_agent
-import json
-
-from pathlib import Path
-import subprocess
+from langchain_openai import ChatOpenAI
 
 checkpointer = InMemorySaver()
 
@@ -42,12 +41,12 @@ def refuse_tool_call(reason: str) -> str:
     """Tool to refuse to call a tool."""
     return f"Refused to call tool: {reason}"
 
-model = init_chat_model(
-    "deepseek-chat",
-    temperature=0.5,
-    timeout=10,
-    max_tokens=1000
-)
+def _default_openrouter_base_url() -> str:
+    return os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+
+def _default_openrouter_model() -> str:
+    return os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
 
 
 
@@ -89,31 +88,56 @@ class ResponseFormat:
 #     weather_conditions="It's always sunny in Florida!"
 # )
 
-def create_agent_outside(input_text: str,mdoel:str = "deepseek-chat", temperature:float=0.5, timeout:int=10, max_tokens:int=1000):
+def create_agent_outside(
+    input_text: str,
+    mdoel: str | None = None,
+    temperature: float = 0.5,
+    timeout: int = 10,
+    max_tokens: int = 1000,
+    *,
+    openrouter_api_key: str | None = None,
+    openrouter_base_url: str | None = None,
+):
 
-    model = init_chat_model(
-    "deepseek-chat",
-    temperature=0.5,
-    timeout=10,
-    max_tokens=1000
-)
+    # Prefer OpenRouter in an OpenAI-compatible mode.
+    # Required env var: OPENROUTER_API_KEY (or fallback OPENAI_API_KEY).
+    openrouter_key = (
+        openrouter_api_key
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+    if not openrouter_key:
+        raise RuntimeError(
+            "Missing API key. Set OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY before using /chat_with_agent."
+        )
+
+    model_name = (mdoel or "").strip() or _default_openrouter_model()
+    base_url = (openrouter_base_url or "").strip() or _default_openrouter_base_url()
+    llm = ChatOpenAI(
+        model=model_name,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        openai_api_key=openrouter_key,
+        openai_api_base=base_url,
+    )
     
     agent = create_agent(
-    model=model,
-    system_prompt=SYSTEM_PROMPT,
-    tools=[get_user_location, get_weather_for_location],
-    context_schema=Context,
-    response_format=ResponseFormat,
-    checkpointer=checkpointer
+        model=llm,
+        system_prompt=SYSTEM_PROMPT,
+        tools=[get_user_location, get_weather_for_location],
+        context_schema=Context,
+        response_format=ResponseFormat,
+        checkpointer=checkpointer,
     )
 
     config = {"configurable": {"thread_id": "1"}}
 
     response = agent.invoke(
-    {"messages": [{"role": "user", "content": f'{input_text}'}]},
-    config=config,
-    context=Context(user_id="1")
-)
+        {"messages": [{"role": "user", "content": f"{input_text}"}]},
+        config=config,
+        context=Context(user_id="1"),
+    )
     return response
 
 

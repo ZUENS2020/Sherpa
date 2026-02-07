@@ -78,6 +78,24 @@
             margin-bottom: 15px;
         }
 
+        .row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .row .form-group {
+            flex: 1;
+            min-width: 240px;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: #666;
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
         label {
             display: block;
             font-size: 14px;
@@ -184,6 +202,18 @@
             margin: 40px 0;
         }
 
+        .checkbox {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #444;
+        }
+
+        input[type="checkbox"] {
+            transform: scale(1.1);
+        }
+
         @media (max-width: 600px) {
             .header h1 {
                 font-size: 24px;
@@ -207,23 +237,97 @@
         </div>
 
         <div class="content">
-            <!-- 智能对话部分 -->
+            <!-- 持久化配置部分 -->
             <div class="section">
-                <div class="section-title">💬 智能对话</div>
-                
+                <div class="section-title">⚙️ 持久化配置</div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label for="openai_api_key">OpenAI API Key（用于 Codex / OpenAI）</label>
+                        <input type="text" id="openai_api_key" placeholder="OPENAI_API_KEY（会持久化保存）" />
+                        <div class="hint">用于 Codex CLI（生成/修复 harness）以及 fuzz 流程的自动化调用。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="openai_base_url">OpenAI Base URL（第三方 OpenAI-compatible，可选）</label>
+                        <input type="text" id="openai_base_url" placeholder="例如：https://api.openai.com/v1 或 https://your-proxy.example.com/v1" />
+                        <div class="hint">会写入 OPENAI_BASE_URL；用于让 Codex 走你配置的 OpenAI-compatible 端点。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="openrouter_api_key">OpenRouter API Key</label>
+                        <input type="text" id="openrouter_api_key" placeholder="OPENROUTER_API_KEY（会持久化保存）" />
+                        <div class="hint">保留字段（当前 Web 已移除聊天功能）。</div>
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label for="openrouter_model">OpenRouter 模型</label>
+                        <input type="text" id="openrouter_model" placeholder="例如：anthropic/claude-3.5-sonnet" value="anthropic/claude-3.5-sonnet" />
+                    </div>
+                    <div class="form-group">
+                        <label for="openrouter_base_url">OpenRouter Base URL</label>
+                        <input type="text" id="openrouter_base_url" placeholder="https://openrouter.ai/api/v1" value="https://openrouter.ai/api/v1" />
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
+                        <input type="text" id="cfg_time_budget" value="900" />
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox">
+                            <input type="checkbox" id="cfg_use_docker" checked>
+                            Fuzz 默认使用 Docker
+                        </label>
+                    </div>
+                </div>
+
                 <div class="form-group">
-                    <label for="input_text">请输入你的问题</label>
-                    <textarea id="input_text" placeholder="例如：外面天气怎么样？"></textarea>
+                    <label for="cfg_docker_image">Fuzz 默认 Docker 镜像名</label>
+                    <input type="text" id="cfg_docker_image" value="auto" />
+                </div>
+
+                <div class="form-group">
+                    <label for="sherpa_git_mirrors">Git 镜像列表（SHERPA_GIT_MIRRORS）</label>
+                    <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}" />
+                    <div class="hint">逗号分隔；支持 {url} 模板。</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="oss_fuzz_dir">OSS-Fuzz 本地路径（oss_fuzz_dir）</label>
+                    <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz（docker-compose 模式）或 D:/oss-fuzz（本机模式）" />
+                    <div class="hint">必须是一个有效的 oss-fuzz checkout 根目录（包含 infra/helper.py）。docker-compose 模式下建议使用 <code>/shared/oss-fuzz</code>。</div>
+                </div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label for="sherpa_docker_http_proxy">Docker HTTP Proxy</label>
+                        <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891" />
+                    </div>
+                    <div class="form-group">
+                        <label for="sherpa_docker_https_proxy">Docker HTTPS Proxy</label>
+                        <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891" />
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label for="sherpa_docker_no_proxy">Docker NO_PROXY</label>
+                        <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1" />
+                    </div>
+                    <div class="form-group">
+                        <label for="sherpa_docker_proxy_host">Docker Proxy Host</label>
+                        <input type="text" id="sherpa_docker_proxy_host" value="host.docker.internal" />
+                    </div>
                 </div>
 
                 <div class="button-group">
-                    <button class="btn-primary" id="send_btn">🚀 发送</button>
+                    <button class="btn-primary" id="cfg_save_btn">💾 保存配置</button>
                 </div>
 
-                <div id="reply_area" class="result-box" style="display: none;"></div>
+                <div id="cfg_status" class="result-box" style="display: none;"></div>
             </div>
-
-            <div class="divider"></div>
 
             <!-- 模糊测试部分 -->
             <div class="section">
@@ -234,9 +338,30 @@
                     <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
                 </div>
 
-                <div class="form-group">
-                    <label for="email">邮箱地址（接收报告）</label>
-                    <input type="text" id="email" placeholder="your-email@example.com">
+                <div class="row">
+                    <div class="form-group">
+                        <label for="email">邮箱地址（可选）</label>
+                        <input type="text" id="email" placeholder="your-email@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="time_budget">运行时长（秒）</label>
+                        <input type="text" id="time_budget" value="900">
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="form-group">
+                        <label class="checkbox">
+                            <input type="checkbox" id="use_docker" checked>
+                            在 Docker 里构建/运行 fuzz（Windows 推荐）
+                        </label>
+                        <div class="hint">需要本机已安装并启动 Docker Desktop。</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="docker_image">Docker 镜像名</label>
+                        <input type="text" id="docker_image" value="auto">
+                        <div class="hint">填 auto 将按语言选择 cpp/java 镜像；镜像不存在会自动 build。</div>
+                    </div>
                 </div>
 
                 <div class="button-group">
@@ -244,6 +369,7 @@
                 </div>
 
                 <div id="fuzz_status" class="result-box" style="display: none;"></div>
+                <div id="fuzz_log" class="result-box" style="display: none; margin-top: 12px;"></div>
             </div>
         </div>
     </div>
