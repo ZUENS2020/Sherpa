@@ -1,10 +1,10 @@
 # SHERPA — 批量化 Fuzz 自动化平台
 
-SHERPA 是一个面向批量 GitHub 项目的自动化模糊测试平台。启动服务后只需通过 REST API 发起任务并查询状态，所有初始化与构建由服务自动完成。
+SHERPA 是一个面向批量 GitHub 项目的自动化模糊测试平台。启动服务后只需通过 REST API 发起任务并查询状态，所有初始化、构建、运行与报告产出由服务自动完成。
 
 核心能力：
-- OpenCode 生成 harness、build 脚本和种子
-- 内置工作流循环自动修复与重试
+- OpenCode 生成 harness、build 脚本、种子与分析报告
+- LangGraph 工作流自动修复与重试（plan → synthesize → build → run → fix）
 - 批量提交、并行执行与统一状态监控
 - 运行日志落盘，Web 仅展示摘要进度
 
@@ -25,7 +25,7 @@ SHERPA 是一个面向批量 GitHub 项目的自动化模糊测试平台。启�
 
 核心组件：
 - Web API（FastAPI）：任务提交与状态查询
-- 工作流引擎（LangGraph）：plan → synthesize → build → run 循环
+- 工作流引擎（LangGraph）：plan → synthesize → build → run → fix 循环
 - OpenCode CLI：代码分析与生成
 - Docker 运行层：容器内构建与 fuzz
 - 持久化配置：`config/web_config.json` 与 `config/web_opencode.env`
@@ -35,13 +35,15 @@ SHERPA 是一个面向批量 GitHub 项目的自动化模糊测试平台。启�
 
 ---
 
-## 实现方式
+## 工作流说明
 
-每个仓库的工作流：
+每个仓库的默认流程：
 1. Plan：生成 `fuzz/PLAN.md` 与 `fuzz/targets.json`
 2. Synthesize：生成 harness、`fuzz/build.py` 与 corpus
 3. Build：执行 `python fuzz/build.py`，失败自动修复重试
 4. Run：执行 fuzz 并产出崩溃样本与复现线索
+5. Fix（可选）：若 crash 产生，尝试修复并生成补丁
+6. Summary：写入 `run_summary.md/json`
 
 运行环境：
 - C/C++ 使用 libFuzzer
@@ -69,8 +71,9 @@ http://localhost:8000/
 ```
 
 说明：
-- Web UI 仅用于人工查看与配置
+- Web UI 用于人工查看与配置
 - 批量调用建议使用 REST API
+- 默认会挂载本机 `./output` 作为产物目录
 
 ### 本地运行（可选）
 
@@ -102,11 +105,6 @@ python ./harness_generator/src/langchain_agent/main.py
 ```json
 { "job_id": "<task_id>", "status": "queued" }
 ```
-
-自动行为：
-- OSS-Fuzz checkout 自动初始化
-- fuzz 镜像自动构建
-- 批量 job 自动并行执行
 
 ### 2) 查询任务状态
 `GET /api/task/{job_id}`
@@ -140,6 +138,28 @@ python ./harness_generator/src/langchain_agent/main.py
 
 ---
 
+## 输出目录与产物
+
+### 默认输出路径
+- Docker Compose：本机 `./output` → 容器 `/shared/output`
+- 每次任务会创建独立子目录：`<repo>-<8位id>/`
+
+### 典型产物
+- `fuzz/`：生成的 harness 与 build 脚本
+- `crash_info.md` / `crash_analysis.md`
+- `reproduce.py`
+- `fix.patch` / `fix_summary.md`（若触发修复）
+- `run_summary.md` / `run_summary.json`
+- `challenge_bundle*/` 或 `false_positive*/` 或 `unreproducible*/`
+
+### 日志
+- `config/logs/jobs/<job_id>.log`
+
+### 自定义输出路径
+- 设置环境变量 `SHERPA_OUTPUT_DIR`（Web 与 CLI 都会生效）
+
+---
+
 ## 配置说明
 
 常用环境变量：
@@ -147,6 +167,7 @@ python ./harness_generator/src/langchain_agent/main.py
 - `OPENAI_BASE_URL`：OpenAI-compatible 端点（可选）
 - `SHERPA_WEB_MAX_WORKERS`：并发 worker 数量（默认 5）
 - `SHERPA_DEFAULT_OSS_FUZZ_DIR`：OSS-Fuzz 根目录（Docker Compose 默认 `/shared/oss-fuzz`）
+- `SHERPA_OUTPUT_DIR`：产物输出目录（默认 `/shared/output`）
 
 运行时配置：
 - `config/` 目录仅运行时生成，不应打包
@@ -154,14 +175,16 @@ python ./harness_generator/src/langchain_agent/main.py
 
 ---
 
-## 日志与产物
+## 国内网络加速（APT 源）
 
-日志位置：
-- `config/logs/jobs/<job_id>.log`
+所有 Dockerfile 默认使用国内镜像源（清华 TUNA）：
+- Ubuntu：`https://mirrors.tuna.tsinghua.edu.cn/ubuntu`
+- Debian：`https://mirrors.tuna.tsinghua.edu.cn/debian`
 
-Docker Compose 默认挂载：
-- OSS-Fuzz：`/shared/oss-fuzz`
-- 临时工作区：`/shared/tmp`
+可通过 build args 覆盖：
+```bash
+docker build --build-arg APT_MIRROR=... -f docker/Dockerfile.fuzz-cpp .
+```
 
 ---
 
