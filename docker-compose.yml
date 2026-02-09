@@ -50,6 +50,8 @@ services:
       # Default OSS-Fuzz checkout path inside containers.
       # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
       SHERPA_DEFAULT_OSS_FUZZ_DIR: "/shared/oss-fuzz"
+      # Default output directory for artifacts (host-mounted).
+      SHERPA_OUTPUT_DIR: "/shared/output"
       # CLI backend for code edits (opencode).
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
 
@@ -73,6 +75,8 @@ services:
 
       # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
       - sherpa-oss-fuzz:/shared/oss-fuzz
+      # Artifacts output directory (host-mounted).
+      - ./output:/shared/output
 
 
       # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
@@ -92,6 +96,7 @@ services:
       - sherpa-docker-data:/var/lib/docker
       - sherpa-tmp:/shared/tmp
       - sherpa-oss-fuzz:/shared/oss-fuzz
+      - ./output:/shared/output
 
 volumes:
   sherpa-docker-data:

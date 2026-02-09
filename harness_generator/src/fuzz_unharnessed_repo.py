@@ -41,6 +41,7 @@ Relies on the existing CodexHelper (OpenCode-backed).
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
 import os
@@ -160,6 +161,122 @@ def read_text_safely(p: Path) -> str:
 def write_text_safely(p: Path, s: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(s, encoding="utf-8", errors="replace")
+
+
+def _default_diff_excludes() -> set[str]:
+    return {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        "build",
+        "dist",
+        "out",
+        "fuzz/out",
+        "fuzz/corpus",
+        "fuzz/build",
+        "challenge_bundle",
+        "unreproducible",
+        "false_positive",
+    }
+
+
+def _should_skip_path(path: Path, *, repo_root: Path, exclude_dirs: set[str]) -> bool:
+    try:
+        rel = path.relative_to(repo_root)
+    except Exception:
+        return True
+    if rel.name == "done":
+        return True
+    parts = rel.parts
+    for i in range(len(parts)):
+        seg = "/".join(parts[: i + 1])
+        if seg in exclude_dirs or parts[i] in exclude_dirs:
+            return True
+    return False
+
+
+def _read_text_for_diff(path: Path, *, max_bytes: int = 2_000_000) -> str | None:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return None
+    if len(data) > max_bytes:
+        return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def snapshot_repo_text(
+    repo_root: Path,
+    *,
+    exclude_dirs: set[str] | None = None,
+    max_bytes: int = 2_000_000,
+) -> dict[str, str]:
+    """Capture text snapshots of repo files for patch generation."""
+    excludes = _default_diff_excludes() | (exclude_dirs or set())
+    snap: dict[str, str] = {}
+    for p in repo_root.rglob("*"):
+        if not p.is_file():
+            continue
+        if _should_skip_path(p, repo_root=repo_root, exclude_dirs=excludes):
+            continue
+        text = _read_text_for_diff(p, max_bytes=max_bytes)
+        if text is None:
+            continue
+        try:
+            rel = p.relative_to(repo_root).as_posix()
+        except Exception:
+            continue
+        snap[rel] = text
+    return snap
+
+
+def write_patch_from_snapshot(
+    snapshot: dict[str, str],
+    repo_root: Path,
+    out_path: Path,
+    *,
+    exclude_dirs: set[str] | None = None,
+    max_bytes: int = 2_000_000,
+) -> list[str]:
+    """Write a unified diff between snapshot and current repo state."""
+    current = snapshot_repo_text(repo_root, exclude_dirs=exclude_dirs, max_bytes=max_bytes)
+    changed_files: list[str] = []
+    diff_lines: list[str] = []
+
+    all_keys = set(snapshot.keys()) | set(current.keys())
+    for rel in sorted(all_keys):
+        before = snapshot.get(rel)
+        after = current.get(rel)
+        if before == after:
+            continue
+        changed_files.append(rel)
+        before_lines = before.splitlines(keepends=True) if before is not None else []
+        after_lines = after.splitlines(keepends=True) if after is not None else []
+        diff_lines.extend(
+            difflib.unified_diff(
+                before_lines,
+                after_lines,
+                fromfile=f"a/{rel}",
+                tofile=f"b/{rel}",
+            )
+        )
+
+    if diff_lines:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("".join(diff_lines), encoding="utf-8", errors="replace")
+    else:
+        out_path.unlink(missing_ok=True)
+
+    return changed_files
 
 
 def hexdump(path: Path, limit_bytes: int = 512) -> str:
@@ -789,6 +906,9 @@ class NonOssFuzzHarnessGenerator:
         if not bins:
             raise HarnessGeneratorError("No fuzzer binaries found under fuzz/out/")
 
+        crash_found = False
+        last_fuzzer = ""
+        last_artifact = ""
         for bin_path in bins:
             fuzzer_name = bin_path.name
             try:
@@ -805,12 +925,20 @@ class NonOssFuzzHarnessGenerator:
                 first = sorted(new_artifacts)[0]
                 print(f"    → analyzing first: {first}")
                 self._analyze_and_package(fuzzer_name, first)
+                crash_found = True
+                last_fuzzer = fuzzer_name
+                last_artifact = str(first)
                 # Stop after first validated crash to keep the demo tight.
                 break
             else:
                 print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
 
         print("[*] Workflow complete.")
+        self._write_run_summary(
+            crash_found=crash_found,
+            last_fuzzer=last_fuzzer,
+            last_artifact=last_artifact,
+        )
 
     # ────────────────────────────────────────────────────────────────────
     # Step A – Plan
@@ -1338,6 +1466,10 @@ class NonOssFuzzHarnessGenerator:
             "crash_analysis.md",
             "true_positive_justification.md",
             "reproduce.py",
+            "fix.patch",
+            "fix_summary.md",
+            "run_summary.md",
+            "run_summary.json",
         ]
 
         for rel in files_to_copy:
@@ -1404,6 +1536,83 @@ class NonOssFuzzHarnessGenerator:
 
                 print("[!] Crash determined to be caused by harness error → recorded as false_positive.")
                 return
+
+    def _write_run_summary(
+        self,
+        *,
+        crash_found: bool,
+        last_fuzzer: str = "",
+        last_artifact: str = "",
+        error: str | None = None,
+    ) -> None:
+        summary_json = self.repo_root / "run_summary.json"
+        summary_md = self.repo_root / "run_summary.md"
+        analysis_path = self.repo_root / "crash_analysis.md"
+        harness_error = False
+        if analysis_path.is_file():
+            try:
+                text = analysis_path.read_text(encoding="utf-8", errors="ignore")
+                harness_error = bool(re.search(r"HARNESS ERROR", text, re.IGNORECASE))
+            except Exception:
+                harness_error = False
+
+        bundle_dirs = [
+            d.name
+            for d in self.repo_root.iterdir()
+            if d.is_dir() and d.name.startswith(("challenge_bundle", "false_positive", "unreproducible"))
+        ]
+
+        payload = {
+            "repo_root": str(self.repo_root),
+            "status": "error" if error else ("crash_found" if crash_found else "ok"),
+            "time_budget": self.time_budget,
+            "max_len": self.max_len,
+            "docker_image": self.docker_image,
+            "crash_found": crash_found,
+            "last_fuzzer": last_fuzzer,
+            "last_crash_artifact": last_artifact,
+            "harness_error": harness_error,
+            "error": error or "",
+            "crash_info_path": str(self.repo_root / "crash_info.md"),
+            "crash_analysis_path": str(self.repo_root / "crash_analysis.md"),
+            "reproducer_path": str(self.repo_root / "reproduce.py"),
+            "bundles": bundle_dirs,
+            "timestamp": time.time(),
+        }
+
+        try:
+            summary_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+        md_lines = [
+            "# Run Summary",
+            "",
+            f"- Status: {payload['status']}",
+            f"- Repo root: {payload['repo_root']}",
+            f"- Time budget: {payload['time_budget']}s",
+            f"- Crash found: {payload['crash_found']}",
+            f"- Harness error: {payload['harness_error']}",
+        ]
+        if error:
+            md_lines.extend(["", "## Error", "```text", error, "```"])
+        if crash_found:
+            md_lines.extend(
+                [
+                    "",
+                    "## Crash",
+                    f"- Fuzzer: {last_fuzzer}",
+                    f"- Artifact: {last_artifact}",
+                    f"- crash_info.md: {payload['crash_info_path']}",
+                    f"- crash_analysis.md: {payload['crash_analysis_path']}",
+                ]
+            )
+        if bundle_dirs:
+            md_lines.extend(["", "## Bundles"] + [f"- {b}" for b in bundle_dirs])
+        try:
+            summary_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     # ────────────────────────────────────────────────────────────────────
     # Discovery & helpers
@@ -2001,10 +2210,37 @@ def main() -> None:
 
     load_dotenv(os.path.expanduser(str(args.ai_key_path)))
 
+    # helper to allocate unique subdirectories under a base workdir
+    from urllib.parse import urlparse
+
+    def _alloc_workdir(base: Path, url: str) -> Path:
+        """Return a unique child directory for a repo url inside base."""
+        repo_name = os.path.basename(urlparse(url).path)  # e.g., 'foo.git'
+        stem = repo_name[:-4] if repo_name.endswith(".git") else repo_name
+        cand = base / stem
+        if not cand.exists():
+            return cand
+        for i in range(1, 1000):
+            cand_i = base / f"{stem}-{i}"
+            if not cand_i.exists():
+                return cand_i
+        return base / f"{stem}-{uuid.uuid4().hex[:8]}"
+
+    base_workdir: Optional[Path] = None
+    if args.workdir:
+        base_workdir = args.workdir.expanduser().resolve()
+        base_workdir.mkdir(parents=True, exist_ok=True)
+    else:
+        env_out = os.environ.get("SHERPA_OUTPUT_DIR", "").strip()
+        if env_out:
+            base_workdir = Path(env_out).expanduser().resolve()
+            base_workdir.mkdir(parents=True, exist_ok=True)
+
     # Build list of RepoSpec objects
     specs: List[RepoSpec] = []
     if args.repo:
-        specs.append(RepoSpec(url=args.repo, ref=args.ref, workdir=args.workdir))
+        work = _alloc_workdir(base_workdir, args.repo) if base_workdir else None
+        specs.append(RepoSpec(url=args.repo, ref=args.ref, workdir=work))
     else:
         import yaml  # lazy import; heavy only if we need it
 
@@ -2022,27 +2258,6 @@ def main() -> None:
         if not isinstance(data, list):
             print("[cli] ERROR: targets YAML must be a list of URLs or dicts", file=sys.stderr)
             sys.exit(1)
-
-        # helper to allocate unique subdirectories under --workdir
-        from urllib.parse import urlparse
-
-        def _alloc_workdir(base: Path, url: str) -> Path:
-            """Return a unique child directory for a repo url inside base."""
-            repo_name = os.path.basename(urlparse(url).path)  # e.g., 'foo.git'
-            stem = repo_name[:-4] if repo_name.endswith('.git') else repo_name
-            cand = base / stem
-            if not cand.exists():
-                return cand
-            for i in range(1, 1000):
-                cand_i = base / f"{stem}-{i}"
-                if not cand_i.exists():
-                    return cand_i
-            return base / f"{stem}-{uuid.uuid4().hex[:8]}"
-
-        base_workdir: Optional[Path] = None
-        if args.workdir:
-            base_workdir = args.workdir.expanduser().resolve()
-            base_workdir.mkdir(parents=True, exist_ok=True)
 
         for idx, item in enumerate(data, 1):
             if isinstance(item, str):

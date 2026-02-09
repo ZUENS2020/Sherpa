@@ -4,6 +4,8 @@ import json
 import os
 import re
 import time
+import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, TypedDict, cast
@@ -11,7 +13,13 @@ from typing import Any, Optional, TypedDict, cast
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
-from fuzz_unharnessed_repo import HarnessGeneratorError, NonOssFuzzHarnessGenerator, RepoSpec
+from fuzz_unharnessed_repo import (
+    HarnessGeneratorError,
+    NonOssFuzzHarnessGenerator,
+    RepoSpec,
+    snapshot_repo_text,
+    write_patch_from_snapshot,
+)
 
 
 class FuzzWorkflowState(TypedDict, total=False):
@@ -37,6 +45,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     last_fuzzer: str
     crash_fix_attempts: int
     next: str
+    fix_patch_path: str
+    fix_patch_files: list[str]
+    fix_patch_bytes: int
+    summary_path: str
+    summary_json_path: str
 
 
 class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
@@ -111,6 +124,24 @@ def _has_codex_key() -> bool:
 
 def _is_tinyxml2_repo(repo_root: Path) -> bool:
     return (repo_root / "tinyxml2.h").is_file() or (repo_root / "tinyxml2.cpp").is_file()
+
+
+def _slug_from_repo_url(repo_url: str) -> str:
+    base = repo_url.rstrip("/").split("/")[-1]
+    if base.endswith(".git"):
+        base = base[: -len(".git")]
+    base = re.sub(r"[^a-zA-Z0-9._-]+", "-", base).strip("-")
+    return base or "repo"
+
+
+def _alloc_output_workdir(repo_url: str) -> Path | None:
+    out_root = os.environ.get("SHERPA_OUTPUT_DIR", "").strip()
+    if not out_root:
+        return None
+    base = Path(out_root).expanduser().resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    slug = _slug_from_repo_url(repo_url)
+    return base / f"{slug}-{uuid.uuid4().hex[:8]}"
 
 
 def _write_builtin_tinyxml2_plan(repo_root: Path) -> None:
@@ -313,8 +344,9 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     docker_image = state.get("docker_image")
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
 
+    workdir = _alloc_output_workdir(repo_url)
     generator = NonOssFuzzHarnessGenerator(
-        repo_spec=RepoSpec(url=repo_url),
+        repo_spec=RepoSpec(url=repo_url, workdir=workdir),
         ai_key_path=ai_key_path,
         max_len=max_len,
         time_budget_per_target=time_budget,
@@ -678,6 +710,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     _wf_log(cast(dict[str, Any], state), "-> fix_crash")
 
     repo_root = gen.repo_root
+    snapshot = snapshot_repo_text(repo_root)
     crash_info = repo_root / "crash_info.md"
     crash_analysis = repo_root / "crash_analysis.md"
     last_artifact = (state.get("last_crash_artifact") or "").strip()
@@ -727,12 +760,46 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     attempts = int(state.get("crash_fix_attempts") or 0) + 1
     try:
         gen.patcher.run_codex_command(prompt, additional_context=context or None)
+        patch_path = repo_root / "fix.patch"
+        fix_summary_path = repo_root / "fix_summary.md"
+        changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
+        patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
+
+        # Write a concise fix summary for downstream triage.
+        summary_lines = [
+            "# Fix Patch Summary",
+            "",
+            f"- Fix type: {'harness_error' if harness_error else 'upstream_bug'}",
+            f"- Patch file: {patch_path}",
+            f"- Files changed: {len(changed_files)}",
+            "",
+        ]
+        if changed_files:
+            summary_lines.append("## Files")
+            summary_lines.extend([f"- {p}" for p in changed_files])
+        else:
+            summary_lines.append("_No textual changes detected for patch generation._")
+        fix_summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8", errors="replace")
+
+        # If a challenge bundle already exists, attach patch artifacts.
+        for child in repo_root.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name.startswith(("challenge_bundle", "false_positive", "unreproducible")):
+                if patch_path.exists():
+                    shutil.copy2(patch_path, child / patch_path.name)
+                if fix_summary_path.exists():
+                    shutil.copy2(fix_summary_path, child / fix_summary_path.name)
+
         out = {
             **state,
             "last_step": "fix_crash",
             "last_error": "",
             "crash_fix_attempts": attempts,
             "message": "opencode fixed crash" if not harness_error else "opencode fixed harness error",
+            "fix_patch_path": str(patch_path) if patch_path.exists() else "",
+            "fix_patch_files": changed_files,
+            "fix_patch_bytes": int(patch_bytes),
         }
         _wf_log(cast(dict[str, Any], out), f"<- fix_crash ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -874,6 +941,112 @@ def build_fuzz_workflow() -> StateGraph:
     return graph
 
 
+def _detect_harness_error(repo_root: Path) -> bool:
+    analysis_path = repo_root / "crash_analysis.md"
+    if not analysis_path.is_file():
+        return False
+    try:
+        text = analysis_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+    return bool(re.search(r"HARNESS ERROR", text, re.IGNORECASE))
+
+
+def _write_run_summary(out: dict[str, Any]) -> None:
+    repo_root_raw = out.get("repo_root")
+    if not repo_root_raw:
+        return
+    repo_root = Path(str(repo_root_raw))
+    if not repo_root.exists():
+        return
+
+    crash_found = bool(out.get("crash_found"))
+    last_error = str(out.get("last_error") or "").strip()
+    failed = bool(out.get("failed"))
+    status = "error" if (failed or last_error) else ("crash_found" if crash_found else "ok")
+    harness_error = _detect_harness_error(repo_root)
+
+    bundle_dirs = [
+        d.name
+        for d in repo_root.iterdir()
+        if d.is_dir() and d.name.startswith(("challenge_bundle", "false_positive", "unreproducible"))
+    ]
+
+    data = {
+        "repo_url": out.get("repo_url"),
+        "repo_root": str(repo_root),
+        "status": status,
+        "message": out.get("message"),
+        "last_step": out.get("last_step"),
+        "step_count": out.get("step_count"),
+        "build_attempts": out.get("build_attempts"),
+        "build_rc": out.get("build_rc"),
+        "last_error": last_error,
+        "crash_found": crash_found,
+        "last_fuzzer": out.get("last_fuzzer"),
+        "last_crash_artifact": out.get("last_crash_artifact"),
+        "harness_error": harness_error,
+        "fix_patch_path": out.get("fix_patch_path") or "",
+        "fix_patch_files": out.get("fix_patch_files") or [],
+        "fix_patch_bytes": out.get("fix_patch_bytes") or 0,
+        "crash_info_path": str(repo_root / "crash_info.md"),
+        "crash_analysis_path": str(repo_root / "crash_analysis.md"),
+        "reproducer_path": str(repo_root / "reproduce.py"),
+        "bundles": bundle_dirs,
+        "timestamp": time.time(),
+    }
+
+    summary_json = repo_root / "run_summary.json"
+    summary_md = repo_root / "run_summary.md"
+    try:
+        summary_json.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    md_lines = [
+        "# Run Summary",
+        "",
+        f"- Status: {status}",
+        f"- Repo: {data['repo_url']}",
+        f"- Repo root: {data['repo_root']}",
+        f"- Last step: {data['last_step']}",
+        f"- Build attempts: {data['build_attempts']}",
+        f"- Crash found: {crash_found}",
+        f"- Harness error: {harness_error}",
+    ]
+    if last_error:
+        md_lines.extend(["", "## Last Error", "```text", last_error, "```"])
+    if crash_found:
+        md_lines.extend(
+            [
+                "",
+                "## Crash",
+                f"- Fuzzer: {data['last_fuzzer']}",
+                f"- Artifact: {data['last_crash_artifact']}",
+                f"- crash_info.md: {data['crash_info_path']}",
+                f"- crash_analysis.md: {data['crash_analysis_path']}",
+            ]
+        )
+    if data["fix_patch_path"]:
+        md_lines.extend(
+            [
+                "",
+                "## Fix Patch",
+                f"- Patch: {data['fix_patch_path']}",
+                f"- Files changed: {len(data['fix_patch_files'])}",
+            ]
+        )
+        if data["fix_patch_files"]:
+            md_lines.extend([f"- {p}" for p in data["fix_patch_files"]])
+    if bundle_dirs:
+        md_lines.extend(["", "## Bundles"] + [f"- {b}" for b in bundle_dirs])
+
+    try:
+        summary_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
     _wf_log(None, f"workflow start repo={inp.repo_url} docker_image={inp.docker_image or '(host)'} time_budget={inp.time_budget}s")
     t0 = time.perf_counter()
@@ -895,6 +1068,10 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
         }
     )
     out = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    try:
+        _write_run_summary(out)
+    except Exception:
+        pass
     msg = str(out.get("message") or "Fuzzing completed.").strip()
     if bool(out.get("failed")):
         _wf_log(out, f"workflow end status=failed dt={_fmt_dt(time.perf_counter()-t0)}")
