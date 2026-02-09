@@ -6,8 +6,8 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Use CN mirrors by default (override with build args if needed).
-ARG APT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
-ARG APT_SECURITY_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 
 # Best-effort: rewrite Ubuntu apt sources to CN mirrors.
 RUN set -e; \

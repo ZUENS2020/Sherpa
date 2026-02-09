@@ -7,8 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Use CN mirrors by default (override with build args if needed).
-ARG APT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian"
-ARG APT_SECURITY_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian-security"
+ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian"
+ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
 
 # Best-effort: rewrite Debian apt sources to CN mirrors.
 RUN set -e; \
@@ -34,7 +34,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (the Debian docker.io package may not include the client binary).
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.1.1.tgz -o /tmp/docker.tgz \
+ARG DOCKER_CLI_TGZ_URL="https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/static/stable/x86_64/docker-27.1.1.tgz"
+RUN curl -fsSL "$DOCKER_CLI_TGZ_URL" -o /tmp/docker.tgz \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && mv /tmp/docker/docker /usr/local/bin/docker \
     && chmod +x /usr/local/bin/docker \
