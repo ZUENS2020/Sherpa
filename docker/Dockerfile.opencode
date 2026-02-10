@@ -1,0 +1,33 @@
+# OpenCode runner image (separate from web UI)
+FROM node:20-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"
+
+# Use CN mirrors by default (override with build args if needed).
+ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian"
+ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
+
+# Best-effort: rewrite Debian apt sources to CN mirrors.
+RUN set -e; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+      [ -f "$f" ] || continue; \
+      sed -i -E "s#https?://deb.debian.org/debian#${APT_MIRROR}#g" "$f"; \
+      sed -i -E "s#https?://security.debian.org/debian-security#${APT_SECURITY_MIRROR}#g" "$f"; \
+      sed -i -E "s#https?://security.debian.org/debian#${APT_SECURITY_MIRROR}#g" "$f"; \
+    done
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm config set registry "$NPM_CONFIG_REGISTRY" \
+    && npm i -g opencode-ai \
+    && opencode --version || true
+
+WORKDIR /repo
+CMD ["opencode", "run"]

@@ -33,7 +33,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.web
       args:
-        INSTALL_OPENCODE: "1"
+        INSTALL_OPENCODE: "0"
     ports:
       - "8000:8000"
     environment:
@@ -54,6 +54,7 @@ services:
       SHERPA_OUTPUT_DIR: "/shared/output"
       # CLI backend for code edits (opencode).
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
+      SHERPA_OPENCODE_DOCKER_IMAGE: "sherpa-opencode:latest"
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
       SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
@@ -101,6 +102,13 @@ services:
       - sherpa-tmp:/shared/tmp
       - sherpa-oss-fuzz:/shared/oss-fuzz
       - ./output:/shared/output
+
+  sherpa-opencode:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.opencode
+    image: sherpa-opencode:latest
+    restart: "no"
 
 volumes:
   sherpa-docker-data:

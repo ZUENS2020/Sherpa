@@ -123,3 +123,7 @@ Outputs are stored under `./jobs/<project>_<uuid>/` by default.
 
 ### OpenCode safety
 By default, `SHERPA_OPENCODE_NO_EXEC=1` blocks build/run commands during OpenCode runs. Only read-only inspection commands are permitted.
+
+### Split OpenCode container
+The Web UI runs without OpenCode installed. OpenCode is executed inside a separate image:
+- `SHERPA_OPENCODE_DOCKER_IMAGE=sherpa-opencode:latest`

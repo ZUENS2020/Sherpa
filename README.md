@@ -205,6 +205,12 @@ docker build \
 默认启用：`SHERPA_OPENCODE_NO_EXEC=1`  
 只允许只读命令（rg/ls/cat/find/sed），禁止构建/运行/fuzz。
 
+### Web UI 与 OpenCode 分离
+默认使用独立的 OpenCode 容器：
+- Web 容器不再安装 OpenCode CLI
+- OpenCode 在 `sherpa-opencode` 镜像中运行
+- 通过 `SHERPA_OPENCODE_DOCKER_IMAGE=sherpa-opencode:latest` 指定镜像
+
 ---
 
 ## 打包前清理建议

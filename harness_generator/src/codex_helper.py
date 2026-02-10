@@ -168,6 +168,57 @@ def _apply_opencode_exec_policy(env: dict) -> None:
     env["SHERPA_OPENCODE_BLOCKED_CMDS"] = ",".join(commands)
 
 
+def _docker_opencode_image() -> str:
+    return os.environ.get("SHERPA_OPENCODE_DOCKER_IMAGE", "").strip()
+
+
+def _docker_opencode_env_args(env: dict) -> list[str]:
+    allowed_keys = [
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_MODEL",
+        "OPENCODE_MODEL",
+        "OPENCODE_PERMISSION",
+        "SHERPA_OPENCODE_NO_EXEC",
+        "SHERPA_OPENCODE_BLOCKLIST",
+        "SHERPA_OPENCODE_ALLOWLIST",
+    ]
+    args: list[str] = []
+    for k in allowed_keys:
+        v = env.get(k)
+        if v is not None and str(v).strip() != "":
+            args += ["-e", f"{k}={v}"]
+    return args
+
+
+def _build_opencode_cmd(
+    cli_exe: str,
+    argv: list[str],
+    working_dir: Path,
+    env: dict,
+) -> list[str]:
+    image = _docker_opencode_image()
+    if not image:
+        return [cli_exe] + argv
+
+    # Run opencode inside a dedicated container.
+    docker_args = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{str(working_dir.resolve())}:/repo",
+        "-w",
+        "/repo",
+        *_docker_opencode_env_args(env),
+        image,
+        "opencode",
+    ]
+    return docker_args + argv
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -492,6 +543,10 @@ class CodexHelper:
                                 cli_exe = str(candidate)
                                 break
 
+                # If we're using a dedicated opencode container, default to docker CLI.
+                if _docker_opencode_image():
+                    cli_exe = "docker"
+
                 if cli_exe is None:
                     raise FileNotFoundError(
                         f"OpenCode CLI not found: '{self.codex_cli}'. "
@@ -499,7 +554,7 @@ class CodexHelper:
                         "or pass the full path via --codex-cli."
                     )
 
-                cmd: list[str] = [cli_exe, "run"]
+                cmd: list[str] = ["run"]
                 model = _resolve_opencode_model()
                 if model:
                     cmd += ["--model", model]
@@ -510,20 +565,22 @@ class CodexHelper:
                     # Encourage non-interactive, tool-enabled mode.
                     env.setdefault("OPENCODE_PERMISSION", json.dumps({"permission": "allow"}))
                     _apply_opencode_exec_policy(env)
+                    full_cmd = _build_opencode_cmd(cli_exe, cmd, self.working_dir, env)
                     proc = subprocess.Popen(
-                        cmd,
+                        full_cmd,
                         cwd=self.working_dir,
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        env=env,
+                        env=None if _docker_opencode_image() else env,
                         text=True,
                         errors="replace",
                     )
                 except FileNotFoundError as e:
                     raise FileNotFoundError(
-                        f"Failed to launch OpenCode CLI: {cmd[0]} (cwd={self.working_dir}). "
-                        "Make sure OpenCode is installed and accessible to the server process."
+                        f"Failed to launch OpenCode CLI: {cli_exe} (cwd={self.working_dir}). "
+                        "Make sure Docker is available (for containerized opencode) or "
+                        "OpenCode is installed and accessible to the server process."
                     ) from e
 
                 start_time = time.time()
