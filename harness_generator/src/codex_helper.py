@@ -112,7 +112,6 @@ def _build_blocklist() -> list[str]:
         "yarn",
         "pnpm",
         "bun",
-        "node",
     ]
     extra = [
         c.strip()
