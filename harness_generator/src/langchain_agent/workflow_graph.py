@@ -407,6 +407,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prompt = (
                 "You are coordinating a fuzz harness generation workflow.\n"
                 "Perform the planning step and produce fuzz/PLAN.md and fuzz/targets.json as required.\n\n"
+                "IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.\n\n"
                 "Additional instruction from coordinator:\n" + hint
             )
             gen.patcher.run_codex_command(prompt)
@@ -457,6 +458,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             prompt = (
                 "You are coordinating a fuzz harness generation workflow.\n"
                 "Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.\n\n"
+                "IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.\n\n"
                 "Additional instruction from coordinator:\n" + hint
             )
             # Provide context from plan/targets if present.
@@ -578,6 +580,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "- Output JSON only: {\"codex_hint\": \"...\"}\n"
                 "- codex_hint must be 1-10 lines, concrete and minimal.\n"
                 "- Tell OpenCode to only change fuzz/ and minimal build glue.\n"
+                "- IMPORTANT: Tell OpenCode to NOT run any commands — only edit files.\n"
                 "- Acceptance: `python fuzz/build.py` succeeds and leaves at least one executable in fuzz/out/.\n\n"
                 f"repo_root={repo_root}\n"
                 + (f"last_error={last_error}\n" if last_error else "")
@@ -613,10 +616,12 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     prompt = (
         "You are OpenCode operating inside a Git repository.\n"
-        "Task: fix the fuzz harness/build so the build passes.\n\n"
-        "Acceptance criteria:\n"
-        "- `python fuzz/build.py` completes successfully\n"
-        "- fuzz/out/ contains at least one runnable fuzzer binary\n\n"
+        "Task: fix the fuzz harness/build source code so the build will pass when run later.\n\n"
+        "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
+        "- `python fuzz/build.py` should complete successfully\n"
+        "- fuzz/out/ should contain at least one runnable fuzzer binary\n\n"
+        "CRITICAL: Do NOT run any commands (no cmake, make, python, bash, gcc, clang, etc.).\n"
+        "Only edit source files. The build will be executed by the workflow after you finish.\n\n"
         "Constraints:\n"
         "- Keep changes minimal; avoid refactors\n"
         "- Prefer edits under fuzz/ and minimal build glue only\n\n"
@@ -728,9 +733,10 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "- Only modify files under fuzz/ or minimal build glue required for the harness.\n"
             "- Do not change upstream/product code unless absolutely required.\n"
             "- Keep changes minimal and targeted.\n\n"
-            "Acceptance:\n"
-            "- The fuzzer builds successfully.\n"
-            "- Running the fuzzer with the previous crashing input no longer crashes.\n\n"
+            "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
+            "- The fuzzer should build successfully.\n"
+            "- Running the fuzzer with the previous crashing input should no longer crash.\n\n"
+            "CRITICAL: Do NOT run any commands. Only edit source files.\n\n"
             "When finished, write the key file you modified into ./done."
         )
     else:
@@ -740,9 +746,10 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "- Keep changes minimal and focused on correctness/security.\n"
             "- Do NOT disable the harness or skip input processing.\n"
             "- Avoid broad refactors.\n\n"
-            "Acceptance:\n"
-            "- The fuzzer builds successfully.\n"
-            "- The previous crashing input no longer crashes.\n\n"
+            "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
+            "- The fuzzer should build successfully.\n"
+            "- The previous crashing input should no longer crash.\n\n"
+            "CRITICAL: Do NOT run any commands. Only edit source files.\n\n"
             "When finished, write the key file you modified into ./done."
         )
 
