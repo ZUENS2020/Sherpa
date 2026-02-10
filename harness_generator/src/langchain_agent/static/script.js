@@ -203,6 +203,7 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
   const useDocker = !!document.getElementById("use_docker")?.checked;
   const dockerImage = (document.getElementById("docker_image")?.value || "sherpa-fuzz:latest").trim();
   const statusEl = document.getElementById("fuzz_status");
+  const progressEl = document.getElementById("fuzz_progress");
   const logEl = document.getElementById("fuzz_log");
   const btn = document.getElementById("fuzz_btn");
 
@@ -222,6 +223,9 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
   statusEl.style.display = "block";
   statusEl.className = "result-box loading";
   statusEl.innerHTML = '<span class="status-icon">⏳</span> 已提交任务，正在排队...';
+  progressEl.style.display = "block";
+  progressEl.className = "result-box";
+  progressEl.innerHTML = "等待任务初始化...";
   logEl.style.display = "block";
   logEl.className = "result-box";
   logEl.innerHTML = "";
@@ -275,6 +279,9 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
         const summary = summarizeLog(log, st, result, err, logFile);
         logEl.innerHTML = `<strong>进度摘要（实时）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(summary)}</pre>`;
         logEl.scrollTop = logEl.scrollHeight;
+
+        const progress = renderProgressFromLog(log);
+        progressEl.innerHTML = progress;
       }
 
       if (st === "queued" || st === "running") {
@@ -373,4 +380,77 @@ function summarizeLog(log, status, result, err, logFile) {
   }
 
   return header.concat(["", ...tail]).join("\n");
+}
+
+function renderProgressFromLog(log) {
+  const parsed = parseWorkflowLog(log || "");
+  const steps = ["init", "plan", "synthesize", "build", "fix_build", "run", "fix_crash"];
+  const labels = {
+    init: "初始化",
+    plan: "计划",
+    synthesize: "生成",
+    build: "构建",
+    fix_build: "修复构建",
+    run: "运行",
+    fix_crash: "修复崩溃",
+  };
+
+  const statusToColor = {
+    pending: "#9ca3af",
+    running: "#f59e0b",
+    done: "#10b981",
+    error: "#ef4444",
+  };
+
+  const items = steps.map((s) => {
+    const st = parsed.steps[s] || "pending";
+    const color = statusToColor[st] || "#9ca3af";
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;"></span>
+      <span>${labels[s]}</span>
+      <span style="color:#6d6f73;font-size:12px;">(${st})</span>
+    </div>`;
+  }).join("");
+
+  const repoLine = parsed.repoRoot ? `<div style="margin-top:6px;color:#6d6f73;font-size:12px;">输出目录：${escapeHtml(parsed.repoRoot)}</div>` : "";
+  const lastErr = parsed.lastError ? `<div style="margin-top:8px;color:#b91c1c;font-size:12px;">错误：${escapeHtml(parsed.lastError)}</div>` : "";
+  return `<strong>阶段进度：</strong><div style="margin-top:8px;">${items}</div>${repoLine}${lastErr}`;
+}
+
+function parseWorkflowLog(log) {
+  const lines = (log || "").split(/\r?\n/);
+  const steps = {};
+  let repoRoot = "";
+  let lastError = "";
+
+  const startRe = /\[wf[^\]]*\]\s*->\s*([a-zA-Z_]+)/;
+  const endRe = /\[wf[^\]]*\]\s*<-\s*([a-zA-Z_]+)/;
+  const repoRe = /repo_root=([^\s]+)/;
+
+  for (const line of lines) {
+    const repoMatch = line.match(repoRe);
+    if (repoMatch && !repoRoot) repoRoot = repoMatch[1];
+
+    const startMatch = line.match(startRe);
+    if (startMatch) {
+      steps[startMatch[1]] = "running";
+    }
+
+    const endMatch = line.match(endRe);
+    if (endMatch) {
+      const step = endMatch[1];
+      if (/err=|failed|error/i.test(line)) {
+        steps[step] = "error";
+        lastError = line.replace(/^\[.*?\]\s*/, "");
+      } else {
+        steps[step] = "done";
+      }
+    }
+
+    if (/Missing fuzz\/build\.py|OpenCodeHelper|opencode/i.test(line)) {
+      lastError = line.replace(/^\[.*?\]\s*/, "");
+    }
+  }
+
+  return { steps, repoRoot, lastError };
 }
