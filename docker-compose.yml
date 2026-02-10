@@ -109,6 +109,8 @@ services:
       dockerfile: docker/Dockerfile.opencode
     image: sherpa-opencode:latest
     restart: "no"
+    profiles:
+      - opencode
 
 volumes:
   sherpa-docker-data:

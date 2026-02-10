@@ -166,6 +166,7 @@ def _apply_opencode_exec_policy(env: dict) -> None:
     shim_dir = _create_block_shims(commands)
     env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
     env["SHERPA_OPENCODE_BLOCKED_CMDS"] = ",".join(commands)
+    env["SHERPA_OPENCODE_SHIM_DIR"] = shim_dir
 
 
 def _docker_opencode_image() -> str:
@@ -204,6 +205,8 @@ def _build_opencode_cmd(
         return [cli_exe] + argv
 
     # Run opencode inside a dedicated container.
+    shim_dir = env.get("SHERPA_OPENCODE_SHIM_DIR", "")
+    path_in_container = "/opencode_shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     docker_args = [
         "docker",
         "run",
@@ -213,6 +216,13 @@ def _build_opencode_cmd(
         "-w",
         "/repo",
         *_docker_opencode_env_args(env),
+        "-e",
+        f"PATH={path_in_container}",
+        *(
+            ["-v", f"{shim_dir}:/opencode_shims:ro"]
+            if shim_dir
+            else []
+        ),
         image,
         "opencode",
     ]
