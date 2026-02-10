@@ -210,6 +210,7 @@ docker build \
 - Web 容器不再安装 OpenCode CLI
 - OpenCode 在 `sherpa-opencode` 镜像中运行
 - 通过 `SHERPA_OPENCODE_DOCKER_IMAGE=sherpa-opencode:latest` 指定镜像
+ - 若镜像不存在，默认会自动构建（`SHERPA_OPENCODE_AUTO_BUILD=1`）
 
 ---
 

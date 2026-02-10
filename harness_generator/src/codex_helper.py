@@ -69,6 +69,7 @@ except Exception:  # pragma: no cover
 
 
 LOGGER = logging.getLogger(__name__)
+_ENSURED_OPENCODE_IMAGES: set[str] = set()
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -171,6 +172,63 @@ def _apply_opencode_exec_policy(env: dict) -> None:
 
 def _docker_opencode_image() -> str:
     return os.environ.get("SHERPA_OPENCODE_DOCKER_IMAGE", "").strip()
+
+
+def _opencode_auto_build_enabled() -> bool:
+    return _bool_env("SHERPA_OPENCODE_AUTO_BUILD", True)
+
+
+def _opencode_dockerfile_path() -> str:
+    return os.environ.get("SHERPA_OPENCODE_DOCKERFILE", "/app/docker/Dockerfile.opencode").strip()
+
+
+def _opencode_build_context() -> str:
+    return os.environ.get("SHERPA_OPENCODE_BUILD_CONTEXT", "/app").strip()
+
+
+def _opencode_build_args() -> list[str]:
+    raw = os.environ.get("SHERPA_OPENCODE_BUILD_ARGS", "").strip()
+    if not raw:
+        return []
+    out: list[str] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        out += ["--build-arg", token]
+    return out
+
+
+def _ensure_opencode_image(image: str, env: dict) -> None:
+    if not image or image in _ENSURED_OPENCODE_IMAGES:
+        return
+    if not _opencode_auto_build_enabled():
+        return
+
+    inspect_cmd = ["docker", "image", "inspect", image]
+    try:
+        probe = subprocess.run(
+            inspect_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            _ENSURED_OPENCODE_IMAGES.add(image)
+            return
+    except FileNotFoundError as e:
+        raise RuntimeError("Docker CLI not found; cannot build opencode image") from e
+
+    dockerfile = _opencode_dockerfile_path()
+    context_dir = _opencode_build_context()
+    build_cmd = ["docker", "build", "-t", image, "-f", dockerfile, *(_opencode_build_args()), context_dir]
+    proc = subprocess.run(build_cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout or "").splitlines()[-120:])
+        raise RuntimeError(f"Failed to build opencode image {image} (rc={proc.returncode}). Tail:\n{tail}")
+    _ENSURED_OPENCODE_IMAGES.add(image)
 
 
 def _docker_opencode_env_args(env: dict) -> list[str]:
@@ -575,6 +633,9 @@ class CodexHelper:
                     # Encourage non-interactive, tool-enabled mode.
                     env.setdefault("OPENCODE_PERMISSION", json.dumps({"permission": "allow"}))
                     _apply_opencode_exec_policy(env)
+                    image = _docker_opencode_image()
+                    if image:
+                        _ensure_opencode_image(image, env)
                     full_cmd = _build_opencode_cmd(cli_exe, cmd, self.working_dir, env)
                     proc = subprocess.Popen(
                         full_cmd,

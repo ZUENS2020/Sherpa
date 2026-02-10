@@ -5,6 +5,7 @@ myenv/
 sherpa_venv/
 
 jobs/
+output/
 
 oss-fuzz/
 
