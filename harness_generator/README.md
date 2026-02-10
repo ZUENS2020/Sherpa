@@ -113,3 +113,13 @@ Outputs are stored under `./jobs/<project>_<uuid>/` by default.
 - Crash analysis marks **HARNESS ERROR** for false positives
 - Fix patches are recorded as `fix.patch` whenever the fix step runs
 - `run_summary.md/json` provides a compact per-run summary for automation
+
+### Domestic network mirrors
+- Node.js: `https://npmmirror.com/mirrors/node`
+- npm registry: `https://registry.npmmirror.com`
+- pip index: `https://pypi.tuna.tsinghua.edu.cn/simple`
+- APT mirrors (TUNA): `http://mirrors.tuna.tsinghua.edu.cn`
+- Git mirror (default): `https://gitclone.com/github.com/`
+
+### OpenCode safety
+By default, `SHERPA_OPENCODE_NO_EXEC=1` blocks build/run commands during OpenCode runs. Only read-only inspection commands are permitted.

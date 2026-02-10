@@ -475,9 +475,11 @@ def _candidate_clone_urls(url: str) -> List[str]:
     Mirrors are only applied to HTTPS GitHub URLs.
     """
 
-    urls: List[str] = [url]
+    prefer_mirrors = os.environ.get("SHERPA_PREFER_GIT_MIRRORS", "").strip().lower() in {"1", "true", "yes"}
+    urls: List[str] = [] if prefer_mirrors else [url]
     if not url.startswith("https://github.com/"):
-        return urls
+        # Non-GitHub URLs are returned as-is to avoid breaking custom hosts.
+        return [url] if not urls else urls
 
     mirror_specs: List[str] = []
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
@@ -531,6 +533,10 @@ def _candidate_clone_urls(url: str) -> List[str]:
 
         if candidate and candidate not in urls:
             urls.append(candidate)
+
+    # If we're not strictly preferring mirrors, keep the original URL as a fallback.
+    if not prefer_mirrors and url not in urls:
+        urls.append(url)
 
     return urls
 

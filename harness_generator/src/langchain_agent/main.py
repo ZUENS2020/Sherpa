@@ -434,7 +434,7 @@ async def task_api(request: task_model = Body(...)):
                         repo_url = (
                             (request.oss_fuzz_repo_url or "").strip()
                             or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://github.com/google/oss-fuzz"
+                            or "https://gitclone.com/github.com/google/oss-fuzz"
                         )
                         target_dir = Path(
                             (cfg.oss_fuzz_dir or "").strip()

@@ -3,7 +3,7 @@ services:
     image: alpine/git:latest
     restart: "no"
     environment:
-      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz"
+      SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
     volumes:
       - sherpa-oss-fuzz:/shared/oss-fuzz
     entrypoint:
@@ -56,7 +56,11 @@ services:
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
-      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz"
+      SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
+
+      # Prefer domestic Git mirrors for clone operations.
+      SHERPA_GIT_MIRRORS: "https://gitclone.com/github.com/"
+      SHERPA_PREFER_GIT_MIRRORS: "1"
 
       # Optional (chat endpoint):
       # OPENROUTER_API_KEY: "..."

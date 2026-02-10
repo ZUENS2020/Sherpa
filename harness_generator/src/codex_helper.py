@@ -71,6 +71,103 @@ except Exception:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_blocklist() -> list[str]:
+    # Default: block build/test/fuzz/run commands but allow read-only tools.
+    default = [
+        "make",
+        "cmake",
+        "ninja",
+        "meson",
+        "bazel",
+        "gradle",
+        "mvn",
+        "mvnw",
+        "go",
+        "cargo",
+        "dotnet",
+        "msbuild",
+        "gcc",
+        "g++",
+        "clang",
+        "clang++",
+        "cc",
+        "c++",
+        "javac",
+        "java",
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "pytest",
+        "tox",
+        "npm",
+        "yarn",
+        "pnpm",
+        "bun",
+        "node",
+    ]
+    extra = [
+        c.strip()
+        for c in os.environ.get("SHERPA_OPENCODE_BLOCKLIST", "").split(",")
+        if c.strip()
+    ]
+    allow = {
+        c.strip()
+        for c in os.environ.get("SHERPA_OPENCODE_ALLOWLIST", "").split(",")
+        if c.strip()
+    }
+    merged = []
+    for c in default + extra:
+        if c and c not in allow and c not in merged:
+            merged.append(c)
+    return merged
+
+
+def _create_block_shims(commands: list[str]) -> str:
+    shim_dir = tempfile.mkdtemp(prefix="opencode-block-")
+    if os.name == "nt":
+        for cmd in commands:
+            path = Path(shim_dir) / f"{cmd}.cmd"
+            path.write_text(
+                "@echo off\r\n"
+                "echo [sherpa] blocked command: %0\r\n"
+                "exit /b 126\r\n",
+                encoding="utf-8",
+            )
+    else:
+        for cmd in commands:
+            path = Path(shim_dir) / cmd
+            path.write_text(
+                "#!/usr/bin/env sh\n"
+                "echo \"[sherpa] blocked command: $0\" >&2\n"
+                "exit 126\n",
+                encoding="utf-8",
+            )
+            try:
+                path.chmod(0o755)
+            except Exception:
+                pass
+    return shim_dir
+
+
+def _apply_opencode_exec_policy(env: dict) -> None:
+    if not _bool_env("SHERPA_OPENCODE_NO_EXEC", True):
+        return
+    commands = _build_blocklist()
+    if not commands:
+        return
+    shim_dir = _create_block_shims(commands)
+    env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
+    env["SHERPA_OPENCODE_BLOCKED_CMDS"] = ",".join(commands)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -303,7 +400,12 @@ class CodexHelper:
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
-            "Do NOT run any build or test commands unless explicitly asked.",
+            "CRITICAL RULE: You MUST NOT execute build/test/fuzz commands or run binaries. "
+            "Read-only commands (rg, ls, cat, find, sed) are allowed for inspection. "
+            "Your ONLY job is to create and edit source files. "
+            "Do NOT run cmake, make, gcc, clang, python, cargo, javac, mvn, gradle, npm, or similar build/run tools. "
+            "The build and test steps are handled by a separate automated system. "
+            "If you run build/test commands, the workflow will break.",
             "When ALL tasks are complete:",
             "  1) Print a short summary.",
             "  2) Create/overwrite a file called 'done' in the repo root (./done).",
@@ -407,6 +509,7 @@ class CodexHelper:
                     env = os.environ.copy()
                     # Encourage non-interactive, tool-enabled mode.
                     env.setdefault("OPENCODE_PERMISSION", json.dumps({"permission": "allow"}))
+                    _apply_opencode_exec_policy(env)
                     proc = subprocess.Popen(
                         cmd,
                         cwd=self.working_dir,

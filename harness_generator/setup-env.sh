@@ -36,6 +36,13 @@
 
 set -euo pipefail
 
+# Domestic mirrors (override via env if needed)
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+export PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+APT_MIRROR="${APT_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn}"
+USE_APT_MIRROR="${SHERPA_APT_USE_MIRROR:-1}"
+
 #------------------------------------------------------------------------------
 # Ensure required command-line tools are present
 #------------------------------------------------------------------------------
@@ -84,11 +91,23 @@ ensure_tool git git
 ensure_tool docker docker.io
 ensure_tool "" libxapian-dev
 
+# Use domestic apt mirrors on Debian/Ubuntu (best-effort)
+if command -v apt-get >/dev/null 2>&1 && [[ "$USE_APT_MIRROR" != "0" ]]; then
+    echo "Switching apt sources to domestic mirror: $APT_MIRROR"
+    sudo sed -i -E "s#https?://(archive|security).ubuntu.com/ubuntu#${APT_MIRROR}/ubuntu#g" /etc/apt/sources.list || true
+    sudo sed -i -E "s#https?://deb.debian.org/debian#${APT_MIRROR}/debian#g" /etc/apt/sources.list || true
+    sudo sed -i -E "s#https?://security.debian.org/debian-security#${APT_MIRROR}/debian-security#g" /etc/apt/sources.list || true
+    sudo apt-get update -y || true
+fi
+
 # The repository relies on the "opencode" command-line tool.
 # Detect OpenCode – offer instructions for installing when missing.
 if ! command -v opencode >/dev/null 2>&1; then
     echo "OpenCode CLI not detected in PATH. It is required for harness generation."
     echo "Install it via npm: npm i -g opencode-ai"
+    if command -v npm >/dev/null 2>&1; then
+        npm config set registry "$NPM_REGISTRY"
+    fi
 fi
 
 # libxapian-dev is handled by ensure_tool above.

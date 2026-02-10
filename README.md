@@ -167,7 +167,9 @@ python ./harness_generator/src/langchain_agent/main.py
 - `OPENAI_BASE_URL`：OpenAI-compatible 端点（可选）
 - `SHERPA_WEB_MAX_WORKERS`：并发 worker 数量（默认 5）
 - `SHERPA_DEFAULT_OSS_FUZZ_DIR`：OSS-Fuzz 根目录（Docker Compose 默认 `/shared/oss-fuzz`）
+- `SHERPA_OSS_FUZZ_REPO_URL`：OSS-Fuzz 仓库地址（默认 `https://gitclone.com/github.com/google/oss-fuzz`）
 - `SHERPA_OUTPUT_DIR`：产物输出目录（默认 `/shared/output`）
+- `SHERPA_GIT_MIRRORS`：Git 镜像列表（默认 `https://gitclone.com/github.com/`）
 
 运行时配置：
 - `config/` 目录仅运行时生成，不应打包
@@ -185,6 +187,23 @@ python ./harness_generator/src/langchain_agent/main.py
 ```bash
 docker build --build-arg APT_MIRROR=... -f docker/Dockerfile.fuzz-cpp .
 ```
+
+### Node / npm / pip 国内源
+- Node.js：默认从 `https://npmmirror.com/mirrors/node` 下载
+- npm registry：`https://registry.npmmirror.com`
+- pip index：`https://pypi.tuna.tsinghua.edu.cn/simple`
+
+如需覆盖，可在 Docker 构建时传入：
+```bash
+docker build \
+  --build-arg NODE_MIRROR=... \
+  --build-arg NODE_VERSION=... \
+  -f docker/Dockerfile.web .
+```
+
+### OpenCode 禁止执行命令（只改文件）
+默认启用：`SHERPA_OPENCODE_NO_EXEC=1`  
+只允许只读命令（rg/ls/cat/find/sed），禁止构建/运行/fuzz。
 
 ---
 

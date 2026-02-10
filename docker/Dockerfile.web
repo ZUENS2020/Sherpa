@@ -2,7 +2,10 @@ FROM python:3.10-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
+    PIP_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn" \
+    NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"
 
 WORKDIR /app
 
@@ -31,6 +34,7 @@ RUN apt-get update \
         git \
         docker.io \
         vim-common \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (the Debian docker.io package may not include the client binary).
@@ -50,15 +54,18 @@ COPY . /app
 # If you cannot reach external package registries from your build environment, rebuild with:
 #   --build-arg INSTALL_OPENCODE=0
 ARG INSTALL_OPENCODE=1
+ARG NODE_VERSION="20.11.1"
+ARG NODE_MIRROR="https://npmmirror.com/mirrors/node"
 RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing Node.js (for CLI tools)..."; \
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
-            apt-get update && apt-get install -y --no-install-recommends nodejs; \
+            curl -fsSL "$NODE_MIRROR/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" -o /tmp/node.tar.xz; \
+            tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+            rm -f /tmp/node.tar.xz; \
             npm --version; node --version; \
-            rm -rf /var/lib/apt/lists/*; \
         fi \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
+            npm config set registry "$NPM_CONFIG_REGISTRY"; \
             npm i -g opencode-ai; \
             opencode --version || true; \
         else \
