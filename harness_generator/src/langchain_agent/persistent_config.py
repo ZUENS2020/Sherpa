@@ -20,6 +20,8 @@ class WebPersistentConfig(BaseModel):
     # Optional: point OpenCode's OpenAI provider at an OpenAI-compatible proxy/router.
     # OPENAI_BASE_URL overrides the default endpoint.
     openai_base_url: str = ""
+    openai_model: str = ""
+    opencode_model: str = ""
 
     # Fuzz defaults
     fuzz_time_budget: int = 900
@@ -122,6 +124,12 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     # OpenAI / OpenCode
     _set_env_if_value("OPENAI_API_KEY", cfg.openai_api_key)
     _set_env_if_value("OPENAI_BASE_URL", cfg.openai_base_url)
+    _set_env_if_value("OPENAI_MODEL", cfg.openai_model)
+    _set_env_if_value("OPENCODE_MODEL", cfg.opencode_model)
+
+    # DeepSeek provider compatibility for OpenCode (when using DeepSeek base URL)
+    if (cfg.openai_base_url or "").strip().startswith("https://api.deepseek.com"):
+        _set_env_if_value("DEEPSEEK_API_KEY", cfg.openai_api_key)
 
     # Git mirror / proxy
     _set_env_if_value("SHERPA_GIT_MIRRORS", cfg.sherpa_git_mirrors)
@@ -148,6 +156,9 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
 
     if cfg.openai_base_url and cfg.openai_base_url.strip():
         lines.append(f"OPENAI_BASE_URL={cfg.openai_base_url.strip()}")
+
+    if cfg.openai_model and cfg.openai_model.strip():
+        lines.append(f"OPENAI_MODEL={cfg.openai_model.strip()}")
 
     content = "\n".join(lines) + ("\n" if lines else "")
 

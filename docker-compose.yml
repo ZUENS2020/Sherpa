@@ -36,6 +36,22 @@ services:
         INSTALL_OPENCODE: "0"
     ports:
       - "8000:8000"
+    volumes:
+      # Persist job logs/config inside a docker volume (fully self-hosted).
+      - sherpa-config:/app/config
+      # Mount opencode config from host
+      - ./opencode.json:/app/opencode.json:ro
+
+      # Shared temp volume (must be mounted into the Docker daemon container too).
+      - sherpa-tmp:/shared/tmp
+
+      # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
+      - sherpa-oss-fuzz:/shared/oss-fuzz
+      # Artifacts output directory (host-mounted).
+      - ./output:/shared/output
+
+      # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
+      # - ./.env:/app/.env:ro
     environment:
       # Make Uvicorn bind for container networking (main.py reads these).
       HOST: "0.0.0.0"
@@ -55,6 +71,7 @@ services:
       # CLI backend for code edits (opencode).
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
       SHERPA_OPENCODE_DOCKER_IMAGE: "sherpa-opencode:latest"
+      SHERPA_OPENCODE_IGNORE_RETRY_ERRORS: "1"
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
       SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
@@ -63,29 +80,19 @@ services:
       SHERPA_GIT_MIRRORS: "https://gitclone.com/github.com/"
       SHERPA_PREFER_GIT_MIRRORS: "1"
 
-      # Optional (chat endpoint):
-      # OPENROUTER_API_KEY: "..."
-      # OPENROUTER_MODEL: "anthropic/claude-3.5-sonnet"
-      # OPENROUTER_BASE_URL: "https://openrouter.ai/api/v1"
+      # OpenRouter API (for all AI features)
+      OPENROUTER_API_KEY: ""
+      OPENROUTER_MODEL: ""
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+
+      # OpenCode model override for OpenAI-compatible endpoints
+      OPENCODE_MODEL: "deepseek/deepseek-reasoner"
+      OPENAI_MODEL: "deepseek-reasoner"
+      OPENCODE_CONFIG: "/opencode.json"
 
       # Optional (fuzz patching): where to read ANTHROPIC_API_KEY from.
       # AI_KEY_PATH: "/app/.env"
       # SHERPA_ACCEPT_DIFF_WITHOUT_DONE: "1"
-    volumes:
-      # Persist job logs/config inside a docker volume (fully self-hosted).
-      - sherpa-config:/app/config
-
-      # Shared temp volume (must be mounted into the Docker daemon container too).
-      - sherpa-tmp:/shared/tmp
-
-      # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
-      - sherpa-oss-fuzz:/shared/oss-fuzz
-      # Artifacts output directory (host-mounted).
-      - ./output:/shared/output
-
-
-      # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
-      # - ./.env:/app/.env:ro
     depends_on:
       sherpa-oss-fuzz-init:
         condition: service_completed_successfully
@@ -97,11 +104,13 @@ services:
     privileged: true
     environment:
       DOCKER_TLS_CERTDIR: ""
+      DOCKER_HOST: tcp://0.0.0.0:2375
     volumes:
       - sherpa-docker-data:/var/lib/docker
       - sherpa-tmp:/shared/tmp
       - sherpa-oss-fuzz:/shared/oss-fuzz
       - ./output:/shared/output
+      - ./opencode.json:/opencode.json:ro
 
   sherpa-opencode:
     build:

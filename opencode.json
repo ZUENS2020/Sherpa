@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepseek": {
+      "options": {
+        "baseURL": "https://api.deepseek.com/v1"
+      },
+      "models": {
+        "deepseek-reasoner": {},
+        "deepseek/deepseek-reasoner": {}
+      }
+    },
+    "openrouter": {
+      "models": {
+        "qwen/qwen3-max-thinking": {},
+        "qwen/qwen3-max": {},
+        "qwen/qwen3-coder-plus": {},
+        "qwen/qwen3-coder-next": {}
+      }
+    }
+  }
+}

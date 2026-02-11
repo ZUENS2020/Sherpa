@@ -1,508 +1,578 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sherpa / OSS-Fuzz 控制台</title>
-    <style>
-        :root {
-            --bg: #f4f4f2;
-            --surface: #ffffff;
-            --ink: #101113;
-            --muted: #6d6f73;
-            --line: #d9d9d2;
-            --accent: #ff8a00;
-            --ok: #1f9d55;
-            --warn: #f97316;
-            --radius: 14px;
-            --radius-sm: 8px;
-            --shadow: 0 20px 40px rgba(10, 12, 14, 0.08);
-            --mono: ui-monospace, "SFMono-Regular", "Consolas", "Liberation Mono", "Courier New", monospace;
-            --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sherpa / OSS-Fuzz 控制台</title>
+  <style>
+    :root {
+      --ink: #101218;
+      --ink-soft: #2a2f3a;
+      --muted: #6b7280;
+      --paper: #f5f2eb;
+      --cream: #f9f6f0;
+      --line: #d6d0c5;
+      --glow: rgba(255, 153, 51, 0.35);
+      --accent: #ff8c1a;
+      --accent-2: #ffb347;
+      --ok: #0f9d58;
+      --warn: #f59e0b;
+      --radius: 18px;
+      --radius-sm: 10px;
+      --shadow: 0 24px 60px rgba(18, 21, 27, 0.12);
+      --mono: "JetBrains Mono", "Fira Mono", "SFMono-Regular", "Consolas", "Liberation Mono", "Courier New", monospace;
+      --sans: "Space Grotesk", "IBM Plex Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-        body {
-            font-family: var(--sans);
-            background: var(--bg);
-            color: var(--ink);
-            min-height: 100vh;
-            padding: 28px 20px 60px;
-        }
+    body {
+      font-family: var(--sans);
+      color: var(--ink);
+      background: radial-gradient(1200px 800px at 10% -10%, rgba(255, 190, 120, 0.35), transparent 60%),
+                  radial-gradient(900px 600px at 90% 10%, rgba(255, 230, 200, 0.55), transparent 60%),
+                  linear-gradient(180deg, #fef9f2 0%, #f2efe8 60%, #efe9de 100%);
+      min-height: 100vh;
+      padding: 28px 18px 70px;
+      overflow-x: hidden;
+    }
 
-        .app {
-            max-width: 1180px;
-            margin: 0 auto;
-            display: flex;
-            flex-direction: column;
-            gap: 22px;
-        }
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.08;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+      mix-blend-mode: multiply;
+      z-index: 0;
+    }
 
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 18px 22px;
-            border: 1px solid var(--line);
-            background: var(--surface);
-            border-radius: var(--radius);
-            box-shadow: var(--shadow);
-        }
+    .app {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      position: relative;
+      z-index: 1;
+    }
 
-        .brand {
-            font-family: var(--mono);
-            font-weight: 600;
-            letter-spacing: 0.08em;
-            font-size: 14px;
-        }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      background: var(--cream);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      animation: rise 0.7s ease-out;
+    }
 
-        .status-line {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 12px;
-            color: var(--muted);
-            font-family: var(--mono);
-        }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #999;
-        }
+    .brand-title {
+      font-size: 20px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
 
-        .dot.ok {
-            background: var(--ok);
-        }
+    .brand-sub {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      letter-spacing: 0.08em;
+    }
 
-        .dot.warn {
-            background: var(--warn);
-        }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
 
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 20px;
-        }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #a0a0a0;
+      box-shadow: 0 0 12px transparent;
+    }
 
-        .panel {
-            background: var(--surface);
-            border: 1px solid var(--line);
-            border-radius: var(--radius);
-            padding: 20px 22px;
-            box-shadow: var(--shadow);
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-        }
+    .dot.ok {
+      background: var(--ok);
+      box-shadow: 0 0 12px rgba(15, 157, 88, 0.4);
+    }
 
-        .panel-title {
-            font-family: var(--mono);
-            font-size: 12px;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            color: var(--muted);
-        }
+    .dot.warn {
+      background: var(--warn);
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
+    }
 
-        .panel h2 {
-            font-size: 20px;
-            font-weight: 600;
-        }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 18px;
+    }
 
-        .monitor-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 12px;
-        }
+    .panel {
+      background: var(--cream);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 22px 24px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      animation: rise 0.8s ease-out;
+    }
 
-        .metric {
-            border: 1px solid var(--line);
-            border-radius: var(--radius-sm);
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            background: #fafafa;
-        }
+    .panel-title {
+      font-size: 12px;
+      font-family: var(--mono);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
 
-        .metric span {
-            font-size: 11px;
-            color: var(--muted);
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-        }
+    .panel h2 {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--ink);
+    }
 
-        .metric strong {
-            font-family: var(--mono);
-            font-size: 16px;
-            font-weight: 600;
-        }
+    .panel.hero {
+      grid-column: span 5;
+      background: linear-gradient(145deg, rgba(255, 239, 213, 0.9), rgba(255, 252, 245, 0.7));
+      position: relative;
+      overflow: hidden;
+    }
 
-        .metric.wide {
-            grid-column: span 3;
-        }
+    .panel.hero::after {
+      content: "";
+      position: absolute;
+      inset: -60% -10% auto auto;
+      width: 240px;
+      height: 240px;
+      background: radial-gradient(circle, rgba(255, 170, 80, 0.5), transparent 70%);
+      opacity: 0.6;
+    }
 
-        .jobs-list {
-            border: 1px solid var(--line);
-            border-radius: var(--radius-sm);
-            padding: 12px;
-            background: #fafafa;
-            font-size: 12px;
-            color: var(--muted);
-            line-height: 1.6;
-            font-family: var(--mono);
-            white-space: pre-wrap;
-        }
+    .panel.system {
+      grid-column: span 7;
+    }
 
-        .form-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 14px;
-        }
+    .panel.run {
+      grid-column: span 7;
+    }
 
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
+    .panel.config {
+      grid-column: span 5;
+    }
 
-        .form-group.full {
-            grid-column: 1 / -1;
-        }
+    .monitor-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
 
-        label {
-            font-size: 12px;
-            color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            font-family: var(--mono);
-        }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      background: #fff8ee;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
-        input[type="text"],
-        textarea {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid var(--line);
-            border-radius: var(--radius-sm);
-            font-size: 14px;
-            font-family: var(--sans);
-            background: #ffffff;
-            transition: border 0.2s ease, box-shadow 0.2s ease;
-        }
+    .metric span {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
 
-        input[type="text"]:focus,
-        textarea:focus {
-            outline: none;
-            border-color: #bcbcbc;
-            box-shadow: 0 0 0 3px rgba(255, 138, 0, 0.15);
-        }
+    .metric strong {
+      font-family: var(--mono);
+      font-size: 16px;
+      font-weight: 600;
+    }
 
-        .hint {
-            font-size: 12px;
-            color: var(--muted);
-            line-height: 1.5;
-        }
+    .metric.wide {
+      grid-column: span 3;
+    }
 
-        .checkbox-line {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 13px;
-            color: var(--muted);
-        }
+    .jobs-list {
+      border: 1px dashed var(--line);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--muted);
+      font-family: var(--mono);
+      background: #fffaf3;
+      white-space: pre-wrap;
+    }
 
-        .checkbox-line input {
-            transform: scale(1.1);
-            accent-color: var(--accent);
-        }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
 
-        .button-group {
-            display: flex;
-            gap: 12px;
-        }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
 
-        button {
-            border: 1px solid var(--line);
-            background: var(--ink);
-            color: white;
-            border-radius: 999px;
-            padding: 10px 18px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s ease, opacity 0.2s ease;
-            font-family: var(--mono);
-            letter-spacing: 0.04em;
-        }
+    .form-group.full {
+      grid-column: 1 / -1;
+    }
 
-        button:hover:not(:disabled) {
-            transform: translateY(-1px);
-        }
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      font-family: var(--mono);
+    }
 
-        button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
+    input[type="text"],
+    textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-family: var(--sans);
+      background: #fff;
+      transition: border 0.2s ease, box-shadow 0.2s ease;
+    }
 
-        .result-box {
-            border: 1px solid var(--line);
-            border-radius: var(--radius-sm);
-            padding: 12px;
-            font-size: 12px;
-            line-height: 1.6;
-            color: var(--ink);
-            background: #fafafa;
-            max-height: 260px;
-            overflow-y: auto;
-        }
+    input[type="text"]:focus,
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--glow);
+    }
 
-        .result-box.loading {
-            border-color: rgba(255, 138, 0, 0.5);
-            color: var(--ink);
-            background: rgba(255, 138, 0, 0.08);
-        }
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
 
-        .result-box.error {
-            border-color: rgba(220, 38, 38, 0.4);
-            color: #9b1c1c;
-            background: rgba(220, 38, 38, 0.08);
-        }
+    .checkbox-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
 
-        .result-box.success {
-            border-color: rgba(31, 157, 85, 0.4);
-            color: #14532d;
-            background: rgba(31, 157, 85, 0.08);
-        }
+    .checkbox-line input {
+      transform: scale(1.1);
+      accent-color: var(--accent);
+    }
 
-        @media (max-width: 1200px) {
-            .grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
+    .button-group {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
 
-            .monitor-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
+    button {
+      border: none;
+      background: var(--ink);
+      color: #fff;
+      border-radius: 999px;
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+      font-family: var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
 
-            .metric.wide {
-                grid-column: span 2;
-            }
-        }
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 20px rgba(20, 20, 20, 0.18);
+    }
 
-        @media (max-width: 900px) {
-            .grid {
-                grid-template-columns: 1fr;
-            }
-        }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
 
-        @media (max-width: 640px) {
-            body {
-                padding: 20px 14px 40px;
-            }
+    .ghost-btn {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
 
-            .topbar {
-                flex-direction: column;
-                gap: 10px;
-                align-items: flex-start;
-            }
+    .result-box {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--ink);
+      background: #fffaf3;
+      max-height: 260px;
+      overflow-y: auto;
+    }
 
-            .form-grid {
-                grid-template-columns: 1fr;
-            }
+    .result-box.loading {
+      border-color: rgba(255, 140, 26, 0.6);
+      background: rgba(255, 140, 26, 0.1);
+    }
 
-            .monitor-grid {
-                grid-template-columns: 1fr;
-            }
+    .result-box.error {
+      border-color: rgba(220, 38, 38, 0.4);
+      color: #991b1b;
+      background: rgba(220, 38, 38, 0.08);
+    }
 
-            .metric.wide {
-                grid-column: span 1;
-            }
+    .result-box.success {
+      border-color: rgba(15, 157, 88, 0.4);
+      color: #14532d;
+      background: rgba(15, 157, 88, 0.08);
+    }
 
-            .button-group {
-                flex-direction: column;
-            }
-        }
-    </style>
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 140, 26, 0.12);
+      color: var(--ink-soft);
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 1100px) {
+      .panel.hero,
+      .panel.system,
+      .panel.run,
+      .panel.config {
+        grid-column: span 12;
+      }
+
+      .monitor-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .metric.wide {
+        grid-column: span 2;
+      }
+    }
+
+    @media (max-width: 720px) {
+      body {
+        padding: 20px 12px 50px;
+      }
+
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .monitor-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .metric.wide {
+        grid-column: span 1;
+      }
+
+      .button-group {
+        flex-direction: column;
+        align-items: stretch;
+      }
+    }
+  </style>
 </head>
 <body>
-    <div class="app">
-        <header class="topbar">
-            <div class="brand">SHERPA / OSS-FUZZ</div>
-            <div class="status-line">
-                <span id="system_status_dot" class="dot"></span>
-                <span id="system_status_text">等待连接</span>
-                <span id="system_time">--</span>
-            </div>
-        </header>
+  <div class="grain"></div>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-title">Sherpa Console</div>
+        <div class="brand-sub">DeepSeek-first orchestration for OSS-Fuzz</div>
+      </div>
+      <div class="status-line">
+        <span id="system_status_dot" class="dot"></span>
+        <span id="system_status_text">等待连接</span>
+        <span id="system_time">--</span>
+      </div>
+    </header>
 
-        <main class="grid">
-            <section class="panel">
-                <div class="panel-title">System Monitor</div>
-                <h2>系统状态</h2>
-                <div class="monitor-grid">
-                    <div class="metric">
-                        <span>Uptime</span>
-                        <strong id="system_uptime">--</strong>
-                    </div>
-                    <div class="metric">
-                        <span>Queued</span>
-                        <strong id="system_jobs_queued">--</strong>
-                    </div>
-                    <div class="metric">
-                        <span>Running</span>
-                        <strong id="system_jobs_running">--</strong>
-                    </div>
-                    <div class="metric">
-                        <span>Success</span>
-                        <strong id="system_jobs_success">--</strong>
-                    </div>
-                    <div class="metric">
-                        <span>Error</span>
-                        <strong id="system_jobs_error">--</strong>
-                    </div>
-                    <div class="metric">
-                        <span>Total</span>
-                        <strong id="system_jobs_total">--</strong>
-                    </div>
-                    <div class="metric wide">
-                        <span>Logs</span>
-                        <strong id="system_logs">--</strong>
-                    </div>
-                    <div class="metric wide">
-                        <span>OSS-Fuzz Dir</span>
-                        <strong id="system_ossfuzz_dir">--</strong>
-                    </div>
-                </div>
-                <div class="jobs-list" id="system_jobs_list">暂无运行中的任务</div>
-            </section>
+    <main class="grid">
+      <section class="panel hero">
+        <div class="panel-title">Overview</div>
+        <h2>深度模型 + Fuzz 自动化，一站式控制台</h2>
+        <p class="hint">
+          这里的配置将直接映射到后端的 OpenAI 兼容参数，但我们将它们全部用于 DeepSeek。
+          OpenRouter 已默认停用，避免误用或费用波动。
+        </p>
+        <div class="badge">DeepSeek Only</div>
+      </section>
 
-            <section class="panel">
-                <div class="panel-title">Run Fuzz</div>
-                <h2>触发模糊测试</h2>
+      <section class="panel system">
+        <div class="panel-title">System Monitor</div>
+        <h2>系统状态</h2>
+        <div class="monitor-grid">
+          <div class="metric"><span>Uptime</span><strong id="system_uptime">--</strong></div>
+          <div class="metric"><span>Queued</span><strong id="system_jobs_queued">--</strong></div>
+          <div class="metric"><span>Running</span><strong id="system_jobs_running">--</strong></div>
+          <div class="metric"><span>Success</span><strong id="system_jobs_success">--</strong></div>
+          <div class="metric"><span>Error</span><strong id="system_jobs_error">--</strong></div>
+          <div class="metric"><span>Total</span><strong id="system_jobs_total">--</strong></div>
+          <div class="metric wide"><span>Logs</span><strong id="system_logs">--</strong></div>
+          <div class="metric wide"><span>OSS-Fuzz Dir</span><strong id="system_ossfuzz_dir">--</strong></div>
+        </div>
+        <div class="jobs-list" id="system_jobs_list">暂无运行中的任务</div>
+      </section>
 
-                <div class="form-grid">
-                    <div class="form-group full">
-                        <label for="code_url">代码仓库地址</label>
-                        <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
-                    </div>
-                    <div class="form-group">
-                        <label for="email">邮箱地址（可选）</label>
-                        <input type="text" id="email" placeholder="your-email@example.com">
-                    </div>
-                    <div class="form-group">
-                        <label for="time_budget">运行时长（秒）</label>
-                        <input type="text" id="time_budget" value="900">
-                    </div>
-                    <div class="form-group">
-                        <label class="checkbox-line">
-                            <input type="checkbox" id="use_docker" checked>
-                            在 Docker 中运行 fuzz
-                        </label>
-                        <div class="hint">Windows 推荐。需要 Docker Desktop 已启动。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="docker_image">Docker 镜像名</label>
-                        <input type="text" id="docker_image" value="auto">
-                        <div class="hint">auto 会按语言选择 cpp/java 镜像。</div>
-                    </div>
-                </div>
+      <section class="panel run">
+        <div class="panel-title">Run Fuzz</div>
+        <h2>触发模糊测试</h2>
+        <div class="form-grid">
+          <div class="form-group full">
+            <label for="code_url">代码仓库地址</label>
+            <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
+          </div>
+          <div class="form-group">
+            <label for="email">邮箱地址（可选）</label>
+            <input type="text" id="email" placeholder="your-email@example.com">
+          </div>
+          <div class="form-group">
+            <label for="time_budget">运行时长（秒）</label>
+            <input type="text" id="time_budget" value="900">
+          </div>
+          <div class="form-group">
+            <label class="checkbox-line">
+              <input type="checkbox" id="use_docker" checked>
+              在 Docker 中运行 fuzz
+            </label>
+            <div class="hint">Windows 推荐，确保 Docker Desktop 已启动。</div>
+          </div>
+          <div class="form-group">
+            <label for="docker_image">Docker 镜像名</label>
+            <input type="text" id="docker_image" value="auto">
+            <div class="hint">auto 会按语言选择 cpp/java 镜像。</div>
+          </div>
+        </div>
+        <div class="button-group">
+          <button id="fuzz_btn">开始模糊测试</button>
+          <button class="ghost-btn" id="refresh_system_btn">刷新系统状态</button>
+        </div>
+        <div id="fuzz_status" class="result-box" style="display:none;"></div>
+        <div id="fuzz_progress" class="result-box" style="display:none;margin-top:12px;"></div>
+        <div id="fuzz_log" class="result-box" style="display:none;margin-top:12px;"></div>
+      </section>
 
-                <div class="button-group">
-                    <button id="fuzz_btn">开始模糊测试</button>
-                </div>
+      <section class="panel config">
+        <div class="panel-title">DeepSeek Config</div>
+        <h2>DeepSeek 持久化配置</h2>
+        <div class="hint">保存后会写入本地配置文件，并作为后端默认参数。</div>
+        <div class="form-grid">
+          <div class="form-group full">
+            <label for="deepseek_api_key">DeepSeek API Key</label>
+            <input type="text" id="deepseek_api_key" placeholder="DEEPSEEK_API_KEY（会持久化保存）">
+            <div class="hint">对应后端 OPENAI_API_KEY。</div>
+          </div>
+          <div class="form-group">
+            <label for="deepseek_base_url">DeepSeek Base URL</label>
+            <input type="text" id="deepseek_base_url" value="https://api.deepseek.com/v1">
+          </div>
+          <div class="form-group">
+            <label for="deepseek_model">DeepSeek 模型</label>
+            <input type="text" id="deepseek_model" value="deepseek-reasoner">
+            <div class="hint">用于后端 OPENAI_MODEL / OPENCODE_MODEL。</div>
+          </div>
+          <div class="form-group full">
+            <label for="oss_fuzz_dir">OSS-Fuzz 本地路径</label>
+            <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz 或 D:/oss-fuzz">
+            <div class="hint">必须包含 infra/helper.py。</div>
+          </div>
+          <div class="form-group full">
+            <label for="sherpa_git_mirrors">Git 镜像列表</label>
+            <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}">
+          </div>
+          <div class="form-group">
+            <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
+            <input type="text" id="cfg_time_budget" value="900">
+          </div>
+          <div class="form-group">
+            <label class="checkbox-line">
+              <input type="checkbox" id="cfg_use_docker" checked>
+              默认在 Docker 中运行 fuzz
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="cfg_docker_image">Fuzz 默认 Docker 镜像</label>
+            <input type="text" id="cfg_docker_image" value="auto">
+          </div>
+          <div class="form-group">
+            <label for="sherpa_docker_http_proxy">Docker HTTP Proxy</label>
+            <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891">
+          </div>
+          <div class="form-group">
+            <label for="sherpa_docker_https_proxy">Docker HTTPS Proxy</label>
+            <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891">
+          </div>
+          <div class="form-group">
+            <label for="sherpa_docker_no_proxy">Docker NO_PROXY</label>
+            <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1">
+          </div>
+          <div class="form-group">
+            <label for="sherpa_docker_proxy_host">Docker Proxy Host</label>
+            <input type="text" id="sherpa_docker_proxy_host" value="host.docker.internal">
+          </div>
+        </div>
+        <div class="button-group">
+          <button id="cfg_save_btn">保存配置</button>
+        </div>
+        <div id="cfg_status" class="result-box" style="display:none;"></div>
+      </section>
+    </main>
+  </div>
 
-                <div id="fuzz_status" class="result-box" style="display: none;"></div>
-                <div id="fuzz_progress" class="result-box" style="display: none; margin-top: 12px;"></div>
-                <div id="fuzz_log" class="result-box" style="display: none; margin-top: 12px;"></div>
-            </section>
-
-            <section class="panel">
-                <div class="panel-title">Persistent Config</div>
-                <h2>持久化配置</h2>
-                <div class="hint">保存后会写入本地配置文件，并同步作为 fuzz 默认参数。</div>
-
-                <div class="form-grid">
-                    <div class="form-group">
-                        <label for="openai_api_key">OpenAI API Key</label>
-                        <input type="text" id="openai_api_key" placeholder="OPENAI_API_KEY（会持久化保存）" />
-                        <div class="hint">用于 OpenCode CLI 调用。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="openai_base_url">OpenAI Base URL</label>
-                        <input type="text" id="openai_base_url" placeholder="https://api.openai.com/v1 或自建代理" />
-                        <div class="hint">会写入 OPENAI_BASE_URL。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="openrouter_api_key">OpenRouter API Key</label>
-                        <input type="text" id="openrouter_api_key" placeholder="OPENROUTER_API_KEY" />
-                        <div class="hint">当前 Web 未使用该 Key。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="openrouter_model">OpenRouter 模型</label>
-                        <input type="text" id="openrouter_model" placeholder="例如：anthropic/claude-3.5-sonnet" value="anthropic/claude-3.5-sonnet" />
-                    </div>
-                    <div class="form-group">
-                        <label for="openrouter_base_url">OpenRouter Base URL</label>
-                        <input type="text" id="openrouter_base_url" placeholder="https://openrouter.ai/api/v1" value="https://openrouter.ai/api/v1" />
-                    </div>
-                    <div class="form-group">
-                        <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
-                        <input type="text" id="cfg_time_budget" value="900" />
-                    </div>
-                    <div class="form-group">
-                        <label class="checkbox-line">
-                            <input type="checkbox" id="cfg_use_docker" checked>
-                            默认在 Docker 中运行 fuzz
-                        </label>
-                        <div class="hint">Windows 推荐打开。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="cfg_docker_image">Fuzz 默认 Docker 镜像</label>
-                        <input type="text" id="cfg_docker_image" value="auto" />
-                        <div class="hint">auto 会按语言自动选择。</div>
-                    </div>
-                    <div class="form-group full">
-                        <label for="oss_fuzz_dir">OSS-Fuzz 本地路径</label>
-                        <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz 或 D:/oss-fuzz" />
-                        <div class="hint">必须指向包含 infra/helper.py 的 oss-fuzz checkout 根目录。</div>
-                    </div>
-                    <div class="form-group full">
-                        <label for="sherpa_git_mirrors">Git 镜像列表（SHERPA_GIT_MIRRORS）</label>
-                        <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}" />
-                        <div class="hint">逗号分隔，支持 {url} 模板。</div>
-                    </div>
-                    <div class="form-group">
-                        <label for="sherpa_docker_http_proxy">Docker HTTP Proxy</label>
-                        <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891" />
-                    </div>
-                    <div class="form-group">
-                        <label for="sherpa_docker_https_proxy">Docker HTTPS Proxy</label>
-                        <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891" />
-                    </div>
-                    <div class="form-group">
-                        <label for="sherpa_docker_no_proxy">Docker NO_PROXY</label>
-                        <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1" />
-                    </div>
-                    <div class="form-group">
-                        <label for="sherpa_docker_proxy_host">Docker Proxy Host</label>
-                        <input type="text" id="sherpa_docker_proxy_host" value="host.docker.internal" />
-                    </div>
-                </div>
-
-                <div class="button-group">
-                    <button id="cfg_save_btn">保存配置</button>
-                </div>
-
-                <div id="cfg_status" class="result-box" style="display: none;"></div>
-            </section>
-        </main>
-    </div>
-
-    <script src="/static/script.js"></script>
+  <script src="/static/script.js"></script>
 </body>
 </html>

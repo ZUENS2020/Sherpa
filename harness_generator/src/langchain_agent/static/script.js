@@ -5,11 +5,9 @@ async function loadConfigIntoForm() {
     if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
     const cfg = await res.json();
 
-    setValue("openai_api_key", cfg.openai_api_key || "");
-    setValue("openai_base_url", cfg.openai_base_url || "");
-    setValue("openrouter_api_key", cfg.openrouter_api_key || "");
-    setValue("openrouter_base_url", cfg.openrouter_base_url || "https://openrouter.ai/api/v1");
-    setValue("openrouter_model", cfg.openrouter_model || "anthropic/claude-3.5-sonnet");
+    setValue("deepseek_api_key", cfg.openai_api_key || "");
+    setValue("deepseek_base_url", cfg.openai_base_url || "https://api.deepseek.com/v1");
+    setValue("deepseek_model", cfg.openai_model || cfg.opencode_model || "deepseek-reasoner");
 
     setValue("cfg_time_budget", String(cfg.fuzz_time_budget ?? 900));
     setChecked("cfg_use_docker", cfg.fuzz_use_docker !== false);
@@ -41,12 +39,19 @@ function gatherConfigFromForm() {
     throw new Error("请输入有效的 Fuzz 默认运行时长（秒）");
   }
 
+  const deepseekBase = (getValue("deepseek_base_url") || "").trim() || "https://api.deepseek.com/v1";
+  const deepseekModel = (getValue("deepseek_model") || "").trim() || "deepseek-reasoner";
+  const normalizedModel = deepseekModel.replace(/^deepseek\//, "");
+  const opencodeModel = deepseekModel.includes("/") ? deepseekModel : `deepseek/${normalizedModel}`;
+
   return {
-    openai_api_key: (getValue("openai_api_key") || "").trim() || null,
-    openai_base_url: (getValue("openai_base_url") || "").trim() || "",
-    openrouter_api_key: (getValue("openrouter_api_key") || "").trim() || null,
-    openrouter_base_url: (getValue("openrouter_base_url") || "").trim() || "https://openrouter.ai/api/v1",
-    openrouter_model: (getValue("openrouter_model") || "").trim() || "anthropic/claude-3.5-sonnet",
+    openai_api_key: (getValue("deepseek_api_key") || "").trim() || null,
+    openai_base_url: deepseekBase,
+    openai_model: normalizedModel,
+    opencode_model: opencodeModel,
+    openrouter_api_key: null,
+    openrouter_base_url: "",
+    openrouter_model: "",
 
     fuzz_time_budget: fuzzTimeBudget,
     fuzz_use_docker: !!getChecked("cfg_use_docker"),
@@ -188,6 +193,10 @@ async function saveConfigFromForm() {
 
 document.getElementById("cfg_save_btn")?.addEventListener("click", async () => {
   await saveConfigFromForm();
+});
+
+document.getElementById("refresh_system_btn")?.addEventListener("click", async () => {
+  await pollSystemStatus();
 });
 
 document.addEventListener("DOMContentLoaded", async () => {

@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stdout, redirect_stderr, asynccontextmanager
 from io import StringIO
 from pathlib import Path
 from fuzz_relative_functions import fuzz_logic
@@ -26,7 +26,16 @@ from persistent_config import (
     save_config,
 )
 
-app = FastAPI(title="LangChain Agent API", version="1.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    cfg = load_config()
+    _cfg_set(cfg)
+    apply_config_to_env(cfg)
+    os.environ["SHERPA_ACCEPT_DIFF_WITHOUT_DONE"] = "0"
+    yield
+
+
+app = FastAPI(title="LangChain Agent API", version="1.0", lifespan=_lifespan)
 
 # 设置静态文件目录
 current_dir = os.path.dirname(os.path.abspath(__file__))#获取当前绝对路径
@@ -66,13 +75,6 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
 
 def _ensure_job_logs_dir() -> None:
     _JOB_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-@app.on_event("startup")
-def _load_persistent_config() -> None:
-    cfg = load_config()
-    _cfg_set(cfg)
-    apply_config_to_env(cfg)
 
 
 def _job_log_path(job_id: str) -> Path:
@@ -312,16 +314,80 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
     if not dockerfile.is_file():
         raise RuntimeError(f"Dockerfile not found: {dockerfile}")
 
-    cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(_REPO_ROOT)]
-    print("[init] " + " ".join(cmd))
-    rc = subprocess.call(cmd)
-    if rc != 0:
-        # Retry without --progress for older Docker.
-        cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(_REPO_ROOT)]
+    def _wait_for_docker_daemon() -> None:
+        max_wait_s = 45
+        deadline = time.time() + max_wait_s
+        while True:
+            try:
+                probe = subprocess.run(
+                    ["docker", "info"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    text=True,
+                )
+                if probe.returncode == 0:
+                    return
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                raise RuntimeError("docker daemon not ready")
+            time.sleep(2)
+
+    def _docker_daemon_unreachable(output: str) -> bool:
+        needles = [
+            "Cannot connect to the Docker daemon",
+            "dial tcp",
+            "no such host",
+            "Error response from daemon: dial tcp",
+        ]
+        return any(n in output for n in needles)
+
+    def _run_build(cmd: list[str]) -> tuple[int, str]:
         print("[init] " + " ".join(cmd))
-        rc = subprocess.call(cmd)
-    if rc != 0:
-        raise RuntimeError(f"docker build failed (rc={rc}) for {image}")
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+        )
+        output = proc.stdout or ""
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
+        return proc.returncode, output
+
+    build_cmds = [
+        ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(_REPO_ROOT)],
+        ["docker", "build", "-t", image, "-f", str(dockerfile), str(_REPO_ROOT)],
+    ]
+
+    max_attempts = 5
+    backoff = 3.0
+    last_output = ""
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _wait_for_docker_daemon()
+        except Exception:
+            if attempt == max_attempts:
+                raise
+        for cmd in build_cmds:
+            rc, output = _run_build(cmd)
+            last_output = output
+            if rc == 0:
+                return
+            if "unknown flag: --progress" in output:
+                # Try without --progress on older Docker.
+                continue
+            if _docker_daemon_unreachable(output) and attempt < max_attempts:
+                print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                time.sleep(backoff)
+                backoff *= 2
+                break
+            raise RuntimeError(f"docker build failed (rc={rc}) for {image}")
+
+    raise RuntimeError(f"docker build failed after retries for {image}. Last output:\n{last_output}")
 
 
 def _job_snapshot(job_id: str) -> dict | None:
@@ -387,9 +453,24 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                     or cfg.fuzz_docker_image
                 )
                 time_budget_value = request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget
+                openai_key = (
+                    os.environ.get("OPENAI_API_KEY")
+                    or cfg.openai_api_key
+                    or ""
+                ).strip()
+                opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
+                openai_model = (
+                    os.environ.get("OPENAI_MODEL")
+                    or opencode_model_env
+                    or "deepseek-reasoner"
+                ).strip()
+                if openai_key:
+                    model_value = request.model or opencode_model_env or openai_model
+                else:
+                    model_value = request.model or cfg.openrouter_model
                 print(
                     f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
-                    f"time_budget={time_budget_value}s max_tokens={request.max_tokens} model={request.model or cfg.openrouter_model}"
+                    f"time_budget={time_budget_value}s max_tokens={request.max_tokens} model={model_value}"
                 )
                 print(f"[job {job_id}] log_file={log_file}")
                 docker_image = docker_image_value if docker_enabled else None
@@ -401,6 +482,7 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                     docker_image=docker_image,
                     ai_key_path=opencode_env_path(),
                     oss_fuzz_dir=cfg.oss_fuzz_dir,
+                    model=model_value,
                 )
                 _job_update(job_id, status="success", result=res)
         except Exception as e:

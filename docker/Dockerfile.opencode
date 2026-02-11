@@ -29,5 +29,10 @@ RUN npm config set registry "$NPM_CONFIG_REGISTRY" \
     && npm i -g opencode-ai \
     && opencode --version || true
 
+# Create opencode config with Qwen models (simplified format without $schema)
+RUN mkdir -p /root/.opencode && \
+    echo '{"provider":{"openrouter":{"models":{"qwen/qwen3-max-thinking":{},"qwen/qwen3-max":{},"qwen/qwen3-coder-plus":{}}}}}' \
+    > /root/.opencode/config.json
+
 WORKDIR /repo
 CMD ["opencode", "run"]

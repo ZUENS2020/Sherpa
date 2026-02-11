@@ -13,6 +13,8 @@ from typing import Any, Optional, TypedDict, cast
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
+from persistent_config import load_config
+
 from fuzz_unharnessed_repo import (
     HarnessGeneratorError,
     NonOssFuzzHarnessGenerator,
@@ -82,12 +84,42 @@ def _fmt_dt(seconds: float) -> str:
 
 
 def _llm_or_none() -> ChatOpenAI | None:
-    key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not key or not key.strip():
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    cfg = None
+    if not (openai_key or openrouter_key):
+        try:
+            cfg = load_config()
+            openai_key = cfg.openai_api_key or ""
+            openrouter_key = cfg.openrouter_api_key or ""
+        except Exception:
+            cfg = None
+
+    key = (openai_key or openrouter_key or "").strip()
+    if not key:
         return None
 
-    model = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet").strip() or "anthropic/claude-3.5-sonnet"
-    base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip() or "https://openrouter.ai/api/v1"
+    if openai_key and openai_key.strip():
+        model = (
+            os.environ.get("OPENAI_MODEL")
+            or os.environ.get("OPENCODE_MODEL")
+            or "deepseek-reasoner"
+        ).strip()
+        base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+        if not base_url and cfg is not None:
+            base_url = (cfg.openai_base_url or "").strip()
+    else:
+        model = (os.environ.get("OPENROUTER_MODEL") or "").strip()
+        base_url = (os.environ.get("OPENROUTER_BASE_URL") or "").strip()
+        if cfg is not None:
+            if not model:
+                model = (cfg.openrouter_model or "").strip()
+            if not base_url:
+                base_url = (cfg.openrouter_base_url or "").strip()
+        if not model:
+            model = "anthropic/claude-3.5-sonnet"
+        if not base_url:
+            base_url = "https://openrouter.ai/api/v1"
 
     # NOTE: langchain_openai.ChatOpenAI signature has changed across versions.
     # Build kwargs dynamically to avoid type-checker false positives.
@@ -118,8 +150,25 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _has_codex_key() -> bool:
-    key = os.environ.get("OPENAI_API_KEY")
-    return bool(key and key.strip())
+    # Check for any available API key (OpenAI, OpenRouter, or OpenCode)
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key and openai_key.strip():
+        return True
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key and openrouter_key.strip():
+        return True
+    try:
+        cfg = load_config()
+        if cfg.openai_api_key and cfg.openai_api_key.strip():
+            return True
+        if cfg.openrouter_api_key and cfg.openrouter_api_key.strip():
+            return True
+    except Exception:
+        pass
+    opencode_key = os.environ.get("OPENCODE_API_KEY")
+    if opencode_key and opencode_key.strip():
+        return True
+    return False
 
 
 def _is_tinyxml2_repo(repo_root: Path) -> bool:
@@ -326,6 +375,7 @@ class FuzzWorkflowInput:
     max_len: int
     docker_image: Optional[str]
     ai_key_path: Path
+    model: Optional[str] = None
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -515,7 +565,16 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         else:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
-        rc, out, err = gen._run_cmd(cmd, cwd=gen.repo_root, env=os.environ.copy(), timeout=7200)
+        build_env = os.environ.copy()
+        if getattr(gen, "docker_image", None):
+            include_root = "/work"
+        else:
+            include_root = str(gen.repo_root)
+        for key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            prev = build_env.get(key, "").strip()
+            build_env[key] = f"{include_root}:{prev}" if prev else include_root
+
+        rc, out, err = gen._run_cmd(cmd, cwd=gen.repo_root, env=build_env, timeout=7200)
         bins = gen._discover_fuzz_binaries() if rc == 0 else []
 
         def _tail(s: str, n: int = 120) -> str:

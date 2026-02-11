@@ -832,6 +832,9 @@ class NonOssFuzzHarnessGenerator:
                 "CFLAGS",
                 "CXXFLAGS",
                 "LDFLAGS",
+                "CPATH",
+                "C_INCLUDE_PATH",
+                "CPLUS_INCLUDE_PATH",
                 # Jazzer/Java
                 "JAVA_TOOL_OPTIONS",
                 "JAZZER_JVM_ARGS",
@@ -885,6 +888,17 @@ class NonOssFuzzHarnessGenerator:
         if filtered_env:
             for k, v in filtered_env.items():
                 docker_cmd += ["-e", f"{k}={v}"]
+
+        # Pre-create artifacts directory inside container before running fuzzer
+        # Check if the command appears to be a libFuzzer invocation with -artifact_prefix
+        cmd_str = " ".join(cmd)
+        if "-artifact_prefix" in cmd_str and self.docker_image:
+            # Extract the artifacts path from the command
+            match = re.search(r'-artifact_prefix=([^\s]+)', cmd_str)
+            if match:
+                artifacts_path = match.group(1)
+                # Prepend mkdir command to ensure artifacts directory exists
+                cmd = ["sh", "-c", f"mkdir -p {artifacts_path} && exec " + " ".join(f'"{a}"' if " " in a else a for a in cmd)]
 
         docker_cmd.append(self.docker_image)
         docker_cmd += [_translate_arg(a) for a in cmd]
@@ -1146,6 +1160,9 @@ class NonOssFuzzHarnessGenerator:
             # Ensure libFuzzer-compatible toolchain when running inside Docker.
             build_env.setdefault("CC", "clang")
             build_env.setdefault("CXX", "clang++")
+            # Define _GNU_SOURCE for projects that use POSIX extensions (e.g., lseek)
+            build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
+            build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
             # Avoid stale compiler choices in cached CMake dirs.
             for stale_dir in (fuzz_build_dir, build_dir):
                 if stale_dir.exists():

@@ -239,10 +239,12 @@ def _docker_opencode_env_args(env: dict) -> list[str]:
         "OPENROUTER_MODEL",
         "OPENCODE_MODEL",
         "OPENCODE_PERMISSION",
+        "OPENCODE_CONFIG",
         "SHERPA_OPENCODE_NO_EXEC",
         "SHERPA_OPENCODE_BLOCKLIST",
         "SHERPA_OPENCODE_ALLOWLIST",
     ]
+    allowed_keys.append("DEEPSEEK_API_KEY")
     args: list[str] = []
     for k in allowed_keys:
         v = env.get(k)
@@ -263,7 +265,11 @@ def _build_opencode_cmd(
 
     # Run opencode inside a dedicated container.
     shim_dir = env.get("SHERPA_OPENCODE_SHIM_DIR", "")
+    shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
     path_in_container = "/opencode_shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    config_path = env.get("OPENCODE_CONFIG", "").strip()
+    config_mount = config_path or "/opencode.json"
+
     docker_args = [
         "docker",
         "run",
@@ -280,6 +286,12 @@ def _build_opencode_cmd(
             if shim_dir
             else []
         ),
+    ]
+    if config_mount:
+        docker_args += ["-v", f"{config_mount}:{config_mount}:ro"]
+    if shared_out:
+        docker_args += ["-v", f"{shared_out}:{shared_out}"]
+    docker_args += [
         image,
         "opencode",
     ]
@@ -517,6 +529,7 @@ class CodexHelper:
 
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
+            "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output).",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "CRITICAL RULE: You MUST NOT execute build/test/fuzz commands or run binaries. "
             "Read-only commands (rg, ls, cat, find, sed) are allowed for inspection. "
@@ -551,8 +564,13 @@ class CodexHelper:
                 return env_model
             openrouter_model = os.environ.get("OPENROUTER_MODEL", "").strip()
             if openrouter_model:
+                # OpenCode built-in models don't need provider prefix
+                if openrouter_model.startswith("opencode/"):
+                    return openrouter_model
+                # Already has openrouter prefix
                 if openrouter_model.startswith("openrouter/"):
                     return openrouter_model
+                # Add openrouter prefix for other models
                 return f"openrouter/{openrouter_model}"
             return None
 
@@ -630,7 +648,13 @@ class CodexHelper:
                 try:
                     env = os.environ.copy()
                     # Encourage non-interactive, tool-enabled mode.
-                    env.setdefault("OPENCODE_PERMISSION", json.dumps({"permission": "allow"}))
+                    env.setdefault(
+                        "OPENCODE_PERMISSION",
+                        json.dumps(
+                            {"permission": "allow", "external_directory": "allow"},
+                            separators=(",", ":"),
+                        ),
+                    )
                     _apply_opencode_exec_policy(env)
                     image = _docker_opencode_image()
                     if image:
@@ -737,7 +761,7 @@ class CodexHelper:
                         if isinstance(item, str) and item:
                             print(item, end="")
                             captured_chunks.append(item)
-                            if any(err in item for err in RETRY_ERRORS):
+                            if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
                                 LOGGER.warning("[OpenCodeHelper] retryable error detected → abort")
                                 saw_retry_error = True
                                 _kill_proc()
