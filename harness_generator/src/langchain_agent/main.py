@@ -236,7 +236,14 @@ def get_config():
 
 @app.put("/api/config")
 def put_config(request: WebPersistentConfig = Body(...)):
-    cfg = request
+    current = _cfg_get()
+    payload = request.model_dump()
+    # Preserve existing secrets when frontend submits null/omits key fields.
+    if request.openai_api_key is None:
+        payload["openai_api_key"] = current.openai_api_key
+    if request.openrouter_api_key is None:
+        payload["openrouter_api_key"] = current.openrouter_api_key
+    cfg = WebPersistentConfig(**payload)
     save_config(cfg)
     _cfg_set(cfg)
     apply_config_to_env(cfg)
@@ -432,7 +439,10 @@ def _derive_task_status(job: dict) -> dict:
     }
     view["children"] = child_jobs
     if derived in {"success", "error"} and not job.get("finished_at"):
-        _job_update(job.get("job_id"), finished_at=time.time(), status=derived)
+        done_ts = time.time()
+        _job_update(job.get("job_id"), finished_at=done_ts, status=derived)
+        view["finished_at"] = done_ts
+        view["status"] = derived
     return view
 
 def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
@@ -508,6 +518,7 @@ async def task_api(request: task_model = Body(...)):
         log_file = _job_log_path(job_id)
         _job_update(job_id, log_file=str(log_file))
         tee = _Tee(job_id, log_file=log_file)
+        had_error = False
         try:
             with redirect_stdout(tee), redirect_stderr(tee):
                 print(f"[task {job_id}] start (jobs={len(request.jobs)})")
@@ -557,7 +568,10 @@ async def task_api(request: task_model = Body(...)):
                 for job in request.jobs:
                     child_id = _submit_fuzz_job(job, cfg)
                     child_ids.append(child_id)
-                _job_update(job_id, result="submitted", children=child_ids)
+                if child_ids:
+                    _job_update(job_id, result="submitted", children=child_ids)
+                else:
+                    _job_update(job_id, status="success", result="submitted (0 jobs)", finished_at=time.time())
                 print(f"[task {job_id}] submitted {len(child_ids)} fuzz jobs")
         except Exception as e:
             had_error = True

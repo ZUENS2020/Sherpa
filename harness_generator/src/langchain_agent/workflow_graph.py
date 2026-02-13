@@ -551,61 +551,163 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), f"-> build attempt={(int(state.get('build_attempts') or 0)+1)}")
     try:
-    # Single build attempt (no OpenCode auto-fix here). If it fails, we'll route to fix_build.
         fuzz_dir = gen.repo_root / "fuzz"
         build_py = fuzz_dir / "build.py"
         build_sh = fuzz_dir / "build.sh"
+
+        def _tail(s: str, n: int = 120) -> str:
+            lines = (s or "").replace("\r", "\n").splitlines()
+            return "\n".join(lines[-n:]).strip()
+
+        def _build_py_supports_clean_flag(path: Path) -> bool:
+            try:
+                txt = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return False
+            return "--clean" in txt
+
+        def _env_bool(name: str, default: bool) -> bool:
+            raw = (os.environ.get(name) or "").strip().lower()
+            if not raw:
+                return default
+            return raw in {"1", "true", "yes", "on"}
+
+        def _list_static_libs_for_diagnostics() -> str:
+            build_dir = gen.repo_root / "build"
+            if not build_dir.exists():
+                return f"(no build dir at {build_dir})"
+            libs: list[str] = []
+            try:
+                for p in build_dir.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() in {".a", ".lib", ".so", ".dylib"}:
+                        try:
+                            libs.append(f"{p.relative_to(gen.repo_root)} ({p.stat().st_size} bytes)")
+                        except Exception:
+                            libs.append(str(p.relative_to(gen.repo_root)))
+                    if len(libs) >= 80:
+                        break
+            except Exception as e:
+                return f"(failed to list libs under build/: {e})"
+            return "\n".join(libs) if libs else "(no static libs found under build/)"
+
+        build_cmd_clean: list[str] | None = None
         if build_py.is_file():
             if getattr(gen, "docker_image", None):
-                cmd = [gen._python_runner(), "fuzz/build.py"]
+                build_cmd = [gen._python_runner(), "fuzz/build.py"]
             else:
-                cmd = [gen._python_runner(), str(build_py)]
+                build_cmd = [gen._python_runner(), str(build_py)]
+            if _build_py_supports_clean_flag(build_py):
+                build_cmd_clean = list(build_cmd) + ["--clean"]
         elif build_sh.is_file():
-            cmd = ["bash", "fuzz/build.sh"] if getattr(gen, "docker_image", None) else ["bash", str(build_sh)]
+            shell = "bash"
+            if not getattr(gen, "docker_image", None):
+                if shutil.which("bash") is None:
+                    if shutil.which("sh") is not None:
+                        shell = "sh"
+                    else:
+                        raise HarnessGeneratorError("build.sh exists but neither bash nor sh is available in PATH")
+            try:
+                mode = build_sh.stat().st_mode
+                build_sh.chmod(mode | 0o111)
+            except Exception:
+                pass
+            build_cmd = [shell, "fuzz/build.sh"] if getattr(gen, "docker_image", None) else [shell, str(build_sh)]
         else:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
         build_env = os.environ.copy()
         if getattr(gen, "docker_image", None):
             include_root = "/work"
+            build_env.setdefault("CC", "clang")
+            build_env.setdefault("CXX", "clang++")
+            build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
+            build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
+            for stale_dir in (gen.repo_root / "fuzz" / "build", gen.repo_root / "build"):
+                if stale_dir.exists():
+                    try:
+                        shutil.rmtree(stale_dir)
+                    except Exception:
+                        pass
         else:
             include_root = str(gen.repo_root)
         for key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
             prev = build_env.get(key, "").strip()
             build_env[key] = f"{include_root}:{prev}" if prev else include_root
 
-        rc, out, err = gen._run_cmd(cmd, cwd=gen.repo_root, env=build_env, timeout=7200)
-        bins = gen._discover_fuzz_binaries() if rc == 0 else []
+        retries_raw = os.environ.get("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "2")
+        try:
+            max_local_attempts = int(retries_raw)
+        except Exception:
+            max_local_attempts = 2
+        max_local_attempts = max(1, min(max_local_attempts, 5))
+        retry_with_clean = _env_bool("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", True)
+        retry_delay_s = 1.0
 
-        def _tail(s: str, n: int = 120) -> str:
-            lines = (s or "").replace("\r", "\n").splitlines()
-            return "\n".join(lines[-n:]).strip()
+        attempts_used = 0
+        final_rc = 1
+        final_out = ""
+        final_err = ""
+        final_bins: list[Path] = []
 
-        attempts = int(state.get("build_attempts") or 0) + 1
+        for attempt in range(1, max_local_attempts + 1):
+            _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
+            rc, out, err = gen._run_cmd(list(build_cmd), cwd=gen.repo_root, env=build_env, timeout=7200)
+            attempts_used += 1
+
+            if rc != 0 and retry_with_clean and build_cmd_clean is not None:
+                combined = (out or "") + "\n" + (err or "")
+                if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
+                    _wf_log(cast(dict[str, Any], state), "build failed; retrying once with --clean")
+                    rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=gen.repo_root, env=build_env, timeout=7200)
+                    attempts_used += 1
+                    combined2 = (out2 or "") + "\n" + (err2 or "")
+                    if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
+                        _wf_log(cast(dict[str, Any], state), "build.py rejected --clean; keeping original diagnostics")
+                    else:
+                        rc, out, err = rc2, out2, err2
+
+            bins = gen._discover_fuzz_binaries() if rc == 0 else []
+            final_rc, final_out, final_err, final_bins = rc, out, err, bins
+            if rc == 0 and bins:
+                break
+
+            if attempt < max_local_attempts:
+                reason = f"rc={rc}" if rc != 0 else "no fuzzer binaries generated"
+                _wf_log(cast(dict[str, Any], state), f"build attempt {attempt} not ready ({reason}); retrying")
+                time.sleep(retry_delay_s)
+
+        if final_rc == 0 and not final_bins:
+            libs_diag = _list_static_libs_for_diagnostics()
+            if libs_diag:
+                final_out = (final_out or "") + "\n\n=== build dir artifacts (static libs) ===\n" + libs_diag + "\n"
+
+        attempts_total = int(state.get("build_attempts") or 0) + attempts_used
         next_state: FuzzWorkflowRuntimeState = {
             **state,
-            "build_attempts": attempts,
-            "build_rc": int(rc),
-            "build_stdout_tail": _tail(out),
-            "build_stderr_tail": _tail(err),
+            "build_attempts": attempts_total,
+            "build_rc": int(final_rc),
+            "build_stdout_tail": _tail(final_out),
+            "build_stderr_tail": _tail(final_err),
             "last_step": "build",
         }
 
-        if rc != 0:
-            next_state["last_error"] = f"build failed rc={rc}"
+        if final_rc != 0:
+            next_state["last_error"] = f"build failed rc={final_rc} after {attempts_used} command run(s)"
             next_state["message"] = "build failed"
-            _wf_log(cast(dict[str, Any], next_state), f"<- build fail rc={rc} dt={_fmt_dt(time.perf_counter()-t0)}")
+            _wf_log(cast(dict[str, Any], next_state), f"<- build fail rc={final_rc} dt={_fmt_dt(time.perf_counter()-t0)}")
             return next_state
 
-        if not bins:
-            next_state["last_error"] = "No fuzzer binaries found under fuzz/out/ after build"
+        if not final_bins:
+            next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
             next_state["message"] = "build produced no fuzzers"
             _wf_log(cast(dict[str, Any], next_state), f"<- build fail no-fuzzers dt={_fmt_dt(time.perf_counter()-t0)}")
             return next_state
 
         next_state["last_error"] = ""
-        next_state["message"] = f"built ({len(bins)} fuzzers)"
-        _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
+        next_state["message"] = f"built ({len(final_bins)} fuzzers)"
+        _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
     except Exception as e:
         out = {**state, "last_step": "build", "last_error": str(e), "message": "build failed"}

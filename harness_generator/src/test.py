@@ -35,8 +35,11 @@ def _clone_repo(spec: RepoSpec) -> Path:
 
 def _resolve_paths(input_dir: str, output_path: str) -> tuple[Path, Path, Path, Path]:
     """解析路径并返回 (static_analysis_dir, analyzer_bin, output_path_abs, input_dir_abs)。"""
-    # static_analysis_dir = Path(__file__).resolve().parents[1]
-    static_analysis_dir =   Path("/home/bohuju/AI-agent-for-Cyber-Security/Static-Analysis")
+    env_dir = (os.environ.get("STATIC_ANALYSIS_DIR") or "").strip()
+    if env_dir:
+        static_analysis_dir = Path(env_dir).expanduser().resolve()
+    else:
+        static_analysis_dir = (Path(__file__).resolve().parents[2] / "Static-Analysis").resolve()
     analyzer_bin = static_analysis_dir / "analyzer"
     output_abs = (static_analysis_dir / output_path).resolve() if not os.path.isabs(output_path) else Path(output_path)
     input_dir_abs = (static_analysis_dir / input_dir).resolve() if not os.path.isabs(input_dir) else Path(input_dir)

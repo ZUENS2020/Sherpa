@@ -176,6 +176,11 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
 
 
 def as_public_dict(cfg: WebPersistentConfig) -> dict[str, Any]:
-    # For now we return full config (including secrets) because the user asked
-    # all config to be managed from the web UI and persisted.
-    return cfg.model_dump()
+    data = cfg.model_dump()
+
+    for key in ("openai_api_key", "openrouter_api_key"):
+        raw = data.get(key)
+        data[f"{key}_set"] = bool(isinstance(raw, str) and raw.strip())
+        data[key] = ""
+
+    return data

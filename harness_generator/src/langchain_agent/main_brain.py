@@ -90,6 +90,7 @@ class ResponseFormat:
 
 def create_agent_outside(
     input_text: str,
+    model: str | None = None,
     mdoel: str | None = None,
     temperature: float = 0.5,
     timeout: int = 10,
@@ -111,7 +112,7 @@ def create_agent_outside(
             "Missing API key. Set OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY before using /chat_with_agent."
         )
 
-    model_name = (mdoel or "").strip() or _default_openrouter_model()
+    model_name = (model or mdoel or "").strip() or _default_openrouter_model()
     base_url = (openrouter_base_url or "").strip() or _default_openrouter_base_url()
     llm = ChatOpenAI(
         model=model_name,
@@ -144,18 +145,9 @@ def create_agent_outside(
 
 
 if __name__ == "__main__":
-    
-    # `thread_id` is a unique identifier for a given conversation.
-    config = {"configurable": {"thread_id": "1"}}
-
-    response = agent.invoke(
-        {"messages": [{"role": "user", "content": "what is the weather outside?"}]},
-        config=config,
-        context=Context(user_id="1")
-    )
-
-    print(response['structured_response'])
-    # ResponseFormat(
-    #     punny_response="Florida is still having a 'sun-derful' day! The sunshine is playing 'ray-dio' hits all day long! I'd say it's the perfect weather for some 'solar-bration'! If you were hoping for rain, I'm afraid that idea is all 'washed up' - the forecast remains 'clear-ly' brilliant!",
-    #     weather_conditions="It's always sunny in Florida!"
-    # )
+    try:
+        response = create_agent_outside("what is the weather outside?")
+    except Exception as e:
+        print(f"demo failed: {e}")
+    else:
+        print(response)

@@ -53,6 +53,8 @@ def fuzz_logic(
     # Set model in environment so OpenCode can pick it up
     if model and model.strip() and not os.environ.get("OPENCODE_MODEL"):
         os.environ["OPENCODE_MODEL"] = model.strip()
+    if oss_fuzz_dir and oss_fuzz_dir.strip():
+        os.environ["SHERPA_DEFAULT_OSS_FUZZ_DIR"] = oss_fuzz_dir.strip()
     return run_fuzz_workflow(
         FuzzWorkflowInput(
             repo_url=repo_url,
