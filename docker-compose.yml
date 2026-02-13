@@ -39,6 +39,8 @@ services:
     volumes:
       # Persist job logs/config inside a docker volume (fully self-hosted).
       - sherpa-config:/app/config
+      # Persist per-job logs in a dedicated volume (separate from config).
+      - sherpa-job-logs:/app/job-logs
       # Mount opencode config from host
       - ./opencode.json:/app/opencode.json:ro
 
@@ -89,6 +91,7 @@ services:
       OPENCODE_MODEL: "deepseek/deepseek-reasoner"
       OPENAI_MODEL: "deepseek-reasoner"
       OPENCODE_CONFIG: "/opencode.json"
+      SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
 
       # Optional (fuzz patching): where to read ANTHROPIC_API_KEY from.
       # AI_KEY_PATH: "/app/.env"
@@ -125,4 +128,5 @@ volumes:
   sherpa-docker-data:
   sherpa-tmp:
   sherpa-config:
+  sherpa-job-logs:
   sherpa-oss-fuzz:

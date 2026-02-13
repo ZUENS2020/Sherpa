@@ -1,13 +1,20 @@
-__pycache__
-.venv
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
 
+# Local environments
+.venv/
+venv/
 myenv/
 sherpa_venv/
 
+# Runtime outputs / artifacts
 jobs/
 output/
-
-oss-fuzz/
+output*/
+sorted/
+_docker_job_logs/
 
 # Runtime data / secrets
 config/
@@ -19,4 +26,9 @@ _submit.json
 .env
 web_config.json
 web_codex.env
+
+# Misc local files
+oss-fuzz/
 nul
+.pytest_cache/
+.playwright-cli/

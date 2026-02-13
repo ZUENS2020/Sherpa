@@ -728,6 +728,62 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     stderr_tail = (state.get("build_stderr_tail") or "").strip()
     repo_root = str(gen.repo_root)
 
+    # Fast-path hotfix (minimal, no refactor): a common generated-script issue is
+    # linking with `-lz` while the static library is only available by file path.
+    def _try_hotfix_missing_lz() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        if "cannot find -lz" not in diag:
+            return False
+
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        changed = False
+        if "-L' + os.path.join(build_dir, 'lib')" not in text:
+            text = text.replace(
+                "lib_path = ['-L' + build_dir]",
+                "lib_path = ['-L' + build_dir, '-L' + os.path.join(build_dir, 'lib')]",
+            )
+            changed = True
+
+        if "lib_patterns = [" not in text and "libs = ['-lz']" in text:
+            inject = (
+                "libs = ['-lz']\n"
+                "    # Hotfix: resolve zlib by full path when -lz is not discoverable\n"
+                "    lib_patterns = [os.path.join(build_dir, 'libz.*'),\n"
+                "                    os.path.join(build_dir, 'lib', 'libz.*'),\n"
+                "                    os.path.join(build_dir, '**', 'libz.*')]\n"
+                "    for pattern in lib_patterns:\n"
+                "        matches = glob.glob(pattern, recursive=True)\n"
+                "        if matches:\n"
+                "            libs = [matches[0]]\n"
+                "            lib_path = []\n"
+                "            break"
+            )
+            text = text.replace("libs = ['-lz']", inject)
+            changed = True
+
+        if not changed:
+            return False
+
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for missing -lz")
+            return True
+        except Exception:
+            return False
+
+    if _try_hotfix_missing_lz():
+        out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for -lz applied"}
+        _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
     codex_hint = (state.get("codex_hint") or "").strip()

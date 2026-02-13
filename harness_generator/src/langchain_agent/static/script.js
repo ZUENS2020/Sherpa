@@ -358,9 +358,12 @@ function summarizeLog(log, status, result, err, logFile) {
   const important = [];
   const wfRe = /^\[wf\b.*\]/;
   const jobRe = /^\[job\b.*\]/;
+  const ocRe = /^\[OpenCodeHelper\]/;
   const buildRe = /(build failed|linking|cmake|compile|error:|fatal|undefined reference)/i;
   const crashRe = /(crash|artifact|asan|ubsan|msan|tsan|segmentation|sanitizer)/i;
   const stepRe = /(->|<-|workflow end|pass [a-e]|ready)/i;
+  const writeRe = /(← Write|Wrote file successfully|\bWrite\s+fuzz\/)/i;
+  const ocStateRe = /(running…|done flag detected|diff produced|sentinel)/i;
 
   for (const line of lines) {
     if (wfRe.test(line) && stepRe.test(line)) {
@@ -368,6 +371,14 @@ function summarizeLog(log, status, result, err, logFile) {
       continue;
     }
     if (jobRe.test(line) && (line.includes("start") || line.includes("params"))) {
+      important.push(line);
+      continue;
+    }
+    if (ocRe.test(line) && ocStateRe.test(line)) {
+      important.push(line);
+      continue;
+    }
+    if (writeRe.test(line)) {
       important.push(line);
       continue;
     }

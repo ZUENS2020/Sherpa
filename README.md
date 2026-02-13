@@ -126,7 +126,7 @@ python ./harness_generator/src/langchain_agent/main.py
       "job_id": "<fuzz_job_id>",
       "status": "running",
       "repo": "https://github.com/madler/zlib.git",
-      "log_file": "/app/config/logs/jobs/<id>.log"
+      "log_file": "/app/job-logs/jobs/<id>.log"
     }
   ]
 }
@@ -153,7 +153,9 @@ python ./harness_generator/src/langchain_agent/main.py
 - `challenge_bundle*/` 或 `false_positive*/` 或 `unreproducible*/`
 
 ### 日志
-- `config/logs/jobs/<job_id>.log`
+- 主日志：`/app/job-logs/jobs/<job_id>.log`
+- 按等级拆分：`<job_id>.level.info.log` / `level.warn.log` / `level.error.log`
+- 按类别拆分：`<job_id>.cat.workflow.log` / `cat.build.log` / `cat.opencode.log` / `cat.docker.log` / ...
 
 ### 自定义输出路径
 - 设置环境变量 `SHERPA_OUTPUT_DIR`（Web 与 CLI 都会生效）

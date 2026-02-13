@@ -1,33 +1,10 @@
+# Keep Docker build context tiny
 .git
 .vscode
-
-# Local envs
-.venv
-myenv
-sherpa_venv
 
 # Python caches
 **/__pycache__
 **/*.pyc
-
-# Logs / caches / outputs
-config
-harness_generator/src/config
-config/logs
-config/cache
-
-# Large artifacts
-output_fixed
-# Keep Docker build context tiny
-.git
-**/__pycache__
-**/*.pyc
-
-# Local outputs
-jobs
-output*
-output_fixed
-sorted
 
 # Local envs
 .venv
@@ -35,7 +12,20 @@ venv
 myenv
 sherpa_venv
 
-# Editor/OS
-.vscode
+# Runtime outputs / logs
+jobs
+output*
+sorted
+_docker_job_logs
+
+# Runtime config/cache
+config
+harness_generator/src/config
+config/logs
+config/cache
+
+# Local metadata
+.pytest_cache
+.playwright-cli
 .DS_Store
 Thumbs.db

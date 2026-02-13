@@ -11,6 +11,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+import queue
 import uuid
 from datetime import datetime, timezone
 from contextlib import redirect_stdout, redirect_stderr, asynccontextmanager
@@ -53,9 +54,15 @@ _JOBS: dict[str, dict] = {}
 _APP_START = time.time()
 _INIT_LOCK = threading.Lock()
 
+# In-memory API log retention limit (characters).
+# 0 or negative means unlimited (no truncation).
+_JOB_MEMORY_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_JOB_LOG_MAX_CHARS", "0"))
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_JOB_LOGS_DIR = _REPO_ROOT / "config" / "logs" / "jobs"
+_JOB_LOGS_DIR = Path(
+    os.environ.get("SHERPA_WEB_JOB_LOG_DIR", "/app/job-logs/jobs")
+).expanduser().resolve()
 
 
 _CFG_LOCK = threading.Lock()
@@ -81,6 +88,32 @@ def _job_log_path(job_id: str) -> Path:
     return _JOB_LOGS_DIR / f"{job_id}.log"
 
 
+def _classify_log_level(line: str) -> str:
+    txt = (line or "").lower()
+    if any(k in txt for k in ["traceback", "exception", " fatal", "error", "failed", "cannot find"]):
+        return "error"
+    if any(k in txt for k in ["warn", "retry", "timeout", "deprecation"]):
+        return "warn"
+    return "info"
+
+
+def _classify_log_category(line: str) -> str:
+    txt = (line or "").lower()
+    if "[wf" in txt:
+        return "workflow"
+    if "[opencodehelper]" in txt or "opencode" in txt:
+        return "opencode"
+    if "docker" in txt or "container" in txt:
+        return "docker"
+    if any(k in txt for k in ["cmake", "clang", "gcc", "linker", "ld:", "build"]):
+        return "build"
+    if "[task" in txt:
+        return "task"
+    if "[job" in txt:
+        return "job"
+    return "general"
+
+
 def _job_update(job_id: str, **fields: object) -> None:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
@@ -98,8 +131,10 @@ def _job_append_log(job_id: str, chunk: str) -> None:
         if not job:
             return
         buf = (job.get("log", "") or "") + chunk
-        # Keep last 50k characters to avoid unbounded memory.
-        job["log"] = buf[-50000:]
+        if _JOB_MEMORY_LOG_MAX_CHARS > 0:
+            job["log"] = buf[-_JOB_MEMORY_LOG_MAX_CHARS:]
+        else:
+            job["log"] = buf
         job["updated_at"] = time.time()
 
 
@@ -108,13 +143,40 @@ class _Tee(StringIO):
         super().__init__()
         self._job_id = job_id
         self._fh = None
+        self._split_fhs: dict[str, object] = {}
+        self._base_path: Path | None = None
         if log_file is not None:
             try:
                 _ensure_job_logs_dir()
                 self._fh = open(log_file, "a", encoding="utf-8")
+                self._base_path = log_file.with_suffix("")
             except Exception:
                 # Best-effort: if we cannot write to disk, keep in-memory logs working.
                 self._fh = None
+                self._base_path = None
+
+    def _split_write(self, line: str) -> None:
+        if not line or self._base_path is None:
+            return
+        level = _classify_log_level(line)
+        category = _classify_log_category(line)
+        targets = [
+            f"{self._base_path.name}.level.{level}.log",
+            f"{self._base_path.name}.cat.{category}.log",
+        ]
+        for filename in targets:
+            handle = self._split_fhs.get(filename)
+            if handle is None:
+                try:
+                    handle = open(self._base_path.parent / filename, "a", encoding="utf-8")
+                    self._split_fhs[filename] = handle
+                except Exception:
+                    continue
+            try:
+                handle.write(line)
+                handle.flush()
+            except Exception:
+                pass
 
     def write(self, s: str) -> int:
         if self._fh is not None and s:
@@ -124,6 +186,9 @@ class _Tee(StringIO):
             except Exception:
                 # Do not break the job if disk logging fails mid-run.
                 pass
+        if s:
+            for line in s.splitlines(keepends=True):
+                self._split_write(line)
         _job_append_log(self._job_id, s)
         return super().write(s)
 
@@ -131,6 +196,11 @@ class _Tee(StringIO):
         try:
             if self._fh is not None:
                 self._fh.close()
+            for handle in self._split_fhs.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
         finally:
             super().close()
 
@@ -352,17 +422,59 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
 
     def _run_build(cmd: list[str]) -> tuple[int, str]:
         print("[init] " + " ".join(cmd))
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             errors="replace",
+            bufsize=1,
         )
-        output = proc.stdout or ""
-        if output:
-            print(output, end="" if output.endswith("\n") else "\n")
-        return proc.returncode, output
+
+        output_chunks: list[str] = []
+        line_q: queue.Queue[str | None] = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                if proc.stdout is None:
+                    return
+                for line in proc.stdout:
+                    line_q.put(line)
+            finally:
+                line_q.put(None)
+
+        th = threading.Thread(target=_reader, daemon=True)
+        th.start()
+
+        last_heartbeat = time.monotonic()
+        while True:
+            try:
+                item = line_q.get(timeout=0.2)
+            except queue.Empty:
+                item = ""
+
+            if item is None:
+                break
+
+            if item:
+                output_chunks.append(item)
+                print(item, end="")
+
+            now = time.monotonic()
+            if now - last_heartbeat >= 10:
+                print("[init] docker build still running...")
+                last_heartbeat = now
+
+            if proc.poll() is not None and line_q.empty():
+                break
+
+        try:
+            th.join(timeout=1)
+        except Exception:
+            pass
+
+        rc = proc.wait() if proc.poll() is None else int(proc.returncode or 0)
+        return rc, "".join(output_chunks)
 
     build_cmds = [
         ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(_REPO_ROOT)],
@@ -550,7 +662,20 @@ async def task_api(request: task_model = Body(...)):
                             )
                             if use_docker_jobs:
                                 from fuzz_unharnessed_repo import DOCKERFILE_FUZZ_CPP, DOCKERFILE_FUZZ_JAVA
-                                images = request.images or ["cpp", "java"]
+                                images = request.images
+                                if not images:
+                                    # Only prebuild explicitly requested non-auto images.
+                                    # 'auto' images are built lazily by the workflow once language is known.
+                                    inferred: set[str] = set()
+                                    for j in request.jobs:
+                                        img = (j.docker_image or "").strip().lower()
+                                        if img in {"cpp", "c", "cxx"}:
+                                            inferred.add("cpp")
+                                        elif img in {"java", "jazzer"}:
+                                            inferred.add("java")
+                                    images = sorted(inferred)
+                                if not images:
+                                    print("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
                                 for img in images:
                                     name = (img or "").strip().lower()
                                     if name in {"cpp", "c", "cxx"}:

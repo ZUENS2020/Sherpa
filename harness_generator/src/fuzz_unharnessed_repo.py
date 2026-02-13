@@ -45,6 +45,7 @@ import difflib
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import socket
@@ -53,6 +54,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import hashlib
 import uuid
@@ -2049,22 +2051,111 @@ class NonOssFuzzHarnessGenerator:
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",
+            bufsize=1,
         )
+
+        stdout_chunks: List[str] = []
+        stderr_chunks: List[str] = []
+        out_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+
+        def _reader(pipe: Optional[object], kind: str) -> None:
+            try:
+                if pipe is None:
+                    return
+                for line in pipe:
+                    out_queue.put((kind, line))
+            finally:
+                out_queue.put(None)
+
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        done_readers = 0
+        timed_out = False
+        heartbeat_sec = 10.0
+        last_heartbeat = time.monotonic()
+
         try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
+            while done_readers < 2:
+                if timeout > 0 and (time.monotonic() - start_mono) > timeout:
+                    timed_out = True
+                    break
+
+                try:
+                    item = out_queue.get(timeout=0.2)
+                except queue.Empty:
+                    item = None
+
+                if item is None:
+                    done_readers += 1
+                else:
+                    kind, text = item
+                    if kind == "stdout":
+                        stdout_chunks.append(text)
+                        print(text, end="")
+                    else:
+                        stderr_chunks.append(text)
+                        # Keep stderr visible in real-time to avoid silent failures.
+                        print(text, end="")
+
+                now = time.monotonic()
+                if now - last_heartbeat >= heartbeat_sec:
+                    elapsed = now - start_mono
+                    print(f"[keepalive] command still running... elapsed={elapsed:.0f}s")
+                    last_heartbeat = now
+        finally:
+            if timed_out and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=4)
+                except Exception:
+                    pass
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+            try:
+                t_out.join(timeout=1)
+            except Exception:
+                pass
+            try:
+                t_err.join(timeout=1)
+            except Exception:
+                pass
+
+            # Drain any remaining queued lines.
+            while True:
+                try:
+                    item = out_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    continue
+                kind, text = item
+                if kind == "stdout":
+                    stdout_chunks.append(text)
+                else:
+                    stderr_chunks.append(text)
+
+        out = "".join(stdout_chunks)
+        err = "".join(stderr_chunks)
+        if timed_out:
             err = (err or "") + "\n[timeout] process exceeded limit and was killed."
+
+        rc = proc.wait() if proc.poll() is None else proc.returncode
         elapsed = time.monotonic() - start_mono
         # Truncate verbose spam in the console but keep full logs if needed.
         print(
-            f"[*] Command rc={proc.returncode}. elapsed={elapsed:.1f}s. started_at={start_ts:.0f}" \
+            f"[*] Command rc={rc}. elapsed={elapsed:.1f}s. started_at={start_ts:.0f}" \
             + ". STDOUT (tail):\n" + "\n".join(out.splitlines()[-80:])
         )
         if err.strip():
             print("[*] STDERR (tail):\n" + "\n".join(err.splitlines()[-80:]))
-        return proc.returncode, out, err
+        return int(rc or 0), out, err
 
     # ────────────────────────────────────────────────────────────────────
     # Reproducer self-test & iterative repair via Codex
