@@ -1,6 +1,6 @@
 # main.py
 from __future__ import annotations
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -298,6 +298,31 @@ class task_model(BaseModel):
     force_clone: bool = False
 
 
+def _resolve_job_docker_policy(request: fuzz_model, cfg: WebPersistentConfig) -> tuple[bool, str]:
+    docker_enabled = request.docker if request.docker is not None else cfg.fuzz_use_docker
+    docker_image_value = (
+        (request.docker_image or "").strip()
+        or (cfg.fuzz_docker_image or "").strip()
+        or "auto"
+    )
+    return bool(docker_enabled), docker_image_value
+
+
+def _enforce_docker_only(jobs: list[fuzz_model], cfg: WebPersistentConfig) -> None:
+    for idx, job in enumerate(jobs):
+        docker_enabled, docker_image_value = _resolve_job_docker_policy(job, cfg)
+        if not docker_enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Docker-only policy: jobs[{idx}] must set docker=true (or enable default docker in config).",
+            )
+        if not docker_image_value.strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Docker-only policy: jobs[{idx}] must provide docker_image (or configure fuzz_docker_image).",
+            )
+
+
 @app.get("/api/config")
 def get_config():
     cfg = _cfg_get()
@@ -306,6 +331,12 @@ def get_config():
 
 @app.put("/api/config")
 def put_config(request: WebPersistentConfig = Body(...)):
+    if request.fuzz_use_docker is False:
+        raise HTTPException(
+            status_code=400,
+            detail="Docker-only policy: fuzz_use_docker must remain enabled.",
+        )
+
     current = _cfg_get()
     payload = request.model_dump()
     # Preserve existing secrets when frontend submits null/omits key fields.
@@ -313,6 +344,8 @@ def put_config(request: WebPersistentConfig = Body(...)):
         payload["openai_api_key"] = current.openai_api_key
     if request.openrouter_api_key is None:
         payload["openrouter_api_key"] = current.openrouter_api_key
+    payload["fuzz_use_docker"] = True
+    payload["fuzz_docker_image"] = (payload.get("fuzz_docker_image") or "").strip() or "auto"
     cfg = WebPersistentConfig(**payload)
     save_config(cfg)
     _cfg_set(cfg)
@@ -420,10 +453,21 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
         ]
         return any(n in output for n in needles)
 
-    def _run_build(cmd: list[str]) -> tuple[int, str]:
+    def _buildkit_unavailable(output: str) -> bool:
+        needles = [
+            "BuildKit is enabled but the buildx component is missing",
+            "buildx component is missing or broken",
+        ]
+        return any(n in output for n in needles)
+
+    def _run_build(cmd: list[str], *, buildkit: str | None = None) -> tuple[int, str]:
         print("[init] " + " ".join(cmd))
+        env = os.environ.copy()
+        if buildkit is not None:
+            env["DOCKER_BUILDKIT"] = buildkit
         proc = subprocess.Popen(
             cmd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -499,6 +543,12 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
             if "unknown flag: --progress" in output:
                 # Try without --progress on older Docker.
                 continue
+            if _buildkit_unavailable(output):
+                print("[init] buildx unavailable; retrying docker build with DOCKER_BUILDKIT=0")
+                rc2, output2 = _run_build(cmd, buildkit="0")
+                last_output = output2
+                if rc2 == 0:
+                    return
             if _docker_daemon_unreachable(output) and attempt < max_attempts:
                 print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                 time.sleep(backoff)
@@ -557,6 +607,75 @@ def _derive_task_status(job: dict) -> dict:
         view["status"] = derived
     return view
 
+
+def _derive_task_status_from_snapshot(job: dict, jobs_snapshot: dict[str, dict]) -> tuple[str, dict, list[dict]]:
+    child_ids = list(job.get("children") or [])
+    child_jobs = [dict(jobs_snapshot[cid]) for cid in child_ids if cid in jobs_snapshot]
+    total = len(child_jobs)
+    queued = sum(1 for j in child_jobs if j.get("status") == "queued")
+    running = sum(1 for j in child_jobs if j.get("status") == "running")
+    success = sum(1 for j in child_jobs if j.get("status") == "success")
+    error = sum(1 for j in child_jobs if j.get("status") == "error")
+    if total == 0:
+        derived = str(job.get("status") or "queued")
+    elif queued or running:
+        derived = "running"
+    elif error:
+        derived = "error"
+    else:
+        derived = "success"
+    return (
+        derived,
+        {
+            "total": total,
+            "queued": queued,
+            "running": running,
+            "success": success,
+            "error": error,
+        },
+        child_jobs,
+    )
+
+
+def _list_tasks(limit: int = 50) -> list[dict]:
+    capped_limit = max(1, min(int(limit), 200))
+    with _JOBS_LOCK:
+        jobs_snapshot = {job_id: dict(job) for job_id, job in _JOBS.items()}
+
+    tasks: list[dict] = []
+    for job in jobs_snapshot.values():
+        if job.get("kind") != "task":
+            continue
+        derived_status, children_status, child_jobs = _derive_task_status_from_snapshot(job, jobs_snapshot)
+        active_child = next(
+            (c for c in child_jobs if c.get("status") in {"running", "queued"}),
+            child_jobs[0] if child_jobs else None,
+        )
+        tasks.append(
+            {
+                "job_id": job.get("job_id"),
+                "status": derived_status,
+                "repo": job.get("repo"),
+                "created_at": job.get("created_at"),
+                "created_at_iso": _iso_time(job.get("created_at")),
+                "updated_at": job.get("updated_at"),
+                "updated_at_iso": _iso_time(job.get("updated_at")),
+                "started_at": job.get("started_at"),
+                "started_at_iso": _iso_time(job.get("started_at")),
+                "finished_at": job.get("finished_at"),
+                "finished_at_iso": _iso_time(job.get("finished_at")),
+                "error": job.get("error"),
+                "result": job.get("result"),
+                "children_status": children_status,
+                "child_count": children_status.get("total", 0),
+                "active_child_id": active_child.get("job_id") if active_child else None,
+                "active_child_status": active_child.get("status") if active_child else None,
+            }
+        )
+    tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
+    return tasks[:capped_limit]
+
+
 def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
     job_id = _create_job("fuzz", request.code_url)
 
@@ -569,11 +688,10 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
         try:
             with redirect_stdout(tee), redirect_stderr(tee):
                 print(f"[job {job_id}] start repo={request.code_url}")
-                docker_enabled = request.docker if request.docker is not None else cfg.fuzz_use_docker
-                docker_image_value = (
-                    (request.docker_image or "").strip()
-                    or cfg.fuzz_docker_image
-                )
+                print(f"[job {job_id}] about to call fuzz_logic...")
+                docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
+                if not docker_enabled:
+                    raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
                 time_budget_value = request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget
                 openai_key = (
                     os.environ.get("OPENAI_API_KEY")
@@ -595,17 +713,25 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                     f"time_budget={time_budget_value}s max_tokens={request.max_tokens} model={model_value}"
                 )
                 print(f"[job {job_id}] log_file={log_file}")
-                docker_image = docker_image_value if docker_enabled else None
-                res = fuzz_logic(
-                    request.code_url,
-                    max_len=request.max_tokens,
-                    time_budget=time_budget_value,
-                    email=request.email,
-                    docker_image=docker_image,
-                    ai_key_path=opencode_env_path(),
-                    oss_fuzz_dir=cfg.oss_fuzz_dir,
-                    model=model_value,
-                )
+                docker_image = docker_image_value
+                print(f"[job {job_id}] calling fuzz_logic with docker_image={docker_image}...")
+                try:
+                    res = fuzz_logic(
+                        request.code_url,
+                        max_len=request.max_tokens,
+                        time_budget=time_budget_value,
+                        email=request.email,
+                        docker_image=docker_image,
+                        ai_key_path=opencode_env_path(),
+                        oss_fuzz_dir=cfg.oss_fuzz_dir,
+                        model=model_value,
+                    )
+                    print(f"[job {job_id}] fuzz_logic returned successfully")
+                except Exception as fuzz_err:
+                    print(f"[job {job_id}] fuzz_logic failed: {fuzz_err}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
                 _job_update(job_id, status="success", result=res)
         except Exception as e:
             _job_update(job_id, status="error", error=str(e))
@@ -623,6 +749,7 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
 @app.post("/api/task")
 async def task_api(request: task_model = Body(...)):
     cfg = _cfg_get()
+    _enforce_docker_only(request.jobs, cfg)
     job_id = _create_job("task", "batch")
 
     def _runner() -> None:
@@ -631,6 +758,7 @@ async def task_api(request: task_model = Body(...)):
         _job_update(job_id, log_file=str(log_file))
         tee = _Tee(job_id, log_file=log_file)
         had_error = False
+        child_ids: list[str] = []
         try:
             with redirect_stdout(tee), redirect_stderr(tee):
                 print(f"[task {job_id}] start (jobs={len(request.jobs)})")
@@ -688,16 +816,17 @@ async def task_api(request: task_model = Body(...)):
                                         _ensure_docker_image(tag, DOCKERFILE_FUZZ_JAVA, force=request.force_build)
                                     else:
                                         print(f"[task] skip unknown image hint: {img}")
-
-                child_ids: list[str] = []
-                for job in request.jobs:
-                    child_id = _submit_fuzz_job(job, cfg)
-                    child_ids.append(child_id)
-                if child_ids:
-                    _job_update(job_id, result="submitted", children=child_ids)
-                else:
-                    _job_update(job_id, status="success", result="submitted (0 jobs)", finished_at=time.time())
-                print(f"[task {job_id}] submitted {len(child_ids)} fuzz jobs")
+            # Submit child jobs outside parent stdout/stderr redirection.
+            # redirect_stdout is process-global; keeping it active here can clobber
+            # child job log redirection and break frontend progress tracking.
+            for job in request.jobs:
+                child_id = _submit_fuzz_job(job, cfg)
+                child_ids.append(child_id)
+            if child_ids:
+                _job_update(job_id, result="submitted", children=child_ids)
+            else:
+                _job_update(job_id, status="success", result="submitted (0 jobs)", finished_at=time.time())
+            tee.write(f"[task {job_id}] submitted {len(child_ids)} fuzz jobs\n")
         except Exception as e:
             had_error = True
             _job_update(job_id, status="error", error=str(e))
@@ -721,6 +850,13 @@ def get_task(job_id: str):
     if job.get("kind") != "task":
         return {"error": "job_not_task"}
     return _derive_task_status(job)
+
+
+@app.get("/api/tasks")
+def list_tasks(limit: int = 50):
+    return {
+        "items": _list_tasks(limit=limit),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

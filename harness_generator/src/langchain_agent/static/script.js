@@ -10,7 +10,8 @@ async function loadConfigIntoForm() {
     setValue("deepseek_model", cfg.openai_model || cfg.opencode_model || "deepseek-reasoner");
 
     setValue("cfg_time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setChecked("cfg_use_docker", cfg.fuzz_use_docker !== false);
+    setChecked("cfg_use_docker", true);
+    setDisabled("cfg_use_docker", true);
     setValue("cfg_docker_image", cfg.fuzz_docker_image || "auto");
 
     setValue("oss_fuzz_dir", cfg.oss_fuzz_dir || "");
@@ -21,9 +22,10 @@ async function loadConfigIntoForm() {
     setValue("sherpa_docker_no_proxy", cfg.sherpa_docker_no_proxy || "");
     setValue("sherpa_docker_proxy_host", cfg.sherpa_docker_proxy_host || "host.docker.internal");
 
-    // Mirror config into the fuzz form defaults
+    // Mirror config into the fuzz form defaults.
     setValue("time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setChecked("use_docker", cfg.fuzz_use_docker !== false);
+    setChecked("use_docker", true);
+    setDisabled("use_docker", true);
     setValue("docker_image", cfg.fuzz_docker_image || "auto");
   } catch (e) {
     // Silent: page still usable.
@@ -54,7 +56,7 @@ function gatherConfigFromForm() {
     openrouter_model: "",
 
     fuzz_time_budget: fuzzTimeBudget,
-    fuzz_use_docker: !!getChecked("cfg_use_docker"),
+    fuzz_use_docker: true,
     fuzz_docker_image: (getValue("cfg_docker_image") || "").trim() || "auto",
 
     oss_fuzz_dir: (getValue("oss_fuzz_dir") || "").trim() || "",
@@ -69,9 +71,19 @@ function gatherConfigFromForm() {
   };
 }
 
-// ===== 系统状态监控 =====
+// ===== 全局状态 =====
+const ACTIVE_TASK_STORAGE_KEY = "sherpa_active_task_id";
 let _systemPollTimer = null;
+let _sessionListPollTimer = null;
+let _taskPollTimer = null;
+let _taskPollInFlight = false;
 
+let _activeTaskId = "";
+let _activeTaskLastLog = "";
+let _activeTaskLastStatus = "";
+let _sessionItems = [];
+
+// ===== 系统状态监控 =====
 function formatDuration(sec) {
   if (!Number.isFinite(sec) || sec < 0) return "--";
   const s = Math.floor(sec);
@@ -94,6 +106,13 @@ function formatBytes(bytes) {
   return `${gb.toFixed(1)} GB`;
 }
 
+function formatIsoTime(iso) {
+  if (!iso) return "--";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -106,6 +125,10 @@ function setStatus(ok, message) {
     dot.className = "dot" + (ok ? " ok" : " warn");
   }
   if (text) text.textContent = message;
+}
+
+function setSessionStatusLine(message) {
+  setText("task_session_status", message);
 }
 
 async function pollSystemStatus() {
@@ -161,6 +184,18 @@ function startSystemPolling() {
   _systemPollTimer = setInterval(pollSystemStatus, 2000);
 }
 
+function startSessionListPolling() {
+  if (_sessionListPollTimer) {
+    clearInterval(_sessionListPollTimer);
+  }
+  _sessionListPollTimer = setInterval(() => {
+    const preferred = _activeTaskId || (getValue("task_session_id") || "").trim();
+    loadTaskSessions(preferred).catch((err) => {
+      console.warn("refresh sessions failed", err);
+    });
+  }, 5000);
+}
+
 async function saveConfigFromForm() {
   const statusEl = document.getElementById("cfg_status");
   statusEl.style.display = "block";
@@ -174,13 +209,21 @@ async function saveConfigFromForm() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
     });
-    if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
+    if (!res.ok) {
+      let detail = `HTTP 错误 ${res.status}`;
+      try {
+        const errObj = await res.json();
+        detail = errObj?.detail || detail;
+      } catch (_) {}
+      throw new Error(detail);
+    }
     const data = await res.json();
     if (!data.ok) throw new Error("保存失败");
 
-    // Update fuzz form defaults immediately
+    // Update fuzz form defaults immediately.
     setValue("time_budget", String(cfg.fuzz_time_budget));
-    setChecked("use_docker", cfg.fuzz_use_docker);
+    setChecked("use_docker", true);
+    setDisabled("use_docker", true);
     setValue("docker_image", cfg.fuzz_docker_image);
 
     statusEl.className = "result-box success";
@@ -191,30 +234,318 @@ async function saveConfigFromForm() {
   }
 }
 
-document.getElementById("cfg_save_btn")?.addEventListener("click", async () => {
-  await saveConfigFromForm();
-});
+// ===== 会话列表与监控 =====
+function formatSessionLabel(item) {
+  const shortId = (item.job_id || "").slice(0, 8);
+  const st = item.status || "unknown";
+  const child = item.children_status || {};
+  const childDone = Number(child.success || 0) + Number(child.error || 0);
+  const childTotal = Number(item.child_count || child.total || 0);
+  const repo = item.repo && item.repo !== "batch" ? item.repo : "batch";
+  const updated = formatIsoTime(item.updated_at_iso);
+  return `#${shortId} | ${st} | 子任务 ${childDone}/${childTotal} | ${repo} | ${updated}`;
+}
 
-document.getElementById("refresh_system_btn")?.addEventListener("click", async () => {
-  await pollSystemStatus();
-});
+function updateSessionHint() {
+  const hintEl = document.getElementById("task_session_hint");
+  const selectEl = document.getElementById("task_session_select");
+  if (!hintEl || !selectEl) return;
+  const selectedId = (selectEl.value || "").trim();
+  const item = _sessionItems.find((x) => x.job_id === selectedId);
+  if (!item) {
+    hintEl.textContent = _sessionItems.length ? "请选择会话并点击“绑定监控”。" : "暂无历史会话。";
+    return;
+  }
+  const child = item.children_status || {};
+  hintEl.textContent =
+    `状态: ${item.status || "unknown"} | 子任务: ${Number(child.total || item.child_count || 0)} ` +
+    `(running=${Number(child.running || 0)}, success=${Number(child.success || 0)}, error=${Number(child.error || 0)})`;
+}
 
-document.addEventListener("DOMContentLoaded", async () => {
-  await loadConfigIntoForm();
-  startSystemPolling();
-});
+function rememberActiveTask(jobId) {
+  try {
+    localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, jobId);
+  } catch (_) {}
+}
+
+function recallActiveTask() {
+  try {
+    return localStorage.getItem(ACTIVE_TASK_STORAGE_KEY) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function setTaskSelection(jobId) {
+  const normalized = (jobId || "").trim();
+  setValue("task_session_id", normalized);
+  const selectEl = document.getElementById("task_session_select");
+  if (!selectEl) return;
+  if (normalized && Array.from(selectEl.options).some((opt) => opt.value === normalized)) {
+    selectEl.value = normalized;
+  }
+  updateSessionHint();
+}
+
+async function loadTaskSessions(preferredId = "") {
+  const selectEl = document.getElementById("task_session_select");
+  const hintEl = document.getElementById("task_session_hint");
+  if (!selectEl) return [];
+
+  try {
+    let source = "tasks";
+    let items = [];
+    const res = await fetch("/api/tasks?limit=80");
+    if (res.ok) {
+      const payload = await res.json();
+      items = Array.isArray(payload.items) ? payload.items : [];
+    } else {
+      source = "system";
+      const sysRes = await fetch("/api/system");
+      if (!sysRes.ok) throw new Error(`HTTP 错误 ${res.status}/${sysRes.status}`);
+      const sys = await sysRes.json();
+      const active = Array.isArray(sys.active_jobs) ? sys.active_jobs : [];
+      items = active
+        .filter((j) => (j.kind || "") === "task")
+        .map((j) => ({
+          job_id: j.job_id,
+          status: j.status || "running",
+          repo: j.repo || "batch",
+          updated_at_iso: j.updated_at ? new Date(Number(j.updated_at) * 1000).toISOString() : "",
+          children_status: { total: 0, queued: 0, running: 0, success: 0, error: 0 },
+          child_count: 0,
+        }));
+    }
+    _sessionItems = items;
+
+    selectEl.innerHTML = "";
+    if (!items.length) {
+      const emptyOpt = document.createElement("option");
+      emptyOpt.value = "";
+      emptyOpt.textContent = "暂无会话";
+      selectEl.appendChild(emptyOpt);
+      selectEl.disabled = true;
+      if (hintEl) hintEl.textContent = "暂无历史会话。";
+      return items;
+    }
+
+    selectEl.disabled = false;
+    for (const item of items) {
+      const opt = document.createElement("option");
+      opt.value = item.job_id || "";
+      opt.textContent = formatSessionLabel(item);
+      selectEl.appendChild(opt);
+    }
+
+    const manualId = (getValue("task_session_id") || "").trim();
+    const remembered = recallActiveTask();
+    const running = items.find((x) => x.status === "running");
+    const fallback = (running && running.job_id) || (items[0] && items[0].job_id) || "";
+    const desired = (preferredId || manualId || remembered || fallback || "").trim();
+    const exists = desired && items.some((x) => x.job_id === desired);
+    const selected = exists ? desired : fallback;
+    selectEl.value = selected;
+    setValue("task_session_id", selected);
+    updateSessionHint();
+    if (source === "system" && hintEl) {
+      const base = hintEl.textContent || "";
+      hintEl.textContent = `${base}（后端未重载新版接口，仅显示运行中会话）`;
+    }
+    return items;
+  } catch (err) {
+    selectEl.innerHTML = "";
+    const failOpt = document.createElement("option");
+    failOpt.value = "";
+    failOpt.textContent = "加载会话失败";
+    selectEl.appendChild(failOpt);
+    selectEl.disabled = true;
+    if (hintEl) hintEl.textContent = `会话列表加载失败: ${err.message}`;
+    return [];
+  }
+}
+
+function getTaskUiElements() {
+  return {
+    statusEl: document.getElementById("fuzz_status"),
+    progressEl: document.getElementById("fuzz_progress"),
+    logEl: document.getElementById("fuzz_log"),
+  };
+}
+
+function ensureTaskUiVisible() {
+  const { statusEl, progressEl, logEl } = getTaskUiElements();
+  if (statusEl) statusEl.style.display = "block";
+  if (progressEl) progressEl.style.display = "block";
+  if (logEl) logEl.style.display = "block";
+}
+
+function extractPrimaryChild(taskObj) {
+  const children = Array.isArray(taskObj.children) ? taskObj.children : [];
+  if (!children.length) return null;
+  return (
+    children.find((c) => c.status === "running") ||
+    children.find((c) => c.status === "queued") ||
+    children.find((c) => c.status === "error") ||
+    children[0]
+  );
+}
+
+function stopTaskPolling() {
+  if (_taskPollTimer) {
+    clearInterval(_taskPollTimer);
+    _taskPollTimer = null;
+  }
+}
+
+function renderTaskState(jobId, taskObj) {
+  const { statusEl, progressEl, logEl } = getTaskUiElements();
+  if (!statusEl || !progressEl || !logEl) return false;
+
+  const st = taskObj.status || "unknown";
+  const child = extractPrimaryChild(taskObj);
+  const err = (child && child.error) || taskObj.error;
+  const result = (child && child.result) || taskObj.result;
+  const log = String(((child && child.log) || taskObj.log || "") ?? "");
+  const logFile = (child && child.log_file) || taskObj.log_file;
+  const childStatus = taskObj.children_status || {};
+  const childSummary = Number(childStatus.total || 0)
+    ? `子任务: ${Number(childStatus.running || 0)} running / ${Number(childStatus.success || 0)} success / ${Number(childStatus.error || 0)} error`
+    : "子任务: 0";
+
+  if (log !== _activeTaskLastLog || st !== _activeTaskLastStatus) {
+    _activeTaskLastLog = log;
+    _activeTaskLastStatus = st;
+    const summary = summarizeLog(log, st, result, err, logFile);
+    logEl.className = "result-box";
+    logEl.innerHTML = `<strong>进度摘要（实时）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(summary)}</pre>`;
+    logEl.scrollTop = logEl.scrollHeight;
+    progressEl.className = "result-box";
+    progressEl.innerHTML = renderProgressFromLog(log);
+  }
+
+  if (st === "queued" || st === "running") {
+    statusEl.className = "result-box loading";
+    statusEl.innerHTML =
+      `<span class="status-icon">⏳</span> 当前状态：<strong>${escapeHtml(st)}</strong>（任务：${escapeHtml(jobId)}）<br>` +
+      `${escapeHtml(childSummary)}`;
+    setSessionStatusLine(`已绑定会话 #${jobId.slice(0, 8)}，正在实时监控。`);
+    return false;
+  }
+
+  if (st === "success") {
+    statusEl.className = "result-box success";
+    statusEl.innerHTML =
+      `<span class="status-icon">✅</span> 完成（任务：<strong>${escapeHtml(jobId)}</strong>）<br>` +
+      `${escapeHtml(childSummary)}<br>${escapeHtml(result || "")}`;
+    setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 已完成。`);
+    return true;
+  }
+
+  statusEl.className = "result-box error";
+  statusEl.innerHTML =
+    `<span class="status-icon">❌</span> 失败（任务：<strong>${escapeHtml(jobId)}</strong>）<br>` +
+    `${escapeHtml(childSummary)}<br>${escapeHtml(err || "unknown error")}`;
+  setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 已失败。`);
+  return true;
+}
+
+async function pollActiveTaskOnce() {
+  if (!_activeTaskId || _taskPollInFlight) return;
+  _taskPollInFlight = true;
+  try {
+    const r = await fetch(`/api/task/${encodeURIComponent(_activeTaskId)}`);
+    if (!r.ok) throw new Error(`轮询失败 HTTP ${r.status}`);
+    const taskObj = await r.json();
+    if (taskObj.error === "job_not_found") {
+      const { statusEl } = getTaskUiElements();
+      if (statusEl) {
+        statusEl.className = "result-box error";
+        statusEl.innerHTML =
+          `<span class="status-icon">❌</span> 会话不存在或已清理：<strong>${escapeHtml(_activeTaskId)}</strong>`;
+      }
+      stopTaskPolling();
+      return;
+    }
+    if (taskObj.error === "job_not_task") {
+      const { statusEl } = getTaskUiElements();
+      if (statusEl) {
+        statusEl.className = "result-box error";
+        statusEl.innerHTML =
+          `<span class="status-icon">❌</span> 该 ID 不是 task 会话：<strong>${escapeHtml(_activeTaskId)}</strong>`;
+      }
+      stopTaskPolling();
+      return;
+    }
+
+    const done = renderTaskState(_activeTaskId, taskObj);
+    if (done) {
+      stopTaskPolling();
+      await loadTaskSessions(_activeTaskId);
+    }
+  } catch (err) {
+    const { statusEl } = getTaskUiElements();
+    if (statusEl) {
+      statusEl.className = "result-box error";
+      statusEl.innerHTML = `<span class="status-icon">❌</span> 监控失败：${escapeHtml(err.message)}`;
+    }
+  } finally {
+    _taskPollInFlight = false;
+  }
+}
+
+function startTaskPolling(jobId) {
+  const targetId = (jobId || "").trim();
+  if (!targetId) return;
+
+  _activeTaskId = targetId;
+  _activeTaskLastLog = "";
+  _activeTaskLastStatus = "";
+  rememberActiveTask(targetId);
+  setTaskSelection(targetId);
+  ensureTaskUiVisible();
+
+  const { statusEl, progressEl, logEl } = getTaskUiElements();
+  if (statusEl) {
+    statusEl.className = "result-box loading";
+    statusEl.innerHTML =
+      `<span class="status-icon">⏳</span> 已绑定会话：<strong>${escapeHtml(targetId)}</strong>，正在拉取状态...`;
+  }
+  if (progressEl) {
+    progressEl.className = "result-box";
+    progressEl.innerHTML = "等待任务初始化...";
+  }
+  if (logEl) {
+    logEl.className = "result-box";
+    logEl.innerHTML = "";
+  }
+
+  stopTaskPolling();
+  pollActiveTaskOnce();
+  _taskPollTimer = setInterval(() => {
+    pollActiveTaskOnce();
+  }, 2000);
+}
+
+function bindSelectedSession() {
+  const manual = (getValue("task_session_id") || "").trim();
+  const selectVal = (getValue("task_session_select") || "").trim();
+  const targetId = manual || selectVal;
+  if (!targetId) {
+    alert("请选择会话或输入任务 ID");
+    return;
+  }
+  startTaskPolling(targetId);
+}
 
 // ===== 模糊测试功能 =====
-document.getElementById("fuzz_btn").addEventListener("click", async () => {
-  const codeUrl = document.getElementById("code_url").value.trim();
-  const email = document.getElementById("email").value.trim();
+document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
+  const codeUrl = (document.getElementById("code_url")?.value || "").trim();
+  const email = (document.getElementById("email")?.value || "").trim();
   const timeBudgetRaw = (document.getElementById("time_budget")?.value || "900").trim();
-  const useDocker = !!document.getElementById("use_docker")?.checked;
-  const dockerImage = (document.getElementById("docker_image")?.value || "sherpa-fuzz:latest").trim();
-  const statusEl = document.getElementById("fuzz_status");
-  const progressEl = document.getElementById("fuzz_progress");
-  const logEl = document.getElementById("fuzz_log");
+  const useDocker = true;
+  const dockerImage = (document.getElementById("docker_image")?.value || "auto").trim();
   const btn = document.getElementById("fuzz_btn");
+  const { statusEl, progressEl, logEl } = getTaskUiElements();
 
   if (!codeUrl) {
     alert("请输入代码仓库地址");
@@ -227,15 +558,15 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
     return;
   }
 
-  // 禁用按钮，显示加载状态
+  if (!statusEl || !progressEl || !logEl || !btn) return;
+
+  // 禁用按钮，显示加载状态。
   btn.disabled = true;
-  statusEl.style.display = "block";
+  ensureTaskUiVisible();
   statusEl.className = "result-box loading";
   statusEl.innerHTML = '<span class="status-icon">⏳</span> 已提交任务，正在排队...';
-  progressEl.style.display = "block";
   progressEl.className = "result-box";
   progressEl.innerHTML = "等待任务初始化...";
-  logEl.style.display = "block";
   logEl.className = "result-box";
   logEl.innerHTML = "";
 
@@ -250,76 +581,74 @@ document.getElementById("fuzz_btn").addEventListener("click", async () => {
             email: email || null,
             time_budget: timeBudget,
             docker: useDocker,
-            docker_image: dockerImage
-          }
-        ]
+            docker_image: dockerImage,
+          },
+        ],
       }),
     });
 
     if (!res.ok) {
-      throw new Error(`HTTP 错误 ${res.status}`);
+      let detail = `HTTP 错误 ${res.status}`;
+      try {
+        const errObj = await res.json();
+        detail = errObj?.detail || detail;
+      } catch (_) {}
+      throw new Error(detail);
     }
 
     const data = await res.json();
-    if (!data.job_id) {
-      throw new Error("服务端未返回 job_id");
-    }
+    const jobId = (data && data.job_id) || "";
+    if (!jobId) throw new Error("服务端未返回 job_id");
 
-    const jobId = data.job_id;
-    statusEl.className = "result-box loading";
-    statusEl.innerHTML = `<span class="status-icon">⏳</span> 任务已创建：<strong>${escapeHtml(jobId)}</strong>（轮询中...）`;
-
-    // Poll status until finished.
-    let lastLog = "";
-    const poll = async () => {
-      const r = await fetch(`/api/task/${encodeURIComponent(jobId)}`);
-      if (!r.ok) throw new Error(`轮询失败 HTTP ${r.status}`);
-      const j = await r.json();
-      if (j.error === "job_not_found") throw new Error("任务不存在或已被清理");
-
-      const st = j.status || "unknown";
-      const child = Array.isArray(j.children) && j.children.length ? j.children[0] : null;
-      const err = (child && child.error) || j.error;
-      const result = (child && child.result) || j.result;
-      const log = ((child && child.log) || j.log || "").toString();
-      const logFile = (child && child.log_file) || j.log_file;
-      if (log !== lastLog) {
-        lastLog = log;
-        const summary = summarizeLog(log, st, result, err, logFile);
-        logEl.innerHTML = `<strong>进度摘要（实时）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(summary)}</pre>`;
-        logEl.scrollTop = logEl.scrollHeight;
-
-        const progress = renderProgressFromLog(log);
-        progressEl.innerHTML = progress;
-      }
-
-      if (st === "queued" || st === "running") {
-        statusEl.className = "result-box loading";
-        statusEl.innerHTML = `<span class="status-icon">⏳</span> 当前状态：<strong>${escapeHtml(st)}</strong>（任务：${escapeHtml(jobId)}）`;
-        return false;
-      }
-
-      if (st === "success") {
-        statusEl.className = "result-box success";
-        statusEl.innerHTML = `<span class="status-icon">✅</span> 完成（任务：<strong>${escapeHtml(jobId)}</strong>）<br>${escapeHtml(result || "")}`;
-        return true;
-      }
-
-      statusEl.className = "result-box error";
-      statusEl.innerHTML = `<span class="status-icon">❌</span> 失败（任务：<strong>${escapeHtml(jobId)}</strong>）<br>${escapeHtml(err || "unknown error")}`;
-      return true;
-    };
-
-    for (let i = 0; i < 3600; i++) {
-      const done = await poll();
-      if (done) break;
-      await new Promise((r) => setTimeout(r, 2000));
-    }
+    setSessionStatusLine(`已创建会话 #${jobId.slice(0, 8)}，准备监控。`);
+    await loadTaskSessions(jobId);
+    startTaskPolling(jobId);
   } catch (err) {
     statusEl.className = "result-box error";
     statusEl.innerHTML = `<span class="status-icon">❌</span> <strong>测试失败：</strong> ${escapeHtml(err.message)}`;
   } finally {
     btn.disabled = false;
+  }
+});
+
+// ===== 页面事件 =====
+document.getElementById("cfg_save_btn")?.addEventListener("click", async () => {
+  await saveConfigFromForm();
+});
+
+document.getElementById("refresh_system_btn")?.addEventListener("click", async () => {
+  await pollSystemStatus();
+});
+
+document.getElementById("refresh_sessions_btn")?.addEventListener("click", async () => {
+  const preferred = _activeTaskId || (getValue("task_session_id") || "").trim();
+  await loadTaskSessions(preferred);
+});
+
+document.getElementById("bind_session_btn")?.addEventListener("click", () => {
+  bindSelectedSession();
+});
+
+document.getElementById("task_session_select")?.addEventListener("change", () => {
+  const val = (getValue("task_session_select") || "").trim();
+  setValue("task_session_id", val);
+  updateSessionHint();
+});
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadConfigIntoForm();
+  startSystemPolling();
+  await loadTaskSessions();
+  startSessionListPolling();
+
+  const remembered = recallActiveTask();
+  if (remembered) {
+    startTaskPolling(remembered);
+    return;
+  }
+  const running = _sessionItems.find((x) => x.status === "running");
+  if (running && running.job_id) {
+    startTaskPolling(running.job_id);
   }
 });
 
@@ -332,7 +661,7 @@ function escapeHtml(text) {
     '"': "&quot;",
     "'": "&#039;",
   };
-  return text.replace(/[&<>"']/g, (m) => map[m]);
+  return String(text ?? "").replace(/[&<>"']/g, (m) => map[m]);
 }
 
 function getValue(id) {
@@ -351,6 +680,11 @@ function getChecked(id) {
 function setChecked(id, checked) {
   const el = document.getElementById(id);
   if (el) el.checked = !!checked;
+}
+
+function setDisabled(id, disabled) {
+  const el = document.getElementById(id);
+  if (el) el.disabled = !!disabled;
 }
 
 function summarizeLog(log, status, result, err, logFile) {
@@ -422,18 +756,24 @@ function renderProgressFromLog(log) {
     error: "#ef4444",
   };
 
-  const items = steps.map((s) => {
-    const st = parsed.steps[s] || "pending";
-    const color = statusToColor[st] || "#9ca3af";
-    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+  const items = steps
+    .map((s) => {
+      const st = parsed.steps[s] || "pending";
+      const color = statusToColor[st] || "#9ca3af";
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
       <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;"></span>
       <span>${labels[s]}</span>
       <span style="color:#6d6f73;font-size:12px;">(${st})</span>
     </div>`;
-  }).join("");
+    })
+    .join("");
 
-  const repoLine = parsed.repoRoot ? `<div style="margin-top:6px;color:#6d6f73;font-size:12px;">输出目录：${escapeHtml(parsed.repoRoot)}</div>` : "";
-  const lastErr = parsed.lastError ? `<div style="margin-top:8px;color:#b91c1c;font-size:12px;">错误：${escapeHtml(parsed.lastError)}</div>` : "";
+  const repoLine = parsed.repoRoot
+    ? `<div style="margin-top:6px;color:#6d6f73;font-size:12px;">输出目录：${escapeHtml(parsed.repoRoot)}</div>`
+    : "";
+  const lastErr = parsed.lastError
+    ? `<div style="margin-top:8px;color:#b91c1c;font-size:12px;">错误：${escapeHtml(parsed.lastError)}</div>`
+    : "";
   return `<strong>阶段进度：</strong><div style="margin-top:8px;">${items}</div>${repoLine}${lastErr}`;
 }
 
@@ -467,7 +807,11 @@ function parseWorkflowLog(log) {
       }
     }
 
-    if (/Missing fuzz\/build\.py|OpenCodeHelper|opencode/i.test(line)) {
+    // Avoid treating generic OpenCode progress/env lines as errors.
+    const opencodeErrorLike =
+      /\b(OpenCodeHelper|opencode)\b/i.test(line) &&
+      /(error|failed|exception|timeout)/i.test(line);
+    if (/Missing fuzz\/build\.py/i.test(line) || opencodeErrorLike) {
       lastError = line.replace(/^\[.*?\]\s*/, "");
     }
   }
