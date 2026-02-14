@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,12 +29,14 @@ class _FakeGenerator:
         self._run_results = list(run_results)
         self._bin_results = list(bin_results)
         self.commands: list[list[str]] = []
+        self.cwds: list[Path] = []
 
     def _python_runner(self) -> str:
         return "python"
 
     def _run_cmd(self, cmd, *, cwd, env, timeout):
         self.commands.append(list(cmd))
+        self.cwds.append(Path(cwd))
         if not self._run_results:
             raise AssertionError("unexpected _run_cmd call")
         return self._run_results.pop(0)
@@ -148,3 +151,69 @@ def test_build_sh_uses_sh_when_bash_missing(tmp_path: Path, monkeypatch, _no_sle
     assert out["last_error"] == ""
     assert len(gen.commands) == 1
     assert gen.commands[0][0] == "sh"
+
+
+def test_build_retries_in_repo_root_cwd_for_hardcoded_fuzz_paths(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text(
+        "print('legacy build script')\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (1, "", "FileNotFoundError: [Errno 2] No such file or directory: 'fuzz/targets.json'"),
+            (0, "ok", ""),
+        ],
+        bin_results=[[fuzzer_bin]],
+        docker_image="sherpa-fuzz-cpp:latest",
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["last_error"] == ""
+    assert out["build_rc"] == 0
+    assert len(gen.commands) == 2
+    assert gen.commands[0] == ["python", "build.py"]
+    assert gen.commands[1] == ["python", "fuzz/build.py"]
+    assert gen.cwds[0] == fuzz_dir
+    assert gen.cwds[1] == tmp_path
+
+
+def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "\n".join(
+            [
+                "flags = [",
+                "    '-std=c++11',",
+                "    '-fsanitize=fuzzer,address,undefined',",
+                "]",
+                "cmd = [cxx] + flags + [source_path, harness_path, '-o', output_path]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    gen = SimpleNamespace(repo_root=tmp_path)
+    state = {
+        "generator": gen,
+        "last_error": "ld: multiple definition of `main'",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+
+    assert out["last_error"] == ""
+    assert "hotfix" in out["message"]
+    assert "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" in build_py.read_text(encoding="utf-8")

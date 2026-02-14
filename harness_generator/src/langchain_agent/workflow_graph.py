@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph
 from persistent_config import load_config
 
 from fuzz_unharnessed_repo import (
+    FuzzerRunResult,
     HarnessGeneratorError,
     NonOssFuzzHarnessGenerator,
     RepoSpec,
@@ -43,6 +44,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     codex_hint: str
     failed: bool
     repo_root: str
+    run_rc: int
+    crash_evidence: str
+    run_error_kind: str
+    run_details: list[dict[str, Any]]
     last_crash_artifact: str
     last_fuzzer: str
     crash_fix_attempts: int
@@ -74,7 +79,7 @@ def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
     prefix = "[wf]"
     if step_count or last_step or nxt:
         prefix = f"[wf step={step_count or '-'} last={last_step or '-'} next={nxt or '-'}]"
-    print(f"{prefix} {msg}")
+    print(f"{prefix} {msg}", flush=True)
 
 
 def _fmt_dt(seconds: float) -> str:
@@ -324,7 +329,7 @@ if __name__ == "__main__":
 """
     readme = f"""# Local fuzz scaffold (tinyxml2)
 
-1. Build: `python fuzz/build.py`
+1. Build: `cd fuzz && python build.py`
 2. Run: `fuzz/out/tinyxml2_fuzz fuzz/corpus/tinyxml2_fuzz`
 
 The harness feeds attacker-controlled XML bytes into `tinyxml2::XMLDocument::Parse`.
@@ -391,7 +396,9 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
 
     time_budget = int(state.get("time_budget") or 900)
     max_len = int(state.get("max_len") or 1024)
-    docker_image = state.get("docker_image")
+    docker_image = (state.get("docker_image") or "").strip()
+    if not docker_image:
+        raise ValueError("Docker execution is mandatory; docker_image is required")
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
 
     workdir = _alloc_output_workdir(repo_url)
@@ -422,6 +429,9 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "codex_hint": "",
             "failed": False,
             "repo_root": str(generator.repo_root),
+            "run_rc": 0,
+            "crash_evidence": "none",
+            "run_error_kind": "",
             "last_crash_artifact": "",
             "last_fuzzer": "",
             "crash_fix_attempts": int(state.get("crash_fix_attempts") or 0),
@@ -509,6 +519,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 "You are coordinating a fuzz harness generation workflow.\n"
                 "Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.\n\n"
                 "IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.\n\n"
+                "If external system dependencies are required, write package names (one per line) to "
+                "fuzz/system_packages.txt. Use package names only; no shell commands.\n\n"
                 "Additional instruction from coordinator:\n" + hint
             )
             # Provide context from plan/targets if present.
@@ -593,11 +605,13 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             return "\n".join(libs) if libs else "(no static libs found under build/)"
 
         build_cmd_clean: list[str] | None = None
+        build_cwd = fuzz_dir
+        fallback_cmd: list[str] | None = None
+        fallback_cwd: Path | None = None
         if build_py.is_file():
-            if getattr(gen, "docker_image", None):
-                build_cmd = [gen._python_runner(), "fuzz/build.py"]
-            else:
-                build_cmd = [gen._python_runner(), str(build_py)]
+            build_cmd = [gen._python_runner(), "build.py"]
+            fallback_cmd = [gen._python_runner(), "fuzz/build.py"]
+            fallback_cwd = gen.repo_root
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
         elif build_sh.is_file():
@@ -613,7 +627,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 build_sh.chmod(mode | 0o111)
             except Exception:
                 pass
-            build_cmd = [shell, "fuzz/build.sh"] if getattr(gen, "docker_image", None) else [shell, str(build_sh)]
+            build_cmd = [shell, "build.sh"]
+            fallback_cmd = [shell, "fuzz/build.sh"]
+            fallback_cwd = gen.repo_root
         else:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
@@ -651,16 +667,34 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         final_err = ""
         final_bins: list[Path] = []
 
+        def _is_repo_root_cwd_issue(out: str, err: str) -> bool:
+            combined = ((out or "") + "\n" + (err or "")).lower()
+            return (
+                ("no such file or directory" in combined and "fuzz/" in combined)
+                or "can't open file '/work/fuzz/fuzz/" in combined
+                or "can't open file 'fuzz/" in combined
+            )
+
         for attempt in range(1, max_local_attempts + 1):
             _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
-            rc, out, err = gen._run_cmd(list(build_cmd), cwd=gen.repo_root, env=build_env, timeout=7200)
+            rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=7200)
             attempts_used += 1
+
+            # Backward-compatibility shim: older generated scripts may hardcode "fuzz/..."
+            # and therefore need repo-root cwd.
+            if rc != 0 and fallback_cmd is not None and fallback_cwd is not None and _is_repo_root_cwd_issue(out, err):
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    f"build retry from repo-root cwd -> {' '.join(fallback_cmd)}",
+                )
+                rc, out, err = gen._run_cmd(list(fallback_cmd), cwd=fallback_cwd, env=build_env, timeout=7200)
+                attempts_used += 1
 
             if rc != 0 and retry_with_clean and build_cmd_clean is not None:
                 combined = (out or "") + "\n" + (err or "")
                 if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
                     _wf_log(cast(dict[str, Any], state), "build failed; retrying once with --clean")
-                    rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=gen.repo_root, env=build_env, timeout=7200)
+                    rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=build_cwd, env=build_env, timeout=7200)
                     attempts_used += 1
                     combined2 = (out2 or "") + "\n" + (err2 or "")
                     if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
@@ -730,6 +764,64 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     # Fast-path hotfix (minimal, no refactor): a common generated-script issue is
     # linking with `-lz` while the static library is only available by file path.
+    def _try_hotfix_libfuzzer_main_conflict() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        if "multiple definition of `main'" not in diag and "multiple definition of main" not in diag:
+            return False
+
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        define_flag = "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
+        if define_flag in text:
+            return False
+
+        lines = text.splitlines()
+        changed = False
+        in_flags = False
+        for i, line in enumerate(lines):
+            if not in_flags and re.search(r"^\s*flags\s*=\s*\[", line):
+                in_flags = True
+                continue
+            if not in_flags:
+                continue
+            if "-fsanitize=fuzzer" in line:
+                indent_match = re.match(r"^(\s*)", line)
+                indent = indent_match.group(1) if indent_match else "        "
+                lines.insert(i + 1, f"{indent}'{define_flag}',")
+                changed = True
+                break
+            if re.search(r"^\s*\]", line):
+                lines.insert(i, f"        '{define_flag}',")
+                changed = True
+                break
+
+        if not changed:
+            replaced = text.replace(
+                "cmd = [cxx] + flags + [source_path, harness_path, '-o', output_path]",
+                "cmd = [cxx, '-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION'] + flags + [source_path, harness_path, '-o', output_path]",
+            )
+            if replaced != text:
+                text = replaced
+                changed = True
+            else:
+                return False
+        else:
+            text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for libfuzzer main conflict")
+            return True
+        except Exception:
+            return False
+
     def _try_hotfix_missing_lz() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         if "cannot find -lz" not in diag:
@@ -779,6 +871,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
+    if _try_hotfix_libfuzzer_main_conflict():
+        out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for libfuzzer main conflict applied"}
+        _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
     if _try_hotfix_missing_lz():
         out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for -lz applied"}
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -798,7 +895,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "- codex_hint must be 1-10 lines, concrete and minimal.\n"
                 "- Tell OpenCode to only change fuzz/ and minimal build glue.\n"
                 "- IMPORTANT: Tell OpenCode to NOT run any commands — only edit files.\n"
-                "- Acceptance: `python fuzz/build.py` succeeds and leaves at least one executable in fuzz/out/.\n\n"
+                "- Acceptance: `(cd fuzz && python build.py)` succeeds and leaves at least one executable in fuzz/out/.\n\n"
                 f"repo_root={repo_root}\n"
                 + (f"last_error={last_error}\n" if last_error else "")
                 + ("\n=== STDOUT (tail) ===\n" + stdout_tail + "\n" if stdout_tail else "")
@@ -815,7 +912,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
         if not codex_hint:
             codex_hint = (
-                "Fix the fuzz build so that running `python fuzz/build.py` succeeds and leaves at least one executable fuzzer under fuzz/out/.\n"
+                "Fix the fuzz build so that running `(cd fuzz && python build.py)` succeeds and leaves at least one executable fuzzer under fuzz/out/.\n"
                 "Only modify files under fuzz/ and the minimal build glue required.\n"
                 "If the harness source is wrong or missing includes/links, fix it. If build.py uses wrong target names or paths, correct it.\n"
                 "Do not refactor production code."
@@ -835,13 +932,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         "You are OpenCode operating inside a Git repository.\n"
         "Task: fix the fuzz harness/build source code so the build will pass when run later.\n\n"
         "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
-        "- `python fuzz/build.py` should complete successfully\n"
+        "- `(cd fuzz && python build.py)` should complete successfully\n"
         "- fuzz/out/ should contain at least one runnable fuzzer binary\n\n"
         "CRITICAL: Do NOT run any commands (no cmake, make, python, bash, gcc, clang, etc.).\n"
         "Only edit source files. The build will be executed by the workflow after you finish.\n\n"
         "Constraints:\n"
         "- Keep changes minimal; avoid refactors\n"
         "- Prefer edits under fuzz/ and minimal build glue only\n\n"
+        "- If external system deps are required, declare package names in fuzz/system_packages.txt "
+        "(one per line, comments allowed, no shell commands)\n\n"
         "Coordinator instruction:\n"
         + codex_hint.strip()
         + "\n\nWhen finished, write `fuzz/build.py` into `./done`."
@@ -888,6 +987,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         crash_found = False
         last_artifact = ""
         last_fuzzer = ""
+        run_rc = 0
+        crash_evidence = "none"
+        run_error_kind = ""
+        run_last_error = ""
+        run_details: list[dict[str, Any]] = []
         for bin_path in bins:
             fuzzer_name = bin_path.name
             try:
@@ -896,26 +1000,63 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 # Seed generation is best-effort; do not block fuzzing.
                 print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
 
-            new_artifacts = gen._run_fuzzer(bin_path)
-            if new_artifacts:
-                first = sorted(new_artifacts)[0]
+            run: FuzzerRunResult = gen._run_fuzzer(bin_path)
+            run_rc = int(run.rc)
+            crash_evidence = run.crash_evidence
+            run_error_kind = run.run_error_kind
+            run_details.append(
+                {
+                    "fuzzer": fuzzer_name,
+                    "rc": int(run.rc),
+                    "crash_found": bool(run.crash_found),
+                    "crash_evidence": run.crash_evidence,
+                    "run_error_kind": run.run_error_kind,
+                    "new_artifacts": [str(p) for p in (run.new_artifacts or [])],
+                    "first_artifact": run.first_artifact or "",
+                    "final_cov": int(run.final_cov),
+                    "final_ft": int(run.final_ft),
+                    "final_iteration": int(run.final_iteration),
+                    "final_execs_per_sec": int(run.final_execs_per_sec),
+                    "final_rss_mb": int(run.final_rss_mb),
+                    "final_corpus_files": int(run.final_corpus_files),
+                    "final_corpus_size_bytes": int(run.final_corpus_size_bytes),
+                    "corpus_files": int(run.corpus_files),
+                    "corpus_size_bytes": int(run.corpus_size_bytes),
+                }
+            )
+            if run.error:
+                run_last_error = run.error
+                break
+
+            if run.crash_found and run.first_artifact:
+                first = Path(run.first_artifact)
                 gen._analyze_and_package(fuzzer_name, first)
                 crash_found = True
                 last_artifact = str(first)
                 last_fuzzer = fuzzer_name
                 break
 
-        msg = "Fuzzing completed." if not crash_found else "Fuzzing completed (crash found and packaged)."
+        if run_last_error:
+            msg = "Fuzzing run failed."
+        else:
+            msg = "Fuzzing completed." if not crash_found else "Fuzzing completed (crash found and packaged)."
         out = {
             **state,
             "last_step": "run",
-            "last_error": "",
+            "last_error": run_last_error,
             "crash_found": crash_found,
+            "run_rc": run_rc,
+            "crash_evidence": crash_evidence,
+            "run_error_kind": run_error_kind,
+            "run_details": run_details,
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "message": msg,
         }
-        _wf_log(cast(dict[str, Any], out), f"<- run ok crash_found={crash_found} dt={_fmt_dt(time.perf_counter()-t0)}")
+        _wf_log(
+            cast(dict[str, Any], out),
+            f"<- run ok crash_found={crash_found} rc={run_rc} evidence={crash_evidence} dt={_fmt_dt(time.perf_counter()-t0)}",
+        )
         return out
     except Exception as e:
         out = {**state, "last_step": "run", "last_error": str(e), "message": "run failed"}
@@ -1089,6 +1230,7 @@ def _node_decide(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "Constraints:\n"
         "- Allowed next steps: plan, synthesize, build, fix_build, fix_crash, run, stop\n"
         "- Only provide codex_hint when next is plan, synthesize, fix_build, or fix_crash\n"
+        "- codex_hint should prioritize minimal-dependency paths and avoid introducing new external system packages\n"
         "- Keep codex_hint short and actionable (1-6 lines)\n"
         "- Output MUST be a single JSON object with keys: next, codex_hint (optional)\n\n"
         f"State summary:\n- repo_root: {repo_root}\n- docker_image: {docker_image}\n- last_step: {last_step}\n- crash_found: {crash_found}\n"
@@ -1176,6 +1318,91 @@ def _detect_harness_error(repo_root: Path) -> bool:
     return bool(re.search(r"HARNESS ERROR", text, re.IGNORECASE))
 
 
+def _bytes_human(num_bytes: int) -> str:
+    n = max(0, int(num_bytes))
+    units = ["B", "KB", "MB", "GB"]
+    idx = 0
+    val = float(n)
+    while val >= 1024.0 and idx < len(units) - 1:
+        val /= 1024.0
+        idx += 1
+    if idx == 0:
+        return f"{int(val)}{units[idx]}"
+    return f"{val:.1f}{units[idx]}"
+
+
+def _tree_file_stats(root: Path) -> tuple[int, int]:
+    files = 0
+    total_bytes = 0
+    if not root.is_dir():
+        return files, total_bytes
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        files += 1
+        try:
+            total_bytes += int(p.stat().st_size)
+        except Exception:
+            pass
+    return files, total_bytes
+
+
+def _collect_fuzz_inventory(repo_root: Path) -> dict[str, Any]:
+    fuzz_dir = repo_root / "fuzz"
+    out_dir = fuzz_dir / "out"
+    corpus_dir = fuzz_dir / "corpus"
+    artifacts_dir = out_dir / "artifacts"
+
+    binaries: list[str] = []
+    options_files: list[str] = []
+    if out_dir.is_dir():
+        for p in sorted(out_dir.iterdir()):
+            if not p.is_file():
+                continue
+            name = p.name
+            if name.endswith(".options"):
+                options_files.append(name)
+            if os.access(p, os.X_OK) or p.suffix.lower() == ".exe":
+                binaries.append(name)
+
+    artifact_files: list[str] = []
+    if artifacts_dir.is_dir():
+        for p in sorted(artifacts_dir.rglob("*")):
+            if p.is_file():
+                artifact_files.append(str(p.relative_to(repo_root)))
+
+    corpus_stats: dict[str, dict[str, Any]] = {}
+    corpus_total_files = 0
+    corpus_total_bytes = 0
+    if corpus_dir.is_dir():
+        for d in sorted(corpus_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            files, size_bytes = _tree_file_stats(d)
+            corpus_total_files += files
+            corpus_total_bytes += size_bytes
+            corpus_stats[d.name] = {
+                "files": files,
+                "bytes": size_bytes,
+                "human": _bytes_human(size_bytes),
+            }
+
+    return {
+        "fuzz_dir": str(fuzz_dir),
+        "fuzz_out_dir": str(out_dir),
+        "fuzz_corpus_dir": str(corpus_dir),
+        "fuzzer_binaries": binaries,
+        "fuzzer_count": len(binaries),
+        "options_files": options_files,
+        "artifact_files": artifact_files,
+        "artifact_count": len(artifact_files),
+        "corpus_stats": corpus_stats,
+        "corpus_total_files": corpus_total_files,
+        "corpus_total_bytes": corpus_total_bytes,
+        "corpus_total_human": _bytes_human(corpus_total_bytes),
+    }
+
+
 def _write_run_summary(out: dict[str, Any]) -> None:
     repo_root_raw = out.get("repo_root")
     if not repo_root_raw:
@@ -1189,6 +1416,8 @@ def _write_run_summary(out: dict[str, Any]) -> None:
     failed = bool(out.get("failed"))
     status = "error" if (failed or last_error) else ("crash_found" if crash_found else "ok")
     harness_error = _detect_harness_error(repo_root)
+    run_details = cast(list[dict[str, Any]], out.get("run_details") or [])
+    fuzz_inventory = _collect_fuzz_inventory(repo_root)
 
     bundle_dirs = [
         d.name
@@ -1205,8 +1434,12 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         "step_count": out.get("step_count"),
         "build_attempts": out.get("build_attempts"),
         "build_rc": out.get("build_rc"),
+        "run_rc": out.get("run_rc"),
         "last_error": last_error,
         "crash_found": crash_found,
+        "crash_evidence": out.get("crash_evidence") or "none",
+        "run_error_kind": out.get("run_error_kind") or "",
+        "run_details": run_details,
         "last_fuzzer": out.get("last_fuzzer"),
         "last_crash_artifact": out.get("last_crash_artifact"),
         "harness_error": harness_error,
@@ -1217,6 +1450,7 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         "crash_analysis_path": str(repo_root / "crash_analysis.md"),
         "reproducer_path": str(repo_root / "reproduce.py"),
         "bundles": bundle_dirs,
+        "fuzz_inventory": fuzz_inventory,
         "timestamp": time.time(),
     }
 
@@ -1235,9 +1469,28 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         f"- Repo root: {data['repo_root']}",
         f"- Last step: {data['last_step']}",
         f"- Build attempts: {data['build_attempts']}",
+        f"- Run rc: {data['run_rc']}",
+        f"- Crash evidence: {data['crash_evidence']}",
         f"- Crash found: {crash_found}",
         f"- Harness error: {harness_error}",
+        f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
+        f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
+        f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
     ]
+    if run_details:
+        md_lines.extend(["", "## Fuzzer Effectiveness"])
+        for item in run_details:
+            md_lines.append(
+                "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, corpus={corp_files}/{corp_size}, rss={rss}MB".format(
+                    fuzzer=item.get("fuzzer"),
+                    rc=item.get("rc"),
+                    cov=item.get("final_cov"),
+                    ft=item.get("final_ft"),
+                    corp_files=item.get("final_corpus_files"),
+                    corp_size=_bytes_human(int(item.get("final_corpus_size_bytes") or 0)),
+                    rss=item.get("final_rss_mb"),
+                )
+            )
     if last_error:
         md_lines.extend(["", "## Last Error", "```text", last_error, "```"])
     if crash_found:
@@ -1269,6 +1522,54 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         summary_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
     except Exception:
         pass
+
+    out_dir = Path(str(fuzz_inventory.get("fuzz_out_dir") or ""))
+    if out_dir.is_dir():
+        eff_json = out_dir / "fuzz_effectiveness.json"
+        eff_md = out_dir / "fuzz_effectiveness.md"
+        eff = {
+            "status": status,
+            "repo_url": data.get("repo_url"),
+            "run_rc": data.get("run_rc"),
+            "crash_found": crash_found,
+            "crash_evidence": data.get("crash_evidence"),
+            "run_details": run_details,
+            "fuzz_inventory": fuzz_inventory,
+            "timestamp": data.get("timestamp"),
+        }
+        try:
+            eff_json.write_text(json.dumps(eff, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        eff_lines = [
+            "# Fuzz Effectiveness",
+            "",
+            f"- Status: {status}",
+            f"- Crash found: {crash_found}",
+            f"- Run rc: {data.get('run_rc')}",
+            f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
+            f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
+            f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
+        ]
+        if run_details:
+            eff_lines.extend(["", "## Per Fuzzer"])
+            for item in run_details:
+                eff_lines.append(
+                    "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, corpus={corp_files}/{corp_size}, exec/s={eps}, rss={rss}MB".format(
+                        fuzzer=item.get("fuzzer"),
+                        rc=item.get("rc"),
+                        cov=item.get("final_cov"),
+                        ft=item.get("final_ft"),
+                        corp_files=item.get("final_corpus_files"),
+                        corp_size=_bytes_human(int(item.get("final_corpus_size_bytes") or 0)),
+                        eps=item.get("final_execs_per_sec"),
+                        rss=item.get("final_rss_mb"),
+                    )
+                )
+        try:
+            eff_md.write_text("\n".join(eff_lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
 
 def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:

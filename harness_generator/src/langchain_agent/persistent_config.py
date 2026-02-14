@@ -62,6 +62,8 @@ def load_config() -> WebPersistentConfig:
     path = config_path()
     if not path.is_file():
         cfg = WebPersistentConfig()
+        cfg.fuzz_use_docker = True
+        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
@@ -73,12 +75,16 @@ def load_config() -> WebPersistentConfig:
         else:
             cfg = WebPersistentConfig(**raw)
 
+        cfg.fuzz_use_docker = True
+        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
         return cfg
     except Exception:
         cfg = WebPersistentConfig()
+        cfg.fuzz_use_docker = True
+        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir

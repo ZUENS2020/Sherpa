@@ -55,17 +55,26 @@ def fuzz_logic(
         os.environ["OPENCODE_MODEL"] = model.strip()
     if oss_fuzz_dir and oss_fuzz_dir.strip():
         os.environ["SHERPA_DEFAULT_OSS_FUZZ_DIR"] = oss_fuzz_dir.strip()
-    return run_fuzz_workflow(
-        FuzzWorkflowInput(
-            repo_url=repo_url,
-            email=email,
-            time_budget=int(time_budget or 900),
-            max_len=int(max_len or 1024),
-            docker_image=docker_image,
-            ai_key_path=(ai_key_path or _find_ai_key_path()),
-            model=model,
+    print(f"[DEBUG] Entering run_fuzz_workflow with repo_url={repo_url}")
+    try:
+        result = run_fuzz_workflow(
+            FuzzWorkflowInput(
+                repo_url=repo_url,
+                email=email,
+                time_budget=int(time_budget or 900),
+                max_len=int(max_len or 1024),
+                docker_image=docker_image,
+                ai_key_path=(ai_key_path or _find_ai_key_path()),
+                model=model,
+            )
         )
-    )
+        print(f"[DEBUG] run_fuzz_workflow returned successfully")
+        return result
+    except Exception as e:
+        print(f"[DEBUG] run_fuzz_workflow failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     pass

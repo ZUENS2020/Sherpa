@@ -64,6 +64,7 @@ services:
 
       # Route docker CLI calls to the dind daemon.
       DOCKER_HOST: "tcp://sherpa-docker:2375"
+      DOCKER_BUILDKIT: "0"
 
       # Default OSS-Fuzz checkout path inside containers.
       # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
@@ -80,7 +81,6 @@ services:
 
       # Prefer domestic Git mirrors for clone operations.
       SHERPA_GIT_MIRRORS: "https://gitclone.com/github.com/"
-      SHERPA_PREFER_GIT_MIRRORS: "1"
 
       # OpenRouter API (for all AI features)
       OPENROUTER_API_KEY: ""

@@ -47,6 +47,7 @@ import logging
 import os
 import queue
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -60,7 +61,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -124,6 +125,7 @@ FUZZ_DIR = "fuzz"
 FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
+FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
 
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
@@ -311,6 +313,13 @@ def _tail_lines(s: str, *, max_lines: int = 80) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def _is_truthy_env(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _run_cmd_capture(
     cmd: Sequence[str],
     *,
@@ -477,11 +486,10 @@ def _candidate_clone_urls(url: str) -> List[str]:
     Mirrors are only applied to HTTPS GitHub URLs.
     """
 
-    prefer_mirrors = os.environ.get("SHERPA_PREFER_GIT_MIRRORS", "").strip().lower() in {"1", "true", "yes"}
-    urls: List[str] = [] if prefer_mirrors else [url]
+    urls: List[str] = [url]
     if not url.startswith("https://github.com/"):
         # Non-GitHub URLs are returned as-is to avoid breaking custom hosts.
-        return [url] if not urls else urls
+        return urls
 
     mirror_specs: List[str] = []
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
@@ -536,10 +544,6 @@ def _candidate_clone_urls(url: str) -> List[str]:
         if candidate and candidate not in urls:
             urls.append(candidate)
 
-    # If we're not strictly preferring mirrors, keep the original URL as a fallback.
-    if not prefer_mirrors and url not in urls:
-        urls.append(url)
-
     return urls
 
 
@@ -552,6 +556,85 @@ class RepoSpec:
     url: str
     ref: Optional[str] = None       # branch/tag/commit
     workdir: Optional[Path] = None  # where to clone; auto if None
+
+
+@dataclass
+class FuzzerRunResult:
+    rc: int
+    new_artifacts: List[Path]
+    crash_found: bool
+    crash_evidence: str
+    first_artifact: str
+    log_tail: str
+    error: str
+    run_error_kind: str
+    final_cov: int = 0
+    final_ft: int = 0
+    final_corpus_files: int = 0
+    final_corpus_size_bytes: int = 0
+    final_execs_per_sec: int = 0
+    final_rss_mb: int = 0
+    final_iteration: int = 0
+    corpus_files: int = 0
+    corpus_size_bytes: int = 0
+
+
+_LIBFUZZER_PROGRESS_RE = re.compile(
+    r"#(?P<iter>\d+)\s+"
+    r"(?P<kind>NEW|REDUCE|pulse)\s+"
+    r"cov:\s*(?P<cov>\d+)\s+"
+    r"ft:\s*(?P<ft>\d+)\s+"
+    r"corp:\s*(?P<corp_files>\d+)/(?P<corp_size>\S+)"
+    r"(?:.*?exec/s:\s*(?P<execs>\d+))?"
+    r"(?:.*?rss:\s*(?P<rss>\d+)Mb)?",
+    re.IGNORECASE,
+)
+
+
+def _parse_size_token_to_bytes(token: str) -> int:
+    txt = (token or "").strip()
+    if not txt:
+        return 0
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)([kmg]?)(?:i?b)?$", txt, re.IGNORECASE)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    unit = (m.group(2) or "").lower()
+    scale = 1
+    if unit == "k":
+        scale = 1024
+    elif unit == "m":
+        scale = 1024 * 1024
+    elif unit == "g":
+        scale = 1024 * 1024 * 1024
+    return int(val * scale)
+
+
+def parse_libfuzzer_final_stats(text: str) -> Dict[str, int]:
+    """Extract the final libFuzzer progress tuple from a log blob."""
+    stats = {
+        "iteration": 0,
+        "cov": 0,
+        "ft": 0,
+        "corpus_files": 0,
+        "corpus_size_bytes": 0,
+        "execs_per_sec": 0,
+        "rss_mb": 0,
+    }
+    if not text:
+        return stats
+    for line in text.splitlines():
+        m = _LIBFUZZER_PROGRESS_RE.search(line)
+        if not m:
+            continue
+        stats["iteration"] = int(m.group("iter") or 0)
+        stats["cov"] = int(m.group("cov") or 0)
+        stats["ft"] = int(m.group("ft") or 0)
+        stats["corpus_files"] = int(m.group("corp_files") or 0)
+        stats["corpus_size_bytes"] = _parse_size_token_to_bytes(m.group("corp_size") or "")
+        stats["execs_per_sec"] = int(m.group("execs") or 0)
+        stats["rss_mb"] = int(m.group("rss") or 0)
+    return stats
 
 
 class NonOssFuzzHarnessGenerator:
@@ -891,19 +974,100 @@ class NonOssFuzzHarnessGenerator:
             for k, v in filtered_env.items():
                 docker_cmd += ["-e", f"{k}={v}"]
 
-        # Pre-create artifacts directory inside container before running fuzzer
-        # Check if the command appears to be a libFuzzer invocation with -artifact_prefix
-        cmd_str = " ".join(cmd)
-        if "-artifact_prefix" in cmd_str and self.docker_image:
-            # Extract the artifacts path from the command
-            match = re.search(r'-artifact_prefix=([^\s]+)', cmd_str)
-            if match:
-                artifacts_path = match.group(1)
-                # Prepend mkdir command to ensure artifacts directory exists
-                cmd = ["sh", "-c", f"mkdir -p {artifacts_path} && exec " + " ".join(f'"{a}"' if " " in a else a for a in cmd)]
+        # Default: translate all args for container.
+        translated_for_exec = [_translate_arg(a) for a in cmd]
+        translated_cmd = list(translated_for_exec)
+
+        # Prepare optional shell prelude for two cases:
+        # 1) fuzzer run: ensure -artifact_prefix directory exists
+        # 2) build run: auto-install declared system deps before invoking build.py/build.sh
+        artifacts_path = ""
+        for a in translated_for_exec:
+            if a.startswith("-artifact_prefix="):
+                artifacts_path = a.split("=", 1)[1]
+                break
+
+        def _is_build_entry_arg(a: str) -> bool:
+            norm = (a or "").strip().replace("\\", "/")
+            if norm in {"build.py", "./build.py", "fuzz/build.py", "build.sh", "./build.sh", "fuzz/build.sh"}:
+                return True
+            return norm.endswith("/build.py") or norm.endswith("/build.sh")
+
+        should_autoinstall = any(_is_build_entry_arg(a) for a in translated_for_exec)
+        dep_setup = ""
+        if should_autoinstall and _is_truthy_env("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", True):
+            dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+            dep_file = f"/work/{dep_rel}"
+            dep_setup = textwrap.dedent(
+                f"""
+                dep_file={shlex.quote(dep_file)}
+                if [ -f "$dep_file" ]; then
+                    pkgs=""
+                    while IFS= read -r line || [ -n "$line" ]; do
+                        line="${{line%%#*}}"
+                        line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                        [ -n "$line" ] || continue
+                        if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
+                            pkgs="$pkgs $line"
+                        else
+                            echo "[warn] (docker/deps) skip invalid package token: $line"
+                        fi
+                    done < "$dep_file"
+
+                    if [ -n "$pkgs" ]; then
+                        missing_pkgs=""
+                        for p in $pkgs; do
+                            if command -v dpkg-query >/dev/null 2>&1; then
+                                if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+                                    continue
+                                fi
+                            fi
+                            missing_pkgs="$missing_pkgs $p"
+                        done
+
+                        if [ -z "$missing_pkgs" ]; then
+                            echo "[*] (docker/deps) all requested packages already installed; skipping"
+                        else
+                            echo "[*] (docker/deps) installing from $dep_file:$missing_pkgs"
+                            if command -v apt-get >/dev/null 2>&1; then
+                                if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
+                                    echo "[warn] (docker/deps) apt-get update failed; continuing without auto-install"
+                                elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
+                                    echo "[warn] (docker/deps) apt-get install failed; continuing without auto-install"
+                                fi
+                            elif command -v dnf >/dev/null 2>&1; then
+                                if ! dnf install -y $missing_pkgs; then
+                                    echo "[warn] (docker/deps) dnf install failed; continuing without auto-install"
+                                fi
+                            elif command -v yum >/dev/null 2>&1; then
+                                if ! yum install -y $missing_pkgs; then
+                                    echo "[warn] (docker/deps) yum install failed; continuing without auto-install"
+                                fi
+                            elif command -v apk >/dev/null 2>&1; then
+                                if ! apk add --no-cache $missing_pkgs; then
+                                    echo "[warn] (docker/deps) apk add failed; continuing without auto-install"
+                                fi
+                            else
+                                echo "[warn] (docker/deps) no supported package manager found; skipping auto-install"
+                            fi
+                        fi
+                    fi
+                fi
+                """
+            ).strip()
+
+        if artifacts_path or dep_setup:
+            exec_cmd = " ".join(shlex.quote(a) for a in translated_for_exec)
+            shell_parts: List[str] = ["set -u"]
+            if artifacts_path:
+                shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
+            if dep_setup:
+                shell_parts.append(dep_setup)
+            shell_parts.append(f"exec {exec_cmd}")
+            translated_cmd = ["sh", "-lc", "\n".join(shell_parts)]
 
         docker_cmd.append(self.docker_image)
-        docker_cmd += [_translate_arg(a) for a in cmd]
+        docker_cmd += translated_cmd
         return docker_cmd
 
     # ────────────────────────────────────────────────────────────────────
@@ -931,6 +1095,9 @@ class NonOssFuzzHarnessGenerator:
         crash_found = False
         last_fuzzer = ""
         last_artifact = ""
+        run_rc = 0
+        crash_evidence = "none"
+        run_error_kind = ""
         for bin_path in bins:
             fuzzer_name = bin_path.name
             try:
@@ -940,11 +1107,17 @@ class NonOssFuzzHarnessGenerator:
                 print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
 
             print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
-            new_artifacts = self._run_fuzzer(bin_path)
+            run = self._run_fuzzer(bin_path)
+            run_rc = run.rc
+            crash_evidence = run.crash_evidence
+            run_error_kind = run.run_error_kind
 
-            if new_artifacts:
-                print(f"[!] Found {len(new_artifacts)} bug artifact(s).")
-                first = sorted(new_artifacts)[0]
+            if run.error:
+                raise HarnessGeneratorError(run.error)
+
+            if run.crash_found and run.first_artifact:
+                print(f"[!] Found {len(run.new_artifacts)} bug artifact(s), evidence={run.crash_evidence}.")
+                first = Path(run.first_artifact)
                 print(f"    → analyzing first: {first}")
                 self._analyze_and_package(fuzzer_name, first)
                 crash_found = True
@@ -960,6 +1133,9 @@ class NonOssFuzzHarnessGenerator:
             crash_found=crash_found,
             last_fuzzer=last_fuzzer,
             last_artifact=last_artifact,
+            run_rc=run_rc,
+            crash_evidence=crash_evidence,
+            run_error_kind=run_error_kind,
         )
 
     # ────────────────────────────────────────────────────────────────────
@@ -997,6 +1173,10 @@ class NonOssFuzzHarnessGenerator:
             - Favor the highest-level API that ingests untrusted data (files/streams/packets).
             - Avoid low-level helpers (e.g., `_read_u32`) unless nothing higher validates input.
             - Prefer targets with small/clear init and good branch structure.
+                        - Prefer the **lowest dependency footprint** target first: prioritize APIs that compile with
+                            toolchain + repository-local code only (or standard runtime libs already present).
+                        - If a candidate requires extra system/dev packages (e.g. new `apt`/`dnf` libraries),
+                            rank it lower and choose an in-repo/low-dependency alternative when possible.
             - If compile_commands.json is needed, note it in `PLAN.md`, but do not generate it yet.
 
             **Do not run commands**; only write the files above and any small metadata you need.
@@ -1037,7 +1217,8 @@ class NonOssFuzzHarnessGenerator:
                 ```
               - **Java**: `<Name>Fuzzer.java` compatible with **Jazzer**.
                         - **`build.py`**:
-                            - Cross-platform, non-interactive build script runnable as `python fuzz/build.py`.
+                            - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
+                            - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
                             - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
                             - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
@@ -1045,16 +1226,22 @@ class NonOssFuzzHarnessGenerator:
             - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
+                        - If external system packages are strictly required, create `{FUZZ_SYSTEM_PACKAGES_FILE}`
+                            with one package name per line (comments with `#` are allowed, no shell commands).
 
             **Critical constraints:**
             - Use **public/documented APIs**; avoid low-level helpers.
             - Perform **minimal real-world init** (contexts/handles via proper constructors).
             - Avoid harness mistakes (double-free, wrong types, lifetime bugs).
+                        - Keep dependency footprint minimal: prefer targets/build paths that require no new
+                            external system packages beyond the existing image/toolchain.
+                        - Do not introduce new third-party library dependencies just to make a harness compile;
+                            if the selected target needs unavailable deps, choose a lower-dependency target instead.
             - Do not vendor large third-party code; use the repo as-is.
             - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
 
             **Acceptance criteria:**
-            - After `python {FUZZ_DIR}/build.py`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
+            - After `(cd {FUZZ_DIR} && python build.py)`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
             - The harness compiles with symbols; ASan/UBSan enabled for C/C++.
             - The harness reaches some code with a trivial input (will be tested soon).
 
@@ -1133,22 +1320,18 @@ class NonOssFuzzHarnessGenerator:
             except Exception as e:
                 return f"(failed to list libs under build/: {e})"
 
+        build_cwd = self.fuzz_dir
+        fallback_cmd: Optional[List[str]] = None
         if build_py.is_file():
-            if self.docker_image:
-                # Inside Docker, the repo is mounted at /work. Passing an absolute
-                # Windows host path will not resolve. Use a repo-relative path.
-                build_cmd = [self._python_runner(), f"{FUZZ_DIR}/build.py"]
-            else:
-                build_cmd = [self._python_runner(), str(build_py)]
+            build_cmd = [self._python_runner(), "build.py"]
+            fallback_cmd = [self._python_runner(), f"{FUZZ_DIR}/build.py"]
             build_cmd_clean: Optional[List[str]] = None
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
         elif build_sh.is_file():
             # Backwards compatibility (older harness scaffolds).
-            if self.docker_image:
-                build_cmd = ["bash", f"{FUZZ_DIR}/build.sh"]
-            else:
-                build_cmd = ["bash", str(build_sh)]
+            build_cmd = ["bash", "build.sh"]
+            fallback_cmd = ["bash", f"{FUZZ_DIR}/build.sh"]
             make_executable(build_sh)
             build_cmd_clean = None
         else:
@@ -1172,10 +1355,83 @@ class NonOssFuzzHarnessGenerator:
                         shutil.rmtree(stale_dir)
                     except Exception:
                         pass
+
+        def _try_hotfix_libfuzzer_main_conflict(diag_text: str) -> bool:
+            if not build_py.is_file():
+                return False
+            low = (diag_text or "").lower()
+            if "multiple definition of `main'" not in low and "multiple definition of main" not in low:
+                return False
+
+            try:
+                text = build_py.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return False
+
+            define_flag = "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
+            if define_flag in text:
+                return False
+
+            lines = text.splitlines()
+            changed = False
+            in_flags = False
+            for i, line in enumerate(lines):
+                if not in_flags and re.search(r"^\s*flags\s*=\s*\[", line):
+                    in_flags = True
+                    continue
+                if not in_flags:
+                    continue
+                if "-fsanitize=fuzzer" in line:
+                    indent_match = re.match(r"^(\s*)", line)
+                    indent = indent_match.group(1) if indent_match else "        "
+                    lines.insert(i + 1, f"{indent}'{define_flag}',")
+                    changed = True
+                    break
+                if re.search(r"^\s*\]", line):
+                    lines.insert(i, f"        '{define_flag}',")
+                    changed = True
+                    break
+
+            if not changed:
+                replaced = text.replace(
+                    "cmd = [cxx] + flags + [source_path, harness_path, '-o', output_path]",
+                    "cmd = [cxx, '-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION'] + flags + [source_path, harness_path, '-o', output_path]",
+                )
+                if replaced == text:
+                    return False
+                text = replaced
+            else:
+                text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+            try:
+                build_py.write_text(text, encoding="utf-8", errors="replace")
+                print("[*] Applied local hotfix for libFuzzer main conflict in fuzz/build.py")
+                return True
+            except Exception:
+                return False
+
         for attempt in range(1, self.max_build_retries + 1):
             print(f"[*] Build attempt {attempt}/{self.max_build_retries} → {' '.join(build_cmd)}")
 
-            rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root, env=build_env)
+            rc, out, err = self._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env)
+
+            combined_first = strip_ansi((out or "") + "\n" + (err or ""))
+            combined_first_l = combined_first.lower()
+            if (
+                rc != 0
+                and fallback_cmd is not None
+                and (
+                    ("no such file or directory" in combined_first_l and "fuzz/" in combined_first_l)
+                    or "can't open file '/work/fuzz/fuzz/" in combined_first_l
+                    or "can't open file 'fuzz/" in combined_first_l
+                )
+            ):
+                print("[*] Build appears to require repo-root cwd; retrying from repo root")
+                rc, out, err = self._run_cmd(list(fallback_cmd), cwd=self.repo_root, env=build_env)
+
+            if rc != 0 and _try_hotfix_libfuzzer_main_conflict(strip_ansi((out or "") + "\n" + (err or ""))):
+                print("[*] Retrying build after applying local main-conflict hotfix")
+                continue
 
             # Optional retry-with-clean for flaky/stale CMake caches.
             if rc != 0 and build_cmd_clean is not None:
@@ -1183,7 +1439,7 @@ class NonOssFuzzHarnessGenerator:
                 # Avoid looping: only retry clean once per attempt.
                 if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
                     print(f"[*] Build failed; retrying once with --clean → {' '.join(build_cmd_clean)}")
-                    rc2, out2, err2 = self._run_cmd(list(build_cmd_clean), cwd=self.repo_root, env=build_env)
+                    rc2, out2, err2 = self._run_cmd(list(build_cmd_clean), cwd=build_cwd, env=build_env)
                 else:
                     rc2, out2, err2 = rc, out, err
                 # If --clean itself is unsupported, keep original rc/out/err.
@@ -1229,10 +1485,15 @@ class NonOssFuzzHarnessGenerator:
                 {problem}
 
                 Read the diagnostics below and apply the **minimal** edits necessary so that running
-                `python fuzz/build.py` completes successfully **and** leaves at least one executable
+                `(cd fuzz && python build.py)` completes successfully **and** leaves at least one executable
                 fuzzer binary in `fuzz/out/` (files ending with `fuzz`, `_fuzzer`, or `Fuzzer`).
 
                 Do not refactor production code or add features; only fix the build glue or harness.
+                Prefer the **minimal-dependency** solution: avoid adding new external/system package
+                requirements. If the current harness target requires unavailable third-party deps,
+                retarget to an existing low-dependency API in this repo instead of introducing new deps.
+                If external system packages are truly necessary, update `{FUZZ_SYSTEM_PACKAGES_FILE}`
+                with package names only (one per line, comments allowed, no shell syntax/commands).
                 Modify files under `fuzz/` and the minimal build files elsewhere. Do **not** run the
                 build yourself; just output patches. Keep emitting binaries to `fuzz/out/`.
 
@@ -1246,7 +1507,19 @@ class NonOssFuzzHarnessGenerator:
                 raise HarnessGeneratorError("Codex failed to resolve build errors after retries.")
 
         # final build try
-        rc, out, err = self._run_cmd(list(build_cmd), cwd=self.repo_root)
+        rc, out, err = self._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env)
+        combined_final = strip_ansi((out or "") + "\n" + (err or ""))
+        combined_final_l = combined_final.lower()
+        if (
+            rc != 0
+            and fallback_cmd is not None
+            and (
+                ("no such file or directory" in combined_final_l and "fuzz/" in combined_final_l)
+                or "can't open file '/work/fuzz/fuzz/" in combined_final_l
+                or "can't open file 'fuzz/" in combined_final_l
+            )
+        ):
+            rc, out, err = self._run_cmd(list(fallback_cmd), cwd=self.repo_root, env=build_env)
         if rc != 0:
             raise HarnessGeneratorError("Build still failing after Codex retries.")
 
@@ -1288,10 +1561,10 @@ class NonOssFuzzHarnessGenerator:
     # Step E – Run fuzzer
     # ────────────────────────────────────────────────────────────────────
 
-    def _run_fuzzer(self, bin_path: Path) -> List[Path]:
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
         """
         Run a single local fuzzer binary with sane defaults.
-        Returns the list of newly created bug artifacts under artifact prefix.
+        Returns a structured result including artifacts and crash evidence.
         """
         bin_dir = bin_path.parent
         artifacts_dir = bin_dir / ARTIFACT_PREFIX
@@ -1323,6 +1596,8 @@ class NonOssFuzzHarnessGenerator:
         tail = "\n".join(log.splitlines()[-200:])
         print(tail)
 
+        libfuzzer_stats = parse_libfuzzer_final_stats(log)
+
         # Detect new artifacts
         post = set(p for p in artifacts_dir.glob("*") if p.is_file())
         new_artifacts = sorted(post - pre_existing)
@@ -1330,8 +1605,79 @@ class NonOssFuzzHarnessGenerator:
             print("[*] New artifact(s):")
             for p in new_artifacts:
                 print("    •", p.relative_to(self.repo_root))
+        crash_evidence = "none"
+        first_artifact = ""
 
-        return new_artifacts
+        if new_artifacts:
+            crash_evidence = "artifact"
+            first_artifact = str(sorted(new_artifacts)[0])
+
+        def _is_sanitizer_crash(text: str) -> bool:
+            if not text:
+                return False
+            if re.search(r"AddressSanitizer failed to allocate", text, re.IGNORECASE):
+                return False
+            if re.search(r"ReserveShadowMemoryRange failed", text, re.IGNORECASE):
+                return False
+            if re.search(r"failed to mmap", text, re.IGNORECASE):
+                return False
+            if re.search(r"==[0-9]+==ERROR: (Address|Undefined|Memory|Thread|Leak)Sanitizer", text):
+                return True
+            if re.search(r"SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)", text):
+                return True
+            if re.search(r"\bruntime error:\b", text, re.IGNORECASE):
+                return True
+            if re.search(r"ERROR: libFuzzer: deadly signal", text):
+                return True
+            return False
+
+        if crash_evidence == "none" and _is_sanitizer_crash(log):
+            crash_evidence = "sanitizer_log"
+            synthetic = artifacts_dir / f"crash-log-{int(time.time())}.txt"
+            write_text_safely(synthetic, strip_ansi(log))
+            new_artifacts = [synthetic]
+            first_artifact = str(synthetic)
+            print(f"[*] Sanitizer crash detected without artifact, synthesized evidence: {synthetic.relative_to(self.repo_root)}")
+
+        crash_found = crash_evidence in {"artifact", "sanitizer_log"}
+        error = ""
+        run_error_kind = ""
+        if rc != 0 and not crash_found:
+            run_error_kind = "nonzero_exit_without_crash"
+            error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
+
+        corpus_files = 0
+        corpus_size_bytes = 0
+        try:
+            for p in corpus_dir.rglob("*"):
+                if p.is_file():
+                    corpus_files += 1
+                    try:
+                        corpus_size_bytes += int(p.stat().st_size)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return FuzzerRunResult(
+            rc=int(rc),
+            new_artifacts=list(new_artifacts),
+            crash_found=crash_found,
+            crash_evidence=crash_evidence,
+            first_artifact=first_artifact,
+            log_tail=tail,
+            error=error,
+            run_error_kind=run_error_kind,
+            final_cov=int(libfuzzer_stats.get("cov", 0)),
+            final_ft=int(libfuzzer_stats.get("ft", 0)),
+            final_corpus_files=int(libfuzzer_stats.get("corpus_files", 0)),
+            final_corpus_size_bytes=int(libfuzzer_stats.get("corpus_size_bytes", 0)),
+            final_execs_per_sec=int(libfuzzer_stats.get("execs_per_sec", 0)),
+            final_rss_mb=int(libfuzzer_stats.get("rss_mb", 0)),
+            final_iteration=int(libfuzzer_stats.get("iteration", 0)),
+            corpus_files=corpus_files,
+            corpus_size_bytes=corpus_size_bytes,
+        )
 
     # ────────────────────────────────────────────────────────────────────
     # Step F – Analyze & package
@@ -1569,6 +1915,9 @@ class NonOssFuzzHarnessGenerator:
         last_fuzzer: str = "",
         last_artifact: str = "",
         error: str | None = None,
+        run_rc: int | None = None,
+        crash_evidence: str = "none",
+        run_error_kind: str = "",
     ) -> None:
         summary_json = self.repo_root / "run_summary.json"
         summary_md = self.repo_root / "run_summary.md"
@@ -1593,6 +1942,9 @@ class NonOssFuzzHarnessGenerator:
             "time_budget": self.time_budget,
             "max_len": self.max_len,
             "docker_image": self.docker_image,
+            "run_rc": run_rc,
+            "crash_evidence": crash_evidence,
+            "run_error_kind": run_error_kind,
             "crash_found": crash_found,
             "last_fuzzer": last_fuzzer,
             "last_crash_artifact": last_artifact,
@@ -1616,6 +1968,8 @@ class NonOssFuzzHarnessGenerator:
             f"- Status: {payload['status']}",
             f"- Repo root: {payload['repo_root']}",
             f"- Time budget: {payload['time_budget']}s",
+            f"- Run rc: {payload['run_rc']}",
+            f"- Crash evidence: {payload['crash_evidence']}",
             f"- Crash found: {payload['crash_found']}",
             f"- Harness error: {payload['harness_error']}",
         ]
@@ -2042,7 +2396,7 @@ class NonOssFuzzHarnessGenerator:
 
         start_ts = time.time()
         start_mono = time.monotonic()
-        print(f"[*] ➜  {' '.join(_redact_cmd(actual_cmd))}")
+        print(f"[*] ➜  {' '.join(_redact_cmd(actual_cmd))}", flush=True)
         proc = subprocess.Popen(
             actual_cmd,
             cwd=cwd,
@@ -2094,16 +2448,16 @@ class NonOssFuzzHarnessGenerator:
                     kind, text = item
                     if kind == "stdout":
                         stdout_chunks.append(text)
-                        print(text, end="")
+                        print(text, end="", flush=True)
                     else:
                         stderr_chunks.append(text)
                         # Keep stderr visible in real-time to avoid silent failures.
-                        print(text, end="")
+                        print(text, end="", flush=True)
 
                 now = time.monotonic()
                 if now - last_heartbeat >= heartbeat_sec:
                     elapsed = now - start_mono
-                    print(f"[keepalive] command still running... elapsed={elapsed:.0f}s")
+                    print(f"[keepalive] command still running... elapsed={elapsed:.0f}s", flush=True)
                     last_heartbeat = now
         finally:
             if timed_out and proc.poll() is None:
@@ -2150,11 +2504,13 @@ class NonOssFuzzHarnessGenerator:
         elapsed = time.monotonic() - start_mono
         # Truncate verbose spam in the console but keep full logs if needed.
         print(
-            f"[*] Command rc={rc}. elapsed={elapsed:.1f}s. started_at={start_ts:.0f}" \
-            + ". STDOUT (tail):\n" + "\n".join(out.splitlines()[-80:])
+            f"[*] Command rc={rc}. elapsed={elapsed:.1f}s. started_at={start_ts:.0f}"
+            + ". STDOUT (tail):\n"
+            + "\n".join(out.splitlines()[-80:]),
+            flush=True,
         )
         if err.strip():
-            print("[*] STDERR (tail):\n" + "\n".join(err.splitlines()[-80:]))
+            print("[*] STDERR (tail):\n" + "\n".join(err.splitlines()[-80:]), flush=True)
         return int(rc or 0), out, err
 
     # ────────────────────────────────────────────────────────────────────
