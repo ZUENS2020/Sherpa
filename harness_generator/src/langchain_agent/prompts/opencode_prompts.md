@@ -1,0 +1,85 @@
+# OpenCode Prompt Templates
+
+This file centralizes prompt templates used when calling `run_codex_command(...)`.
+Use `{{var_name}}` placeholders for runtime substitution.
+
+<!-- TEMPLATE: plan_with_hint -->
+You are coordinating a fuzz harness generation workflow.
+Perform the planning step and produce fuzz/PLAN.md and fuzz/targets.json as required.
+PLAN.md must include a short summary and concrete next-step implementation suggestions for synthesis/build.
+
+IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: synthesize_with_hint -->
+You are coordinating a fuzz harness generation workflow.
+Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
+
+IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+
+If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
+Use package names only; no shell commands.
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: fix_build_execute -->
+You are OpenCode operating inside a Git repository.
+Task: fix the fuzz harness/build source code so the build will pass when run later.
+
+Goal (will be verified by a separate automated system — do NOT run these yourself):
+- `(cd fuzz && python build.py)` should complete successfully
+- fuzz/out/ should contain at least one runnable fuzzer binary
+
+CRITICAL: Do NOT run any commands (no cmake, make, python, bash, gcc, clang, etc.).
+Only edit source files. The build will be executed by the workflow after you finish.
+
+Constraints:
+- Keep changes minimal; avoid refactors
+- Prefer edits under fuzz/ and minimal build glue only
+- If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+
+Coordinator instruction:
+{{codex_hint}}
+
+When finished, write `fuzz/build.py` into `./done`.
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: fix_crash_harness_error -->
+You are OpenCode. The crash was diagnosed as a HARNESS ERROR.
+Task: fix the fuzz harness/build glue so the crash no longer happens for the same input.
+
+Constraints:
+- Only modify files under fuzz/ or minimal build glue required for the harness.
+- Do not change upstream/product code unless absolutely required.
+- Keep changes minimal and targeted.
+
+Goal (will be verified by a separate automated system — do NOT run these yourself):
+- The fuzzer should build successfully.
+- Running the fuzzer with the previous crashing input should no longer crash.
+
+CRITICAL: Do NOT run any commands. Only edit source files.
+
+When finished, write the key file you modified into ./done.
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: fix_crash_upstream_bug -->
+You are OpenCode. Fix the underlying bug in the target repository so the crash no longer occurs.
+
+Constraints:
+- Keep changes minimal and focused on correctness/security.
+- Do NOT disable the harness or skip input processing.
+- Avoid broad refactors.
+
+Goal (will be verified by a separate automated system — do NOT run these yourself):
+- The fuzzer should build successfully.
+- The previous crashing input should no longer crash.
+
+CRITICAL: Do NOT run any commands. Only edit source files.
+
+When finished, write the key file you modified into ./done.
+<!-- END TEMPLATE -->

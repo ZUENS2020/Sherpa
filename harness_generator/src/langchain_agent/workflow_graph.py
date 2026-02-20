@@ -7,6 +7,7 @@ import time
 import shutil
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, TypedDict, cast
 
@@ -57,15 +58,14 @@ class FuzzWorkflowState(TypedDict, total=False):
     fix_patch_bytes: int
     summary_path: str
     summary_json_path: str
+    plan_fix_on_crash: bool
+    plan_max_fix_rounds: int
 
 
 class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
     generator: NonOssFuzzHarnessGenerator
     crash_found: bool
     message: str
-
-
-_ALLOWED_NEXT = {"plan", "synthesize", "build", "fix_build", "fix_crash", "run", "stop"}
 
 
 def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
@@ -342,34 +342,128 @@ Default max_len: {max_len}
     (fuzz_dir / "tinyxml2_fuzz.options").write_text(f"-max_len={max_len}\n", encoding="utf-8")
 
 
-def _fallback_next(state: FuzzWorkflowRuntimeState) -> str:
-    last_step = (state.get("last_step") or "").strip()
-    last_error = (state.get("last_error") or "").strip()
-    if bool(state.get("crash_found")):
-        return "fix_crash"
-    if last_step == "fix_crash":
-        return "build" if not last_error else "stop"
-    # Simple deterministic router.
-    if last_error:
-        if "No fuzzer binaries" in last_error:
-            return "synthesize"
-        if "build" in last_step:
-            return "fix_build"
-        if "OpenCode" in last_error or "plan" in last_error.lower():
-            return "plan"
-        if "build" in last_error.lower():
-            return "fix_build"
+def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
+    step_count = int(state.get("step_count") or 0) + 1
+    max_steps = int(state.get("max_steps") or 10)
+    next_state = cast(FuzzWorkflowRuntimeState, {**state, "step_count": step_count})
+    if step_count >= max_steps:
+        failed = bool(next_state.get("last_error")) and not bool(next_state.get("crash_found"))
+        out = cast(
+            FuzzWorkflowRuntimeState,
+            {
+                **next_state,
+                "last_step": step_name,
+                "failed": failed,
+                "message": "workflow stopped (max steps reached)",
+            },
+        )
+        _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=max_steps")
+        return out, True
+    return next_state, False
 
-    # Forward progress if possible.
-    if last_step in {"", "init"}:
-        return "plan"
-    if last_step == "plan":
-        return "synthesize"
-    if last_step == "synthesize":
-        return "build"
-    if last_step == "build":
-        return "run"
-    return "stop"
+
+def _make_plan_hint(repo_root: Path) -> str:
+    hints: list[str] = []
+    plan_path = repo_root / "fuzz" / "PLAN.md"
+    targets_path = repo_root / "fuzz" / "targets.json"
+
+    if targets_path.is_file():
+        try:
+            raw = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(raw, list) and raw:
+                names = [str(it.get("name") or "").strip() for it in raw if isinstance(it, dict)]
+                names = [n for n in names if n]
+                if names:
+                    hints.append(f"Prioritize targets in fuzz/targets.json: {', '.join(names[:3])}.")
+        except Exception:
+            pass
+
+    if plan_path.is_file():
+        try:
+            for line in plan_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = line.strip()
+                if s.startswith(("Primary fuzzer:", "Target:")):
+                    hints.append(s)
+                if len(hints) >= 3:
+                    break
+        except Exception:
+            pass
+
+    hints.extend(
+        [
+            "Keep harness deterministic and only touch fuzz/ plus minimal build glue.",
+            "Ensure fuzz/build.py leaves at least one runnable fuzzer under fuzz/out/.",
+        ]
+    )
+    return "\n".join(hints[:6])
+
+
+def _derive_plan_policy(repo_root: Path) -> tuple[bool, int]:
+    """Derive stop/repair policy from fuzz/PLAN.md (with safe defaults).
+
+    Supported PLAN.md hints (case-insensitive):
+    - "Crash policy: report-only"  -> do not enter fix_crash
+    - "Crash policy: fix"          -> enter fix_crash (default)
+    - "Max fix rounds: <N>"        -> max fix_crash rounds before stop (default 1)
+    """
+    fix_on_crash = True
+    max_fix_rounds = 1
+    plan_path = repo_root / "fuzz" / "PLAN.md"
+    if not plan_path.is_file():
+        return fix_on_crash, max_fix_rounds
+
+    try:
+        text = plan_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return fix_on_crash, max_fix_rounds
+
+    m_policy = re.search(r"crash\s*policy\s*:\s*([^\n\r]+)", text, re.IGNORECASE)
+    if m_policy:
+        val = m_policy.group(1).strip().lower()
+        if "report" in val or "triage" in val:
+            fix_on_crash = False
+        elif "fix" in val:
+            fix_on_crash = True
+
+    m_rounds = re.search(r"max\s*fix\s*rounds\s*:\s*(\d+)", text, re.IGNORECASE)
+    if m_rounds:
+        try:
+            max_fix_rounds = max(0, min(int(m_rounds.group(1)), 20))
+        except Exception:
+            pass
+
+    return fix_on_crash, max_fix_rounds
+
+
+_OPENCODE_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "opencode_prompts.md"
+
+
+@lru_cache(maxsize=1)
+def _load_opencode_prompt_templates() -> dict[str, str]:
+    if not _OPENCODE_PROMPT_FILE.is_file():
+        raise RuntimeError(f"OpenCode prompt template file not found: {_OPENCODE_PROMPT_FILE}")
+    text = _OPENCODE_PROMPT_FILE.read_text(encoding="utf-8", errors="replace")
+    pattern = re.compile(
+        r"<!--\s*TEMPLATE:\s*([a-zA-Z0-9_]+)\s*-->\s*\n(.*?)\n<!--\s*END TEMPLATE\s*-->",
+        re.DOTALL,
+    )
+    templates: dict[str, str] = {}
+    for name, body in pattern.findall(text):
+        templates[name.strip().lower()] = body.strip()
+    if not templates:
+        raise RuntimeError(f"No templates found in {_OPENCODE_PROMPT_FILE}")
+    return templates
+
+
+def _render_opencode_prompt(name: str, **kwargs: object) -> str:
+    templates = _load_opencode_prompt_templates()
+    key = name.strip().lower()
+    if key not in templates:
+        raise RuntimeError(f"OpenCode prompt template '{name}' not found in {_OPENCODE_PROMPT_FILE}")
+    out = templates[key]
+    for k, v in kwargs.items():
+        out = out.replace("{{" + k + "}}", str(v))
+    return out.strip() + "\n"
 
 
 @dataclass(frozen=True)
@@ -435,6 +529,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "last_crash_artifact": "",
             "last_fuzzer": "",
             "crash_fix_attempts": int(state.get("crash_fix_attempts") or 0),
+            "plan_fix_on_crash": True,
+            "plan_max_fix_rounds": 1,
         },
     )
     _wf_log(cast(dict[str, Any], out), f"<- init ok repo_root={out.get('repo_root')} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -445,13 +541,25 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "plan")
+    if stop_now:
+        return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> plan")
     hint = (state.get("codex_hint") or "").strip()
     if not _has_codex_key():
         if _is_tinyxml2_repo(gen.repo_root):
             _write_builtin_tinyxml2_plan(gen.repo_root)
-            out = {**state, "last_step": "plan", "last_error": "", "codex_hint": "", "message": "planned (builtin)"}
+            fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
+            out = {
+                **state,
+                "last_step": "plan",
+                "last_error": "",
+                "codex_hint": _make_plan_hint(gen.repo_root),
+                "plan_fix_on_crash": fix_on_crash,
+                "plan_max_fix_rounds": max_fix_rounds,
+                "message": "planned (builtin)",
+            }
             _wf_log(cast(dict[str, Any], out), f"<- plan builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
         out = {
@@ -464,16 +572,20 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         return out
     try:
         if hint:
-            prompt = (
-                "You are coordinating a fuzz harness generation workflow.\n"
-                "Perform the planning step and produce fuzz/PLAN.md and fuzz/targets.json as required.\n\n"
-                "IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.\n\n"
-                "Additional instruction from coordinator:\n" + hint
-            )
+            prompt = _render_opencode_prompt("plan_with_hint", hint=hint)
             gen.patcher.run_codex_command(prompt)
         else:
             gen._pass_plan_targets()
-        out = {**state, "last_step": "plan", "last_error": "", "codex_hint": "", "message": "planned"}
+        fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
+        out = {
+            **state,
+            "last_step": "plan",
+            "last_error": "",
+            "codex_hint": _make_plan_hint(gen.repo_root),
+            "plan_fix_on_crash": fix_on_crash,
+            "plan_max_fix_rounds": max_fix_rounds,
+            "message": "planned",
+        }
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -481,7 +593,16 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         try:
             if _is_tinyxml2_repo(gen.repo_root):
                 _write_builtin_tinyxml2_plan(gen.repo_root)
-                out = {**state, "last_step": "plan", "last_error": "", "codex_hint": "", "message": "planned (builtin)"}
+                fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
+                out = {
+                    **state,
+                    "last_step": "plan",
+                    "last_error": "",
+                    "codex_hint": _make_plan_hint(gen.repo_root),
+                    "plan_fix_on_crash": fix_on_crash,
+                    "plan_max_fix_rounds": max_fix_rounds,
+                    "message": "planned (builtin)",
+                }
                 _wf_log(cast(dict[str, Any], out), f"<- plan builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
                 return out
         except Exception:
@@ -495,6 +616,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "synthesize")
+    if stop_now:
+        return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
@@ -515,14 +639,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         return out
     try:
         if hint:
-            prompt = (
-                "You are coordinating a fuzz harness generation workflow.\n"
-                "Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.\n\n"
-                "IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.\n\n"
-                "If external system dependencies are required, write package names (one per line) to "
-                "fuzz/system_packages.txt. Use package names only; no shell commands.\n\n"
-                "Additional instruction from coordinator:\n" + hint
-            )
+            prompt = _render_opencode_prompt("synthesize_with_hint", hint=hint)
             # Provide context from plan/targets if present.
             plan = (gen.repo_root / "fuzz" / "PLAN.md")
             targets = (gen.repo_root / "fuzz" / "targets.json")
@@ -560,6 +677,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "build")
+    if stop_now:
+        return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), f"-> build attempt={(int(state.get('build_attempts') or 0)+1)}")
     try:
@@ -753,6 +873,9 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "fix_build")
+    if stop_now:
+        return state
 
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> fix_build")
@@ -928,23 +1051,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         context_parts.append("=== build stderr (tail) ===\n" + stderr_tail)
     context = "\n\n".join(context_parts)
 
-    prompt = (
-        "You are OpenCode operating inside a Git repository.\n"
-        "Task: fix the fuzz harness/build source code so the build will pass when run later.\n\n"
-        "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
-        "- `(cd fuzz && python build.py)` should complete successfully\n"
-        "- fuzz/out/ should contain at least one runnable fuzzer binary\n\n"
-        "CRITICAL: Do NOT run any commands (no cmake, make, python, bash, gcc, clang, etc.).\n"
-        "Only edit source files. The build will be executed by the workflow after you finish.\n\n"
-        "Constraints:\n"
-        "- Keep changes minimal; avoid refactors\n"
-        "- Prefer edits under fuzz/ and minimal build glue only\n\n"
-        "- If external system deps are required, declare package names in fuzz/system_packages.txt "
-        "(one per line, comments allowed, no shell commands)\n\n"
-        "Coordinator instruction:\n"
-        + codex_hint.strip()
-        + "\n\nWhen finished, write `fuzz/build.py` into `./done`."
-    )
+    prompt = _render_opencode_prompt("fix_build_execute", codex_hint=codex_hint.strip())
 
     try:
         _wf_log(cast(dict[str, Any], state), f"fix_build: running opencode (hint_lines={len(codex_hint.splitlines())})")
@@ -962,6 +1069,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "run")
+    if stop_now:
+        return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> run")
     try:
@@ -1068,6 +1178,9 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "fix_crash")
+    if stop_now:
+        return state
 
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> fix_crash")
@@ -1084,32 +1197,9 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     harness_error = bool(re.search(r"HARNESS ERROR", analysis_text, re.IGNORECASE))
 
     if harness_error:
-        prompt = (
-            "You are OpenCode. The crash was diagnosed as a HARNESS ERROR.\n"
-            "Task: fix the fuzz harness/build glue so the crash no longer happens for the same input.\n\n"
-            "Constraints:\n"
-            "- Only modify files under fuzz/ or minimal build glue required for the harness.\n"
-            "- Do not change upstream/product code unless absolutely required.\n"
-            "- Keep changes minimal and targeted.\n\n"
-            "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
-            "- The fuzzer should build successfully.\n"
-            "- Running the fuzzer with the previous crashing input should no longer crash.\n\n"
-            "CRITICAL: Do NOT run any commands. Only edit source files.\n\n"
-            "When finished, write the key file you modified into ./done."
-        )
+        prompt = _render_opencode_prompt("fix_crash_harness_error")
     else:
-        prompt = (
-            "You are OpenCode. Fix the underlying bug in the target repository so the crash no longer occurs.\n\n"
-            "Constraints:\n"
-            "- Keep changes minimal and focused on correctness/security.\n"
-            "- Do NOT disable the harness or skip input processing.\n"
-            "- Avoid broad refactors.\n\n"
-            "Goal (will be verified by a separate automated system — do NOT run these yourself):\n"
-            "- The fuzzer should build successfully.\n"
-            "- The previous crashing input should no longer crash.\n\n"
-            "CRITICAL: Do NOT run any commands. Only edit source files.\n\n"
-            "When finished, write the key file you modified into ./done."
-        )
+        prompt = _render_opencode_prompt("fix_crash_upstream_bug")
 
     ctx_parts: list[str] = []
     if last_fuzzer:
@@ -1180,95 +1270,10 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return out
 
 
-def _node_decide(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
-    t0 = time.perf_counter()
-    step_count = int(state.get("step_count") or 0) + 1
-    max_steps = int(state.get("max_steps") or 10)
-    state = {**state, "step_count": step_count}
-
-    _wf_log(cast(dict[str, Any], state), f"-> decide (max_steps={max_steps})")
-
-    if step_count >= max_steps:
-        # Stop to avoid infinite loops.
-        failed = bool(state.get("last_error")) and not bool(state.get("crash_found"))
-        return {
-            **state,
-            "failed": failed,
-            "next": "stop",
-            "message": "workflow stopped (max steps reached)",
-        }
-
-    # If we already finished a run:
-    # - crash found => try to fix and continue
-    # - no crash => stop
-    if state.get("last_step") == "run":
-        if bool(state.get("crash_found")):
-            return {**state, "next": "fix_crash"}
-        if not (state.get("last_error") or "").strip():
-            return {**state, "next": "stop"}
-
-    # If build failed, try fix_build by default (LLM can override).
-    if (state.get("last_step") == "build") and (state.get("last_error") or "").strip():
-        # Let LLM decide, but default fallback will route to fix_build.
-        pass
-
-    llm = _llm_or_none()
-    if llm is None:
-        out = {**state, "next": _fallback_next(state)}
-        _wf_log(cast(dict[str, Any], out), f"<- decide fallback next={out.get('next')} dt={_fmt_dt(time.perf_counter()-t0)}")
-        return out
-
-    last_error = (state.get("last_error") or "").strip()
-    last_step = (state.get("last_step") or "").strip()
-    crash_found = bool(state.get("crash_found"))
-    repo_root = (state.get("repo_root") or "").strip()
-    docker_image = (state.get("docker_image") or "").strip() or "(host)"
-
-    prompt = (
-        "You are a workflow coordinator for fuzz harness generation and fuzzing.\n"
-        "You decide the next step and optionally provide a short instruction to guide OpenCode for that step.\n\n"
-        "Constraints:\n"
-        "- Allowed next steps: plan, synthesize, build, fix_build, fix_crash, run, stop\n"
-        "- Only provide codex_hint when next is plan, synthesize, fix_build, or fix_crash\n"
-        "- codex_hint should prioritize minimal-dependency paths and avoid introducing new external system packages\n"
-        "- Keep codex_hint short and actionable (1-6 lines)\n"
-        "- Output MUST be a single JSON object with keys: next, codex_hint (optional)\n\n"
-        f"State summary:\n- repo_root: {repo_root}\n- docker_image: {docker_image}\n- last_step: {last_step}\n- crash_found: {crash_found}\n"
-        + (f"- last_error: {last_error}\n" if last_error else "- last_error: (none)\n")
-        + "\nReturn JSON only."
-    )
-
-    try:
-        resp = llm.invoke(prompt)
-        text = getattr(resp, "content", None) or str(resp)
-        obj = _extract_json_object(text)
-        if not obj:
-            out = {**state, "next": _fallback_next(state)}
-            _wf_log(cast(dict[str, Any], out), f"<- decide (llm) parse_fail next={out.get('next')} dt={_fmt_dt(time.perf_counter()-t0)}")
-            return out
-
-        nxt = str(obj.get("next") or "").strip().lower()
-        if nxt not in _ALLOWED_NEXT:
-            nxt = _fallback_next(state)
-
-        hint = str(obj.get("codex_hint") or "").strip()
-        if nxt not in {"plan", "synthesize", "fix_build", "fix_crash"}:
-            hint = ""
-
-        out = {**state, "next": nxt, "codex_hint": hint}
-        _wf_log(cast(dict[str, Any], out), f"<- decide (llm) next={nxt} hint={'yes' if bool(hint) else 'no'} dt={_fmt_dt(time.perf_counter()-t0)}")
-        return out
-    except Exception as e:
-        out = {**state, "next": _fallback_next(state), "last_error": last_error or str(e)}
-        _wf_log(cast(dict[str, Any], out), f"<- decide err={e} next={out.get('next')} dt={_fmt_dt(time.perf_counter()-t0)}")
-        return out
-
-
 def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
     graph.add_node("init", _node_init)
-    graph.add_node("decide", _node_decide)
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
@@ -1277,32 +1282,57 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("run", _node_run)
 
     graph.set_entry_point("init")
-    graph.add_edge("init", "decide")
+    graph.add_edge("init", "plan")
 
-    def _route(state: FuzzWorkflowRuntimeState) -> str:
-        nxt = str(state.get("next") or "").strip().lower()
-        return nxt if nxt in _ALLOWED_NEXT else "stop"
+    def _route_after_plan(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+            return "stop"
+        return "synthesize"
 
-    graph.add_conditional_edges(
-        "decide",
-        _route,
-        {
-            "plan": "plan",
-            "synthesize": "synthesize",
-            "build": "build",
-            "fix_build": "fix_build",
-            "fix_crash": "fix_crash",
-            "run": "run",
-            "stop": END,
-        },
-    )
+    def _route_after_synthesize(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+            return "stop"
+        return "build"
 
-    graph.add_edge("plan", "decide")
-    graph.add_edge("synthesize", "decide")
-    graph.add_edge("build", "decide")
-    graph.add_edge("fix_build", "build")
-    graph.add_edge("fix_crash", "build")
-    graph.add_edge("run", "decide")
+    def _route_after_build(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")):
+            return "stop"
+        if (state.get("last_error") or "").strip():
+            return "fix_build"
+        return "run"
+
+    def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")):
+            return "stop"
+        if (state.get("last_error") or "").strip():
+            return "stop"
+        return "build"
+
+    def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")):
+            return "stop"
+        if bool(state.get("crash_found")):
+            fix_on_crash = bool(state.get("plan_fix_on_crash", True))
+            max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 1))
+            attempts = int(state.get("crash_fix_attempts") or 0)
+            if fix_on_crash and attempts < max_fix_rounds:
+                return "fix_crash"
+            return "stop"
+        return "stop"
+
+    def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
+        if bool(state.get("failed")):
+            return "stop"
+        if (state.get("last_error") or "").strip():
+            return "stop"
+        return "build"
+
+    graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
+    graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
+    graph.add_conditional_edges("build", _route_after_build, {"run": "run", "fix_build": "fix_build", "stop": END})
+    graph.add_conditional_edges("fix_build", _route_after_fix_build, {"build": "build", "stop": END})
+    graph.add_conditional_edges("run", _route_after_run, {"fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("fix_crash", _route_after_fix_crash, {"build": "build", "stop": END})
 
     return graph
 
@@ -1451,6 +1481,10 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         "reproducer_path": str(repo_root / "reproduce.py"),
         "bundles": bundle_dirs,
         "fuzz_inventory": fuzz_inventory,
+        "plan_policy": {
+            "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
+            "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
+        },
         "timestamp": time.time(),
     }
 
@@ -1476,6 +1510,8 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
         f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
         f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
+        f"- Plan crash policy: {'fix' if data['plan_policy']['fix_on_crash'] else 'report-only'}",
+        f"- Plan max fix rounds: {data['plan_policy']['max_fix_rounds']}",
     ]
     if run_details:
         md_lines.extend(["", "## Fuzzer Effectiveness"])
