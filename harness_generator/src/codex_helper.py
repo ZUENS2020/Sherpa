@@ -46,7 +46,9 @@ from __future__ import annotations
 
 import logging
 import json
+import hashlib
 import os
+import re
 import queue
 import shutil
 import subprocess
@@ -77,6 +79,34 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _append_opencode_metadata(repo_root: Path, payload: dict) -> None:
+    """Append runtime OpenCode metadata outside the git working tree.
+
+    Writing this file inside the repo can pollute `git diff HEAD` detection and
+    cause false-positive "edits produced" signals.
+    """
+    try:
+        override = (os.environ.get("SHERPA_OPENCODE_METADATA_PATH") or "").strip()
+        if override:
+            path = Path(override).expanduser().resolve()
+        else:
+            sink_root = Path("/tmp/sherpa-opencode-metadata")
+            sink_root.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(repo_root.resolve()))
+            path = sink_root / f"{slug}.jsonl"
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def _build_blocklist() -> list[str]:
@@ -557,6 +587,8 @@ class CodexHelper:
             )
 
         prompt = "\n".join(prompt_parts).strip()
+        prompt_hash = _sha256_text(prompt)
+        context_hash = _sha256_text(additional_context or "")
 
         def _resolve_opencode_model() -> str | None:
             env_model = os.environ.get("OPENCODE_MODEL", "").strip()
@@ -591,6 +623,20 @@ class CodexHelper:
                 baseline_diff = self._git_diff_head()
             except Exception:
                 baseline_diff = ""
+
+            run_meta: dict = {
+                "ts": time.time(),
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "codex_cli": self.codex_cli,
+                "codex_model": self.codex_model,
+                "resolved_model": "",
+                "prompt_hash": prompt_hash,
+                "context_hash": context_hash,
+                "working_dir": str(self.working_dir),
+                "status": "running",
+                "repo_root": str(self.working_dir),
+            }
 
             # ----------------------------------------------------------------
             # Inner loop – retry CLI invocation on transient errors.
@@ -643,6 +689,7 @@ class CodexHelper:
                 model = _resolve_opencode_model()
                 if model:
                     cmd += ["--model", model]
+                run_meta["resolved_model"] = model or ""
                 cmd.append(prompt)
 
                 try:
@@ -808,10 +855,16 @@ class CodexHelper:
                 if accept_diff_without_done and diff_changed:
                     LOGGER.info("[OpenCodeHelper] diff produced without sentinel — accepting")
                     print("[OpenCodeHelper] diff produced without sentinel — accepting")
+                    run_meta["status"] = "success"
+                    run_meta["cli_retries_used"] = cli_try
+                    _append_opencode_metadata(self.working_dir, run_meta)
                     return "".join(captured_chunks)
 
                 LOGGER.warning("[OpenCodeHelper] sentinel not created; next attempt")
                 print("[OpenCodeHelper] sentinel not created; next attempt")
+                run_meta["status"] = "retry_no_sentinel"
+                run_meta["cli_retries_used"] = cli_try
+                _append_opencode_metadata(self.working_dir, run_meta)
                 continue  # outer attempt loop
 
             # Refresh repo to ensure it sees new changes.
@@ -819,12 +872,31 @@ class CodexHelper:
 
             if diff_changed or self._git_diff_head() != baseline_diff:
                 LOGGER.info("[OpenCodeHelper] diff produced — success")
+                run_meta["status"] = "success"
+                run_meta["cli_retries_used"] = cli_try
+                _append_opencode_metadata(self.working_dir, run_meta)
                 return "".join(captured_chunks)
 
             LOGGER.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
             print("[OpenCodeHelper] sentinel present but no diff; next attempt")
+            run_meta["status"] = "retry_no_diff"
+            run_meta["cli_retries_used"] = cli_try
+            _append_opencode_metadata(self.working_dir, run_meta)
 
         LOGGER.warning("[OpenCodeHelper] exhausted attempts — no edits produced")
+        _append_opencode_metadata(
+            self.working_dir,
+            {
+                "ts": time.time(),
+                "status": "exhausted",
+                "codex_cli": self.codex_cli,
+                "codex_model": self.codex_model,
+                "prompt_hash": prompt_hash,
+                "context_hash": context_hash,
+                "working_dir": str(self.working_dir),
+                "repo_root": str(self.working_dir),
+            },
+        )
         return None
 
 

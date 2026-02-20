@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -152,6 +153,74 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return val if isinstance(val, dict) else None
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
+    targets = repo_root / "fuzz" / "targets.json"
+    if not targets.is_file():
+        return False, "missing fuzz/targets.json"
+    try:
+        data = json.loads(targets.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        return False, f"invalid json in fuzz/targets.json: {e}"
+
+    if not isinstance(data, list) or not data:
+        return False, "targets.json must be a non-empty JSON array"
+
+    allowed_lang = {"c-cpp", "cpp", "c", "c++", "java"}
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            return False, f"targets[{i}] must be an object"
+        for key in ("name", "api", "lang"):
+            val = item.get(key)
+            if not isinstance(val, str) or not val.strip():
+                return False, f"targets[{i}].{key} must be a non-empty string"
+        lang = str(item.get("lang") or "").strip().lower()
+        if lang not in allowed_lang:
+            return False, f"targets[{i}].lang unsupported: {item.get('lang')}"
+    return True, ""
+
+
+def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) -> dict[str, str]:
+    combined = "\n".join(x for x in [last_error, stdout_tail, stderr_tail] if x).strip()
+    low = combined.lower()
+    error_type = "unknown"
+    if any(k in low for k in ["missing fuzz/build.py", "no such file", "cannot find", "not found"]):
+        error_type = "missing_file"
+    elif any(k in low for k in ["undefined reference", "ld:", "linker", "collect2"]):
+        error_type = "link_error"
+    elif any(k in low for k in ["error:", "fatal error:", "compilation terminated", "clang", "gcc"]):
+        error_type = "compile_error"
+    elif any(k in low for k in ["traceback", "exception", "module not found", "syntaxerror"]):
+        error_type = "script_error"
+
+    evidence_lines = [ln.strip() for ln in combined.splitlines() if ln.strip()]
+    evidence = "\n".join(evidence_lines[-12:])
+    return {
+        "error_type": error_type,
+        "evidence": evidence,
+    }
+
+
+def _collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:
+    pairs = [
+        ("fuzz/targets.json", repo_root / "fuzz" / "targets.json"),
+        ("fuzz/build.py", repo_root / "fuzz" / "build.py"),
+        ("fuzz/PLAN.md", repo_root / "fuzz" / "PLAN.md"),
+    ]
+    out: dict[str, str] = {}
+    for name, path in pairs:
+        if not path.is_file():
+            continue
+        try:
+            out[name] = _sha256_text(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+    return out
 
 
 def _has_codex_key() -> bool:
@@ -576,6 +645,24 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             gen.patcher.run_codex_command(prompt)
         else:
             gen._pass_plan_targets()
+
+        strict_targets = (os.environ.get("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1").strip().lower() in {"1", "true", "yes", "on"})
+        ok_targets, targets_err = _validate_targets_json(gen.repo_root)
+        if strict_targets and not ok_targets:
+            _wf_log(cast(dict[str, Any], state), f"plan: targets.json schema invalid -> {targets_err}; retrying once")
+            prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
+            gen.patcher.run_codex_command(prompt)
+            ok_targets, targets_err = _validate_targets_json(gen.repo_root)
+            if not ok_targets:
+                out = {
+                    **state,
+                    "last_step": "plan",
+                    "last_error": f"targets schema validation failed: {targets_err}",
+                    "message": "plan failed",
+                }
+                _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
+                return out
+
         fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
         out = {
             **state,
@@ -1004,6 +1091,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
+    summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
+
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
     codex_hint = (state.get("codex_hint") or "").strip()
@@ -1020,9 +1109,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "- IMPORTANT: Tell OpenCode to NOT run any commands — only edit files.\n"
                 "- Acceptance: `(cd fuzz && python build.py)` succeeds and leaves at least one executable in fuzz/out/.\n\n"
                 f"repo_root={repo_root}\n"
+                + f"error_type={summary['error_type']}\n"
                 + (f"last_error={last_error}\n" if last_error else "")
                 + ("\n=== STDOUT (tail) ===\n" + stdout_tail + "\n" if stdout_tail else "")
                 + ("\n=== STDERR (tail) ===\n" + stderr_tail + "\n" if stderr_tail else "")
+                + "\n=== STRUCTURED EVIDENCE ===\n" + summary["evidence"] + "\n"
                 + "\nReturn JSON only."
             )
             try:
@@ -1043,6 +1134,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     # Now call OpenCode with a purpose-built prompt including diagnostics.
     context_parts: list[str] = []
+    context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
     if last_error:
         context_parts.append("=== last_error ===\n" + last_error)
     if stdout_tail:
@@ -1448,6 +1540,7 @@ def _write_run_summary(out: dict[str, Any]) -> None:
     harness_error = _detect_harness_error(repo_root)
     run_details = cast(list[dict[str, Any]], out.get("run_details") or [])
     fuzz_inventory = _collect_fuzz_inventory(repo_root)
+    key_artifact_hashes = _collect_key_artifact_hashes(repo_root)
 
     bundle_dirs = [
         d.name
@@ -1481,6 +1574,7 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         "reproducer_path": str(repo_root / "reproduce.py"),
         "bundles": bundle_dirs,
         "fuzz_inventory": fuzz_inventory,
+        "key_artifact_hashes": key_artifact_hashes,
         "plan_policy": {
             "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
             "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
@@ -1512,7 +1606,12 @@ def _write_run_summary(out: dict[str, Any]) -> None:
         f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
         f"- Plan crash policy: {'fix' if data['plan_policy']['fix_on_crash'] else 'report-only'}",
         f"- Plan max fix rounds: {data['plan_policy']['max_fix_rounds']}",
+        f"- Key artifact hashes: {len(key_artifact_hashes)}",
     ]
+    if key_artifact_hashes:
+        md_lines.extend(["", "## Key Artifact Hashes"])
+        for path, digest in sorted(key_artifact_hashes.items()):
+            md_lines.append(f"- {path}: `{digest}`")
     if run_details:
         md_lines.extend(["", "## Fuzzer Effectiveness"])
         for item in run_details:

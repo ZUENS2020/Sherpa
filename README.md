@@ -218,6 +218,12 @@ docker build \
 
 ## 打包前清理建议
 
+---
+
+## 运维改进参考
+
+- OpenCode 产出稳定性提升计划：`harness_generator/docs/opencode_stability_plan.md`
+
 1. 删除运行时 `config/` 目录
 2. 不提交 `.env` 或任何密钥文件
 3. 保留 `config.example/` 与 `.env.example` 作为模板

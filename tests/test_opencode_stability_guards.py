@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "harness_generator" / "src" / "langchain_agent"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+import types
+
+# Optional runtime deps are not required for these unit-level helper tests.
+if "langchain_openai" not in sys.modules:
+    mod = types.ModuleType("langchain_openai")
+    class _DummyChatOpenAI:  # pragma: no cover
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+    mod.ChatOpenAI = _DummyChatOpenAI
+    sys.modules["langchain_openai"] = mod
+
+if "langgraph.graph" not in sys.modules:
+    pkg = types.ModuleType("langgraph")
+    graph = types.ModuleType("langgraph.graph")
+    graph.END = object()
+    class _DummyStateGraph:  # pragma: no cover
+        def __init__(self, *args, **kwargs):
+            pass
+    graph.StateGraph = _DummyStateGraph
+    sys.modules["langgraph"] = pkg
+    sys.modules["langgraph.graph"] = graph
+
+if "persistent_config" not in sys.modules:
+    pmod = types.ModuleType("persistent_config")
+    pmod.load_config = lambda: None
+    sys.modules["persistent_config"] = pmod
+
+if "fuzz_unharnessed_repo" not in sys.modules:
+    fmod = types.ModuleType("fuzz_unharnessed_repo")
+    class _Dummy:  # pragma: no cover
+        pass
+    fmod.FuzzerRunResult = _Dummy
+    fmod.HarnessGeneratorError = RuntimeError
+    fmod.NonOssFuzzHarnessGenerator = _Dummy
+    fmod.RepoSpec = _Dummy
+    fmod.snapshot_repo_text = lambda *a, **k: ""
+    fmod.write_patch_from_snapshot = lambda *a, **k: None
+    sys.modules["fuzz_unharnessed_repo"] = fmod
+
+import workflow_graph
+
+
+def test_validate_targets_json_rejects_missing_required_fields(tmp_path: Path):
+    fuzz = tmp_path / "fuzz"
+    fuzz.mkdir(parents=True, exist_ok=True)
+    (fuzz / "targets.json").write_text(json.dumps([{"name": "f", "lang": "c-cpp"}]), encoding="utf-8")
+
+    ok, err = workflow_graph._validate_targets_json(tmp_path)
+
+    assert not ok
+    assert "api" in err
+
+
+def test_validate_targets_json_accepts_valid_minimal_schema(tmp_path: Path):
+    fuzz = tmp_path / "fuzz"
+    fuzz.mkdir(parents=True, exist_ok=True)
+    (fuzz / "targets.json").write_text(
+        json.dumps([{"name": "f", "api": "LLVMFuzzerTestOneInput", "lang": "c-cpp"}]),
+        encoding="utf-8",
+    )
+
+    ok, err = workflow_graph._validate_targets_json(tmp_path)
+
+    assert ok
+    assert err == ""
+
+
+def test_summarize_build_error_classifies_linker_issue():
+    out = workflow_graph._summarize_build_error(
+        "",
+        "",
+        "ld: undefined reference to foo\ncollect2: error: ld returned 1 exit status",
+    )
+
+    assert out["error_type"] == "link_error"
+    assert "undefined reference" in out["evidence"]
+
+
+def test_collect_key_artifact_hashes_only_returns_existing(tmp_path: Path):
+    fuzz = tmp_path / "fuzz"
+    fuzz.mkdir(parents=True, exist_ok=True)
+    (fuzz / "targets.json").write_text("[]\n", encoding="utf-8")
+
+    hashes = workflow_graph._collect_key_artifact_hashes(tmp_path)
+
+    assert sorted(hashes.keys()) == ["fuzz/targets.json"]
+    assert len(hashes["fuzz/targets.json"]) == 64

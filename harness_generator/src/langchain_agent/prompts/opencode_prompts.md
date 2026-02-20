@@ -83,3 +83,23 @@ CRITICAL: Do NOT run any commands. Only edit source files.
 
 When finished, write the key file you modified into ./done.
 <!-- END TEMPLATE -->
+
+<!-- TEMPLATE: plan_fix_targets_schema -->
+You are coordinating a fuzz harness generation workflow.
+Repair `fuzz/targets.json` so it passes strict schema checks.
+
+Required schema:
+- JSON array with at least one object
+- each object must include non-empty string keys: `name`, `api`, `lang`
+- `lang` must be one of: c-cpp, cpp, c, c++, java
+
+Constraints:
+- Keep edits minimal
+- Do NOT run any build, compile, or test commands
+- Only edit files
+
+Current validation error:
+{{schema_error}}
+
+When finished, ensure `fuzz/targets.json` is valid JSON and matches the schema.
+<!-- END TEMPLATE -->
