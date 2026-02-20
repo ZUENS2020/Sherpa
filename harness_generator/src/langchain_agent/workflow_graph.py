@@ -34,6 +34,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     max_len: int
     docker_image: Optional[str]
     ai_key_path: str
+    workflow_started_at: float
 
     step_count: int
     max_steps: int
@@ -412,6 +413,23 @@ Default max_len: {max_len}
 
 
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
+    started_at = float(state.get("workflow_started_at") or time.time())
+    time_budget = max(1, int(state.get("time_budget") or 900))
+    elapsed = time.time() - started_at
+    if elapsed >= time_budget:
+        out = cast(
+            FuzzWorkflowRuntimeState,
+            {
+                **state,
+                "last_step": step_name,
+                "failed": True,
+                "last_error": f"time budget exceeded: elapsed={elapsed:.1f}s budget={time_budget}s",
+                "message": "workflow stopped (time budget exceeded)",
+            },
+        )
+        _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=time_budget elapsed={elapsed:.1f}s budget={time_budget}s")
+        return out, True
+
     step_count = int(state.get("step_count") or 0) + 1
     max_steps = int(state.get("max_steps") or 10)
     next_state = cast(FuzzWorkflowRuntimeState, {**state, "step_count": step_count})
@@ -429,6 +447,14 @@ def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWo
         _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=max_steps")
         return out, True
     return next_state, False
+
+
+def _remaining_time_budget_sec(state: FuzzWorkflowRuntimeState, *, min_timeout: int = 5) -> int:
+    started_at = float(state.get("workflow_started_at") or time.time())
+    total_budget = max(1, int(state.get("time_budget") or 900))
+    elapsed = max(0.0, time.time() - started_at)
+    remaining = int(total_budget - elapsed)
+    return max(min_timeout, remaining)
 
 
 def _make_plan_hint(repo_root: Path) -> str:
@@ -642,16 +668,26 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     try:
         if hint:
             prompt = _render_opencode_prompt("plan_with_hint", hint=hint)
-            gen.patcher.run_codex_command(prompt)
+            gen.patcher.run_codex_command(
+                prompt,
+                timeout=_remaining_time_budget_sec(state),
+                max_attempts=1,
+                max_cli_retries=1,
+            )
         else:
-            gen._pass_plan_targets()
+            gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
 
         strict_targets = (os.environ.get("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1").strip().lower() in {"1", "true", "yes", "on"})
         ok_targets, targets_err = _validate_targets_json(gen.repo_root)
         if strict_targets and not ok_targets:
             _wf_log(cast(dict[str, Any], state), f"plan: targets.json schema invalid -> {targets_err}; retrying once")
             prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
-            gen.patcher.run_codex_command(prompt)
+            gen.patcher.run_codex_command(
+                prompt,
+                timeout=_remaining_time_budget_sec(state),
+                max_attempts=1,
+                max_cli_retries=1,
+            )
             ok_targets, targets_err = _validate_targets_json(gen.repo_root)
             if not ok_targets:
                 out = {
@@ -738,9 +774,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     ctx += "=== fuzz/targets.json ===\n" + targets.read_text(encoding="utf-8", errors="replace") + "\n"
             except Exception:
                 pass
-            gen.patcher.run_codex_command(prompt, additional_context=ctx or None)
+            gen.patcher.run_codex_command(
+                prompt,
+                additional_context=ctx or None,
+                timeout=_remaining_time_budget_sec(state),
+                max_attempts=1,
+                max_cli_retries=1,
+            )
         else:
-            gen._pass_synthesize_harness()
+            gen._pass_synthesize_harness(timeout=_remaining_time_budget_sec(state))
         out = {**state, "last_step": "synthesize", "last_error": "", "codex_hint": "", "message": "synthesized"}
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -1147,7 +1189,13 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     try:
         _wf_log(cast(dict[str, Any], state), f"fix_build: running opencode (hint_lines={len(codex_hint.splitlines())})")
-        gen.patcher.run_codex_command(prompt, additional_context=context or None)
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context or None,
+            timeout=_remaining_time_budget_sec(state),
+            max_attempts=1,
+            max_cli_retries=1,
+        )
         out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "opencode fixed build"}
         _wf_log(cast(dict[str, Any], out), f"<- fix_build ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -1306,7 +1354,13 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     attempts = int(state.get("crash_fix_attempts") or 0) + 1
     try:
-        gen.patcher.run_codex_command(prompt, additional_context=context or None)
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context or None,
+            timeout=_remaining_time_budget_sec(state),
+            max_attempts=1,
+            max_cli_retries=1,
+        )
         patch_path = repo_root / "fix.patch"
         fix_summary_path = repo_root / "fix_summary.md"
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
@@ -1721,6 +1775,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
             "repo_url": inp.repo_url,
             "email": inp.email,
             "time_budget": inp.time_budget,
+            "workflow_started_at": time.time(),
             "max_len": inp.max_len,
             "docker_image": inp.docker_image,
             "ai_key_path": str(inp.ai_key_path),

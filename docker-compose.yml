@@ -51,6 +51,8 @@ services:
       - sherpa-oss-fuzz:/shared/oss-fuzz
       # Artifacts output directory (host-mounted).
       - ./output:/shared/output
+      # Dev override: load latest local source without rebuilding the image.
+      - ./harness_generator/src:/app/harness_generator/src
 
       # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
       # - ./.env:/app/.env:ro
@@ -100,11 +102,23 @@ services:
       sherpa-oss-fuzz-init:
         condition: service_completed_successfully
       sherpa-docker:
-        condition: service_started
+        condition: service_healthy
 
   sherpa-docker:
     image: docker:27-dind
     privileged: true
+    restart: unless-stopped
+    command:
+      - --host=tcp://0.0.0.0:2375
+      - --host=unix:///var/run/docker.sock
+      - --tls=false
+      - --registry-mirror=${SHERPA_DOCKER_REGISTRY_MIRROR:-https://docker.m.daocloud.io}
+    healthcheck:
+      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     environment:
       DOCKER_TLS_CERTDIR: ""
       DOCKER_HOST: tcp://0.0.0.0:2375

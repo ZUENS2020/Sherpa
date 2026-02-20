@@ -763,6 +763,35 @@ class NonOssFuzzHarnessGenerator:
         tool will build the fuzz runtime image automatically if it's missing.
         """
 
+        def _wait_for_docker_daemon_ready() -> None:
+            wait_raw = os.environ.get("SHERPA_DOCKER_DAEMON_WAIT_SEC", "60")
+            try:
+                wait_sec = max(5, min(int(wait_raw), 300))
+            except Exception:
+                wait_sec = 60
+            deadline = time.time() + wait_sec
+            while True:
+                try:
+                    probe = subprocess.run(
+                        ["docker", "info"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        text=True,
+                    )
+                    if probe.returncode == 0:
+                        return
+                except FileNotFoundError:
+                    raise HarnessGeneratorError("Docker not found in PATH. Install Docker Desktop and ensure 'docker' is available.")
+                except Exception:
+                    pass
+                if time.time() >= deadline:
+                    raise HarnessGeneratorError("Docker daemon is not ready (timeout waiting for docker info).")
+                time.sleep(2)
+
+        # Ensure daemon is reachable first; this avoids startup race failures.
+        _wait_for_docker_daemon_ready()
+
         # Fast path: image exists.
         try:
             probe = subprocess.run(
@@ -784,6 +813,35 @@ class NonOssFuzzHarnessGenerator:
             raise HarnessGeneratorError(f"Dockerfile not found: {dockerfile}")
 
         print(f"[*] Docker image '{image}' not found. Building it now …")
+
+        def _is_transient_registry_error(lines: list[str]) -> bool:
+            blob = "\n".join(lines).lower()
+            needles = [
+                "tls handshake timeout",
+                "i/o timeout",
+                "connection reset by peer",
+                "context deadline exceeded",
+                "temporary failure in name resolution",
+                "net/http: request canceled",
+                "no such host",
+                "unexpected eof",
+                "proxyconnect tcp",
+                "lookup registry-1.docker.io",
+            ]
+            return any(n in blob for n in needles)
+
+        def _is_docker_daemon_unavailable(lines: list[str]) -> bool:
+            blob = "\n".join(lines).lower()
+            needles = [
+                "cannot connect to the docker daemon",
+                "is the docker daemon running",
+                "connection refused",
+                "dial tcp",
+                "lookup sherpa-docker",
+                "no such host",
+            ]
+            return any(n in blob for n in needles)
+
         def _run_build(build_cmd: list[str], *, buildkit: str | None = None) -> tuple[int, list[str]]:
             print(f"[*] ➜  {' '.join(build_cmd)}")
             try:
@@ -815,19 +873,49 @@ class NonOssFuzzHarnessGenerator:
             rc = proc.wait()
             return rc, lines
 
-        cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
-        rc, lines = _run_build(cmd, buildkit="1")
-        if rc != 0:
-            # Older docker builders do not support --progress; retry without it.
-            if any("unknown flag: --progress" in ln for ln in lines):
-                cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
-                rc, lines = _run_build(cmd, buildkit="1")
-            # BuildKit can be enabled without buildx; retry with classic builder.
-            if rc != 0 and any("BuildKit is enabled" in ln or "buildx component is missing" in ln for ln in lines):
-                cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
-                rc, _ = _run_build(cmd, buildkit="0")
+        tries_raw = os.environ.get("SHERPA_DOCKER_BUILD_RETRIES", "3")
+        try:
+            max_tries = max(1, min(int(tries_raw), 8))
+        except Exception:
+            max_tries = 3
+
+        backoff_s = 2.0
+        last_rc = 1
+        last_lines: list[str] = []
+        for attempt in range(1, max_tries + 1):
+            cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+            rc, lines = _run_build(cmd, buildkit="1")
+
             if rc != 0:
-                raise HarnessGeneratorError(f"Docker build failed (rc={rc}).")
+                # Older docker builders do not support --progress; retry without it.
+                if any("unknown flag: --progress" in ln for ln in lines):
+                    cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                    rc, lines = _run_build(cmd, buildkit="1")
+
+                # BuildKit can be enabled without buildx; retry with classic builder.
+                if rc != 0 and any("BuildKit is enabled" in ln or "buildx component is missing" in ln for ln in lines):
+                    cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                    rc, lines = _run_build(cmd, buildkit="0")
+
+            last_rc = rc
+            last_lines = lines
+            if rc == 0:
+                return
+
+            if attempt < max_tries and (_is_transient_registry_error(lines) or _is_docker_daemon_unavailable(lines)):
+                reason = "daemon/network transient error"
+                print(f"[warn] docker build {reason}; retrying in {backoff_s:.0f}s ({attempt}/{max_tries})")
+                time.sleep(backoff_s)
+                backoff_s = min(backoff_s * 2, 20.0)
+                continue
+            break
+
+        tail = "".join(last_lines[-120:]).strip()
+        if tail:
+            raise HarnessGeneratorError(
+                f"Docker build failed (rc={last_rc}). Last output tail:\n{tail}"
+            )
+        raise HarnessGeneratorError(f"Docker build failed (rc={last_rc}).")
 
     def _python_runner(self) -> str:
         # When executing build/run inside Docker, use the container's python.
@@ -1142,7 +1230,7 @@ class NonOssFuzzHarnessGenerator:
     # Step A – Plan
     # ────────────────────────────────────────────────────────────────────
 
-    def _pass_plan_targets(self) -> None:
+    def _pass_plan_targets(self, *, timeout: int = 1800) -> None:
         """
         Ask Codex to mine/score candidates and author PLAN.md + targets.json.
         """
@@ -1184,7 +1272,12 @@ class NonOssFuzzHarnessGenerator:
             """
         ).strip()
 
-        stdout = self.patcher.run_codex_command(instructions)
+        stdout = self.patcher.run_codex_command(
+            instructions,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=1,
+        )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not produce a plan (`fuzz/PLAN.md`).")
 
@@ -1194,7 +1287,7 @@ class NonOssFuzzHarnessGenerator:
     # Step B – Synthesize harness & build glue
     # ────────────────────────────────────────────────────────────────────
 
-    def _pass_synthesize_harness(self) -> None:
+    def _pass_synthesize_harness(self, *, timeout: int = 1800) -> None:
         """
         Ask Codex to create a harness and local build system under fuzz/.
         """
@@ -1254,7 +1347,13 @@ class NonOssFuzzHarnessGenerator:
             "=== fuzz/PLAN.md ===\n" + plan_text +
             "\n\n=== fuzz/targets.json ===\n" + targets_text
         )
-        stdout = self.patcher.run_codex_command(instructions, additional_context=context)
+        stdout = self.patcher.run_codex_command(
+            instructions,
+            additional_context=context,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=1,
+        )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
 
@@ -2385,10 +2484,9 @@ class NonOssFuzzHarnessGenerator:
             return redacted
 
         if extra_inputs:
-            # If the last element is a directory (e.g., corpus), append after "--" for libFuzzer/Jazzer
+            # Append corpus/extra inputs directly. libFuzzer treats a bare "--" as an ignored flag
+            # and logs noisy warnings that can look like failures in UI streams.
             cmd = list(cmd)
-            if "--" not in cmd:
-                cmd.append("--")
             cmd.extend(extra_inputs)
 
         effective_env = env or os.environ.copy()

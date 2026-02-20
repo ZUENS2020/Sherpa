@@ -2,20 +2,6 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
-    PIP_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn"
-
-# Use CN mirrors by default (override with build args if needed).
-ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
-ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
-
-# Best-effort: rewrite Ubuntu apt sources to CN mirrors.
-RUN set -e; \
-  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
-    [ -f "$f" ] || continue; \
-    sed -i -E "s#https?://(archive|security).ubuntu.com/ubuntu#${APT_MIRROR}#g" "$f"; \
-    sed -i -E "s#https?://ports.ubuntu.com/ubuntu-ports#${APT_MIRROR}/ubuntu-ports#g" "$f"; \
-  done
 
 RUN apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
   && apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 \
