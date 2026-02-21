@@ -1955,7 +1955,45 @@ class NonOssFuzzHarnessGenerator:
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src_dir, dst)
-        # Final classification: unreproducible if reproducer failed.
+        # Final classification policy (single-shot, avoid double-renames):
+        # 1) HARNESS ERROR => false_positive
+        # 2) reproducer failed => unreproducible
+        # 3) otherwise keep challenge_bundle
+        harness_error = False
+        analysis_text = ""
+        if analysis_path.exists():
+            analysis_text = analysis_path.read_text(encoding="utf-8", errors="ignore")
+            harness_error = bool(re.search(r"HARNESS ERROR", analysis_text, re.IGNORECASE))
+
+        if harness_error:
+            # Generate a concise justification explaining why this is a harness error.
+            justification_path = self.repo_root / "false_positive_justification.md"
+            fp_prompt = textwrap.dedent(
+                """
+                Write `false_positive_justification.md`.
+
+                Explain in under 300 words why the observed crash/timeout is
+                attributable to a misuse or bug in the fuzzing harness rather
+                than a flaw in the target project.  Summarise what the harness
+                does wrong (e.g., incorrect API usage, invalid parameters, not
+                respecting preconditions) and how this leads to the detected
+                fault.  Provide guidance on how to fix the harness so the bug
+                disappears.
+                """
+            ).strip()
+            self.patcher.run_codex_command(fp_prompt, additional_context=analysis_text)
+
+            false_pos_dir = self.repo_root / ("false_positive" if self.round_index == 1 else f"false_positive_{self.round_index}")
+            if false_pos_dir.exists():
+                shutil.rmtree(false_pos_dir)
+            bundle.rename(false_pos_dir)
+
+            if justification_path.exists():
+                shutil.copy2(justification_path, false_pos_dir / justification_path.name)
+
+            print("[!] Crash determined to be caused by harness error → recorded as false_positive.")
+            return
+
         if not reproducer_ok:
             unrepro = self.repo_root / ("unreproducible" if self.round_index == 1 else f"unreproducible_{self.round_index}")
             if unrepro.exists():
@@ -1964,48 +2002,6 @@ class NonOssFuzzHarnessGenerator:
             print("[!] Could not reliably reproduce the crash → recorded under unreproducible/.")
         else:
             print(f"[*] Challenge bundle ready → {bundle.relative_to(self.repo_root)}")
-
-        # ────────────────────────────────────────────────────────────────
-        # Heuristic: detect false positives due to harness mistakes
-        # If crash_analysis.md contains the marker string "HARNESS ERROR"
-        # then we treat the finding as a false-positive.  Move the folder
-        # aside so downstream automation can skip it.
-        # ────────────────────────────────────────────────────────────────
-
-        if analysis_path.exists():
-            text = analysis_path.read_text(encoding="utf-8", errors="ignore")
-            if re.search(r"HARNESS ERROR", text, re.IGNORECASE):
-                # Generate a concise justification explaining why this is a harness error.
-                justification_path = self.repo_root / "false_positive_justification.md"
-
-                fp_prompt = textwrap.dedent(
-                    """
-                    Write `false_positive_justification.md`.
-
-                    Explain in under 300 words why the observed crash/timeout is
-                    attributable to a misuse or bug in the fuzzing harness rather
-                    than a flaw in the target project.  Summarise what the harness
-                    does wrong (e.g., incorrect API usage, invalid parameters, not
-                    respecting preconditions) and how this leads to the detected
-                    fault.  Provide guidance on how to fix the harness so the bug
-                    disappears.
-                    """
-                ).strip()
-
-                self.patcher.run_codex_command(fp_prompt, additional_context=text)
-
-                # Rename bundle directory and include justification (if produced)
-                false_pos_dir = self.repo_root / ("false_positive" if self.round_index == 1 else f"false_positive_{self.round_index}")
-                if false_pos_dir.exists():
-                    shutil.rmtree(false_pos_dir)
-                bundle.rename(false_pos_dir)
-
-                jp = justification_path
-                if jp.exists():
-                    shutil.copy2(jp, false_pos_dir / jp.name)
-
-                print("[!] Crash determined to be caused by harness error → recorded as false_positive.")
-                return
 
     def _write_run_summary(
         self,
