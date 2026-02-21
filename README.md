@@ -1,229 +1,240 @@
-# SHERPA — 批量化 Fuzz 自动化平台
+# SHERPA
 
-SHERPA 是一个面向批量 GitHub 项目的自动化模糊测试平台。启动服务后只需通过 REST API 发起任务并查询状态，所有初始化、构建、运行与报告产出由服务自动完成。
+SHERPA 是一个面向批量 GitHub 仓库的自动化 Fuzz 编排服务。
+当前主路径是 Docker-only：通过 Web API 提交任务，系统自动完成 `plan -> synthesize -> build -> run -> (可选 fix)`，并落盘日志与报告。
 
-核心能力：
-- OpenCode 生成 harness、build 脚本、种子与分析报告
-- LangGraph 工作流自动修复与重试（plan → synthesize → build → run → fix）
-- 批量提交、并行执行与统一状态监控
-- 运行日志落盘，Web 仅展示摘要进度
+## 当前进展（与旧文档相比）
 
----
+- 已移除 `decide` 节点，流程不再经过单独决策节点。
+- `plan` 节点现在同时负责：
+  - 生成 `fuzz/PLAN.md` 与 `fuzz/targets.json`
+  - 给后续 `synthesize/build` 提供可执行建议（hint）
+  - 通过 `PLAN.md` 决定 crash 后是 `report-only` 还是进入 `fix_crash`
+- 结束流程由 `plan` 产出的策略控制，并统一写出 `run_summary.md/json` 报告。
+- OpenCode 提示词已从代码中抽离，统一在：
+  - `harness_generator/src/langchain_agent/prompts/opencode_prompts.md`
 
-## 项目信息
+## 一图看系统
 
-定位：无需人工执行命令的“批量 fuzz 编排服务”。
-
-适用场景：
-- 批量测试多个 GitHub 项目
-- 由外部系统统一调度与监控
-- 多机/多项目流水线集成
-
----
-
-## 项目架构
-
-核心组件：
-- Web API（FastAPI）：任务提交与状态查询
-- 工作流引擎（LangGraph）：plan → synthesize → build → run → fix 循环
-- OpenCode CLI：代码分析与生成
-- Docker 运行层：容器内构建与 fuzz
-- 持久化配置：`config/web_config.json` 与 `config/web_opencode.env`
-
-数据流：
-- `/api/task` → 初始化（可选）→ 批量 job 入队 → 工作线程并行执行 → `/api/task/{id}` 轮询
-
----
-
-## 工作流说明
-
-每个仓库的默认流程：
-1. Plan：生成 `fuzz/PLAN.md` 与 `fuzz/targets.json`
-2. Synthesize：生成 harness、`fuzz/build.py` 与 corpus
-3. Build：执行 `python fuzz/build.py`，失败自动修复重试
-4. Run：执行 fuzz 并产出崩溃样本与复现线索
-5. Fix（可选）：若 crash 产生，尝试修复并生成补丁
-6. Summary：写入 `run_summary.md/json`
-
-运行环境：
-- C/C++ 使用 libFuzzer
-- Java 使用 Jazzer
-
----
-
-## 部署方法
-
-### Docker Compose（推荐，Ubuntu/Windows 通用）
-
-1. 准备配置
-```bash
-cp .env.example .env
+```mermaid
+flowchart LR
+  User["User / API Client"] --> API["sherpa-web (FastAPI)"]
+  API --> Queue["In-memory Task Queue"]
+  Queue --> Worker["Workflow Worker Thread"]
+  Worker --> WG["LangGraph Workflow"]
+  WG --> OC["OpenCode CLI (in sherpa-opencode)"]
+  WG --> DKR["Docker Engine (sherpa-docker dind)"]
+  DKR --> IMG["fuzz images\n(sherpa-fuzz-cpp/java)"]
+  WG --> OUT["/shared/output/<repo>-<id>/"]
+  API --> LOG["/app/job-logs/jobs/*.log"]
+  User --> UI["Web UI /static"]
+  UI --> API
 ```
 
-2. 启动服务
+## 执行路径图（单仓库）
+
+```mermaid
+flowchart TD
+  init["init"] --> plan["plan"]
+  plan -->|"ok"| synthesize["synthesize"]
+  plan -->|"error/failed"| stop1["END"]
+
+  synthesize -->|"ok"| build["build"]
+  synthesize -->|"error/failed"| stop2["END"]
+
+  build -->|"build failed"| fixBuild["fix_build"]
+  build -->|"build ok"| run["run"]
+  build -->|"failed flag"| stop3["END"]
+
+  fixBuild -->|"fixed"| build
+  fixBuild -->|"still error"| stop4["END"]
+
+  run -->|"no crash"| stop5["END"]
+  run -->|"crash + plan allows fix"| fixCrash["fix_crash"]
+  run -->|"crash + report-only / max rounds reached"| stop6["END"]
+
+  fixCrash -->|"fixed"| build
+  fixCrash -->|"error"| stop7["END"]
+```
+
+## 任务生命周期（批量）
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant W as sherpa-web
+  participant Q as Task/Child Jobs
+  participant F as Fuzz Workflow
+
+  C->>W: POST /api/task
+  W->>Q: create parent task + child fuzz jobs
+  W-->>C: {job_id, status:"queued"}
+
+  loop polling
+    C->>W: GET /api/task/{job_id}
+    W-->>C: 聚合状态(queued/running/success/error)
+  end
+
+  Q->>F: run_fuzz_workflow per child
+  F-->>Q: 写日志、写产物、回传状态
+```
+
+## LangGraph 中 LLM 的职责
+
+### `plan` 节点
+
+- 通过 OpenCode 生成：
+  - `fuzz/PLAN.md`
+  - `fuzz/targets.json`
+- 从 `PLAN.md` 解析策略：
+  - `Crash policy: report-only|fix`
+  - `Max fix rounds: N`
+- 输出 `codex_hint` 给后续 `synthesize/fix_build` 使用。
+
+### `decide` 节点
+
+- 当前实现中已删除。
+- 原先决策职责已并入 `plan` + 路由函数（`_route_after_*`）。
+
+### 其他仍使用 LLM 的节点
+
+- `synthesize`：根据 plan 生成 harness 与构建脚本。
+- `fix_build`：先做本地热修；必要时用 LLM 生成 OpenCode 指令并修复源码。
+- `fix_crash`：根据 crash 分析走 harness 修复或 upstream 修复。
+
+## 哪个节点写哪些文件
+
+| 节点 | 主要写入文件 | 用途 |
+|---|---|---|
+| `plan` | `fuzz/PLAN.md`, `fuzz/targets.json` | 规划目标、定义后续策略 |
+| `synthesize` | `fuzz/build.py`, `fuzz/*harness*`, `fuzz/system_packages.txt`(可选) | 产出可构建 harness |
+| `build` | `fuzz/out/*` | 生成可执行 fuzzer |
+| `run` | `fuzz/corpus/*`, `fuzz/out/artifacts/*`, `crash_info.md`, `crash_analysis.md`, `reproduce.py` | 运行与崩溃分析 |
+| `fix_crash` | `fix.patch`, `fix_summary.md` | 输出修复补丁 |
+| `workflow end` | `run_summary.md`, `run_summary.json`, `fuzz/out/fuzz_effectiveness.md/json` | 统一报告 |
+
+## 报告与产物流
+
+```mermaid
+flowchart LR
+  planN["plan"] --> P1["fuzz/PLAN.md"]
+  planN --> P2["fuzz/targets.json"]
+  synN["synthesize"] --> S1["fuzz/build.py + harness"]
+  buildN["build"] --> B1["fuzz/out/<fuzzer>"]
+  runN["run"] --> R1["artifacts + crash_info + crash_analysis"]
+  fixN["fix_crash"] --> F1["fix.patch + fix_summary.md"]
+  endN["_write_run_summary"] --> SUM["run_summary.md/json"]
+  endN --> EFF["fuzz_effectiveness.md/json"]
+```
+
+## API
+
+### `POST /api/task`
+
+提交批量任务（每个 job 必须 Docker 运行）。
+
+示例：
+
+```json
+{
+  "jobs": [
+    {
+      "code_url": "https://github.com/madler/zlib.git",
+      "time_budget": 900,
+      "max_tokens": 1000,
+      "docker": true,
+      "docker_image": "auto"
+    }
+  ],
+  "auto_init": true,
+  "build_images": true,
+  "force_build": false
+}
+```
+
+### `GET /api/task/{job_id}`
+
+返回父任务聚合状态 + 子任务明细（running/success/error 统计）。
+
+### `GET /api/tasks`
+
+拉取最近任务列表，便于前端会话面板展示。
+
+### 其他接口
+
+- `GET /api/config`
+- `PUT /api/config`
+- `GET /api/system`
+
+## 输出与日志
+
+- 默认产物目录：`./output`（容器内 `/shared/output`）
+- 单任务目录形态：`<repo>-<8位id>/`
+- 主日志：`/app/job-logs/jobs/<job_id>.log`
+- 日志拆分：
+  - 等级：`<job_id>.level.info.log` / `warn.log` / `error.log`
+  - 类别：`<job_id>.cat.workflow.log` / `build.log` / `opencode.log` / `docker.log` / ...
+
+当前前端按等级/类别展示日志；正常运行日志不会直接当成错误，只有命中错误关键字或任务状态为 `error` 才作为错误态展示。
+
+## 部署（Docker Compose）
+
 ```bash
 docker compose up -d --build
 ```
 
-3. 打开 Web UI（可选）
-```
-http://localhost:8000/
-```
+默认入口：
 
-说明：
-- Web UI 用于人工查看与配置
-- 批量调用建议使用 REST API
-- 默认会挂载本机 `./output` 作为产物目录
+- Web UI: `http://localhost:8000/`
+- API: `http://localhost:8000/api/*`
 
-### 本地运行（可选）
+关键服务：
+
+- `sherpa-web`: FastAPI + 静态前端
+- `sherpa-docker`: dind 守护进程（web 通过 `DOCKER_HOST=tcp://sherpa-docker:2375` 调用）
+- `sherpa-oss-fuzz-init`: 初始化 oss-fuzz checkout
+- `sherpa-opencode`: OpenCode 运行镜像
+
+## 常见问题与排障
+
+### 1) `BuildKit is enabled but the buildx component is missing`
+
+现有代码已在构建失败时自动回退到 `DOCKER_BUILDKIT=0` 重试。若仍失败，确认：
+
+- 当前调用是否真的在 `sherpa-web` 容器内（而不是宿主机错误环境）
+- `docker` CLI 与 daemon 是否匹配（`docker info`）
+
+### 2) `lookup sherpa-docker ... no such host`
+
+说明当前进程不在 compose 网络里，或环境变量污染：
+
+- 若在宿主机调试，清理错误的 `DOCKER_HOST=tcp://sherpa-docker:2375`
+- 若在容器内调试，确认 `sherpa-docker` 服务健康且同网络
+
+### 3) OrbStack / Docker Desktop 代理导致拉取或构建异常
+
+优先检查宿主机 Docker daemon 的代理与镜像源配置是否有效；项目内仅保留通用配置，不写入个人私有源。
+
+## 关键目录
+
+- `harness_generator/src/langchain_agent/main.py`: Web API 与任务编排入口
+- `harness_generator/src/langchain_agent/workflow_graph.py`: LangGraph 节点与路由
+- `harness_generator/src/langchain_agent/prompts/opencode_prompts.md`: OpenCode 提示词模板
+- `harness_generator/src/langchain_agent/persistent_config.py`: Web 持久化配置
+- `docker-compose.yml`: 容器拓扑
+- `output/`: 每个任务的产物目录（已在 `.gitignore` 中忽略）
+
+## 最小启动检查
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r harness_generator/requirements.txt
-python ./harness_generator/src/langchain_agent/main.py
+# 1) 启动
+docker compose up -d --build
+
+# 2) 健康检查
+curl -s http://localhost:8000/api/system | jq .ok
+
+# 3) 提交一次任务
+curl -s http://localhost:8000/api/task \
+ -H 'Content-Type: application/json' \
+ -d '{"jobs":[{"code_url":"https://github.com/madler/zlib.git","docker":true,"docker_image":"auto"}]}' | jq
 ```
-
----
-
-## API 信息（集成化）
-
-### 1) 启动任务
-`POST /api/task`
-
-请求示例：
-```json
-{
-  "jobs": [
-    { "code_url": "https://github.com/madler/zlib.git", "time_budget": 900, "docker": true, "docker_image": "auto" },
-    { "code_url": "https://github.com/libexpat/libexpat.git", "time_budget": 900, "docker": true, "docker_image": "auto" }
-  ]
-}
-```
-
-返回示例：
-```json
-{ "job_id": "<task_id>", "status": "queued" }
-```
-
-### 2) 查询任务状态
-`GET /api/task/{job_id}`
-
-返回示例：
-```json
-{
-  "job_id": "<task_id>",
-  "status": "running",
-  "children_status": {
-    "total": 2,
-    "queued": 0,
-    "running": 1,
-    "success": 1,
-    "error": 0
-  },
-  "children": [
-    {
-      "job_id": "<fuzz_job_id>",
-      "status": "running",
-      "repo": "https://github.com/madler/zlib.git",
-      "log_file": "/app/job-logs/jobs/<id>.log"
-    }
-  ]
-}
-```
-
-其他可选接口：
-- `GET /api/config` / `PUT /api/config`
-- `GET /api/system`
-
----
-
-## 输出目录与产物
-
-### 默认输出路径
-- Docker Compose：本机 `./output` → 容器 `/shared/output`
-- 每次任务会创建独立子目录：`<repo>-<8位id>/`
-
-### 典型产物
-- `fuzz/`：生成的 harness 与 build 脚本
-- `crash_info.md` / `crash_analysis.md`
-- `reproduce.py`
-- `fix.patch` / `fix_summary.md`（若触发修复）
-- `run_summary.md` / `run_summary.json`
-- `challenge_bundle*/` 或 `false_positive*/` 或 `unreproducible*/`
-
-### 日志
-- 主日志：`/app/job-logs/jobs/<job_id>.log`
-- 按等级拆分：`<job_id>.level.info.log` / `level.warn.log` / `level.error.log`
-- 按类别拆分：`<job_id>.cat.workflow.log` / `cat.build.log` / `cat.opencode.log` / `cat.docker.log` / ...
-
-### 自定义输出路径
-- 设置环境变量 `SHERPA_OUTPUT_DIR`（Web 与 CLI 都会生效）
-
----
-
-## 配置说明
-
-常用环境变量：
-- `OPENAI_API_KEY`：OpenCode 使用的 Key
-- `OPENAI_BASE_URL`：OpenAI-compatible 端点（可选）
-- `SHERPA_WEB_MAX_WORKERS`：并发 worker 数量（默认 5）
-- `SHERPA_DEFAULT_OSS_FUZZ_DIR`：OSS-Fuzz 根目录（Docker Compose 默认 `/shared/oss-fuzz`）
-- `SHERPA_OSS_FUZZ_REPO_URL`：OSS-Fuzz 仓库地址（默认 `https://gitclone.com/github.com/google/oss-fuzz`）
-- `SHERPA_OUTPUT_DIR`：产物输出目录（默认 `/shared/output`）
-- `SHERPA_GIT_MIRRORS`：Git 镜像列表（默认 `https://gitclone.com/github.com/`）
-
-运行时配置：
-- `config/` 目录仅运行时生成，不应打包
-- 模板文件位于 `config.example/`
-
----
-
-## 国内网络加速（APT 源）
-
-所有 Dockerfile 默认使用国内镜像源（清华 TUNA）：
-- Ubuntu：`https://mirrors.tuna.tsinghua.edu.cn/ubuntu`
-- Debian：`https://mirrors.tuna.tsinghua.edu.cn/debian`
-
-可通过 build args 覆盖：
-```bash
-docker build --build-arg APT_MIRROR=... -f docker/Dockerfile.fuzz-cpp .
-```
-
-### Node / npm / pip 国内源
-- Node.js：默认从 `https://npmmirror.com/mirrors/node` 下载
-- npm registry：`https://registry.npmmirror.com`
-- pip index：`https://pypi.tuna.tsinghua.edu.cn/simple`
-
-如需覆盖，可在 Docker 构建时传入：
-```bash
-docker build \
-  --build-arg NODE_MIRROR=... \
-  --build-arg NODE_VERSION=... \
-  -f docker/Dockerfile.web .
-```
-
-### OpenCode 禁止执行命令（只改文件）
-默认启用：`SHERPA_OPENCODE_NO_EXEC=1`  
-只允许只读命令（rg/ls/cat/find/sed），禁止构建/运行/fuzz。
-
-### Web UI 与 OpenCode 分离
-默认使用独立的 OpenCode 容器：
-- Web 容器不再安装 OpenCode CLI
-- OpenCode 在 `sherpa-opencode` 镜像中运行
-- 通过 `SHERPA_OPENCODE_DOCKER_IMAGE=sherpa-opencode:latest` 指定镜像
- - 若镜像不存在，默认会自动构建（`SHERPA_OPENCODE_AUTO_BUILD=1`）
-
----
-
-## 打包前清理建议
-
----
-
-## 运维改进参考
-
-- OpenCode 产出稳定性提升计划：`harness_generator/docs/opencode_stability_plan.md`
-
-1. 删除运行时 `config/` 目录
-2. 不提交 `.env` 或任何密钥文件
-3. 保留 `config.example/` 与 `.env.example` 作为模板
