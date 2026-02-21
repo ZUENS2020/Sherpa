@@ -10,8 +10,6 @@ async function loadConfigIntoForm() {
     setValue("deepseek_model", cfg.openai_model || cfg.opencode_model || "deepseek-reasoner");
 
     setValue("cfg_time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setChecked("cfg_use_docker", true);
-    setDisabled("cfg_use_docker", true);
     setValue("cfg_docker_image", cfg.fuzz_docker_image || "auto");
 
     setValue("oss_fuzz_dir", cfg.oss_fuzz_dir || "");
@@ -24,8 +22,6 @@ async function loadConfigIntoForm() {
 
     // Mirror config into the fuzz form defaults.
     setValue("time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setChecked("use_docker", true);
-    setDisabled("use_docker", true);
     setValue("docker_image", cfg.fuzz_docker_image || "auto");
   } catch (e) {
     // Silent: page still usable.
@@ -222,8 +218,6 @@ async function saveConfigFromForm() {
 
     // Update fuzz form defaults immediately.
     setValue("time_budget", String(cfg.fuzz_time_budget));
-    setChecked("use_docker", true);
-    setDisabled("use_docker", true);
     setValue("docker_image", cfg.fuzz_docker_image);
 
     statusEl.className = "result-box success";
@@ -366,17 +360,18 @@ async function loadTaskSessions(preferredId = "") {
 
 function getTaskUiElements() {
   return {
+    panelEl: document.getElementById("task_panels"),
     statusEl: document.getElementById("fuzz_status"),
     progressEl: document.getElementById("fuzz_progress"),
+    errorPanelEl: document.getElementById("fuzz_error_panel"),
+    errorEl: document.getElementById("fuzz_error"),
     logEl: document.getElementById("fuzz_log"),
   };
 }
 
 function ensureTaskUiVisible() {
-  const { statusEl, progressEl, logEl } = getTaskUiElements();
-  if (statusEl) statusEl.style.display = "block";
-  if (progressEl) progressEl.style.display = "block";
-  if (logEl) logEl.style.display = "block";
+  const { panelEl } = getTaskUiElements();
+  if (panelEl) panelEl.style.display = "grid";
 }
 
 function extractPrimaryChild(taskObj) {
@@ -397,6 +392,230 @@ function stopTaskPolling() {
   }
 }
 
+function mapStatusLabel(status) {
+  const st = String(status || "unknown");
+  if (st === "queued") return "排队中";
+  if (st === "running") return "运行中";
+  if (st === "success") return "已完成";
+  if (st === "error") return "失败";
+  return "未知";
+}
+
+function mapStatusClass(status) {
+  const st = String(status || "unknown");
+  if (st === "queued" || st === "running" || st === "success" || st === "error") return st;
+  return "unknown";
+}
+
+function mapStepLabel(step) {
+  const labels = {
+    init: "初始化",
+    plan: "计划",
+    synthesize: "生成",
+    build: "构建",
+    fix_build: "修复构建",
+    run: "运行",
+    fix_crash: "修复崩溃",
+    report: "报告",
+    summarize: "总结",
+  };
+  if (labels[step]) return labels[step];
+  return String(step || "")
+    .split("_")
+    .filter(Boolean)
+    .join(" ");
+}
+
+function mapStepStatusLabel(stepStatus) {
+  if (stepStatus === "running") return "running";
+  if (stepStatus === "done") return "done";
+  if (stepStatus === "error") return "error";
+  return "pending";
+}
+
+function mapEventTag(kind, level) {
+  if (kind === "workflow") return "WF";
+  if (kind === "job") return "JOB";
+  if (kind === "helper") return "HELPER";
+  if (kind === "command") return "CMD";
+  if (kind === "warning") return "WARN";
+  if (kind === "failure") return "ERROR";
+  if (level === "warn") return "WARN";
+  if (level === "error") return "ERROR";
+  return "INFO";
+}
+
+function isWorkflowStepFailureLine(line) {
+  const s = String(line || "");
+  return /\[wf[^\]]*\]\s*<-\s*[a-zA-Z_]+\b.*\berr=/i.test(s) || /\[wf[^\]]*\]\s*<-\s*[a-zA-Z_]+\b.*\bfailed\b/i.test(s);
+}
+
+function isExplicitFailureLine(line) {
+  const s = String(line || "").trim();
+  if (!s) return false;
+  if (isWorkflowStepFailureLine(s)) return true;
+  if (/^\s*ERROR:\s+/i.test(s)) return true;
+  if (/^\s*Error:\s+/i.test(s) && /(failed|exception|traceback|rc=\d+|timeout|dial tcp|no such host|cannot|unable)/i.test(s)) return true;
+  if (/fuzz_unharnessed_repo\.[A-Za-z_]+Error:/.test(s)) return true;
+  if (/^\s*Traceback \(most recent call last\):/.test(s)) return true;
+  if (/^\s*raise\s+[A-Za-z_]*Error\b/.test(s)) return true;
+  if (/Docker build failed \(rc=\d+\)/i.test(s)) return true;
+  if (/error during connect:/i.test(s)) return true;
+  if (/dial tcp: .* no such host/i.test(s)) return true;
+  return false;
+}
+
+function isWarningLine(line) {
+  const s = String(line || "").trim();
+  if (!s) return false;
+  if (/^\s*WARN(?:ING)?[:\s]/i.test(s)) return true;
+  if (/\bDEPRECATED:/i.test(s)) return true;
+  if (/\bwarning:\b/i.test(s)) return true;
+  return false;
+}
+
+function classifyLogEvent(line) {
+  const s = String(line || "").trim();
+  if (!s) return null;
+  if (isExplicitFailureLine(s)) return { level: "error", kind: "failure", text: s };
+  if (isWarningLine(s)) return { level: "warn", kind: "warning", text: s };
+  if (/^\[wf\b/i.test(s)) return { level: "info", kind: "workflow", text: s };
+  if (/^\[job\b/i.test(s)) return { level: "info", kind: "job", text: s };
+  if (/^\[OpenCodeHelper\]/i.test(s)) return { level: "info", kind: "helper", text: s };
+  if (/^\[\*\]\s*➜/.test(s)) return { level: "info", kind: "command", text: s };
+  if (/^\s*错误[:：]/.test(s)) return { level: "warn", kind: "warning", text: s };
+  if (/Wrote file successfully|done flag detected|artifact_prefix=|workflow end/i.test(s)) {
+    return { level: "info", kind: "info", text: s };
+  }
+  return null;
+}
+
+function renderTaskStatusPanel(jobId, status, childStatus, result, logFile) {
+  const total = Number(childStatus.total || 0);
+  const running = Number(childStatus.running || 0);
+  const success = Number(childStatus.success || 0);
+  const error = Number(childStatus.error || 0);
+  const queued = Number(childStatus.queued || 0);
+  const done = success + error;
+
+  const summaryLabel = total
+    ? `${done}/${total}`
+    : "0/0";
+
+  const resultText = result ? `结果：${result}` : "结果将在任务完成后显示。";
+  return `
+    <div class="status-head">
+      <span class="status-pill ${mapStatusClass(status)}">${escapeHtml(mapStatusLabel(status))}</span>
+      <span class="status-job-id">#${escapeHtml(String(jobId || "").slice(0, 12))}</span>
+    </div>
+    <div class="status-meta-grid">
+      <div class="status-meta-item"><div class="key">子任务</div><div class="val">${escapeHtml(summaryLabel)}</div></div>
+      <div class="status-meta-item"><div class="key">running / queued</div><div class="val">${running} / ${queued}</div></div>
+      <div class="status-meta-item"><div class="key">success / error</div><div class="val">${success} / ${error}</div></div>
+      <div class="status-meta-item"><div class="key">日志文件</div><div class="val">${escapeHtml(logFile || "--")}</div></div>
+    </div>
+    <div class="status-note">${escapeHtml(resultText)}</div>
+  `;
+}
+
+function renderProgressPanel(parsed) {
+  const statusByStep = parsed.steps || {};
+  const ordered = ["init", "plan", "synthesize", "build", "fix_build", "run", "fix_crash", "report"];
+  for (const step of parsed.stepOrder || []) {
+    if (!ordered.includes(step)) ordered.push(step);
+  }
+  if (!ordered.length) {
+    return '<div class="empty-note">尚未捕获到 workflow 阶段日志。</div>';
+  }
+
+  const items = ordered
+    .map((step) => {
+      const st = statusByStep[step] || "pending";
+      return `
+        <div class="progress-item">
+          <span class="progress-dot ${st}"></span>
+          <span>${escapeHtml(mapStepLabel(step))}</span>
+          <span class="progress-status">${escapeHtml(mapStepStatusLabel(st))}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  const repoRoot = parsed.repoRoot
+    ? `<div class="progress-footnote">repo_root: ${escapeHtml(parsed.repoRoot)}</div>`
+    : "";
+  return `<div class="progress-list">${items}</div>${repoRoot}`;
+}
+
+function renderErrorPanel(status, backendError, parsed) {
+  const { errorPanelEl, errorEl } = getTaskUiElements();
+  if (!errorPanelEl || !errorEl) return;
+  const hasBackendError = !!(backendError && backendError !== "unknown error");
+  const hasParsedError = Array.isArray(parsed.failureLines) && parsed.failureLines.length > 0;
+  const shouldShow = status === "error" || (status !== "success" && hasBackendError);
+  if (!shouldShow) {
+    errorPanelEl.style.display = "none";
+    errorEl.innerHTML = "";
+    return;
+  }
+
+  const primary = hasBackendError
+    ? backendError
+    : (hasParsedError ? parsed.failureLines[parsed.failureLines.length - 1] : "任务失败，但未返回明确错误。");
+  const lines = hasParsedError ? parsed.failureLines.slice(-3) : [];
+  const details = lines.length
+    ? `<div style="margin-top:8px;"><strong>最近失败事件</strong><br>${lines.map((x) => escapeHtml(x)).join("<br>")}</div>`
+    : "";
+
+  errorPanelEl.style.display = "block";
+  errorEl.innerHTML = `
+    <div class="error-box">
+      <div class="error-title">Task Failure</div>
+      <div>${escapeHtml(primary)}</div>
+      ${details}
+    </div>
+  `;
+}
+
+function renderLogPanel(parsed) {
+  const events = Array.isArray(parsed.events) ? parsed.events : [];
+  const shown = events.slice(-120);
+  const stats = { info: 0, warn: 0, error: 0 };
+  for (const event of shown) {
+    if (event.level === "error") stats.error += 1;
+    else if (event.level === "warn") stats.warn += 1;
+    else stats.info += 1;
+  }
+
+  const header = `
+    <div class="log-header">
+      <div class="log-meta">显示 ${shown.length} 条关键事件（总日志 ${parsed.totalLines} 行）</div>
+      <div class="log-counter">
+        <span class="level-info">info ${stats.info}</span>
+        <span class="level-warn">warn ${stats.warn}</span>
+        <span class="level-error">error ${stats.error}</span>
+      </div>
+    </div>
+  `;
+
+  if (!shown.length) {
+    return `${header}<div class="empty-note">暂无关键日志，任务可能仍在初始化。</div>`;
+  }
+
+  const lines = shown
+    .map((event) => {
+      return `
+        <div class="event-line level-${event.level}">
+          <span class="event-tag">${escapeHtml(mapEventTag(event.kind, event.level))}</span>
+          <code class="event-text">${escapeHtml(event.text)}</code>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `${header}<div class="event-log-list">${lines}</div>`;
+}
+
 function renderTaskState(jobId, taskObj) {
   const { statusEl, progressEl, logEl } = getTaskUiElements();
   if (!statusEl || !progressEl || !logEl) return false;
@@ -408,45 +627,34 @@ function renderTaskState(jobId, taskObj) {
   const log = String(((child && child.log) || taskObj.log || "") ?? "");
   const logFile = (child && child.log_file) || taskObj.log_file;
   const childStatus = taskObj.children_status || {};
-  const childSummary = Number(childStatus.total || 0)
-    ? `子任务: ${Number(childStatus.running || 0)} running / ${Number(childStatus.success || 0)} success / ${Number(childStatus.error || 0)} error`
-    : "子任务: 0";
+  const parsed = parseWorkflowLog(log);
+  const renderKey = `${st}|${result || ""}|${err || ""}|${log}`;
 
-  if (log !== _activeTaskLastLog || st !== _activeTaskLastStatus) {
-    _activeTaskLastLog = log;
+  statusEl.innerHTML = renderTaskStatusPanel(jobId, st, childStatus, result, logFile);
+  renderErrorPanel(st, err, parsed);
+
+  if (renderKey !== _activeTaskLastLog || st !== _activeTaskLastStatus) {
+    _activeTaskLastLog = renderKey;
     _activeTaskLastStatus = st;
-    const summary = summarizeLog(log, st, result, err, logFile);
-    logEl.className = "result-box";
-    logEl.innerHTML = `<strong>进度摘要（实时）：</strong><pre style="white-space: pre-wrap; margin-top: 8px;">${escapeHtml(summary)}</pre>`;
+    progressEl.innerHTML = renderProgressPanel(parsed);
+    logEl.innerHTML = renderLogPanel(parsed);
     logEl.scrollTop = logEl.scrollHeight;
-    progressEl.className = "result-box";
-    progressEl.innerHTML = renderProgressFromLog(log);
   }
 
   if (st === "queued" || st === "running") {
-    statusEl.className = "result-box loading";
-    statusEl.innerHTML =
-      `<span class="status-icon">⏳</span> 当前状态：<strong>${escapeHtml(st)}</strong>（任务：${escapeHtml(jobId)}）<br>` +
-      `${escapeHtml(childSummary)}`;
     setSessionStatusLine(`已绑定会话 #${jobId.slice(0, 8)}，正在实时监控。`);
     return false;
   }
-
   if (st === "success") {
-    statusEl.className = "result-box success";
-    statusEl.innerHTML =
-      `<span class="status-icon">✅</span> 完成（任务：<strong>${escapeHtml(jobId)}</strong>）<br>` +
-      `${escapeHtml(childSummary)}<br>${escapeHtml(result || "")}`;
     setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 已完成。`);
     return true;
   }
-
-  statusEl.className = "result-box error";
-  statusEl.innerHTML =
-    `<span class="status-icon">❌</span> 失败（任务：<strong>${escapeHtml(jobId)}</strong>）<br>` +
-    `${escapeHtml(childSummary)}<br>${escapeHtml(err || "unknown error")}`;
-  setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 已失败。`);
-  return true;
+  if (st === "error") {
+    setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 已失败。`);
+    return true;
+  }
+  setSessionStatusLine(`会话 #${jobId.slice(0, 8)} 状态: ${st}`);
+  return false;
 }
 
 async function pollActiveTaskOnce() {
@@ -457,21 +665,29 @@ async function pollActiveTaskOnce() {
     if (!r.ok) throw new Error(`轮询失败 HTTP ${r.status}`);
     const taskObj = await r.json();
     if (taskObj.error === "job_not_found") {
-      const { statusEl } = getTaskUiElements();
+      const { statusEl, progressEl, logEl, errorPanelEl, errorEl } = getTaskUiElements();
       if (statusEl) {
-        statusEl.className = "result-box error";
-        statusEl.innerHTML =
-          `<span class="status-icon">❌</span> 会话不存在或已清理：<strong>${escapeHtml(_activeTaskId)}</strong>`;
+        statusEl.innerHTML = `<div class="empty-note">会话不存在或已清理：${escapeHtml(_activeTaskId)}</div>`;
+      }
+      if (progressEl) progressEl.innerHTML = '<div class="empty-note">无法继续获取阶段进度。</div>';
+      if (logEl) logEl.innerHTML = '<div class="empty-note">无法继续获取日志。</div>';
+      if (errorPanelEl && errorEl) {
+        errorPanelEl.style.display = "block";
+        errorEl.innerHTML = `<div class="error-box"><div class="error-title">Task Missing</div><div>会话不存在或已清理。</div></div>`;
       }
       stopTaskPolling();
       return;
     }
     if (taskObj.error === "job_not_task") {
-      const { statusEl } = getTaskUiElements();
+      const { statusEl, progressEl, logEl, errorPanelEl, errorEl } = getTaskUiElements();
       if (statusEl) {
-        statusEl.className = "result-box error";
-        statusEl.innerHTML =
-          `<span class="status-icon">❌</span> 该 ID 不是 task 会话：<strong>${escapeHtml(_activeTaskId)}</strong>`;
+        statusEl.innerHTML = `<div class="empty-note">该 ID 不是 task 会话：${escapeHtml(_activeTaskId)}</div>`;
+      }
+      if (progressEl) progressEl.innerHTML = '<div class="empty-note">无法继续获取阶段进度。</div>';
+      if (logEl) logEl.innerHTML = '<div class="empty-note">无法继续获取日志。</div>';
+      if (errorPanelEl && errorEl) {
+        errorPanelEl.style.display = "block";
+        errorEl.innerHTML = `<div class="error-box"><div class="error-title">Invalid Session</div><div>该 ID 对应的作业类型不是 task。</div></div>`;
       }
       stopTaskPolling();
       return;
@@ -483,10 +699,11 @@ async function pollActiveTaskOnce() {
       await loadTaskSessions(_activeTaskId);
     }
   } catch (err) {
-    const { statusEl } = getTaskUiElements();
-    if (statusEl) {
-      statusEl.className = "result-box error";
-      statusEl.innerHTML = `<span class="status-icon">❌</span> 监控失败：${escapeHtml(err.message)}`;
+    const { statusEl, errorPanelEl, errorEl } = getTaskUiElements();
+    if (statusEl) statusEl.innerHTML = `<div class="empty-note">监控请求失败，请检查网络或后端状态。</div>`;
+    if (errorPanelEl && errorEl) {
+      errorPanelEl.style.display = "block";
+      errorEl.innerHTML = `<div class="error-box"><div class="error-title">Polling Error</div><div>${escapeHtml(err.message)}</div></div>`;
     }
   } finally {
     _taskPollInFlight = false;
@@ -504,19 +721,19 @@ function startTaskPolling(jobId) {
   setTaskSelection(targetId);
   ensureTaskUiVisible();
 
-  const { statusEl, progressEl, logEl } = getTaskUiElements();
+  const { statusEl, progressEl, logEl, errorPanelEl, errorEl } = getTaskUiElements();
   if (statusEl) {
-    statusEl.className = "result-box loading";
-    statusEl.innerHTML =
-      `<span class="status-icon">⏳</span> 已绑定会话：<strong>${escapeHtml(targetId)}</strong>，正在拉取状态...`;
+    statusEl.innerHTML = renderTaskStatusPanel(targetId, "running", {}, "", "");
   }
   if (progressEl) {
-    progressEl.className = "result-box";
-    progressEl.innerHTML = "等待任务初始化...";
+    progressEl.innerHTML = '<div class="empty-note">等待任务初始化...</div>';
   }
   if (logEl) {
-    logEl.className = "result-box";
-    logEl.innerHTML = "";
+    logEl.innerHTML = '<div class="empty-note">等待任务日志输出...</div>';
+  }
+  if (errorPanelEl && errorEl) {
+    errorPanelEl.style.display = "none";
+    errorEl.innerHTML = "";
   }
 
   stopTaskPolling();
@@ -545,7 +762,7 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
   const useDocker = true;
   const dockerImage = (document.getElementById("docker_image")?.value || "auto").trim();
   const btn = document.getElementById("fuzz_btn");
-  const { statusEl, progressEl, logEl } = getTaskUiElements();
+  const { statusEl, progressEl, logEl, errorPanelEl, errorEl } = getTaskUiElements();
 
   if (!codeUrl) {
     alert("请输入代码仓库地址");
@@ -563,12 +780,13 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
   // 禁用按钮，显示加载状态。
   btn.disabled = true;
   ensureTaskUiVisible();
-  statusEl.className = "result-box loading";
-  statusEl.innerHTML = '<span class="status-icon">⏳</span> 已提交任务，正在排队...';
-  progressEl.className = "result-box";
-  progressEl.innerHTML = "等待任务初始化...";
-  logEl.className = "result-box";
-  logEl.innerHTML = "";
+  statusEl.innerHTML = renderTaskStatusPanel("pending", "queued", {}, "", "");
+  progressEl.innerHTML = '<div class="empty-note">等待任务初始化...</div>';
+  logEl.innerHTML = '<div class="empty-note">等待任务日志输出...</div>';
+  if (errorPanelEl && errorEl) {
+    errorPanelEl.style.display = "none";
+    errorEl.innerHTML = "";
+  }
 
   try {
     const res = await fetch("/api/task", {
@@ -604,8 +822,11 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
     await loadTaskSessions(jobId);
     startTaskPolling(jobId);
   } catch (err) {
-    statusEl.className = "result-box error";
-    statusEl.innerHTML = `<span class="status-icon">❌</span> <strong>测试失败：</strong> ${escapeHtml(err.message)}`;
+    statusEl.innerHTML = '<div class="empty-note">任务提交失败。</div>';
+    if (errorPanelEl && errorEl) {
+      errorPanelEl.style.display = "block";
+      errorEl.innerHTML = `<div class="error-box"><div class="error-title">Submit Error</div><div>${escapeHtml(err.message)}</div></div>`;
+    }
   } finally {
     btn.disabled = false;
   }
@@ -673,148 +894,67 @@ function setValue(id, value) {
   if (el) el.value = value;
 }
 
-function getChecked(id) {
-  return !!document.getElementById(id)?.checked;
-}
-
-function setChecked(id, checked) {
-  const el = document.getElementById(id);
-  if (el) el.checked = !!checked;
-}
-
-function setDisabled(id, disabled) {
-  const el = document.getElementById(id);
-  if (el) el.disabled = !!disabled;
-}
-
-function summarizeLog(log, status, result, err, logFile) {
-  const lines = (log || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const important = [];
-  const wfRe = /^\[wf\b.*\]/;
-  const jobRe = /^\[job\b.*\]/;
-  const ocRe = /^\[OpenCodeHelper\]/;
-  const buildRe = /(build failed|linking|cmake|compile|error:|fatal|undefined reference)/i;
-  const crashRe = /(crash|artifact|asan|ubsan|msan|tsan|segmentation|sanitizer)/i;
-  const stepRe = /(->|<-|workflow end|pass [a-e]|ready)/i;
-  const writeRe = /(← Write|Wrote file successfully|\bWrite\s+fuzz\/)/i;
-  const ocStateRe = /(running…|done flag detected|diff produced|sentinel)/i;
-
-  for (const line of lines) {
-    if (wfRe.test(line) && stepRe.test(line)) {
-      important.push(line);
-      continue;
-    }
-    if (jobRe.test(line) && (line.includes("start") || line.includes("params"))) {
-      important.push(line);
-      continue;
-    }
-    if (ocRe.test(line) && ocStateRe.test(line)) {
-      important.push(line);
-      continue;
-    }
-    if (writeRe.test(line)) {
-      important.push(line);
-      continue;
-    }
-    if (buildRe.test(line) || crashRe.test(line)) {
-      important.push(line);
-      continue;
-    }
-  }
-
-  const tail = important.slice(-10);
-  const header = [];
-  header.push(`Status: ${status || "unknown"}`);
-  if (result) header.push(`Result: ${result}`);
-  if (err) header.push(`Error: ${err}`);
-  if (logFile) header.push(`Log file: ${logFile}`);
-
-  if (!tail.length) {
-    tail.push("暂无可展示的摘要，任务仍在初始化或无关键事件。");
-  }
-
-  return header.concat(["", ...tail]).join("\n");
-}
-
-function renderProgressFromLog(log) {
-  const parsed = parseWorkflowLog(log || "");
-  const steps = ["init", "plan", "synthesize", "build", "fix_build", "run", "fix_crash"];
-  const labels = {
-    init: "初始化",
-    plan: "计划",
-    synthesize: "生成",
-    build: "构建",
-    fix_build: "修复构建",
-    run: "运行",
-    fix_crash: "修复崩溃",
-  };
-
-  const statusToColor = {
-    pending: "#9ca3af",
-    running: "#f59e0b",
-    done: "#10b981",
-    error: "#ef4444",
-  };
-
-  const items = steps
-    .map((s) => {
-      const st = parsed.steps[s] || "pending";
-      const color = statusToColor[st] || "#9ca3af";
-      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-      <span style="width:8px;height:8px;border-radius:50%;background:${color};display:inline-block;"></span>
-      <span>${labels[s]}</span>
-      <span style="color:#6d6f73;font-size:12px;">(${st})</span>
-    </div>`;
-    })
-    .join("");
-
-  const repoLine = parsed.repoRoot
-    ? `<div style="margin-top:6px;color:#6d6f73;font-size:12px;">输出目录：${escapeHtml(parsed.repoRoot)}</div>`
-    : "";
-  const lastErr = parsed.lastError
-    ? `<div style="margin-top:8px;color:#b91c1c;font-size:12px;">错误：${escapeHtml(parsed.lastError)}</div>`
-    : "";
-  return `<strong>阶段进度：</strong><div style="margin-top:8px;">${items}</div>${repoLine}${lastErr}`;
-}
-
 function parseWorkflowLog(log) {
   const lines = (log || "").split(/\r?\n/);
   const steps = {};
+  const stepOrder = [];
   let repoRoot = "";
-  let lastError = "";
+  const failureLines = [];
+  const events = [];
 
   const startRe = /\[wf[^\]]*\]\s*->\s*([a-zA-Z_]+)/;
   const endRe = /\[wf[^\]]*\]\s*<-\s*([a-zA-Z_]+)/;
   const repoRe = /repo_root=([^\s]+)/;
 
   for (const line of lines) {
+    const clean = String(line || "").trim();
+    if (!clean) continue;
+
+    const event = classifyLogEvent(clean);
+    if (event) events.push(event);
+    if (isExplicitFailureLine(clean)) {
+      failureLines.push(clean.replace(/^\[.*?\]\s*/, ""));
+    }
+
     const repoMatch = line.match(repoRe);
     if (repoMatch && !repoRoot) repoRoot = repoMatch[1];
 
     const startMatch = line.match(startRe);
     if (startMatch) {
-      steps[startMatch[1]] = "running";
+      const step = startMatch[1];
+      if (!stepOrder.includes(step)) stepOrder.push(step);
+      if (steps[step] !== "done" && steps[step] !== "error") {
+        steps[step] = "running";
+      }
     }
 
     const endMatch = line.match(endRe);
     if (endMatch) {
       const step = endMatch[1];
-      if (/err=|failed|error/i.test(line)) {
+      if (!stepOrder.includes(step)) stepOrder.push(step);
+      if (isWorkflowStepFailureLine(line)) {
         steps[step] = "error";
-        lastError = line.replace(/^\[.*?\]\s*/, "");
       } else {
         steps[step] = "done";
       }
     }
-
-    // Avoid treating generic OpenCode progress/env lines as errors.
-    const opencodeErrorLike =
-      /\b(OpenCodeHelper|opencode)\b/i.test(line) &&
-      /(error|failed|exception|timeout)/i.test(line);
-    if (/Missing fuzz\/build\.py/i.test(line) || opencodeErrorLike) {
-      lastError = line.replace(/^\[.*?\]\s*/, "");
-    }
   }
 
-  return { steps, repoRoot, lastError };
+  if (!events.length) {
+    const tail = lines
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .slice(-20)
+      .map((x) => ({ level: "info", kind: "info", text: x }));
+    events.push(...tail);
+  }
+
+  return {
+    steps,
+    stepOrder,
+    repoRoot,
+    failureLines,
+    events,
+    totalLines: lines.filter((x) => String(x || "").trim()).length,
+  };
 }

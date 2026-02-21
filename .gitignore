@@ -13,6 +13,8 @@ sherpa_venv/
 jobs/
 output/
 output*/
+/output/
+/output/**
 sorted/
 _docker_job_logs/
 

@@ -314,6 +314,309 @@
       line-height: 1.5;
     }
 
+    .task-layout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .task-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #fffaf3;
+      padding: 12px;
+      min-height: 110px;
+    }
+
+    .task-card.full {
+      grid-column: 1 / -1;
+    }
+
+    .task-card-title {
+      font-family: var(--mono);
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .status-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+
+    .status-pill.queued,
+    .status-pill.running {
+      color: #92400e;
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.3);
+    }
+
+    .status-pill.success {
+      color: #166534;
+      background: rgba(15, 157, 88, 0.12);
+      border-color: rgba(15, 157, 88, 0.25);
+    }
+
+    .status-pill.error {
+      color: #991b1b;
+      background: rgba(220, 38, 38, 0.11);
+      border-color: rgba(220, 38, 38, 0.3);
+    }
+
+    .status-pill.unknown {
+      color: #374151;
+      background: rgba(107, 114, 128, 0.12);
+      border-color: rgba(107, 114, 128, 0.28);
+    }
+
+    .status-job-id {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .status-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .status-meta-item {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 9px;
+    }
+
+    .status-meta-item .key {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+
+    .status-meta-item .val {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ink);
+      word-break: break-word;
+    }
+
+    .status-note {
+      margin-top: 10px;
+      border-top: 1px dashed var(--line);
+      padding-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .progress-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .progress-item {
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .progress-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #9ca3af;
+    }
+
+    .progress-dot.pending {
+      background: #9ca3af;
+    }
+
+    .progress-dot.running {
+      background: #f59e0b;
+    }
+
+    .progress-dot.done {
+      background: #10b981;
+    }
+
+    .progress-dot.error {
+      background: #ef4444;
+    }
+
+    .progress-status {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--mono);
+      text-transform: uppercase;
+    }
+
+    .progress-footnote {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-family: var(--mono);
+      word-break: break-word;
+    }
+
+    .error-box {
+      border: 1px solid rgba(220, 38, 38, 0.35);
+      background: rgba(220, 38, 38, 0.08);
+      border-radius: 8px;
+      padding: 10px;
+      color: #7f1d1d;
+      font-size: 12px;
+      line-height: 1.55;
+      word-break: break-word;
+    }
+
+    .error-title {
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+      margin-bottom: 6px;
+    }
+
+    .log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .log-meta {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+
+    .log-counter {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+
+    .log-counter span {
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .log-counter .level-error {
+      color: #991b1b;
+      border-color: rgba(220, 38, 38, 0.3);
+      background: rgba(220, 38, 38, 0.08);
+    }
+
+    .log-counter .level-warn {
+      color: #92400e;
+      border-color: rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .log-counter .level-info {
+      color: #1f2937;
+    }
+
+    .event-log-list {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      max-height: 310px;
+      overflow: auto;
+    }
+
+    .event-line {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(214, 208, 197, 0.6);
+      align-items: start;
+    }
+
+    .event-line:last-child {
+      border-bottom: none;
+    }
+
+    .event-tag {
+      font-size: 10px;
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 2px 6px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      color: #374151;
+      background: rgba(107, 114, 128, 0.1);
+      white-space: nowrap;
+    }
+
+    .event-line.level-info .event-tag {
+      color: #1f2937;
+      border-color: rgba(107, 114, 128, 0.2);
+      background: rgba(107, 114, 128, 0.08);
+    }
+
+    .event-line.level-warn .event-tag {
+      color: #92400e;
+      border-color: rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.13);
+    }
+
+    .event-line.level-error .event-tag {
+      color: #991b1b;
+      border-color: rgba(220, 38, 38, 0.3);
+      background: rgba(220, 38, 38, 0.13);
+    }
+
+    .event-text {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--ink);
+    }
+
+    .empty-note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+
     button {
       border: none;
       background: var(--ink);
@@ -442,6 +745,14 @@
         flex-direction: column;
         align-items: stretch;
       }
+
+      .task-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .status-meta-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -504,16 +815,9 @@
             <input type="text" id="time_budget" value="900">
           </div>
           <div class="form-group">
-            <label class="checkbox-line">
-              <input type="checkbox" id="use_docker" checked disabled>
-              在 Docker 中运行 fuzz（强制）
-            </label>
-            <div class="hint">该选项已强制开启，所有 fuzz 任务仅允许在 Docker 容器中执行。</div>
-          </div>
-          <div class="form-group">
             <label for="docker_image">Docker 镜像名</label>
             <input type="text" id="docker_image" value="auto">
-            <div class="hint">auto 会按语言选择 cpp/java 镜像。</div>
+            <div class="hint">仅支持 Docker 执行；auto 会按语言选择 cpp/java 镜像。</div>
           </div>
         </div>
         <div class="button-group">
@@ -542,9 +846,24 @@
           </div>
           <div class="session-status-line" id="task_session_status">未绑定会话</div>
         </div>
-        <div id="fuzz_status" class="result-box" style="display:none;"></div>
-        <div id="fuzz_progress" class="result-box" style="display:none;margin-top:12px;"></div>
-        <div id="fuzz_log" class="result-box" style="display:none;margin-top:12px;"></div>
+        <div id="task_panels" class="task-layout" style="display:none;">
+          <div class="task-card">
+            <div class="task-card-title">任务状态</div>
+            <div id="fuzz_status"></div>
+          </div>
+          <div class="task-card">
+            <div class="task-card-title">阶段进度</div>
+            <div id="fuzz_progress"></div>
+          </div>
+          <div class="task-card full" id="fuzz_error_panel" style="display:none;">
+            <div class="task-card-title">错误详情</div>
+            <div id="fuzz_error"></div>
+          </div>
+          <div class="task-card full">
+            <div class="task-card-title">事件日志</div>
+            <div id="fuzz_log"></div>
+          </div>
+        </div>
       </section>
 
       <section class="panel config">
@@ -578,12 +897,6 @@
           <div class="form-group">
             <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
             <input type="text" id="cfg_time_budget" value="900">
-          </div>
-          <div class="form-group">
-            <label class="checkbox-line">
-              <input type="checkbox" id="cfg_use_docker" checked disabled>
-              默认在 Docker 中运行 fuzz（强制）
-            </label>
           </div>
           <div class="form-group">
             <label for="cfg_docker_image">Fuzz 默认 Docker 镜像</label>
