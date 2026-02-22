@@ -46,6 +46,8 @@ Constraints:
 - If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
+- Full build output from the previous failed attempts is available in `{{build_log_file}}`.
+- You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
 
 Coordinator instruction:
 {{codex_hint}}

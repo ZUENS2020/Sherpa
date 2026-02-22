@@ -44,7 +44,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     build_rc: int
     build_stdout_tail: str
     build_stderr_tail: str
+    build_full_log_path: str
+    build_error_signature: str
+    same_build_error_repeats: int
     build_attempts: int
+    fix_build_attempts: int
     codex_hint: str
     failed: bool
     repo_root: str
@@ -469,7 +473,11 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "build_rc": 0,
             "build_stdout_tail": "",
             "build_stderr_tail": "",
+            "build_full_log_path": "",
+            "build_error_signature": "",
+            "same_build_error_repeats": 0,
             "build_attempts": int(state.get("build_attempts") or 0),
+            "fix_build_attempts": int(state.get("fix_build_attempts") or 0),
             "codex_hint": "",
             "failed": False,
             "repo_root": str(generator.repo_root),
@@ -649,10 +657,50 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         fuzz_dir = gen.repo_root / "fuzz"
         build_py = fuzz_dir / "build.py"
         build_sh = fuzz_dir / "build.sh"
+        build_full_log_path = fuzz_dir / "build_full.log"
 
         def _tail(s: str, n: int = 120) -> str:
             lines = (s or "").replace("\r", "\n").splitlines()
             return "\n".join(lines[-n:]).strip()
+
+        def _init_build_full_log() -> None:
+            try:
+                build_full_log_path.parent.mkdir(parents=True, exist_ok=True)
+                header = (
+                    "Sherpa build full log\n"
+                    f"repo_root={gen.repo_root}\n"
+                    f"generated_at={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
+                    + "=" * 88
+                    + "\n"
+                )
+                build_full_log_path.write_text(header, encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        def _append_build_full_log(*, stage: str, cmd: list[str], cwd: Path, rc: int, out: str, err: str) -> None:
+            try:
+                lines = [
+                    "",
+                    "=" * 88,
+                    f"stage={stage}",
+                    f"cmd={' '.join(cmd)}",
+                    f"cwd={cwd}",
+                    f"rc={rc}",
+                    "-" * 88,
+                    "[stdout]",
+                    out or "",
+                    "-" * 88,
+                    "[stderr]",
+                    err or "",
+                    "=" * 88,
+                    "",
+                ]
+                with build_full_log_path.open("a", encoding="utf-8", errors="replace") as f:
+                    f.write("\n".join(lines))
+            except Exception:
+                pass
+
+        _init_build_full_log()
 
         def _build_py_supports_clean_flag(path: Path) -> bool:
             try:
@@ -749,7 +797,6 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         final_out = ""
         final_err = ""
         final_bins: list[Path] = []
-
         def _is_repo_root_cwd_issue(out: str, err: str) -> bool:
             combined = ((out or "") + "\n" + (err or "")).lower()
             return (
@@ -761,6 +808,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         for attempt in range(1, max_local_attempts + 1):
             _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
             rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=7200)
+            _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
             attempts_used += 1
 
             # Backward-compatibility shim: older generated scripts may hardcode "fuzz/..."
@@ -771,6 +819,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     f"build retry from repo-root cwd -> {' '.join(fallback_cmd)}",
                 )
                 rc, out, err = gen._run_cmd(list(fallback_cmd), cwd=fallback_cwd, env=build_env, timeout=7200)
+                _append_build_full_log(stage=f"attempt-{attempt}/repo-root-fallback", cmd=list(fallback_cmd), cwd=fallback_cwd, rc=rc, out=out, err=err)
                 attempts_used += 1
 
             if rc != 0 and retry_with_clean and build_cmd_clean is not None:
@@ -778,6 +827,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
                     _wf_log(cast(dict[str, Any], state), "build failed; retrying once with --clean")
                     rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=build_cwd, env=build_env, timeout=7200)
+                    _append_build_full_log(stage=f"attempt-{attempt}/clean-retry", cmd=list(build_cmd_clean), cwd=build_cwd, rc=rc2, out=out2, err=err2)
                     attempts_used += 1
                     combined2 = (out2 or "") + "\n" + (err2 or "")
                     if re.search(r"unrecognized arguments: --clean", combined2, re.IGNORECASE):
@@ -807,27 +857,78 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "build_rc": int(final_rc),
             "build_stdout_tail": _tail(final_out),
             "build_stderr_tail": _tail(final_err),
+            "build_full_log_path": str(build_full_log_path),
             "last_step": "build",
         }
 
+        def _calc_build_error_signature() -> str:
+            marker = "rc-fail" if final_rc != 0 else "no-fuzzers"
+            blob = (
+                marker
+                + "\n"
+                + _tail(final_out, n=220)
+                + "\n"
+                + _tail(final_err, n=220)
+            )
+            return _sha256_text(blob)
+
+        prev_sig = str(state.get("build_error_signature") or "").strip()
+        prev_repeats = int(state.get("same_build_error_repeats") or 0)
+        max_same_repeats_raw = os.environ.get("SHERPA_WORKFLOW_MAX_SAME_BUILD_ERROR_REPEATS", "2")
+        try:
+            max_same_repeats = max(0, min(int(max_same_repeats_raw), 10))
+        except Exception:
+            max_same_repeats = 2
+
         if final_rc != 0:
+            sig = _calc_build_error_signature()
+            repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
+            next_state["build_error_signature"] = sig
+            next_state["same_build_error_repeats"] = repeats
+            if repeats >= max_same_repeats:
+                next_state["failed"] = True
+                next_state["last_error"] = (
+                    "build failed with the same error signature repeatedly "
+                    f"(repeats={repeats + 1}, threshold={max_same_repeats + 1})"
+                )
+                next_state["message"] = "build failed repeatedly (same error)"
+                _wf_log(cast(dict[str, Any], next_state), f"<- build stop same-error repeats={repeats+1}")
+                return next_state
             next_state["last_error"] = f"build failed rc={final_rc} after {attempts_used} command run(s)"
             next_state["message"] = "build failed"
             _wf_log(cast(dict[str, Any], next_state), f"<- build fail rc={final_rc} dt={_fmt_dt(time.perf_counter()-t0)}")
             return next_state
 
         if not final_bins:
+            sig = _calc_build_error_signature()
+            repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
+            next_state["build_error_signature"] = sig
+            next_state["same_build_error_repeats"] = repeats
+            if repeats >= max_same_repeats:
+                next_state["failed"] = True
+                next_state["last_error"] = (
+                    "build produced no fuzzers with the same diagnostics repeatedly "
+                    f"(repeats={repeats + 1}, threshold={max_same_repeats + 1})"
+                )
+                next_state["message"] = "build failed repeatedly (no fuzzers)"
+                _wf_log(cast(dict[str, Any], next_state), f"<- build stop same-error repeats={repeats+1}")
+                return next_state
             next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
             next_state["message"] = "build produced no fuzzers"
             _wf_log(cast(dict[str, Any], next_state), f"<- build fail no-fuzzers dt={_fmt_dt(time.perf_counter()-t0)}")
             return next_state
 
+        next_state["build_error_signature"] = ""
+        next_state["same_build_error_repeats"] = 0
+        next_state["fix_build_attempts"] = 0
         next_state["last_error"] = ""
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
     except Exception as e:
         out = {**state, "last_step": "build", "last_error": str(e), "message": "build failed"}
+        if "build_full_log_path" in locals():
+            out["build_full_log_path"] = str(build_full_log_path)
         _wf_log(cast(dict[str, Any], out), f"<- build err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -842,11 +943,55 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> fix_build")
+    fix_attempts = int(state.get("fix_build_attempts") or 0) + 1
+    state = cast(FuzzWorkflowRuntimeState, {**state, "fix_build_attempts": fix_attempts})
 
     last_error = (state.get("last_error") or "").strip()
     stdout_tail = (state.get("build_stdout_tail") or "").strip()
     stderr_tail = (state.get("build_stderr_tail") or "").strip()
     repo_root = str(gen.repo_root)
+    build_log_file = ""
+    raw_build_log_path = (state.get("build_full_log_path") or "").strip()
+    if raw_build_log_path:
+        p = Path(raw_build_log_path)
+        if p.is_file():
+            try:
+                build_log_file = str(p.resolve().relative_to(gen.repo_root.resolve())).replace("\\", "/")
+            except Exception:
+                build_log_file = p.name
+    if not build_log_file:
+        default_log = gen.repo_root / "fuzz" / "build_full.log"
+        if default_log.is_file():
+            build_log_file = "fuzz/build_full.log"
+
+    def _collect_fix_relevant_hashes() -> dict[str, str]:
+        fuzz_dir = gen.repo_root / "fuzz"
+        if not fuzz_dir.is_dir():
+            return {}
+        out: dict[str, str] = {}
+        skip_prefixes = ("fuzz/out/", "fuzz/corpus/", "fuzz/build/")
+        skip_names = {"fuzz/build_full.log"}
+        for p in fuzz_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                rel = str(p.relative_to(gen.repo_root)).replace("\\", "/")
+            except Exception:
+                continue
+            if rel in skip_names:
+                continue
+            if any(rel.startswith(pref) for pref in skip_prefixes):
+                continue
+            try:
+                data = p.read_bytes()
+            except Exception:
+                continue
+            if len(data) > 5_000_000:
+                continue
+            out[rel] = hashlib.sha256(data).hexdigest()
+        return out
+
+    baseline_fix_hashes = _collect_fix_relevant_hashes()
 
     # Fast-path hotfixes (minimal, no refactor):
     # 1) libstdc++/libc++ ABI mismatch from injected "-stdlib=libc++"
@@ -1098,10 +1243,12 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "- Output JSON only: {\"codex_hint\": \"...\"}\n"
                 "- codex_hint must be 1-10 lines, concrete and minimal.\n"
                 "- Tell OpenCode to only change fuzz/ and minimal build glue.\n"
-                "- IMPORTANT: Tell OpenCode to NOT run any commands — only edit files.\n"
+                + (f"- Tell OpenCode to read full build logs from `{build_log_file}` before editing.\n" if build_log_file else "")
+                + "- IMPORTANT: Tell OpenCode to NOT run any commands — only edit files.\n"
                 "- Acceptance: `(cd fuzz && python build.py)` succeeds and leaves at least one executable in fuzz/out/.\n\n"
                 f"repo_root={repo_root}\n"
                 + f"error_type={summary['error_type']}\n"
+                + (f"build_log_file={build_log_file}\n" if build_log_file else "")
                 + (f"last_error={last_error}\n" if last_error else "")
                 + ("\n=== STDOUT (tail) ===\n" + stdout_tail + "\n" if stdout_tail else "")
                 + ("\n=== STDERR (tail) ===\n" + stderr_tail + "\n" if stderr_tail else "")
@@ -1118,6 +1265,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
         if not codex_hint:
             codex_hint = (
+                (f"First read `{build_log_file}` for the complete build logs, then apply the minimal fix.\n" if build_log_file else "")
+                +
                 "Fix the fuzz build so that running `(cd fuzz && python build.py)` succeeds and leaves at least one executable fuzzer under fuzz/out/.\n"
                 "Only modify files under fuzz/ and the minimal build glue required.\n"
                 "Do not use `-stdlib=libc++` in this environment.\n"
@@ -1128,6 +1277,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     # Now call OpenCode with a purpose-built prompt including diagnostics.
     context_parts: list[str] = []
+    if build_log_file:
+        context_parts.append("=== full build log file ===\n" + build_log_file)
     context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
     if last_error:
         context_parts.append("=== last_error ===\n" + last_error)
@@ -1137,7 +1288,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         context_parts.append("=== build stderr (tail) ===\n" + stderr_tail)
     context = "\n\n".join(context_parts)
 
-    prompt = _render_opencode_prompt("fix_build_execute", codex_hint=codex_hint.strip())
+    prompt = _render_opencode_prompt(
+        "fix_build_execute",
+        codex_hint=codex_hint.strip(),
+        build_log_file=build_log_file or "fuzz/build_full.log",
+    )
 
     try:
         _wf_log(cast(dict[str, Any], state), f"fix_build: running opencode (hint_lines={len(codex_hint.splitlines())})")
@@ -1148,6 +1303,16 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             max_attempts=1,
             max_cli_retries=1,
         )
+        post_fix_hashes = _collect_fix_relevant_hashes()
+        if post_fix_hashes == baseline_fix_hashes:
+            out = {
+                **state,
+                "last_step": "fix_build",
+                "last_error": "opencode fix_build made no relevant file changes",
+                "message": "opencode fix_build no-op",
+            }
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
         out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "opencode fixed build"}
         _wf_log(cast(dict[str, Any], out), f"<- fix_build ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
