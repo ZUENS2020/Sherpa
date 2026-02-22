@@ -3,7 +3,7 @@ services:
     image: alpine/git:latest
     restart: "no"
     environment:
-      SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
+      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz.git"
     volumes:
       - sherpa-oss-fuzz:/shared/oss-fuzz
     entrypoint:
@@ -13,7 +13,7 @@ services:
         set -e
         REPO="$$SHERPA_OSS_FUZZ_REPO_URL"
         if [ -z "$$REPO" ]; then
-          REPO="https://github.com/google/oss-fuzz"
+          REPO="https://github.com/google/oss-fuzz.git"
         fi
         echo "[*] Ensuring oss-fuzz checkout in /shared/oss-fuzz from $$REPO"
         if [ -f /shared/oss-fuzz/infra/helper.py ]; then
@@ -79,10 +79,10 @@ services:
       SHERPA_OPENCODE_IGNORE_RETRY_ERRORS: "1"
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
-      SHERPA_OSS_FUZZ_REPO_URL: "https://gitclone.com/github.com/google/oss-fuzz"
+      SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz.git"
 
-      # Prefer domestic Git mirrors for clone operations.
-      SHERPA_GIT_MIRRORS: "https://gitclone.com/github.com/"
+      # Optional Git mirrors for clone operations.
+      SHERPA_GIT_MIRRORS: ""
 
       # OpenRouter API (for all AI features)
       OPENROUTER_API_KEY: ""
@@ -112,7 +112,6 @@ services:
       - --host=tcp://0.0.0.0:2375
       - --host=unix:///var/run/docker.sock
       - --tls=false
-      - --registry-mirror=${SHERPA_DOCKER_REGISTRY_MIRROR:-https://docker.m.daocloud.io}
     healthcheck:
       test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
       interval: 5s

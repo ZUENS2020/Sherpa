@@ -4,264 +4,373 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sherpa / OSS-Fuzz 控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Berkeley+Mono&family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --ink: #101218;
-      --ink-soft: #2a2f3a;
-      --muted: #6b7280;
-      --paper: #f5f2eb;
-      --cream: #f9f6f0;
-      --line: #d6d0c5;
-      --glow: rgba(255, 153, 51, 0.35);
-      --accent: #ff8c1a;
-      --accent-2: #ffb347;
-      --ok: #0f9d58;
-      --warn: #f59e0b;
-      --radius: 18px;
-      --radius-sm: 10px;
-      --shadow: 0 24px 60px rgba(18, 21, 27, 0.12);
-      --mono: "JetBrains Mono", "Fira Mono", "SFMono-Regular", "Consolas", "Liberation Mono", "Courier New", monospace;
-      --sans: "Space Grotesk", "IBM Plex Sans", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+      --ink: #0d1117;
+      --ink-soft: #24292f;
+      --muted: #656d76;
+      --muted-2: #8c959f;
+      --surface: #ffffff;
+      --surface-2: #f6f8fa;
+      --surface-3: #eaeef2;
+      --border: #d0d7de;
+      --border-subtle: #e8ecf0;
+      --accent: #f7871a;
+      --accent-dim: rgba(247, 135, 26, 0.15);
+      --accent-glow: rgba(247, 135, 26, 0.3);
+      --ok: #1a7f37;
+      --ok-dim: rgba(26, 127, 55, 0.12);
+      --warn: #9a6700;
+      --warn-dim: rgba(154, 103, 0, 0.12);
+      --err: #cf222e;
+      --err-dim: rgba(207, 34, 46, 0.1);
+      --blue: #0969da;
+      --blue-dim: rgba(9, 105, 218, 0.1);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --radius-xs: 5px;
+      --mono: 'Berkeley Mono', 'JetBrains Mono', 'Fira Mono', monospace;
+      --serif: 'Instrument Serif', Georgia, serif;
+      --sans: 'DM Sans', 'Helvetica Neue', Arial, sans-serif;
+      --shadow-sm: 0 1px 3px rgba(13,17,23,0.08), 0 1px 2px rgba(13,17,23,0.05);
+      --shadow: 0 4px 12px rgba(13,17,23,0.1), 0 2px 4px rgba(13,17,23,0.06);
+      --shadow-lg: 0 12px 32px rgba(13,17,23,0.12), 0 4px 8px rgba(13,17,23,0.06);
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: var(--sans);
       color: var(--ink);
-      background: radial-gradient(1200px 800px at 10% -10%, rgba(255, 190, 120, 0.35), transparent 60%),
-                  radial-gradient(900px 600px at 90% 10%, rgba(255, 230, 200, 0.55), transparent 60%),
-                  linear-gradient(180deg, #fef9f2 0%, #f2efe8 60%, #efe9de 100%);
+      background: #f0f2f5;
       min-height: 100vh;
-      padding: 28px 18px 70px;
+      padding: 0 0 80px;
       overflow-x: hidden;
+      font-size: 14px;
+      line-height: 1.5;
     }
 
-    .grain {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.08;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
-      mix-blend-mode: multiply;
-      z-index: 0;
-    }
-
-    .app {
-      max-width: 1200px;
-      margin: 0 auto;
-      display: flex;
-      flex-direction: column;
-      gap: 22px;
-      position: relative;
-      z-index: 1;
-    }
-
+    /* ── Topbar ─────────────────────────────────────────── */
     .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 0 28px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 18px 22px;
-      background: var(--cream);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-      animation: rise 0.7s ease-out;
+      gap: 20px;
+      height: 58px;
     }
 
     .brand {
       display: flex;
-      flex-direction: column;
-      gap: 6px;
+      align-items: center;
+      gap: 12px;
     }
 
-    .brand-title {
-      font-size: 20px;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      font-weight: 700;
+    .brand-logo {
+      width: 32px;
+      height: 32px;
+      background: var(--ink);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .brand-logo svg {
+      width: 18px;
+      height: 18px;
+      fill: white;
+    }
+
+    .brand-name {
+      font-family: var(--serif);
+      font-size: 19px;
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+
+    .brand-sep {
+      width: 1px;
+      height: 16px;
+      background: var(--border);
+      flex-shrink: 0;
     }
 
     .brand-sub {
       font-size: 12px;
       color: var(--muted);
       font-family: var(--mono);
-      letter-spacing: 0.08em;
     }
 
-    .status-line {
+    .topbar-right {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 16px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
       font-size: 12px;
-      color: var(--muted);
       font-family: var(--mono);
+      color: var(--muted);
     }
 
     .dot {
-      width: 9px;
-      height: 9px;
+      width: 7px; height: 7px;
       border-radius: 50%;
-      background: #a0a0a0;
-      box-shadow: 0 0 12px transparent;
+      background: #9ca3af;
+      flex-shrink: 0;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .dot.ok   { background: #22c55e; box-shadow: 0 0 0 2px rgba(34,197,94,0.2); }
+    .dot.warn { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245,158,11,0.2); }
+    .dot.pulse { animation: pulse-dot 2s ease infinite; }
+
+    @keyframes pulse-dot {
+      0%,100% { opacity:1; } 50% { opacity:0.4; }
     }
 
-    .dot.ok {
-      background: var(--ok);
-      box-shadow: 0 0 12px rgba(15, 157, 88, 0.4);
+    .clock {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted-2);
+      letter-spacing: 0.04em;
     }
 
-    .dot.warn {
-      background: var(--warn);
-      box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 18px;
-    }
-
-    .panel {
-      background: var(--cream);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 22px 24px;
-      box-shadow: var(--shadow);
+    /* ── Page layout ──────────────────────────────────────── */
+    .app {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 28px 24px 0;
       display: flex;
       flex-direction: column;
-      gap: 16px;
-      animation: rise 0.8s ease-out;
+      gap: 20px;
     }
 
-    .panel-title {
-      font-size: 12px;
-      font-family: var(--mono);
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      color: var(--muted);
+    /* ── Page title bar ──────────────────────────────────── */
+    .page-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
+      animation: fadeUp 0.5s ease-out;
     }
 
-    .panel h2 {
-      font-size: 20px;
-      font-weight: 600;
+    .page-title {
+      font-family: var(--serif);
+      font-size: 32px;
       color: var(--ink);
+      letter-spacing: -0.02em;
+      line-height: 1.2;
     }
 
-    .panel.hero {
-      grid-column: span 5;
-      background: linear-gradient(145deg, rgba(255, 239, 213, 0.9), rgba(255, 252, 245, 0.7));
-      position: relative;
+    .page-title em {
+      color: var(--accent);
+      font-style: italic;
+    }
+
+    .page-desc {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 4px;
+      max-width: 480px;
+    }
+
+    .tag-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: #fff;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    /* ── Grid ────────────────────────────────────────────── */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 20px;
+      animation: fadeUp 0.55s ease-out;
+    }
+
+    .grid-wide {
+      animation: fadeUp 0.6s ease-out;
+    }
+
+    /* ── Panel ───────────────────────────────────────────── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm);
       overflow: hidden;
     }
 
-    .panel.hero::after {
-      content: "";
-      position: absolute;
-      inset: -60% -10% auto auto;
-      width: 240px;
-      height: 240px;
-      background: radial-gradient(circle, rgba(255, 170, 80, 0.5), transparent 70%);
-      opacity: 0.6;
-    }
-
-    .panel.system {
-      grid-column: span 7;
-    }
-
-    .panel.run {
-      grid-column: span 7;
-    }
-
-    .panel.config {
-      grid-column: span 5;
-    }
-
-    .monitor-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .metric {
-      border: 1px solid var(--line);
-      border-radius: var(--radius-sm);
-      padding: 12px;
-      background: #fff8ee;
+    .panel-head {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border-subtle);
       display: flex;
-      flex-direction: column;
-      gap: 6px;
+      align-items: center;
+      gap: 10px;
     }
 
-    .metric span {
+    .panel-icon {
+      width: 28px; height: 28px;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 14px;
+    }
+
+    .panel-icon.orange { background: var(--accent-dim); color: var(--accent); }
+    .panel-icon.green  { background: var(--ok-dim);   color: var(--ok); }
+    .panel-icon.blue   { background: var(--blue-dim); color: var(--blue); }
+    .panel-icon.gray   { background: var(--surface-2); color: var(--muted); }
+
+    .panel-title-text {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink-soft);
+    }
+
+    .panel-title-sub {
       font-size: 11px;
+      font-family: var(--mono);
       color: var(--muted);
-      letter-spacing: 0.08em;
+      margin-left: auto;
+      letter-spacing: 0.05em;
       text-transform: uppercase;
     }
 
-    .metric strong {
-      font-family: var(--mono);
-      font-size: 16px;
-      font-weight: 600;
+    .panel-body {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
 
-    .metric.wide {
-      grid-column: span 3;
+    /* ── Metrics ─────────────────────────────────────────── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
     }
 
-    .jobs-list {
-      border: 1px dashed var(--line);
+    .metric {
+      padding: 14px;
+      background: var(--surface-2);
+      border: 1px solid var(--border-subtle);
       border-radius: var(--radius-sm);
-      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .metric.full { grid-column: 1 / -1; }
+
+    .metric-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+
+    .metric-value {
+      font-family: var(--mono);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .metric-value.sm { font-size: 13px; }
+
+    .metric.accent-border { border-left: 3px solid var(--accent); }
+    .metric.green-border  { border-left: 3px solid #22c55e; }
+    .metric.red-border    { border-left: 3px solid #ef4444; }
+
+    /* ── Jobs list ───────────────────────────────────────── */
+    .jobs-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      font-family: var(--mono);
       font-size: 12px;
       line-height: 1.6;
       color: var(--muted);
-      font-family: var(--mono);
-      background: #fffaf3;
       white-space: pre-wrap;
+      min-height: 60px;
     }
 
+    /* ── Forms ───────────────────────────────────────────── */
     .form-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(2, 1fr);
       gap: 14px;
     }
 
     .form-group {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
     }
 
-    .form-group.full {
-      grid-column: 1 / -1;
-    }
+    .form-group.full { grid-column: 1 / -1; }
 
     label {
-      font-size: 12px;
+      font-size: 11px;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.1em;
+      letter-spacing: 0.08em;
       font-family: var(--mono);
+      font-weight: 500;
     }
 
     input[type="text"],
     textarea,
     select {
       width: 100%;
-      padding: 10px 12px;
-      border: 1px solid var(--line);
+      padding: 8px 11px;
+      border: 1px solid var(--border);
       border-radius: var(--radius-sm);
-      font-size: 14px;
+      font-size: 13px;
       font-family: var(--sans);
-      background: #fff;
-      transition: border 0.2s ease, box-shadow 0.2s ease;
+      background: var(--surface);
+      color: var(--ink);
+      transition: border-color 0.15s, box-shadow 0.15s;
+      appearance: none;
+    }
+
+    input[type="text"]:hover,
+    select:hover {
+      border-color: #b0b7be;
     }
 
     input[type="text"]:focus,
@@ -269,69 +378,113 @@
     select:focus {
       outline: none;
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--glow);
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
 
     .hint {
-      font-size: 12px;
-      color: var(--muted);
+      font-size: 11px;
+      color: var(--muted-2);
       line-height: 1.5;
     }
 
-    .checkbox-line {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 13px;
-      color: var(--muted);
-    }
-
-    .checkbox-line input {
-      transform: scale(1.1);
-      accent-color: var(--accent);
-    }
-
+    /* ── Buttons ─────────────────────────────────────────── */
     .button-group {
       display: flex;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
     }
 
-    .session-panel {
-      border: 1px dashed var(--line);
+    button {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: none;
+      cursor: pointer;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 500;
       border-radius: var(--radius-sm);
-      padding: 12px;
-      background: #fff8ee;
+      padding: 8px 16px;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .btn-primary {
+      background: var(--ink);
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: #2d333b;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .btn-accent {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-accent:hover:not(:disabled) {
+      background: #e07310;
+      box-shadow: 0 4px 12px rgba(247,135,26,0.35);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--ink-soft);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover:not(:disabled) {
+      background: var(--surface-2);
+      border-color: #b0b7be;
+    }
+
+    /* ── Session panel ──────────────────────────────────── */
+    .session-panel {
+      background: var(--surface-2);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
+    }
+
+    .session-panel-title {
+      font-size: 11px;
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      font-weight: 600;
     }
 
     .session-status-line {
       font-family: var(--mono);
-      font-size: 12px;
+      font-size: 11px;
       color: var(--muted);
-      line-height: 1.5;
+      padding: 6px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xs);
     }
 
+    /* ── Task layout ─────────────────────────────────────── */
     .task-layout {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(2, 1fr);
       gap: 12px;
-      margin-top: 12px;
     }
 
     .task-card {
-      border: 1px solid var(--line);
+      background: var(--surface-2);
+      border: 1px solid var(--border-subtle);
       border-radius: var(--radius-sm);
-      background: #fffaf3;
-      padding: 12px;
-      min-height: 110px;
+      padding: 14px;
+      min-height: 100px;
     }
 
-    .task-card.full {
-      grid-column: 1 / -1;
-    }
+    .task-card.full { grid-column: 1 / -1; }
 
     .task-card-title {
       font-family: var(--mono);
@@ -340,217 +493,136 @@
       letter-spacing: 0.1em;
       text-transform: uppercase;
       margin-bottom: 10px;
+      font-weight: 600;
     }
+
+    /* ── Status pills ────────────────────────────────────── */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-family: var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .status-pill::before {
+      content: '';
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+
+    .status-pill.queued, .status-pill.running {
+      color: var(--warn); background: var(--warn-dim); border-color: rgba(154,103,0,0.25);
+    }
+    .status-pill.success { color: var(--ok); background: var(--ok-dim); border-color: rgba(26,127,55,0.2); }
+    .status-pill.error   { color: var(--err); background: var(--err-dim); border-color: rgba(207,34,46,0.2); }
+    .status-pill.unknown { color: var(--muted); background: var(--surface-3); border-color: var(--border); }
+
+    .status-job-id   { font-family: var(--mono); font-size: 11px; color: var(--muted-2); }
 
     .status-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
       margin-bottom: 10px;
-    }
-
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 11px;
-      font-family: var(--mono);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      border: 1px solid transparent;
-    }
-
-    .status-pill.queued,
-    .status-pill.running {
-      color: #92400e;
-      background: rgba(245, 158, 11, 0.12);
-      border-color: rgba(245, 158, 11, 0.3);
-    }
-
-    .status-pill.success {
-      color: #166534;
-      background: rgba(15, 157, 88, 0.12);
-      border-color: rgba(15, 157, 88, 0.25);
-    }
-
-    .status-pill.error {
-      color: #991b1b;
-      background: rgba(220, 38, 38, 0.11);
-      border-color: rgba(220, 38, 38, 0.3);
-    }
-
-    .status-pill.unknown {
-      color: #374151;
-      background: rgba(107, 114, 128, 0.12);
-      border-color: rgba(107, 114, 128, 0.28);
-    }
-
-    .status-job-id {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--muted);
     }
 
     .status-meta-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
     }
 
     .status-meta-item {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px 9px;
+      background: var(--surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-xs);
+      padding: 7px 9px;
     }
-
-    .status-meta-item .key {
-      font-size: 11px;
-      color: var(--muted);
-      margin-bottom: 2px;
-    }
-
-    .status-meta-item .val {
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--ink);
-      word-break: break-word;
-    }
+    .status-meta-item .key { font-size: 10px; color: var(--muted); margin-bottom: 2px; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
+    .status-meta-item .val { font-family: var(--mono); font-size: 12px; color: var(--ink); word-break: break-word; }
 
     .status-note {
       margin-top: 10px;
-      border-top: 1px dashed var(--line);
       padding-top: 8px;
+      border-top: 1px dashed var(--border);
       color: var(--muted);
       font-size: 12px;
       line-height: 1.5;
       word-break: break-word;
     }
 
-    .progress-list {
-      display: flex;
-      flex-direction: column;
-      gap: 7px;
-    }
-
+    /* ── Progress ────────────────────────────────────────── */
+    .progress-list { display: flex; flex-direction: column; gap: 6px; }
     .progress-item {
       display: grid;
-      grid-template-columns: 10px 1fr auto;
+      grid-template-columns: 8px 1fr auto;
       gap: 8px;
       align-items: center;
       font-size: 13px;
+      padding: 4px 0;
     }
 
     .progress-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #9ca3af;
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--border);
+      flex-shrink: 0;
+      transition: background 0.3s;
     }
+    .progress-dot.pending { background: var(--border); }
+    .progress-dot.running { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,0.2); }
+    .progress-dot.done    { background: #22c55e; }
+    .progress-dot.error   { background: #ef4444; }
 
-    .progress-dot.pending {
-      background: #9ca3af;
-    }
+    .progress-status { color: var(--muted-2); font-size: 11px; font-family: var(--mono); text-transform: uppercase; }
+    .progress-footnote { margin-top: 8px; color: var(--muted); font-size: 11px; font-family: var(--mono); word-break: break-word; }
 
-    .progress-dot.running {
-      background: #f59e0b;
-    }
-
-    .progress-dot.done {
-      background: #10b981;
-    }
-
-    .progress-dot.error {
-      background: #ef4444;
-    }
-
-    .progress-status {
-      color: var(--muted);
-      font-size: 11px;
-      font-family: var(--mono);
-      text-transform: uppercase;
-    }
-
-    .progress-footnote {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 12px;
-      font-family: var(--mono);
-      word-break: break-word;
-    }
-
+    /* ── Error box ───────────────────────────────────────── */
     .error-box {
-      border: 1px solid rgba(220, 38, 38, 0.35);
-      background: rgba(220, 38, 38, 0.08);
-      border-radius: 8px;
-      padding: 10px;
-      color: #7f1d1d;
+      border: 1px solid rgba(207,34,46,0.3);
+      background: var(--err-dim);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      color: #8b1a24;
       font-size: 12px;
       line-height: 1.55;
       word-break: break-word;
     }
-
     .error-title {
       font-family: var(--mono);
       text-transform: uppercase;
       letter-spacing: 0.08em;
       font-size: 11px;
       margin-bottom: 6px;
+      font-weight: 600;
+      color: var(--err);
     }
 
+    /* ── Event log ───────────────────────────────────────── */
     .log-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 8px;
-      flex-wrap: wrap;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
     }
-
-    .log-meta {
-      color: var(--muted);
-      font-size: 11px;
-      font-family: var(--mono);
-    }
-
-    .log-counter {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      font-size: 11px;
-      font-family: var(--mono);
-    }
-
-    .log-counter span {
-      padding: 2px 8px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: #fff;
-    }
-
-    .log-counter .level-error {
-      color: #991b1b;
-      border-color: rgba(220, 38, 38, 0.3);
-      background: rgba(220, 38, 38, 0.08);
-    }
-
-    .log-counter .level-warn {
-      color: #92400e;
-      border-color: rgba(245, 158, 11, 0.35);
-      background: rgba(245, 158, 11, 0.08);
-    }
-
-    .log-counter .level-info {
-      color: #1f2937;
-    }
+    .log-meta { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+    .log-counter { display: flex; gap: 6px; align-items: center; font-size: 11px; font-family: var(--mono); }
+    .log-counter span { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); }
+    .log-counter .level-error { color: var(--err); border-color: rgba(207,34,46,0.25); background: var(--err-dim); }
+    .log-counter .level-warn  { color: var(--warn); border-color: rgba(154,103,0,0.25); background: var(--warn-dim); }
+    .log-counter .level-info  { color: var(--ink-soft); }
 
     .event-log-list {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-      max-height: 310px;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      max-height: 300px;
       overflow: auto;
     }
 
@@ -558,373 +630,358 @@
       display: grid;
       grid-template-columns: auto 1fr;
       gap: 8px;
-      padding: 8px 10px;
-      border-bottom: 1px solid rgba(214, 208, 197, 0.6);
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--border-subtle);
       align-items: start;
     }
-
-    .event-line:last-child {
-      border-bottom: none;
-    }
+    .event-line:last-child { border-bottom: none; }
+    .event-line:hover { background: var(--surface-2); }
 
     .event-tag {
-      font-size: 10px;
-      font-family: var(--mono);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      padding: 2px 6px;
-      border-radius: 999px;
-      border: 1px solid transparent;
-      color: #374151;
-      background: rgba(107, 114, 128, 0.1);
-      white-space: nowrap;
+      font-size: 10px; font-family: var(--mono); text-transform: uppercase;
+      letter-spacing: 0.06em; padding: 2px 7px; border-radius: 999px;
+      border: 1px solid transparent; white-space: nowrap;
+      color: var(--muted); background: var(--surface-3); border-color: var(--border-subtle);
     }
-
-    .event-line.level-info .event-tag {
-      color: #1f2937;
-      border-color: rgba(107, 114, 128, 0.2);
-      background: rgba(107, 114, 128, 0.08);
-    }
-
-    .event-line.level-warn .event-tag {
-      color: #92400e;
-      border-color: rgba(245, 158, 11, 0.35);
-      background: rgba(245, 158, 11, 0.13);
-    }
-
-    .event-line.level-error .event-tag {
-      color: #991b1b;
-      border-color: rgba(220, 38, 38, 0.3);
-      background: rgba(220, 38, 38, 0.13);
-    }
+    .event-line.level-info  .event-tag { color: var(--blue); border-color: rgba(9,105,218,0.2); background: var(--blue-dim); }
+    .event-line.level-warn  .event-tag { color: var(--warn); border-color: rgba(154,103,0,0.25); background: var(--warn-dim); }
+    .event-line.level-error .event-tag { color: var(--err); border-color: rgba(207,34,46,0.25); background: var(--err-dim); }
 
     .event-text {
-      font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--ink);
+      font-family: var(--mono); font-size: 12px; line-height: 1.5;
+      white-space: pre-wrap; word-break: break-word; color: var(--ink-soft);
+      padding-top: 1px;
     }
 
+    /* ── Empty note ──────────────────────────────────────── */
     .empty-note {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      background: #fff;
-    }
-
-    button {
-      border: none;
-      background: var(--ink);
-      color: #fff;
-      border-radius: 999px;
-      padding: 10px 20px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+      color: var(--muted-2); font-size: 12px; line-height: 1.5;
+      border: 1px dashed var(--border); border-radius: var(--radius-sm);
+      padding: 12px 14px; background: var(--surface-2);
       font-family: var(--mono);
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
     }
 
-    button:hover:not(:disabled) {
-      transform: translateY(-1px);
-      box-shadow: 0 8px 20px rgba(20, 20, 20, 0.18);
-    }
-
-    button:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
-    }
-
-    .ghost-btn {
-      background: transparent;
-      color: var(--ink);
-      border: 1px solid var(--line);
-    }
-
+    /* ── Result box ──────────────────────────────────────── */
     .result-box {
-      border: 1px solid var(--line);
+      border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       padding: 12px;
       font-size: 12px;
       line-height: 1.6;
       color: var(--ink);
-      background: #fffaf3;
-      max-height: 260px;
+      background: var(--surface-2);
+      max-height: 240px;
       overflow-y: auto;
-    }
-
-    .result-box.loading {
-      border-color: rgba(255, 140, 26, 0.6);
-      background: rgba(255, 140, 26, 0.1);
-    }
-
-    .result-box.error {
-      border-color: rgba(220, 38, 38, 0.4);
-      color: #991b1b;
-      background: rgba(220, 38, 38, 0.08);
-    }
-
-    .result-box.success {
-      border-color: rgba(15, 157, 88, 0.4);
-      color: #14532d;
-      background: rgba(15, 157, 88, 0.08);
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
       font-family: var(--mono);
+    }
+    .result-box.loading { border-color: rgba(247,135,26,0.5); background: var(--accent-dim); }
+    .result-box.error   { border-color: rgba(207,34,46,0.35); color: #8b1a24; background: var(--err-dim); }
+    .result-box.success { border-color: rgba(26,127,55,0.35); color: #1a5c34; background: var(--ok-dim); }
+
+    /* ── Divider ─────────────────────────────────────────── */
+    .divider {
+      height: 1px; background: var(--border-subtle); margin: 4px 0;
+    }
+
+    /* ── Config section tabs ─────────────────────────────── */
+    .cfg-section {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .cfg-section-label {
       font-size: 11px;
-      letter-spacing: 0.1em;
+      font-family: var(--mono);
       text-transform: uppercase;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(255, 140, 26, 0.12);
-      color: var(--ink-soft);
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      font-weight: 600;
+      padding: 6px 0 2px;
+      border-top: 1px dashed var(--border);
+      margin-top: 8px;
+    }
+    .cfg-section:first-child .cfg-section-label {
+      border-top: none; margin-top: 0;
     }
 
-    @keyframes rise {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
+    /* ── Scrollbar ───────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #b0b7be; }
+
+    /* ── Animations ──────────────────────────────────────── */
+    @keyframes fadeUp {
+      from { opacity:0; transform: translateY(12px); }
+      to   { opacity:1; transform: translateY(0); }
     }
 
-    @media (max-width: 1100px) {
-      .panel.hero,
-      .panel.system,
-      .panel.run,
-      .panel.config {
-        grid-column: span 12;
-      }
-
-      .monitor-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .metric.wide {
-        grid-column: span 2;
-      }
+    /* ── Responsive ──────────────────────────────────────── */
+    @media (max-width: 960px) {
+      .grid-2 { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 720px) {
-      body {
-        padding: 20px 12px 50px;
-      }
-
-      .topbar {
-        flex-direction: column;
-        align-items: flex-start;
-      }
-
-      .form-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .monitor-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .metric.wide {
-        grid-column: span 1;
-      }
-
-      .button-group {
-        flex-direction: column;
-        align-items: stretch;
-      }
-
-      .task-layout {
-        grid-template-columns: 1fr;
-      }
-
-      .status-meta-grid {
-        grid-template-columns: 1fr;
-      }
+      body { padding-bottom: 60px; }
+      .app { padding: 16px 14px 0; gap: 16px; }
+      .topbar { padding: 0 16px; }
+      .brand-sub { display: none; }
+      .brand-sep { display: none; }
+      .form-grid { grid-template-columns: 1fr; }
+      .metrics-grid { grid-template-columns: 1fr 1fr; }
+      .metric.full { grid-column: 1 / -1; }
+      .task-layout { grid-template-columns: 1fr; }
+      .status-meta-grid { grid-template-columns: 1fr; }
+      .button-group { flex-direction: column; align-items: stretch; }
+      .page-header { flex-direction: column; align-items: flex-start; }
+      .page-title { font-size: 24px; }
     }
   </style>
 </head>
 <body>
-  <div class="grain"></div>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-title">Sherpa Console</div>
-        <div class="brand-sub">DeepSeek-first orchestration for OSS-Fuzz</div>
+
+  <!-- Sticky topbar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
       </div>
-      <div class="status-line">
-        <span id="system_status_dot" class="dot"></span>
+      <span class="brand-name">Sherpa</span>
+      <div class="brand-sep"></div>
+      <span class="brand-sub">OSS-Fuzz Orchestration</span>
+    </div>
+    <div class="topbar-right">
+      <div class="status-badge">
+        <div id="system_status_dot" class="dot"></div>
         <span id="system_status_text">等待连接</span>
-        <span id="system_time">--</span>
       </div>
-    </header>
+      <span class="clock" id="system_time">--:--:--</span>
+    </div>
+  </header>
 
-    <main class="grid">
-      <section class="panel hero">
-        <div class="panel-title">Overview</div>
-        <h2>深度模型 + Fuzz 自动化，一站式控制台</h2>
-        <p class="hint">
-          这里的配置将直接映射到后端的 OpenAI 兼容参数，但我们将它们全部用于 DeepSeek。
-          OpenRouter 已默认停用，避免误用或费用波动。
-        </p>
-        <div class="badge">DeepSeek Only</div>
-      </section>
+  <div class="app">
 
-      <section class="panel system">
-        <div class="panel-title">System Monitor</div>
-        <h2>系统状态</h2>
-        <div class="monitor-grid">
-          <div class="metric"><span>Uptime</span><strong id="system_uptime">--</strong></div>
-          <div class="metric"><span>Queued</span><strong id="system_jobs_queued">--</strong></div>
-          <div class="metric"><span>Running</span><strong id="system_jobs_running">--</strong></div>
-          <div class="metric"><span>Success</span><strong id="system_jobs_success">--</strong></div>
-          <div class="metric"><span>Error</span><strong id="system_jobs_error">--</strong></div>
-          <div class="metric"><span>Total</span><strong id="system_jobs_total">--</strong></div>
-          <div class="metric wide"><span>Logs</span><strong id="system_logs">--</strong></div>
-          <div class="metric wide"><span>OSS-Fuzz Dir</span><strong id="system_ossfuzz_dir">--</strong></div>
-        </div>
-        <div class="jobs-list" id="system_jobs_list">暂无运行中的任务</div>
-      </section>
+    <!-- Page header -->
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">深度模型 + <em>Fuzz 自动化</em></h1>
+        <p class="page-desc">DeepSeek 驱动的一站式 OSS-Fuzz 控制台。配置将直接映射到后端 OpenAI 兼容参数。</p>
+      </div>
+      <div class="tag-pill">⬡ DeepSeek Only</div>
+    </div>
 
-      <section class="panel run">
-        <div class="panel-title">Run Fuzz</div>
-        <h2>触发模糊测试</h2>
-        <div class="form-grid">
-          <div class="form-group full">
-            <label for="code_url">代码仓库地址</label>
-            <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
-          </div>
-          <div class="form-group">
-            <label for="email">邮箱地址（可选）</label>
-            <input type="text" id="email" placeholder="your-email@example.com">
-          </div>
-          <div class="form-group">
-            <label for="time_budget">运行时长（秒）</label>
-            <input type="text" id="time_budget" value="900">
-          </div>
-          <div class="form-group">
-            <label for="docker_image">Docker 镜像名</label>
-            <input type="text" id="docker_image" value="auto">
-            <div class="hint">仅支持 Docker 执行；auto 会按语言选择 cpp/java 镜像。</div>
-          </div>
+    <!-- Row 1: System Monitor + Run Fuzz -->
+    <div class="grid-2">
+
+      <!-- System Monitor -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-icon green">⚡</div>
+          <span class="panel-title-text">System Monitor</span>
+          <span class="panel-title-sub">实时状态</span>
         </div>
-        <div class="button-group">
-          <button id="fuzz_btn">开始模糊测试</button>
-          <button class="ghost-btn" id="refresh_system_btn">刷新系统状态</button>
+        <div class="panel-body">
+          <div class="metrics-grid">
+            <div class="metric accent-border">
+              <span class="metric-label">Uptime</span>
+              <span class="metric-value sm" id="system_uptime">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Queued</span>
+              <span class="metric-value" id="system_jobs_queued">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Running</span>
+              <span class="metric-value" id="system_jobs_running">--</span>
+            </div>
+            <div class="metric green-border">
+              <span class="metric-label">Success</span>
+              <span class="metric-value" id="system_jobs_success">--</span>
+            </div>
+            <div class="metric red-border">
+              <span class="metric-label">Error</span>
+              <span class="metric-value" id="system_jobs_error">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Total</span>
+              <span class="metric-value" id="system_jobs_total">--</span>
+            </div>
+            <div class="metric full">
+              <span class="metric-label">Logs</span>
+              <span class="metric-value sm" id="system_logs">--</span>
+            </div>
+            <div class="metric full">
+              <span class="metric-label">OSS-Fuzz Dir</span>
+              <span class="metric-value sm" id="system_ossfuzz_dir">--</span>
+            </div>
+          </div>
+          <div class="jobs-box" id="system_jobs_list">暂无运行中的任务</div>
         </div>
-        <div class="session-panel">
-          <div class="panel-title">Session Picker</div>
+      </div>
+
+      <!-- Run Fuzz -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-icon orange">▶</div>
+          <span class="panel-title-text">Run Fuzz</span>
+          <span class="panel-title-sub">触发模糊测试</span>
+        </div>
+        <div class="panel-body">
           <div class="form-grid">
             <div class="form-group full">
-              <label for="task_session_select">会话列表（最近任务）</label>
-              <select id="task_session_select"></select>
-              <div class="hint" id="task_session_hint">加载中...</div>
+              <label for="code_url">代码仓库地址</label>
+              <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
             </div>
             <div class="form-group">
-              <label for="task_session_id">手动任务 ID</label>
-              <input type="text" id="task_session_id" placeholder="粘贴 task id（32位）">
+              <label for="email">邮箱地址（可选）</label>
+              <input type="text" id="email" placeholder="your@email.com">
             </div>
             <div class="form-group">
-              <label>监控控制</label>
-              <div class="button-group">
-                <button class="ghost-btn" id="refresh_sessions_btn" type="button">刷新会话</button>
-                <button class="ghost-btn" id="bind_session_btn" type="button">绑定监控</button>
+              <label for="total_time_budget">总时长（秒）</label>
+              <input type="text" id="total_time_budget" value="900">
+            </div>
+            <div class="form-group">
+              <label for="run_time_budget">单次运行时长（秒）</label>
+              <input type="text" id="run_time_budget" value="900">
+            </div>
+            <div class="form-group full">
+              <label for="docker_image">Docker 镜像名</label>
+              <input type="text" id="docker_image" value="auto">
+              <span class="hint">auto 会按语言自动选择 cpp/java 镜像。仅支持 Docker 执行。</span>
+            </div>
+          </div>
+
+          <div class="button-group">
+            <button class="btn-accent" id="fuzz_btn">▶ 开始模糊测试</button>
+            <button class="btn-ghost" id="refresh_system_btn">↺ 刷新系统状态</button>
+          </div>
+
+          <!-- Session picker -->
+          <div class="session-panel">
+            <div class="session-panel-title">Session Picker</div>
+            <div class="form-grid">
+              <div class="form-group full">
+                <label for="task_session_select">会话列表（最近任务）</label>
+                <select id="task_session_select"></select>
+                <span class="hint" id="task_session_hint">加载中...</span>
+              </div>
+              <div class="form-group">
+                <label for="task_session_id">手动任务 ID</label>
+                <input type="text" id="task_session_id" placeholder="粘贴 task id（32位）">
+              </div>
+              <div class="form-group">
+                <label>监控控制</label>
+                <div class="button-group">
+                  <button class="btn-ghost" id="refresh_sessions_btn" type="button">↺ 刷新</button>
+                  <button class="btn-primary" id="bind_session_btn" type="button">绑定监控</button>
+                </div>
               </div>
             </div>
+            <div class="session-status-line" id="task_session_status">未绑定会话</div>
           </div>
-          <div class="session-status-line" id="task_session_status">未绑定会话</div>
-        </div>
-        <div id="task_panels" class="task-layout" style="display:none;">
-          <div class="task-card">
-            <div class="task-card-title">任务状态</div>
-            <div id="fuzz_status"></div>
-          </div>
-          <div class="task-card">
-            <div class="task-card-title">阶段进度</div>
-            <div id="fuzz_progress"></div>
-          </div>
-          <div class="task-card full" id="fuzz_error_panel" style="display:none;">
-            <div class="task-card-title">错误详情</div>
-            <div id="fuzz_error"></div>
-          </div>
-          <div class="task-card full">
-            <div class="task-card-title">事件日志</div>
-            <div id="fuzz_log"></div>
-          </div>
-        </div>
-      </section>
 
-      <section class="panel config">
-        <div class="panel-title">DeepSeek Config</div>
-        <h2>DeepSeek 持久化配置</h2>
-        <div class="hint">保存后会写入本地配置文件，并作为后端默认参数。</div>
+          <!-- Task panels -->
+          <div id="task_panels" class="task-layout" style="display:none;">
+            <div class="task-card">
+              <div class="task-card-title">任务状态</div>
+              <div id="fuzz_status"></div>
+            </div>
+            <div class="task-card">
+              <div class="task-card-title">阶段进度</div>
+              <div id="fuzz_progress"></div>
+            </div>
+            <div class="task-card full" id="fuzz_error_panel" style="display:none;">
+              <div class="task-card-title">错误详情</div>
+              <div id="fuzz_error"></div>
+            </div>
+            <div class="task-card full">
+              <div class="task-card-title">事件日志</div>
+              <div id="fuzz_log"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2: Config panel (full width) -->
+    <div class="panel grid-wide">
+      <div class="panel-head">
+        <div class="panel-icon blue">⚙</div>
+        <span class="panel-title-text">DeepSeek 持久化配置</span>
+        <span class="panel-title-sub">保存后写入本地配置文件</span>
+      </div>
+      <div class="panel-body">
         <div class="form-grid">
+
+          <!-- API credentials -->
+          <div class="cfg-section-label" style="grid-column:1/-1; border-top:none; margin-top:0; padding-top:0">API 凭据</div>
+
           <div class="form-group full">
             <label for="deepseek_api_key">DeepSeek API Key</label>
             <input type="text" id="deepseek_api_key" placeholder="DEEPSEEK_API_KEY（会持久化保存）">
-            <div class="hint">对应后端 OPENAI_API_KEY。</div>
+            <span class="hint">对应后端 OPENAI_API_KEY。</span>
           </div>
           <div class="form-group">
-            <label for="deepseek_base_url">DeepSeek Base URL</label>
+            <label for="deepseek_base_url">Base URL</label>
             <input type="text" id="deepseek_base_url" value="https://api.deepseek.com/v1">
           </div>
           <div class="form-group">
-            <label for="deepseek_model">DeepSeek 模型</label>
+            <label for="deepseek_model">Model</label>
             <input type="text" id="deepseek_model" value="deepseek-reasoner">
-            <div class="hint">用于后端 OPENAI_MODEL / OPENCODE_MODEL。</div>
+            <span class="hint">OPENAI_MODEL / OPENCODE_MODEL</span>
           </div>
+
+          <!-- Fuzz defaults -->
+          <div class="cfg-section-label" style="grid-column:1/-1">Fuzz 默认参数</div>
+
           <div class="form-group full">
             <label for="oss_fuzz_dir">OSS-Fuzz 本地路径</label>
             <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz 或 D:/oss-fuzz">
-            <div class="hint">必须包含 infra/helper.py。</div>
-          </div>
-          <div class="form-group full">
-            <label for="sherpa_git_mirrors">Git 镜像列表</label>
-            <input type="text" id="sherpa_git_mirrors" placeholder="https://gitclone.com/github.com/,https://ghproxy.com/{url}">
+            <span class="hint">必须包含 infra/helper.py。</span>
           </div>
           <div class="form-group">
-            <label for="cfg_time_budget">Fuzz 默认运行时长（秒）</label>
+            <label for="cfg_time_budget">默认运行时长（秒）</label>
             <input type="text" id="cfg_time_budget" value="900">
           </div>
           <div class="form-group">
-            <label for="cfg_docker_image">Fuzz 默认 Docker 镜像</label>
+            <label for="cfg_docker_image">默认 Docker 镜像</label>
             <input type="text" id="cfg_docker_image" value="auto">
           </div>
+          <div class="form-group full">
+            <label for="sherpa_git_mirrors">Git 镜像列表</label>
+            <input type="text" id="sherpa_git_mirrors" placeholder="https://mirror.example/github.com/,https://proxy.example/{url}">
+          </div>
+
+          <!-- Docker proxy -->
+          <div class="cfg-section-label" style="grid-column:1/-1">Docker 代理设置</div>
+
           <div class="form-group">
-            <label for="sherpa_docker_http_proxy">Docker HTTP Proxy</label>
+            <label for="sherpa_docker_http_proxy">HTTP Proxy</label>
             <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891">
           </div>
           <div class="form-group">
-            <label for="sherpa_docker_https_proxy">Docker HTTPS Proxy</label>
+            <label for="sherpa_docker_https_proxy">HTTPS Proxy</label>
             <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891">
           </div>
           <div class="form-group">
-            <label for="sherpa_docker_no_proxy">Docker NO_PROXY</label>
+            <label for="sherpa_docker_no_proxy">NO_PROXY</label>
             <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1">
           </div>
           <div class="form-group">
-            <label for="sherpa_docker_proxy_host">Docker Proxy Host</label>
+            <label for="sherpa_docker_proxy_host">Proxy Host</label>
             <input type="text" id="sherpa_docker_proxy_host" value="host.docker.internal">
           </div>
         </div>
+
         <div class="button-group">
-          <button id="cfg_save_btn">保存配置</button>
+          <button class="btn-primary" id="cfg_save_btn">✓ 保存配置</button>
         </div>
         <div id="cfg_status" class="result-box" style="display:none;"></div>
-      </section>
-    </main>
+      </div>
+    </div>
+
   </div>
 
   <script src="/static/script.js"></script>

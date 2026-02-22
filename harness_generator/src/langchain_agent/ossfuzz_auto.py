@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -31,7 +32,7 @@ class OssFuzzAutoError(RuntimeError):
 
 def _oss_fuzz_repo_url() -> str:
     # Allow overriding for mirrors or internal forks.
-    return os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "https://gitclone.com/github.com/google/oss-fuzz").strip()
+    return os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "https://github.com/google/oss-fuzz.git").strip()
 
 
 def _which(cmd: str) -> Optional[str]:
@@ -407,57 +408,6 @@ def _llm_generate_ossfuzz_project(
         out_path.write_text(content, encoding="utf-8", errors="replace")
 
 
-def _generate_tinyxml2_project(project: str, repo_url: str, ossproj_dir: Path) -> None:
-    ossproj_dir.mkdir(parents=True, exist_ok=True)
-    dockerfile = f"""FROM gcr.io/oss-fuzz-base/base-builder
-RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 {repo_url} $SRC/{project}
-COPY build.sh $SRC/build.sh
-COPY tinyxml2_fuzzer.cc $SRC/tinyxml2_fuzzer.cc
-"""
-    build_sh = f"""#!/bin/bash -eux
-cd $SRC/{project}
-cmake -S . -B build -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \\
-  -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \\
-  -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS"
-cmake --build build
-$CXX $CXXFLAGS -I$SRC/{project} -o $OUT/tinyxml2_fuzzer \\
-  $SRC/tinyxml2_fuzzer.cc $LIB_FUZZING_ENGINE $SRC/{project}/build/libtinyxml2.a
-"""
-    project_yaml = f"""homepage: "https://github.com/leethomason/tinyxml2"
-language: c++
-primary_contact: "security@example.com"
-main_repo: "{repo_url}"
-"""
-    fuzzer_cc = """#include <stdint.h>
-#include <stddef.h>
-#include "tinyxml2.h"
-
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  tinyxml2::XMLDocument doc;
-  doc.Parse(reinterpret_cast<const char*>(data), size);
-  return 0;
-}
-"""
-    (ossproj_dir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
-    (ossproj_dir / "build.sh").write_text(build_sh, encoding="utf-8")
-    (ossproj_dir / "project.yaml").write_text(project_yaml, encoding="utf-8")
-    (ossproj_dir / "tinyxml2_fuzzer.cc").write_text(fuzzer_cc, encoding="utf-8")
-    # Ensure build.sh is executable in case the filesystem preserves mode.
-    try:
-        os.chmod(ossproj_dir / "build.sh", 0o755)
-    except Exception:
-        pass
-
-
-def _try_generate_builtin_project(repo_url: str, project: str, target_dir: Path, ossproj_dir: Path) -> bool:
-    # TinyXML2 heuristic
-    if "tinyxml2" in repo_url.lower() or (target_dir / "tinyxml2.h").is_file():
-        _generate_tinyxml2_project(project, repo_url, ossproj_dir)
-        return True
-    return False
-
-
 @dataclass(frozen=True)
 class OssFuzzAutoInput:
     repo_url: str
@@ -555,17 +505,15 @@ def run_ossfuzz_auto(inp: OssFuzzAutoInput) -> str:
                     ai_key_path=inp.ai_key_path,
                 )
             except Exception as e:
-                # Final fallback: built-in templates for known repos.
-                if not _try_generate_builtin_project(repo_url, project, target_dir, ossproj_dir):
-                    if codex_err:
-                        raise OssFuzzAutoError(
-                            f"OpenCode failed and LLM fallback also failed: codex_err={codex_err} fallback_err={e}"
-                        )
-                    raise OssFuzzAutoError(f"OpenCode did not generate required oss-fuzz files: {missing}; fallback_err={e}")
+                if codex_err:
+                    raise OssFuzzAutoError(
+                        f"OpenCode failed and LLM fallback also failed: codex_err={codex_err} fallback_err={e}"
+                    )
+                raise OssFuzzAutoError(f"OpenCode did not generate required oss-fuzz files: {missing}; fallback_err={e}")
 
             missing = [str(p) for p in required if not p.is_file()]
             if missing:
-                raise OssFuzzAutoError(f"LLM/builtin fallback did not generate required oss-fuzz files: {missing}")
+                raise OssFuzzAutoError(f"LLM fallback did not generate required oss-fuzz files: {missing}")
 
         print(f"[*] Installing generated project into oss-fuzz: {project_dir}")
         project_dir.parent.mkdir(parents=True, exist_ok=True)

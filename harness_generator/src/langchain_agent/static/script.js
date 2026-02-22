@@ -21,7 +21,8 @@ async function loadConfigIntoForm() {
     setValue("sherpa_docker_proxy_host", cfg.sherpa_docker_proxy_host || "host.docker.internal");
 
     // Mirror config into the fuzz form defaults.
-    setValue("time_budget", String(cfg.fuzz_time_budget ?? 900));
+    setValue("total_time_budget", String(cfg.fuzz_time_budget ?? 900));
+    setValue("run_time_budget", String(cfg.fuzz_time_budget ?? 900));
     setValue("docker_image", cfg.fuzz_docker_image || "auto");
   } catch (e) {
     // Silent: page still usable.
@@ -217,7 +218,8 @@ async function saveConfigFromForm() {
     if (!data.ok) throw new Error("保存失败");
 
     // Update fuzz form defaults immediately.
-    setValue("time_budget", String(cfg.fuzz_time_budget));
+    setValue("total_time_budget", String(cfg.fuzz_time_budget));
+    setValue("run_time_budget", String(cfg.fuzz_time_budget));
     setValue("docker_image", cfg.fuzz_docker_image);
 
     statusEl.className = "result-box success";
@@ -758,7 +760,8 @@ function bindSelectedSession() {
 document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
   const codeUrl = (document.getElementById("code_url")?.value || "").trim();
   const email = (document.getElementById("email")?.value || "").trim();
-  const timeBudgetRaw = (document.getElementById("time_budget")?.value || "900").trim();
+  const totalTimeBudgetRaw = (document.getElementById("total_time_budget")?.value || "900").trim();
+  const runTimeBudgetRaw = (document.getElementById("run_time_budget")?.value || "900").trim();
   const useDocker = true;
   const dockerImage = (document.getElementById("docker_image")?.value || "auto").trim();
   const btn = document.getElementById("fuzz_btn");
@@ -769,9 +772,15 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
     return;
   }
 
-  const timeBudget = Number.parseInt(timeBudgetRaw || "900", 10);
-  if (!Number.isFinite(timeBudget) || timeBudget <= 0) {
-    alert("请输入有效的运行时长（秒）");
+  const totalTimeBudget = Number.parseInt(totalTimeBudgetRaw || "900", 10);
+  if (!Number.isFinite(totalTimeBudget) || totalTimeBudget <= 0) {
+    alert("请输入有效的总时长（秒）");
+    return;
+  }
+
+  const runTimeBudget = Number.parseInt(runTimeBudgetRaw || "900", 10);
+  if (!Number.isFinite(runTimeBudget) || runTimeBudget <= 0) {
+    alert("请输入有效的单次运行时长（秒）");
     return;
   }
 
@@ -797,7 +806,9 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
           {
             code_url: codeUrl,
             email: email || null,
-            time_budget: timeBudget,
+            time_budget: totalTimeBudget,
+            total_time_budget: totalTimeBudget,
+            run_time_budget: runTimeBudget,
             docker: useDocker,
             docker_image: dockerImage,
           },

@@ -22,6 +22,8 @@ IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit fil
 
 If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
+Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
+If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
 
 Additional instruction from coordinator:
 {{hint}}
@@ -42,6 +44,8 @@ Constraints:
 - Keep changes minimal; avoid refactors
 - Prefer edits under fuzz/ and minimal build glue only
 - If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+- Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
+- If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
 
 Coordinator instruction:
 {{codex_hint}}

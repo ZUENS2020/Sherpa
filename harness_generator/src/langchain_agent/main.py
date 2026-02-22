@@ -284,6 +284,8 @@ class fuzz_model(BaseModel):
     timeout: int = 10
     max_tokens: int = 1000
     time_budget: int | None = None
+    total_time_budget: int | None = None
+    run_time_budget: int | None = None
     docker: bool | None = None
     docker_image: str | None = None
 
@@ -692,7 +694,20 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                 docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
                 if not docker_enabled:
                     raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
-                time_budget_value = request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget
+                total_time_budget_value = (
+                    request.total_time_budget
+                    if request.total_time_budget is not None
+                    else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
+                )
+                run_time_budget_value = (
+                    request.run_time_budget
+                    if request.run_time_budget is not None
+                    else total_time_budget_value
+                )
+                if int(total_time_budget_value) <= 0:
+                    raise RuntimeError("total_time_budget must be > 0")
+                if int(run_time_budget_value) <= 0:
+                    raise RuntimeError("run_time_budget must be > 0")
                 openai_key = (
                     os.environ.get("OPENAI_API_KEY")
                     or cfg.openai_api_key
@@ -710,7 +725,8 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                     model_value = request.model or cfg.openrouter_model
                 print(
                     f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
-                    f"time_budget={time_budget_value}s max_tokens={request.max_tokens} model={model_value}"
+                    f"time_budget={total_time_budget_value}s run_time_budget={run_time_budget_value}s "
+                    f"max_tokens={request.max_tokens} model={model_value}"
                 )
                 print(f"[job {job_id}] log_file={log_file}")
                 docker_image = docker_image_value
@@ -719,7 +735,8 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
                     res = fuzz_logic(
                         request.code_url,
                         max_len=request.max_tokens,
-                        time_budget=time_budget_value,
+                        time_budget=total_time_budget_value,
+                        run_time_budget=run_time_budget_value,
                         email=request.email,
                         docker_image=docker_image,
                         ai_key_path=opencode_env_path(),
@@ -767,7 +784,7 @@ async def task_api(request: task_model = Body(...)):
                         repo_url = (
                             (request.oss_fuzz_repo_url or "").strip()
                             or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://gitclone.com/github.com/google/oss-fuzz"
+                            or "https://github.com/google/oss-fuzz.git"
                         )
                         target_dir = Path(
                             (cfg.oss_fuzz_dir or "").strip()

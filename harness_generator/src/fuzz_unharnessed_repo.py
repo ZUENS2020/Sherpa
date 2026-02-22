@@ -90,10 +90,10 @@ GIT_HOST_CLONE_TIMEOUT_SEC = int(os.environ.get("SHERPA_GIT_HOST_CLONE_TIMEOUT_S
 #
 # Configure via env:
 # - SHERPA_GITHUB_MIRROR: base URL used to replace "https://github.com/".
-#   Example: "https://gitclone.com/github.com/"
+#   Example: "https://mirror.example/github.com/"
 # - SHERPA_GIT_MIRRORS: comma-separated list of mirror specs. Each item can be:
-#   - A template containing "{url}" (e.g., "https://ghproxy.com/{url}")
-#   - A base URL (e.g., "https://gitclone.com/github.com/")
+#   - A template containing "{url}" (e.g., "https://proxy.example/{url}")
+#   - A base URL (e.g., "https://mirror.example/github.com/")
 # NOTE: These are intentionally read at runtime (not import time) so a running
 # web server can apply updated config without restart.
 
@@ -481,10 +481,7 @@ def _host_git_proxy_override_args() -> List[str]:
 
 
 def _candidate_clone_urls(url: str) -> List[str]:
-    """Return a prioritized list of clone URLs, including configured mirrors.
-
-    Mirrors are only applied to HTTPS GitHub URLs.
-    """
+    """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
     urls: List[str] = [url]
     if not url.startswith("https://github.com/"):
@@ -500,31 +497,7 @@ def _candidate_clone_urls(url: str) -> List[str]:
     if sherpa_github_mirror:
         mirror_specs.append(sherpa_github_mirror)
 
-    # If the user didn't configure mirrors explicitly, still try a small set of
-    # common GitHub mirrors/proxies for restricted networks.
-    if not mirror_specs:
-        mirror_specs.extend(
-            [
-                "https://ghproxy.com/{url}",
-                "https://hub.gitmirror.com",
-                "https://gitclone.com/github.com/",
-            ]
-        )
-
     gh_path = url[len("https://github.com/") :]
-    # Best-effort: try Gitee's popular "mirrors" namespace for GitHub projects.
-    # This often works better on mainland China networks.
-    try:
-        parts = gh_path.split("/")
-        if len(parts) >= 2:
-            repo_name = parts[1]
-            if repo_name.endswith(".git"):
-                repo_name = repo_name[: -len(".git")]
-            gitee_mirror = f"https://gitee.com/mirrors/{repo_name}.git"
-            if gitee_mirror not in urls:
-                urls.append(gitee_mirror)
-    except Exception:
-        pass
 
     for spec in mirror_specs:
         candidate = ""
@@ -532,10 +505,7 @@ def _candidate_clone_urls(url: str) -> List[str]:
             candidate = spec.replace("{url}", url)
         else:
             base = spec.rstrip("/")
-            # Most common patterns:
-            # - https://gitclone.com/github.com/<owner>/<repo>.git
-            # - https://hub.gitmirror.com/<owner>/<repo>.git
-            # If base already contains 'github.com', do not strip it.
+            # Common pattern: <base>/<owner>/<repo>.git
             if base.endswith("github.com") or base.endswith("github.com/"):
                 candidate = f"{base}/{gh_path}"
             else:
@@ -1455,6 +1425,103 @@ class NonOssFuzzHarnessGenerator:
                     except Exception:
                         pass
 
+        def _repo_has_c_cpp_main() -> bool:
+            exts = {".c", ".cc", ".cpp", ".cxx"}
+            try:
+                checked = 0
+                for p in self.repo_root.rglob("*"):
+                    if not p.is_file() or p.suffix.lower() not in exts:
+                        continue
+                    checked += 1
+                    if checked > 200:
+                        break
+                    try:
+                        txt = p.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                    if re.search(r"\bint\s+main\s*\(", txt):
+                        return True
+            except Exception:
+                return False
+            return False
+
+        def _inject_define_into_flag_list(text: str, define_flag: str) -> tuple[str, bool]:
+            if define_flag in text:
+                return text, False
+            lines = text.splitlines()
+            changed = False
+            in_flags = False
+            for i, line in enumerate(lines):
+                if not in_flags and re.search(r"^\s*(?:CXXFLAGS|flags)\s*=\s*\[", line):
+                    in_flags = True
+                    continue
+                if not in_flags:
+                    continue
+                if re.search(r"^\s*\]", line):
+                    indent_match = re.match(r"^(\s*)", line)
+                    indent = indent_match.group(1) if indent_match else "    "
+                    lines.insert(i, f'{indent}"{define_flag}",')
+                    changed = True
+                    break
+            if changed:
+                return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), True
+            replaced = text.replace(
+                " + [harness_cpp, VULNERABLE_CPP] + ",
+                f" + ['{define_flag}', harness_cpp, VULNERABLE_CPP] + ",
+            )
+            if replaced != text:
+                return replaced, True
+            return text, False
+
+        def _try_hotfix_stdlib_mismatch_and_main_conflict(diag_text: str) -> bool:
+            if not build_py.is_file():
+                return False
+
+            low = (diag_text or "").lower()
+            abi_mismatch = any(
+                token in low
+                for token in [
+                    "undefined reference to `std::__cxx11",
+                    "undefined reference to `std::",
+                    "vtable for std::",
+                    "libclang_rt.fuzzer",
+                ]
+            )
+            multiple_main = ("multiple definition of `main'" in low) or ("multiple definition of main" in low)
+
+            try:
+                text = build_py.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return False
+
+            has_libcpp_flag = "-stdlib=libc++" in text
+            if not (abi_mismatch or has_libcpp_flag or multiple_main):
+                return False
+
+            changed = False
+            if has_libcpp_flag:
+                text2 = re.sub(r'^[ \t]*["\']-stdlib=libc\+\+["\'],?\s*\n?', "", text, flags=re.MULTILINE)
+                text2 = text2.replace('"-stdlib=libc++",', "").replace('"-stdlib=libc++"', "")
+                text2 = text2.replace("'-stdlib=libc++',", "").replace("'-stdlib=libc++'", "")
+                if text2 != text:
+                    text = text2
+                    changed = True
+
+            need_main_rename = multiple_main or _repo_has_c_cpp_main()
+            if need_main_rename and "-Dmain=vuln_main" not in text:
+                text, injected = _inject_define_into_flag_list(text, "-Dmain=vuln_main")
+                changed = changed or injected
+
+            if not changed:
+                return False
+
+            try:
+                build_py.write_text(text, encoding="utf-8", errors="replace")
+                print("[*] Applied local hotfix for stdlib mismatch/main conflict in fuzz/build.py")
+                return True
+            except Exception:
+                return False
+
         def _try_hotfix_libfuzzer_main_conflict(diag_text: str) -> bool:
             if not build_py.is_file():
                 return False
@@ -1527,6 +1594,10 @@ class NonOssFuzzHarnessGenerator:
             ):
                 print("[*] Build appears to require repo-root cwd; retrying from repo root")
                 rc, out, err = self._run_cmd(list(fallback_cmd), cwd=self.repo_root, env=build_env)
+
+            if rc != 0 and _try_hotfix_stdlib_mismatch_and_main_conflict(strip_ansi((out or "") + "\n" + (err or ""))):
+                print("[*] Retrying build after applying local stdlib/main-conflict hotfix")
+                continue
 
             if rc != 0 and _try_hotfix_libfuzzer_main_conflict(strip_ansi((out or "") + "\n" + (err or ""))):
                 print("[*] Retrying build after applying local main-conflict hotfix")

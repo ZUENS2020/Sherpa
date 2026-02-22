@@ -31,6 +31,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     repo_url: str
     email: Optional[str]
     time_budget: int
+    run_time_budget: int
     max_len: int
     docker_image: Optional[str]
     ai_key_path: str
@@ -246,10 +247,6 @@ def _has_codex_key() -> bool:
     return False
 
 
-def _is_tinyxml2_repo(repo_root: Path) -> bool:
-    return (repo_root / "tinyxml2.h").is_file() or (repo_root / "tinyxml2.cpp").is_file()
-
-
 def _slug_from_repo_url(repo_url: str) -> str:
     base = repo_url.rstrip("/").split("/")[-1]
     if base.endswith(".git"):
@@ -266,150 +263,6 @@ def _alloc_output_workdir(repo_url: str) -> Path | None:
     base.mkdir(parents=True, exist_ok=True)
     slug = _slug_from_repo_url(repo_url)
     return base / f"{slug}-{uuid.uuid4().hex[:8]}"
-
-
-def _write_builtin_tinyxml2_plan(repo_root: Path) -> None:
-    fuzz_dir = repo_root / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    plan_md = fuzz_dir / "PLAN.md"
-    targets_json = fuzz_dir / "targets.json"
-    plan_md.write_text(
-        "\n".join(
-            [
-                "# Fuzz Plan",
-                "",
-                "Primary fuzzer: tinyxml2_fuzz",
-                "",
-                "Target: tinyxml2::XMLDocument::Parse(const char*, size_t)",
-                "",
-                "Rationale:",
-                "- Parses attacker-controlled XML strings",
-                "- High-level entrypoint used by typical consumers",
-                "- Minimal initialization required",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    targets_json.write_text(
-        json.dumps(
-            [
-                {
-                    "name": "tinyxml2_fuzz",
-                    "api": "tinyxml2::XMLDocument::Parse",
-                    "lang": "c-cpp",
-                    "proto": "const uint8_t*,size_t",
-                    "build_target": "libtinyxml2",
-                    "reason": "Top-level XML parser entrypoint with attacker-controlled input.",
-                    "evidence": ["tinyxml2.cpp"],
-                }
-            ],
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def _write_builtin_tinyxml2_scaffold(repo_root: Path, max_len: int) -> None:
-    fuzz_dir = repo_root / "fuzz"
-    fuzz_out = fuzz_dir / "out"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    fuzz_out.mkdir(parents=True, exist_ok=True)
-
-    fuzzer_cc = """#include <stdint.h>
-#include <stddef.h>
-#include "tinyxml2.h"
-
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  tinyxml2::XMLDocument doc;
-  doc.Parse(reinterpret_cast<const char*>(data), size);
-  return 0;
-}
-"""
-    build_py = f"""#!/usr/bin/env python3
-import argparse
-import os
-import shutil
-import subprocess
-from pathlib import Path
-
-def run(cmd, cwd):
-    print("[build] " + " ".join(cmd))
-    subprocess.check_call(cmd, cwd=cwd)
-
-def find_lib(build_dir: Path) -> Path:
-    for p in build_dir.rglob("libtinyxml2.a"):
-        return p
-    for p in build_dir.rglob("tinyxml2.lib"):
-        return p
-    raise RuntimeError("libtinyxml2 not found under build/")
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--clean", action="store_true")
-    args = ap.parse_args()
-
-    repo = Path(__file__).resolve().parents[1]
-    build_dir = repo / "build"
-    if args.clean and build_dir.exists():
-        shutil.rmtree(build_dir)
-
-    build_dir.mkdir(parents=True, exist_ok=True)
-    cxx = os.environ.get("CXX", "clang++")
-    cc = os.environ.get("CC", "clang")
-
-    run([
-        "cmake",
-        "-S", ".",
-        "-B", str(build_dir),
-        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-        "-DBUILD_SHARED_LIBS=OFF",
-        f"-DCMAKE_C_COMPILER={{cc}}",
-        f"-DCMAKE_CXX_COMPILER={{cxx}}",
-    ], cwd=repo)
-
-    run(["cmake", "--build", str(build_dir), "--config", "Release"], cwd=repo)
-
-    lib = find_lib(build_dir)
-    out_dir = repo / "fuzz" / "out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fuzzer_src = repo / "fuzz" / "tinyxml2_fuzz.cc"
-    bin_path = out_dir / "tinyxml2_fuzz"
-
-    flags = [
-        "-std=c++11",
-        "-g",
-        "-O1",
-        "-fno-omit-frame-pointer",
-        "-fsanitize=fuzzer,address",
-    ]
-
-    run([
-        cxx,
-        *flags,
-        "-I", str(repo),
-        "-o", str(bin_path),
-        str(fuzzer_src),
-        str(lib),
-    ], cwd=repo)
-
-if __name__ == "__main__":
-    main()
-"""
-    readme = f"""# Local fuzz scaffold (tinyxml2)
-
-1. Build: `cd fuzz && python build.py`
-2. Run: `fuzz/out/tinyxml2_fuzz fuzz/corpus/tinyxml2_fuzz`
-
-The harness feeds attacker-controlled XML bytes into `tinyxml2::XMLDocument::Parse`.
-Default max_len: {max_len}
-"""
-
-    (fuzz_dir / "tinyxml2_fuzz.cc").write_text(fuzzer_cc, encoding="utf-8")
-    (fuzz_dir / "build.py").write_text(build_py, encoding="utf-8")
-    (fuzz_dir / "README.md").write_text(readme, encoding="utf-8")
-    (fuzz_dir / "tinyxml2_fuzz.options").write_text(f"-max_len={max_len}\n", encoding="utf-8")
 
 
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
@@ -566,6 +419,7 @@ class FuzzWorkflowInput:
     repo_url: str
     email: Optional[str]
     time_budget: int
+    run_time_budget: int
     max_len: int
     docker_image: Optional[str]
     ai_key_path: Path
@@ -584,6 +438,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         raise ValueError("ai_key_path is required")
 
     time_budget = int(state.get("time_budget") or 900)
+    run_time_budget = int(state.get("run_time_budget") or time_budget or 900)
     max_len = int(state.get("max_len") or 1024)
     docker_image = (state.get("docker_image") or "").strip()
     if not docker_image:
@@ -595,7 +450,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         repo_spec=RepoSpec(url=repo_url, workdir=workdir),
         ai_key_path=ai_key_path,
         max_len=max_len,
-        time_budget_per_target=time_budget,
+        time_budget_per_target=run_time_budget,
         docker_image=docker_image,
         codex_cli=codex_cli,
     )
@@ -643,20 +498,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     _wf_log(cast(dict[str, Any], state), "-> plan")
     hint = (state.get("codex_hint") or "").strip()
     if not _has_codex_key():
-        if _is_tinyxml2_repo(gen.repo_root):
-            _write_builtin_tinyxml2_plan(gen.repo_root)
-            fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
-            out = {
-                **state,
-                "last_step": "plan",
-                "last_error": "",
-                "codex_hint": _make_plan_hint(gen.repo_root),
-                "plan_fix_on_crash": fix_on_crash,
-                "plan_max_fix_rounds": max_fix_rounds,
-                "message": "planned (builtin)",
-            }
-            _wf_log(cast(dict[str, Any], out), f"<- plan builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
-            return out
         out = {
             **state,
             "last_step": "plan",
@@ -712,24 +553,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
-        # Built-in fallback for known repos (keeps web flow usable without OpenCode).
-        try:
-            if _is_tinyxml2_repo(gen.repo_root):
-                _write_builtin_tinyxml2_plan(gen.repo_root)
-                fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
-                out = {
-                    **state,
-                    "last_step": "plan",
-                    "last_error": "",
-                    "codex_hint": _make_plan_hint(gen.repo_root),
-                    "plan_fix_on_crash": fix_on_crash,
-                    "plan_max_fix_rounds": max_fix_rounds,
-                    "message": "planned (builtin)",
-                }
-                _wf_log(cast(dict[str, Any], out), f"<- plan builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
-                return out
-        except Exception:
-            pass
         out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -745,13 +568,23 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
+
+    def _has_min_synthesis_outputs() -> bool:
+        fuzz_dir = gen.repo_root / "fuzz"
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            for p in fuzz_dir.rglob("*"):
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"} and "fuzz" in p.stem.lower():
+                    return True
+        except Exception:
+            return False
+        return False
+
     if not _has_codex_key():
-        if _is_tinyxml2_repo(gen.repo_root):
-            max_len = int(state.get("max_len") or 1024)
-            _write_builtin_tinyxml2_scaffold(gen.repo_root, max_len)
-            out = {**state, "last_step": "synthesize", "last_error": "", "codex_hint": "", "message": "synthesized (builtin)"}
-            _wf_log(cast(dict[str, Any], out), f"<- synthesize builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
-            return out
         out = {
             **state,
             "last_step": "synthesize",
@@ -781,22 +614,23 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 max_attempts=1,
                 max_cli_retries=1,
             )
+            # Guardrail: if hint-mode synthesis produced nothing useful, retry once
+            # with the canonical full synthesis prompt.
+            if not _has_min_synthesis_outputs():
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: missing build.py/harness after hint-mode; retrying full synthesize",
+                )
+                gen._pass_synthesize_harness(timeout=_remaining_time_budget_sec(state))
         else:
             gen._pass_synthesize_harness(timeout=_remaining_time_budget_sec(state))
+
+        if not _has_min_synthesis_outputs():
+            raise HarnessGeneratorError("synthesize incomplete: missing fuzz/build.py or harness source")
         out = {**state, "last_step": "synthesize", "last_error": "", "codex_hint": "", "message": "synthesized"}
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
-        # Built-in fallback for known repos (keeps web flow usable without OpenCode).
-        try:
-            if _is_tinyxml2_repo(gen.repo_root):
-                max_len = int(state.get("max_len") or 1024)
-                _write_builtin_tinyxml2_scaffold(gen.repo_root, max_len)
-                out = {**state, "last_step": "synthesize", "last_error": "", "codex_hint": "", "message": "synthesized (builtin)"}
-                _wf_log(cast(dict[str, Any], out), f"<- synthesize builtin ok dt={_fmt_dt(time.perf_counter()-t0)}")
-                return out
-        except Exception:
-            pass
         out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -1014,8 +848,113 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     stderr_tail = (state.get("build_stderr_tail") or "").strip()
     repo_root = str(gen.repo_root)
 
-    # Fast-path hotfix (minimal, no refactor): a common generated-script issue is
-    # linking with `-lz` while the static library is only available by file path.
+    # Fast-path hotfixes (minimal, no refactor):
+    # 1) libstdc++/libc++ ABI mismatch from injected "-stdlib=libc++"
+    # 2) libFuzzer main conflict when target sources define main()
+    # 3) linking with `-lz` while the static library is only available by file path.
+    def _repo_has_c_cpp_main() -> bool:
+        exts = {".c", ".cc", ".cpp", ".cxx"}
+        try:
+            checked = 0
+            for p in gen.repo_root.rglob("*"):
+                if not p.is_file() or p.suffix.lower() not in exts:
+                    continue
+                checked += 1
+                if checked > 200:
+                    break
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                if re.search(r"\bint\s+main\s*\(", txt):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _inject_define_into_flag_list(text: str, define_flag: str) -> tuple[str, bool]:
+        if define_flag in text:
+            return text, False
+        lines = text.splitlines()
+        changed = False
+        in_flags = False
+        for i, line in enumerate(lines):
+            if not in_flags and re.search(r"^\s*(?:CXXFLAGS|flags)\s*=\s*\[", line):
+                in_flags = True
+                continue
+            if not in_flags:
+                continue
+            if re.search(r"^\s*\]", line):
+                indent_match = re.match(r"^(\s*)", line)
+                indent = indent_match.group(1) if indent_match else "    "
+                lines.insert(i, f'{indent}"{define_flag}",')
+                changed = True
+                break
+        if changed:
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), True
+        # Fallback for common command pattern in generated build.py
+        replaced = text.replace(
+            " + [harness_cpp, VULNERABLE_CPP] + ",
+            f" + ['{define_flag}', harness_cpp, VULNERABLE_CPP] + ",
+        )
+        if replaced != text:
+            return replaced, True
+        return text, False
+
+    def _try_hotfix_stdlib_mismatch_and_main_conflict() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        abi_mismatch = any(
+            token in diag
+            for token in [
+                "undefined reference to `std::__cxx11",
+                "undefined reference to `std::",
+                "vtable for std::",
+                "libclang_rt.fuzzer",
+            ]
+        )
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        has_libcpp_flag = "-stdlib=libc++" in text
+        multiple_main = ("multiple definition of `main'" in diag) or ("multiple definition of main" in diag)
+
+        if not (abi_mismatch or has_libcpp_flag or multiple_main):
+            return False
+
+        changed = False
+        # Avoid libc++/libstdc++ mismatch with clang/libFuzzer runtime in our base image.
+        if has_libcpp_flag:
+            text2 = re.sub(r'^[ \t]*["\']-stdlib=libc\+\+["\'],?\s*\n?', "", text, flags=re.MULTILINE)
+            text2 = text2.replace('"-stdlib=libc++",', "").replace('"-stdlib=libc++"', "")
+            text2 = text2.replace("'-stdlib=libc++',", "").replace("'-stdlib=libc++'", "")
+            if text2 != text:
+                text = text2
+                changed = True
+
+        # If sources define main(), rename it away from libFuzzer's main symbol.
+        need_main_rename = multiple_main or _repo_has_c_cpp_main()
+        if need_main_rename and "-Dmain=vuln_main" not in text:
+            text, injected = _inject_define_into_flag_list(text, "-Dmain=vuln_main")
+            changed = changed or injected
+
+        if not changed:
+            return False
+
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(
+                cast(dict[str, Any], state),
+                "fix_build: applied local hotfix for stdlib mismatch/main conflict",
+            )
+            return True
+        except Exception:
+            return False
+
     def _try_hotfix_libfuzzer_main_conflict() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         if "multiple definition of `main'" not in diag and "multiple definition of main" not in diag:
@@ -1123,6 +1062,17 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
+    if _try_hotfix_stdlib_mismatch_and_main_conflict():
+        out = {
+            **state,
+            "last_step": "fix_build",
+            "last_error": "",
+            "codex_hint": "",
+            "message": "local hotfix for stdlib mismatch/main conflict applied",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
     if _try_hotfix_libfuzzer_main_conflict():
         out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for libfuzzer main conflict applied"}
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -1170,6 +1120,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             codex_hint = (
                 "Fix the fuzz build so that running `(cd fuzz && python build.py)` succeeds and leaves at least one executable fuzzer under fuzz/out/.\n"
                 "Only modify files under fuzz/ and the minimal build glue required.\n"
+                "Do not use `-stdlib=libc++` in this environment.\n"
+                "If target sources define `main`, add a compile define such as `-Dmain=vuln_main` to avoid libFuzzer main conflicts.\n"
                 "If the harness source is wrong or missing includes/links, fix it. If build.py uses wrong target names or paths, correct it.\n"
                 "Do not refactor production code."
             )
@@ -1762,7 +1714,12 @@ def _write_run_summary(out: dict[str, Any]) -> None:
 
 
 def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
-    _wf_log(None, f"workflow start repo={inp.repo_url} docker_image={inp.docker_image or '(host)'} time_budget={inp.time_budget}s")
+    _wf_log(
+        None,
+        "workflow start "
+        f"repo={inp.repo_url} docker_image={inp.docker_image or '(host)'} "
+        f"time_budget={inp.time_budget}s run_time_budget={inp.run_time_budget}s",
+    )
     t0 = time.perf_counter()
     try:
         max_steps_env = int(os.environ.get("SHERPA_WORKFLOW_MAX_STEPS", "20"))
@@ -1775,6 +1732,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
             "repo_url": inp.repo_url,
             "email": inp.email,
             "time_budget": inp.time_budget,
+            "run_time_budget": inp.run_time_budget,
             "workflow_started_at": time.time(),
             "max_len": inp.max_len,
             "docker_image": inp.docker_image,
