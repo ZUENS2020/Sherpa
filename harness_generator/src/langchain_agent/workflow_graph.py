@@ -58,6 +58,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     run_details: list[dict[str, Any]]
     last_crash_artifact: str
     last_fuzzer: str
+    crash_signature: str
+    same_crash_repeats: int
     crash_fix_attempts: int
     next: str
     fix_patch_path: str
@@ -486,6 +488,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "run_error_kind": "",
             "last_crash_artifact": "",
             "last_fuzzer": "",
+            "crash_signature": "",
+            "same_crash_repeats": 0,
             "crash_fix_attempts": int(state.get("crash_fix_attempts") or 0),
             "plan_fix_on_crash": True,
             "plan_max_fix_rounds": 1,
@@ -950,6 +954,65 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     stdout_tail = (state.get("build_stdout_tail") or "").strip()
     stderr_tail = (state.get("build_stderr_tail") or "").strip()
     repo_root = str(gen.repo_root)
+    diag_text = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+
+    def _detect_non_source_build_blocker(diag: str) -> str:
+        checks: list[tuple[str, list[str]]] = [
+            (
+                "docker_daemon_unavailable",
+                [
+                    "cannot connect to the docker daemon",
+                    "is the docker daemon running",
+                    "lookup sherpa-docker",
+                    "permission denied while trying to connect to the docker daemon",
+                ],
+            ),
+            (
+                "registry_or_network_unavailable",
+                [
+                    "tls handshake timeout",
+                    "temporary failure in name resolution",
+                    "failed to resolve source metadata",
+                    "dial tcp",
+                    "no such host",
+                ],
+            ),
+            (
+                "resource_exhausted",
+                [
+                    "no space left on device",
+                    "cannot allocate memory",
+                    "out of memory",
+                    "killed",
+                ],
+            ),
+            (
+                "build_command_timeout",
+                [
+                    "[timeout] process exceeded limit and was killed",
+                    "process exceeded limit and was killed",
+                ],
+            ),
+        ]
+        for reason, needles in checks:
+            if any(n in diag for n in needles):
+                return reason
+        return ""
+
+    stop_on_infra_raw = (os.environ.get("SHERPA_WORKFLOW_STOP_ON_INFRA_BUILD_ERROR") or "").strip().lower()
+    stop_on_infra = stop_on_infra_raw not in {"0", "false", "no", "off"}
+    non_source_reason = _detect_non_source_build_blocker(diag_text)
+    if stop_on_infra and non_source_reason:
+        out = {
+            **state,
+            "last_step": "fix_build",
+            "failed": True,
+            "last_error": f"non-source build blocker detected: {non_source_reason}",
+            "message": "fix_build skipped (environment/infrastructure issue)",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- fix_build stop=non-source reason={non_source_reason}")
+        return out
+
     build_log_file = ""
     raw_build_log_path = (state.get("build_full_log_path") or "").strip()
     if raw_build_log_path:
@@ -1359,6 +1422,29 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_error_kind = ""
         run_last_error = ""
         run_details: list[dict[str, Any]] = []
+        prev_crash_sig = str(state.get("crash_signature") or "").strip()
+        prev_crash_repeats = int(state.get("same_crash_repeats") or 0)
+        max_same_crash_repeats_raw = os.environ.get("SHERPA_WORKFLOW_MAX_SAME_CRASH_REPEATS", "1")
+        try:
+            max_same_crash_repeats = max(0, min(int(max_same_crash_repeats_raw), 10))
+        except Exception:
+            max_same_crash_repeats = 1
+
+        def _calc_crash_signature(fuzzer_name: str, artifact_path: str) -> str:
+            parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
+            crash_info = gen.repo_root / "crash_info.md"
+            crash_analysis = gen.repo_root / "crash_analysis.md"
+            for p in (crash_info, crash_analysis):
+                if not p.is_file():
+                    continue
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                tail = "\n".join(txt.splitlines()[-400:])
+                parts.append(f"== {p.name} ==\n{tail}")
+            return _sha256_text("\n\n".join(parts))
+
         for bin_path in bins:
             fuzzer_name = bin_path.name
             try:
@@ -1407,6 +1493,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             msg = "Fuzzing run failed."
         else:
             msg = "Fuzzing completed." if not crash_found else "Fuzzing completed (crash found and packaged)."
+
+        crash_signature = ""
+        same_crash_repeats = 0
+        if crash_found and last_fuzzer and last_artifact:
+            crash_signature = _calc_crash_signature(last_fuzzer, last_artifact)
+            same_crash_repeats = (prev_crash_repeats + 1) if (prev_crash_sig and crash_signature == prev_crash_sig) else 0
+
         out = {
             **state,
             "last_step": "run",
@@ -1418,11 +1511,23 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_details": run_details,
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
+            "crash_signature": crash_signature,
+            "same_crash_repeats": same_crash_repeats,
             "message": msg,
         }
+        if crash_found and same_crash_repeats >= max_same_crash_repeats:
+            out["failed"] = True
+            out["last_error"] = (
+                "same crash signature repeated after crash-fix attempts "
+                f"(repeats={same_crash_repeats + 1}, threshold={max_same_crash_repeats + 1})"
+            )
+            out["message"] = "workflow stopped (same crash repeated)"
         _wf_log(
             cast(dict[str, Any], out),
-            f"<- run ok crash_found={crash_found} rc={run_rc} evidence={crash_evidence} dt={_fmt_dt(time.perf_counter()-t0)}",
+            (
+                f"<- run ok crash_found={crash_found} rc={run_rc} evidence={crash_evidence} "
+                f"same_crash_repeats={same_crash_repeats} dt={_fmt_dt(time.perf_counter()-t0)}"
+            ),
         )
         return out
     except Exception as e:
@@ -1482,6 +1587,19 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         fix_summary_path = repo_root / "fix_summary.md"
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
         patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
+        if not changed_files:
+            out = {
+                **state,
+                "last_step": "fix_crash",
+                "last_error": "opencode fix_crash made no textual file changes",
+                "crash_fix_attempts": attempts,
+                "message": "opencode fix_crash no-op",
+                "fix_patch_path": str(patch_path) if patch_path.exists() else "",
+                "fix_patch_files": [],
+                "fix_patch_bytes": int(patch_bytes),
+            }
+            _wf_log(cast(dict[str, Any], out), f"<- fix_crash err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
 
         # Write a concise fix summary for downstream triage.
         summary_lines = [

@@ -32,6 +32,7 @@ Additional instruction from coordinator:
 <!-- TEMPLATE: fix_build_execute -->
 You are OpenCode operating inside a Git repository.
 Task: fix the fuzz harness/build source code so the build will pass when run later.
+Environment note: build/fuzz runs in a separate runtime container (typically `sherpa-fuzz-cpp:latest` or `sherpa-fuzz-java:latest`), not this OpenCode environment.
 
 Goal (will be verified by a separate automated system — do NOT run these yourself):
 - `(cd fuzz && python build.py)` should complete successfully
@@ -58,6 +59,7 @@ When finished, write `fuzz/build.py` into `./done`.
 <!-- TEMPLATE: fix_crash_harness_error -->
 You are OpenCode. The crash was diagnosed as a HARNESS ERROR.
 Task: fix the fuzz harness/build glue so the crash no longer happens for the same input.
+Environment note: build/fuzz runs in a separate runtime container (typically `sherpa-fuzz-cpp:latest` or `sherpa-fuzz-java:latest`), not this OpenCode environment.
 
 Constraints:
 - Only modify files under fuzz/ or minimal build glue required for the harness.
@@ -75,6 +77,7 @@ When finished, write the key file you modified into ./done.
 
 <!-- TEMPLATE: fix_crash_upstream_bug -->
 You are OpenCode. Fix the underlying bug in the target repository so the crash no longer occurs.
+Environment note: build/fuzz runs in a separate runtime container (typically `sherpa-fuzz-cpp:latest` or `sherpa-fuzz-java:latest`), not this OpenCode environment.
 
 Constraints:
 - Keep changes minimal and focused on correctness/security.

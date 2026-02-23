@@ -561,6 +561,10 @@ class CodexHelper:
             "You are OpenCode running in a local Git repository.",
             "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output).",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
+            "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "
+            "not this OpenCode execution environment. Do not infer runtime availability from this environment.",
+            "Typical runtime images are sherpa-fuzz-cpp:latest or sherpa-fuzz-java:latest; "
+            "OpenCode must only edit source files and must not attempt runtime verification.",
             "CRITICAL RULE: You MUST NOT execute build/test/fuzz commands or run binaries. "
             "Read-only commands (rg, ls, cat, find, sed) are allowed for inspection. "
             "Your ONLY job is to create and edit source files. "
