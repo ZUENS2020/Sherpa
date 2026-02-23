@@ -21,10 +21,10 @@ services:
           exit 0
         fi
         if [ -d /shared/oss-fuzz ] && [ "$(ls -A /shared/oss-fuzz 2>/dev/null || true)" != "" ]; then
-          echo "[!] /shared/oss-fuzz exists but is not a valid oss-fuzz checkout (missing infra/helper.py)" >&2
-          exit 1
+          echo "[warn] /shared/oss-fuzz exists but is not a valid oss-fuzz checkout (missing infra/helper.py)" >&2
+          echo "[warn] Cleaning stale contents and re-cloning..." >&2
         fi
-        rm -rf /shared/oss-fuzz/*
+        rm -rf /shared/oss-fuzz/* /shared/oss-fuzz/.[!.]* /shared/oss-fuzz/..?* || true
         git clone --depth 1 "$$REPO" /shared/oss-fuzz
         test -f /shared/oss-fuzz/infra/helper.py
 
