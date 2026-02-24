@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 
@@ -38,6 +39,21 @@ class _FakeRunGenerator:
 
     def _analyze_and_package(self, fuzzer_name: str, artifact: Path) -> None:
         self.analysis_calls.append((fuzzer_name, artifact))
+
+
+class _SlowSeedGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, seed_sleep_sec: float) -> None:
+        super().__init__(tmp_path, run_results)
+        self._bins = [self.fuzz_out_dir / "demo_fuzz_1", self.fuzz_out_dir / "demo_fuzz_2"]
+        for p in self._bins:
+            p.write_text("", encoding="utf-8")
+        self._seed_sleep_sec = seed_sleep_sec
+
+    def _discover_fuzz_binaries(self) -> list[Path]:
+        return list(self._bins)
+
+    def _pass_generate_seeds(self, _fuzzer_name: str) -> None:
+        time.sleep(self._seed_sleep_sec)
 
 
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
@@ -137,3 +153,46 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_ft"] == 654
     assert detail["final_corpus_files"] == 12
     assert detail["final_execs_per_sec"] == 777
+
+
+def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path):
+    gen = _SlowSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+        seed_sleep_sec=1.2,
+    )
+    started = time.time()
+    out = workflow_graph._node_run(
+        {
+            "generator": gen,
+            "crash_fix_attempts": 0,
+            "workflow_started_at": started,
+            "time_budget": 1,
+            "run_time_budget": 300,
+        }
+    )
+    assert out["last_step"] == "run"
+    assert out["failed"] is True
+    assert "time budget exceeded" in out["last_error"]
+    assert out["message"] == "workflow stopped (time budget exceeded)"

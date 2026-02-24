@@ -77,6 +77,7 @@ services:
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
       SHERPA_OPENCODE_DOCKER_IMAGE: "sherpa-opencode:latest"
       SHERPA_OPENCODE_IGNORE_RETRY_ERRORS: "1"
+      SHERPA_PARALLEL_FUZZERS: ${SHERPA_PARALLEL_FUZZERS:-2}
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
       SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz.git"
@@ -108,10 +109,22 @@ services:
     image: docker:27-dind
     privileged: true
     restart: unless-stopped
-    command:
-      - --host=tcp://0.0.0.0:2375
-      - --host=unix:///var/run/docker.sock
-      - --tls=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - ${SHERPA_DOCKER_DNS_1:-1.1.1.1}
+      - ${SHERPA_DOCKER_DNS_2:-8.8.8.8}
+    entrypoint:
+      - sh
+      - -lc
+      - |
+        set -eu
+        ARGS="--host=tcp://0.0.0.0:2375 --host=unix:///var/run/docker.sock --tls=false"
+        if [ -n "$${SHERPA_DOCKER_REGISTRY_MIRROR:-}" ]; then
+          ARGS="$$ARGS --registry-mirror=$${SHERPA_DOCKER_REGISTRY_MIRROR}"
+          echo "[*] Using docker registry mirror: $${SHERPA_DOCKER_REGISTRY_MIRROR}"
+        fi
+        exec dockerd-entrypoint.sh $$ARGS
     healthcheck:
       test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
       interval: 5s
@@ -120,7 +133,9 @@ services:
       start_period: 10s
     environment:
       DOCKER_TLS_CERTDIR: ""
-      DOCKER_HOST: tcp://0.0.0.0:2375
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # Optional: pass a non-personal mirror from local env at runtime.
+      SHERPA_DOCKER_REGISTRY_MIRROR: ${SHERPA_DOCKER_REGISTRY_MIRROR:-}
     volumes:
       - sherpa-docker-data:/var/lib/docker
       - sherpa-tmp:/shared/tmp

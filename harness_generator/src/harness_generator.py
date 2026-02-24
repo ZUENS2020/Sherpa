@@ -212,7 +212,7 @@ class HarnessGenerator:
                 # ── Record existing crash/timeout/oom files before run
                 baseline_bug_files = self._find_bug_files()
 
-                output = self._run_fuzzer(fuzzer)
+                self._run_fuzzer(fuzzer)
 
                 # ── Detect newly-generated bug files
                 new_bug_files = self._find_bug_files() - baseline_bug_files

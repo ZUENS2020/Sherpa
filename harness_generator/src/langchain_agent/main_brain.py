@@ -36,11 +36,6 @@ def get_user_location(runtime: ToolRuntime[Context]) -> str:
     user_id = runtime.context.user_id
     return "Florida" if user_id == "1" else "SF"
 
-@tool
-def refuse_tool_call(reason: str) -> str:
-    """Tool to refuse to call a tool."""
-    return f"Refused to call tool: {reason}"
-
 def _default_openrouter_base_url() -> str:
     return os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
@@ -48,9 +43,6 @@ def _default_openrouter_base_url() -> str:
 def _default_openrouter_model() -> str:
     return os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
 
-
-
-# We use a dataclass here, but Pydantic models are also supported.
 @dataclass
 class ResponseFormat:
     """标准化的智能体响应格式"""
@@ -63,30 +55,6 @@ class ResponseFormat:
             "response": self.response,
             "used_tools": self.used_tools or []
         }, ensure_ascii=False)
-
-# agent = create_agent(
-#     model=model,
-#     system_prompt=SYSTEM_PROMPT,
-#     tools=[get_user_location, get_weather_for_location],
-#     context_schema=Context,
-#     response_format=ResponseFormat,
-#     checkpointer=checkpointer
-# )
-
-# # `thread_id` is a unique identifier for a given conversation.
-# config = {"configurable": {"thread_id": "1"}}
-
-# response = agent.invoke(
-#     {"messages": [{"role": "user", "content": "what is the weather outside?"}]},
-#     config=config,
-#     context=Context(user_id="1")
-# )
-
-# print(response['structured_response'])
-# ResponseFormat(
-#     punny_response="Florida is still having a 'sun-derful' day! The sunshine is playing 'ray-dio' hits all day long! I'd say it's the perfect weather for some 'solar-bration'! If you were hoping for rain, I'm afraid that idea is all 'washed up' - the forecast remains 'clear-ly' brilliant!",
-#     weather_conditions="It's always sunny in Florida!"
-# )
 
 def create_agent_outside(
     input_text: str,

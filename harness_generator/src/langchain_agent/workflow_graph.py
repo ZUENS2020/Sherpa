@@ -7,6 +7,7 @@ import re
 import time
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -313,7 +314,28 @@ def _remaining_time_budget_sec(state: FuzzWorkflowRuntimeState, *, min_timeout: 
     total_budget = max(1, int(state.get("time_budget") or 900))
     elapsed = max(0.0, time.time() - started_at)
     remaining = int(total_budget - elapsed)
-    return max(min_timeout, remaining)
+    if remaining <= 0:
+        return 0
+    # Do not return a timeout larger than the real remaining total budget.
+    return remaining
+
+
+def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
+    started_at = float(state.get("workflow_started_at") or time.time())
+    time_budget = max(1, int(state.get("time_budget") or 900))
+    elapsed = max(0.0, time.time() - started_at)
+    out = cast(
+        FuzzWorkflowRuntimeState,
+        {
+            **state,
+            "last_step": step_name,
+            "failed": True,
+            "last_error": f"time budget exceeded: elapsed={elapsed:.1f}s budget={time_budget}s",
+            "message": "workflow stopped (time budget exceeded)",
+        },
+    )
+    _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=time_budget elapsed={elapsed:.1f}s budget={time_budget}s")
+    return out
 
 
 def _make_plan_hint(repo_root: Path) -> str:
@@ -810,27 +832,36 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
 
         for attempt in range(1, max_local_attempts + 1):
+            build_cmd_timeout = _remaining_time_budget_sec(state, min_timeout=0)
+            if build_cmd_timeout <= 0:
+                return _time_budget_exceeded_state(state, step_name="build")
             _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
-            rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=7200)
+            rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=build_cmd_timeout)
             _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
             attempts_used += 1
 
             # Backward-compatibility shim: older generated scripts may hardcode "fuzz/..."
             # and therefore need repo-root cwd.
             if rc != 0 and fallback_cmd is not None and fallback_cwd is not None and _is_repo_root_cwd_issue(out, err):
+                fallback_timeout = _remaining_time_budget_sec(state, min_timeout=0)
+                if fallback_timeout <= 0:
+                    return _time_budget_exceeded_state(state, step_name="build")
                 _wf_log(
                     cast(dict[str, Any], state),
                     f"build retry from repo-root cwd -> {' '.join(fallback_cmd)}",
                 )
-                rc, out, err = gen._run_cmd(list(fallback_cmd), cwd=fallback_cwd, env=build_env, timeout=7200)
+                rc, out, err = gen._run_cmd(list(fallback_cmd), cwd=fallback_cwd, env=build_env, timeout=fallback_timeout)
                 _append_build_full_log(stage=f"attempt-{attempt}/repo-root-fallback", cmd=list(fallback_cmd), cwd=fallback_cwd, rc=rc, out=out, err=err)
                 attempts_used += 1
 
             if rc != 0 and retry_with_clean and build_cmd_clean is not None:
                 combined = (out or "") + "\n" + (err or "")
                 if not re.search(r"unrecognized arguments: --clean", combined, re.IGNORECASE):
+                    clean_timeout = _remaining_time_budget_sec(state, min_timeout=0)
+                    if clean_timeout <= 0:
+                        return _time_budget_exceeded_state(state, step_name="build")
                     _wf_log(cast(dict[str, Any], state), "build failed; retrying once with --clean")
-                    rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=build_cwd, env=build_env, timeout=7200)
+                    rc2, out2, err2 = gen._run_cmd(list(build_cmd_clean), cwd=build_cwd, env=build_env, timeout=clean_timeout)
                     _append_build_full_log(stage=f"attempt-{attempt}/clean-retry", cmd=list(build_cmd_clean), cwd=build_cwd, rc=rc2, out=out2, err=err2)
                     attempts_used += 1
                     combined2 = (out2 or "") + "\n" + (err2 or "")
@@ -1150,6 +1181,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             text, injected = _inject_define_into_flag_list(text, "-Dmain=vuln_main")
             changed = changed or injected
 
+        # Keep legacy libFuzzer macro hotfix for compatibility with existing build.py patterns/tests.
+        if multiple_main and "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" not in text:
+            text, injected = _inject_define_into_flag_list(text, "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION")
+            changed = changed or injected
+
         if not changed:
             return False
 
@@ -1422,6 +1458,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_error_kind = ""
         run_last_error = ""
         run_details: list[dict[str, Any]] = []
+        configured_run_time_budget = max(1, int(state.get("run_time_budget") or state.get("time_budget") or 900))
         prev_crash_sig = str(state.get("crash_signature") or "").strip()
         prev_crash_repeats = int(state.get("same_crash_repeats") or 0)
         max_same_crash_repeats_raw = os.environ.get("SHERPA_WORKFLOW_MAX_SAME_CRASH_REPEATS", "1")
@@ -1429,6 +1466,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             max_same_crash_repeats = max(0, min(int(max_same_crash_repeats_raw), 10))
         except Exception:
             max_same_crash_repeats = 1
+        max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "2")
+        try:
+            max_parallel = max(1, min(int(max_parallel_raw), 16))
+        except Exception:
+            max_parallel = 2
+        if len(bins) <= 1:
+            max_parallel = 1
+
+        _wf_log(cast(dict[str, Any], state), f"run: fuzzers={len(bins)} parallel={max_parallel}")
 
         def _calc_crash_signature(fuzzer_name: str, artifact_path: str) -> str:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
@@ -1445,25 +1491,166 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 parts.append(f"== {p.name} ==\n{tail}")
             return _sha256_text("\n\n".join(parts))
 
+        # Seed generation uses OpenCode and shared repo context; keep it serial.
+        prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+        try:
+            for bin_path in bins:
+                remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_for_seed <= 0:
+                    return _time_budget_exceeded_state(state, step_name="run")
+                setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
+                fuzzer_name = bin_path.name
+                try:
+                    gen._pass_generate_seeds(fuzzer_name)
+                except Exception as e:
+                    # Seed generation is best-effort; do not block fuzzing.
+                    print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+        finally:
+            setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
+
+        run_results: dict[str, FuzzerRunResult] = {}
+        run_exec_errors: dict[str, str] = {}
+
+        def _run_one(bin_path: Path) -> tuple[str, FuzzerRunResult]:
+            return bin_path.name, gen._run_fuzzer(bin_path)
+
+        # Execute fuzzers in parallel batches and cap each batch to remaining total budget.
+        pending_bins = list(bins)
+        prev_run_budget = getattr(gen, "current_run_time_budget_sec", None)
+        prev_run_hard_timeout = getattr(gen, "current_run_hard_timeout_sec", None)
+        try:
+            while pending_bins:
+                remaining_for_run = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_for_run <= 0:
+                    if not run_last_error:
+                        run_last_error = "time budget exceeded during run phase"
+                    if not run_error_kind:
+                        run_error_kind = "workflow_time_budget_exceeded"
+                    for skipped in pending_bins:
+                        run_exec_errors[skipped.name] = "skipped: workflow total time budget exhausted before execution"
+                    pending_bins = []
+                    break
+
+                rounds_left = (len(pending_bins) + max_parallel - 1) // max_parallel
+                round_budget = min(configured_run_time_budget, max(1, remaining_for_run // max(1, rounds_left)))
+                hard_timeout = min(max(60, round_budget + 120), max(60, remaining_for_run + 30))
+                setattr(gen, "current_run_time_budget_sec", round_budget)
+                setattr(gen, "current_run_hard_timeout_sec", hard_timeout)
+
+                batch = pending_bins[:max_parallel]
+                pending_bins = pending_bins[max_parallel:]
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    (
+                        "run batch: "
+                        f"size={len(batch)} round_budget={round_budget}s hard_timeout={hard_timeout}s "
+                        f"remaining_total={remaining_for_run}s"
+                    ),
+                )
+
+                if len(batch) <= 1:
+                    for bin_path in batch:
+                        try:
+                            name, run = _run_one(bin_path)
+                            run_results[name] = run
+                        except Exception as e:
+                            run_exec_errors[bin_path.name] = str(e)
+                else:
+                    with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                        futures = {pool.submit(_run_one, bin_path): bin_path for bin_path in batch}
+                        for fut in as_completed(futures):
+                            bin_path = futures[fut]
+                            try:
+                                name, run = fut.result()
+                                run_results[name] = run
+                            except Exception as e:
+                                run_exec_errors[bin_path.name] = str(e)
+        finally:
+            setattr(gen, "current_run_time_budget_sec", prev_run_budget)
+            setattr(gen, "current_run_hard_timeout_sec", prev_run_hard_timeout)
+
+        first_nonzero_rc = 0
+        crash_candidates: list[tuple[str, Path, FuzzerRunResult]] = []
+
         for bin_path in bins:
             fuzzer_name = bin_path.name
-            try:
-                gen._pass_generate_seeds(fuzzer_name)
-            except Exception as e:
-                # Seed generation is best-effort; do not block fuzzing.
-                print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+            exec_err = run_exec_errors.get(fuzzer_name, "")
+            if exec_err:
+                if not run_last_error:
+                    run_last_error = f"fuzzer run crashed for {fuzzer_name}: {exec_err}"
+                if not run_error_kind:
+                    run_error_kind = "run_exception"
+                if first_nonzero_rc == 0:
+                    first_nonzero_rc = 1
+                run_details.append(
+                    {
+                        "fuzzer": fuzzer_name,
+                        "rc": 1,
+                        "crash_found": False,
+                        "crash_evidence": "none",
+                        "run_error_kind": "run_exception",
+                        "error": exec_err,
+                        "new_artifacts": [],
+                        "first_artifact": "",
+                        "final_cov": 0,
+                        "final_ft": 0,
+                        "final_iteration": 0,
+                        "final_execs_per_sec": 0,
+                        "final_rss_mb": 0,
+                        "final_corpus_files": 0,
+                        "final_corpus_size_bytes": 0,
+                        "corpus_files": 0,
+                        "corpus_size_bytes": 0,
+                    }
+                )
+                continue
 
-            run: FuzzerRunResult = gen._run_fuzzer(bin_path)
-            run_rc = int(run.rc)
-            crash_evidence = run.crash_evidence
-            run_error_kind = run.run_error_kind
+            run = run_results.get(fuzzer_name)
+            if run is None:
+                # Defensive fallback: if a future completed without result/exception.
+                if not run_last_error:
+                    run_last_error = f"missing run result for {fuzzer_name}"
+                if not run_error_kind:
+                    run_error_kind = "run_exception"
+                if first_nonzero_rc == 0:
+                    first_nonzero_rc = 1
+                run_details.append(
+                    {
+                        "fuzzer": fuzzer_name,
+                        "rc": 1,
+                        "crash_found": False,
+                        "crash_evidence": "none",
+                        "run_error_kind": "run_exception",
+                        "error": "missing run result",
+                        "new_artifacts": [],
+                        "first_artifact": "",
+                        "final_cov": 0,
+                        "final_ft": 0,
+                        "final_iteration": 0,
+                        "final_execs_per_sec": 0,
+                        "final_rss_mb": 0,
+                        "final_corpus_files": 0,
+                        "final_corpus_size_bytes": 0,
+                        "corpus_files": 0,
+                        "corpus_size_bytes": 0,
+                    }
+                )
+                continue
+
+            rc = int(run.rc)
+            if first_nonzero_rc == 0 and rc != 0:
+                first_nonzero_rc = rc
+            if not run_error_kind and run.run_error_kind:
+                run_error_kind = run.run_error_kind
+
             run_details.append(
                 {
                     "fuzzer": fuzzer_name,
-                    "rc": int(run.rc),
+                    "rc": rc,
                     "crash_found": bool(run.crash_found),
                     "crash_evidence": run.crash_evidence,
                     "run_error_kind": run.run_error_kind,
+                    "error": run.error or "",
                     "new_artifacts": [str(p) for p in (run.new_artifacts or [])],
                     "first_artifact": run.first_artifact or "",
                     "final_cov": int(run.final_cov),
@@ -1477,22 +1664,28 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "corpus_size_bytes": int(run.corpus_size_bytes),
                 }
             )
-            if run.error:
+            if run.error and not run_last_error:
                 run_last_error = run.error
-                break
-
             if run.crash_found and run.first_artifact:
-                first = Path(run.first_artifact)
-                gen._analyze_and_package(fuzzer_name, first)
-                crash_found = True
-                last_artifact = str(first)
-                last_fuzzer = fuzzer_name
-                break
+                crash_candidates.append((fuzzer_name, Path(run.first_artifact), run))
 
-        if run_last_error:
+        if crash_candidates:
+            last_fuzzer, first, crash_run = crash_candidates[0]
+            gen._analyze_and_package(last_fuzzer, first)
+            crash_found = True
+            last_artifact = str(first)
+            run_rc = int(crash_run.rc)
+            crash_evidence = crash_run.crash_evidence
+        else:
+            run_rc = first_nonzero_rc
+            crash_evidence = "none"
+
+        if crash_found:
+            msg = "Fuzzing completed (crash found and packaged)."
+        elif run_last_error:
             msg = "Fuzzing run failed."
         else:
-            msg = "Fuzzing completed." if not crash_found else "Fuzzing completed (crash found and packaged)."
+            msg = "Fuzzing completed."
 
         crash_signature = ""
         same_crash_repeats = 0
@@ -1515,6 +1708,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "same_crash_repeats": same_crash_repeats,
             "message": msg,
         }
+        if run_error_kind == "workflow_time_budget_exceeded":
+            out["failed"] = True
+            out["last_error"] = out.get("last_error") or "time budget exceeded during run phase"
+            out["message"] = "workflow stopped (time budget exceeded)"
         if crash_found and same_crash_repeats >= max_same_crash_repeats:
             out["failed"] = True
             out["last_error"] = (

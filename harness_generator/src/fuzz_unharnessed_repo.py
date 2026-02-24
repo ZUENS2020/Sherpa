@@ -61,7 +61,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -637,6 +637,10 @@ class NonOssFuzzHarnessGenerator:
         self.sanitizer = sanitizer
         self.codex_cli = codex_cli
         self.time_budget = time_budget_per_target
+        # Workflow can override these per-step/per-batch at runtime.
+        self.seed_generation_timeout_sec: Optional[int] = None
+        self.current_run_time_budget_sec: Optional[int] = None
+        self.current_run_hard_timeout_sec: Optional[int] = None
         self.rss_limit_mb = rss_limit_mb
         self.max_len = max_len
         self.max_build_retries = max_build_retries
@@ -843,7 +847,8 @@ class NonOssFuzzHarnessGenerator:
             rc = proc.wait()
             return rc, lines
 
-        tries_raw = os.environ.get("SHERPA_DOCKER_BUILD_RETRIES", "3")
+        # Network to Docker Hub can be unstable in some regions; use a safer default.
+        tries_raw = os.environ.get("SHERPA_DOCKER_BUILD_RETRIES", "6")
         try:
             max_tries = max(1, min(int(tries_raw), 8))
         except Exception:
@@ -895,13 +900,17 @@ class NonOssFuzzHarnessGenerator:
         if not self.docker_image:
             return list(cmd)
 
-        def _docker_container_name(mount_src: str) -> str:
+        def _docker_container_name(mount_src: str, cmd_args: Sequence[str]) -> str:
             base = Path(mount_src).name
             base = re.sub(r"[^a-zA-Z0-9_.-]+", "-", base).strip("-.").lower()
             if not base:
                 base = "sherpa"
             suffix = hashlib.sha1(mount_src.encode("utf-8", errors="ignore")).hexdigest()[:8]
-            name = f"{base}-{suffix}"
+            cmd_sig = hashlib.sha1(
+                "\x1f".join(str(x) for x in cmd_args).encode("utf-8", errors="ignore")
+            ).hexdigest()[:6]
+            nonce = uuid.uuid4().hex[:6]
+            name = f"{base}-{suffix}-{cmd_sig}-{nonce}"
             # Docker name limit is generous, but keep it short for readability.
             return name[:63]
 
@@ -1012,7 +1021,7 @@ class NonOssFuzzHarnessGenerator:
             "run",
             "--rm",
             "--name",
-            _docker_container_name(mount_src),
+            _docker_container_name(mount_src, cmd),
             "--label",
             f"sherpa.repo_root={Path(mount_src).name}",
             "--label",
@@ -1204,9 +1213,6 @@ class NonOssFuzzHarnessGenerator:
         """
         Ask Codex to mine/score candidates and author PLAN.md + targets.json.
         """
-        output_path = self.repo_root/"output.dot"
-        N = 15
-
         instructions = textwrap.dedent(
             f"""
             **Goal:** Analyze this repository and produce a realistic fuzz plan.
@@ -1719,9 +1725,14 @@ class NonOssFuzzHarnessGenerator:
             """
         ).strip()
 
+        seed_timeout = getattr(self, "seed_generation_timeout_sec", None)
+        patcher_kwargs: Dict[str, object] = {}
+        if isinstance(seed_timeout, int) and seed_timeout > 0:
+            patcher_kwargs["timeout"] = seed_timeout
         stdout = self.patcher.run_codex_command(
             instructions,
-            additional_context=harness_text or "(no harness found)"
+            additional_context=harness_text or "(no harness found)",
+            **patcher_kwargs,
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not generate any seed files.")
@@ -1750,16 +1761,28 @@ class NonOssFuzzHarnessGenerator:
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
+        run_time_budget = int(getattr(self, "current_run_time_budget_sec", self.time_budget) or self.time_budget)
+        run_time_budget = max(1, run_time_budget)
+        hard_timeout = int(getattr(self, "current_run_hard_timeout_sec", 0) or 0)
+        if hard_timeout <= 0:
+            hard_timeout = max(60, run_time_budget + 120)
+
         cmd = [
             str(bin_path),
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
-            f"-max_total_time={self.time_budget}",
+            f"-max_total_time={run_time_budget}",
             f"-max_len={self.max_len}",
         ]
 
         print(f"[*] ➜  {' '.join(cmd)}")
-        rc, out, err = self._run_cmd(cmd, cwd=self.repo_root, env=env, extra_inputs=[str(corpus_dir)])
+        rc, out, err = self._run_cmd(
+            cmd,
+            cwd=self.repo_root,
+            env=env,
+            extra_inputs=[str(corpus_dir)],
+            timeout=hard_timeout,
+        )
 
         # Dump the tail for quick reading.
         log = (out + "\n=== STDERR ===\n" + err).replace("\r", "\n")
@@ -2265,37 +2288,34 @@ class NonOssFuzzHarnessGenerator:
             last_rc: Optional[int] = None
             for clone_url in _candidate_clone_urls(spec.url):
                 attempted.append(clone_url)
-                try:
-                    if root.exists():
-                        shutil.rmtree(root, ignore_errors=True)
-                except Exception:
-                    pass
                 print(f"[*] (docker/git) Cloning {clone_url} → {root}")
-                clone_cmd = [
-                    "docker",
-                    "run",
-                    "--rm",
-                    *_docker_proxy_env_args(),
-                    "-v",
-                    f"{str(parent)}:/out",
-                    "-w",
-                    "/out",
-                    DEFAULT_GIT_DOCKER_IMAGE,
-                    "-c",
-                    "http.version=HTTP/1.1",
-                    "-c",
-                    "http.postBuffer=524288000",
-                    "clone",
-                    "--depth",
-                    "1",
-                    clone_url,
-                    name,
-                ]
-                print(f"[*] ➜  {' '.join(clone_cmd)}")
                 for attempt in range(1, max(1, GIT_CLONE_RETRIES) + 1):
+                    temp_name = f"{name}.clone-{uuid.uuid4().hex[:8]}"
+                    temp_root = parent / temp_name
+                    clone_cmd = [
+                        "docker",
+                        "run",
+                        "--rm",
+                        *_docker_proxy_env_args(),
+                        "-v",
+                        f"{str(parent)}:/out",
+                        "-w",
+                        "/out",
+                        DEFAULT_GIT_DOCKER_IMAGE,
+                        "-c",
+                        "http.version=HTTP/1.1",
+                        "-c",
+                        "http.postBuffer=524288000",
+                        "clone",
+                        "--depth",
+                        "1",
+                        clone_url,
+                        temp_name,
+                    ]
+                    print(f"[*] ➜  {' '.join(clone_cmd)}")
                     try:
-                        if root.exists():
-                            shutil.rmtree(root, ignore_errors=True)
+                        if temp_root.exists():
+                            shutil.rmtree(temp_root, ignore_errors=True)
                     except Exception:
                         pass
                     try:
@@ -2313,12 +2333,36 @@ class NonOssFuzzHarnessGenerator:
                         print(
                             f"[warn] (docker/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_DOCKER_CLONE_TIMEOUT_SEC}s); retrying..."
                         )
+                        try:
+                            if temp_root.exists():
+                                shutil.rmtree(temp_root, ignore_errors=True)
+                        except Exception:
+                            pass
                         time.sleep(2 * attempt)
                         continue
 
                     if rc == 0:
-                        clone_success = True
-                        break
+                        try:
+                            if root.exists():
+                                shutil.rmtree(root, ignore_errors=True)
+                            shutil.move(str(temp_root), str(root))
+                        except Exception as move_err:
+                            rc = 1
+                            err = (err or "") + f"\n[warn] failed to promote temp clone {temp_root} -> {root}: {move_err}"
+                            try:
+                                if temp_root.exists():
+                                    shutil.rmtree(temp_root, ignore_errors=True)
+                            except Exception:
+                                pass
+                        if rc == 0:
+                            clone_success = True
+                            break
+
+                    try:
+                        if temp_root.exists():
+                            shutil.rmtree(temp_root, ignore_errors=True)
+                    except Exception:
+                        pass
 
                     if (t := _tail_lines(err)):
                         print("[warn] (docker/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))

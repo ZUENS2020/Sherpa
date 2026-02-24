@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 import os
-import asyncio
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -41,7 +40,6 @@ app = FastAPI(title="LangChain Agent API", version="1.0", lifespan=_lifespan)
 # 设置静态文件目录
 current_dir = os.path.dirname(os.path.abspath(__file__))#获取当前绝对路径
 static_dir = os.path.join(current_dir, "static")
-print(static_dir)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 #创建线程池
@@ -686,7 +684,6 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
         log_file = _job_log_path(job_id)
         _job_update(job_id, log_file=str(log_file))
         tee = _Tee(job_id, log_file=log_file)
-        had_error = False
         try:
             with redirect_stdout(tee), redirect_stderr(tee):
                 print(f"[job {job_id}] start repo={request.code_url}")
@@ -888,5 +885,3 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host=host, port=port)
-    # finla = create_agent_outside("what is the weather outside?")
-    # print(finla)

@@ -835,21 +835,17 @@
               <input type="text" id="code_url" placeholder="https://github.com/example/repo.git">
             </div>
             <div class="form-group">
-              <label for="email">邮箱地址（可选）</label>
-              <input type="text" id="email" placeholder="your@email.com">
+              <label for="total_time_budget">总时长限制（秒）</label>
+              <input type="number" id="total_time_budget" min="1" step="1" placeholder="900">
+              <span class="hint">控制整条工作流的最大执行时长。</span>
             </div>
             <div class="form-group">
-              <label for="total_time_budget">总时长（秒）</label>
-              <input type="text" id="total_time_budget" value="900">
-            </div>
-            <div class="form-group">
-              <label for="run_time_budget">单次运行时长（秒）</label>
-              <input type="text" id="run_time_budget" value="900">
+              <label for="run_time_budget">单次时长限制（秒）</label>
+              <input type="number" id="run_time_budget" min="1" step="1" placeholder="900">
+              <span class="hint">控制单次 build/fuzz 运行预算。</span>
             </div>
             <div class="form-group full">
-              <label for="docker_image">Docker 镜像名</label>
-              <input type="text" id="docker_image" value="auto">
-              <span class="hint">auto 会按语言自动选择 cpp/java 镜像。仅支持 Docker 执行。</span>
+              <span class="hint">留空时自动使用系统默认值；镜像与其他高级参数由后端统一管理。</span>
             </div>
           </div>
 
@@ -909,69 +905,15 @@
     <div class="panel grid-wide">
       <div class="panel-head">
         <div class="panel-icon blue">⚙</div>
-        <span class="panel-title-text">DeepSeek 持久化配置</span>
+        <span class="panel-title-text">API Key 配置</span>
         <span class="panel-title-sub">保存后写入本地配置文件</span>
       </div>
       <div class="panel-body">
         <div class="form-grid">
-
-          <!-- API credentials -->
-          <div class="cfg-section-label" style="grid-column:1/-1; border-top:none; margin-top:0; padding-top:0">API 凭据</div>
-
           <div class="form-group full">
             <label for="deepseek_api_key">DeepSeek API Key</label>
             <input type="text" id="deepseek_api_key" placeholder="DEEPSEEK_API_KEY（会持久化保存）">
-            <span class="hint">对应后端 OPENAI_API_KEY。</span>
-          </div>
-          <div class="form-group">
-            <label for="deepseek_base_url">Base URL</label>
-            <input type="text" id="deepseek_base_url" value="https://api.deepseek.com/v1">
-          </div>
-          <div class="form-group">
-            <label for="deepseek_model">Model</label>
-            <input type="text" id="deepseek_model" value="deepseek-reasoner">
-            <span class="hint">OPENAI_MODEL / OPENCODE_MODEL</span>
-          </div>
-
-          <!-- Fuzz defaults -->
-          <div class="cfg-section-label" style="grid-column:1/-1">Fuzz 默认参数</div>
-
-          <div class="form-group full">
-            <label for="oss_fuzz_dir">OSS-Fuzz 本地路径</label>
-            <input type="text" id="oss_fuzz_dir" placeholder="/shared/oss-fuzz 或 D:/oss-fuzz">
-            <span class="hint">必须包含 infra/helper.py。</span>
-          </div>
-          <div class="form-group">
-            <label for="cfg_time_budget">默认运行时长（秒）</label>
-            <input type="text" id="cfg_time_budget" value="900">
-          </div>
-          <div class="form-group">
-            <label for="cfg_docker_image">默认 Docker 镜像</label>
-            <input type="text" id="cfg_docker_image" value="auto">
-          </div>
-          <div class="form-group full">
-            <label for="sherpa_git_mirrors">Git 镜像列表</label>
-            <input type="text" id="sherpa_git_mirrors" placeholder="https://mirror.example/github.com/,https://proxy.example/{url}">
-          </div>
-
-          <!-- Docker proxy -->
-          <div class="cfg-section-label" style="grid-column:1/-1">Docker 代理设置</div>
-
-          <div class="form-group">
-            <label for="sherpa_docker_http_proxy">HTTP Proxy</label>
-            <input type="text" id="sherpa_docker_http_proxy" placeholder="http://127.0.0.1:7891">
-          </div>
-          <div class="form-group">
-            <label for="sherpa_docker_https_proxy">HTTPS Proxy</label>
-            <input type="text" id="sherpa_docker_https_proxy" placeholder="http://127.0.0.1:7891">
-          </div>
-          <div class="form-group">
-            <label for="sherpa_docker_no_proxy">NO_PROXY</label>
-            <input type="text" id="sherpa_docker_no_proxy" placeholder="127.0.0.1,localhost,::1">
-          </div>
-          <div class="form-group">
-            <label for="sherpa_docker_proxy_host">Proxy Host</label>
-            <input type="text" id="sherpa_docker_proxy_host" value="host.docker.internal">
+            <span class="hint">只保留常用配置。其余高级参数由后端侧统一维护。</span>
           </div>
         </div>
 

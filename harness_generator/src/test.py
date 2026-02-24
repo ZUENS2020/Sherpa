@@ -1,16 +1,11 @@
 from __future__ import annotations
+
 from fuzz_unharnessed_repo import NonOssFuzzHarnessGenerator, RepoSpec
 from pathlib import Path
 import subprocess
-from graphviz import Source
-
-from typing import Dict, List, Optional, Sequence, Tuple
-from dataclasses import dataclass
 import tempfile
 from git import Repo, exc as git_exc
 import os
-from pathlib import Path
-from typing import Optional
 
 
 def _clone_repo(spec: RepoSpec) -> Path:
@@ -86,54 +81,3 @@ if __name__ == "__main__":
     repo_spec= repospec,
     ai_key_path=Path("./.env"),)
     generator.generate()
-    # from pathlib import Path
-    # dot_path = Path("/tmp/sherpa-fuzz-g80hbp40/output_fixed.dot")
-    # lines = dot_path.read_text(encoding="utf-8").splitlines()
-
-    # for i in range(max(0, 88 - 5), min(len(lines), 88 + 5)):
-    #     print(f"{i+1:>4}: {lines[i]}")
-
-
-    # import re
-    # from pathlib import Path
-
-    # # ======== 配置部分 ========
-    # input_path = Path("/tmp/sherpa-fuzz-g80hbp40/output.dot")  
-    # output_path = input_path.with_name("output_fixed.dot")
-    # # ===========================
-
-    # print(f"开始修复 {input_path} ...")
-
-    # text = input_path.read_text(encoding="utf-8")
-
-    # # --- Step 1: 修复多余的双引号开头，例如 ""OpenGL error...
-    # text = re.sub(r'""([A-Za-z0-9_])', r'"\1', text)
-
-    # # --- Step 2: 修复 label 字段内部的转义问题
-    # def fix_label(match: re.Match):
-    #     label = match.group(1)
-
-    #     # 先统一转义反斜杠
-    #     label = label.replace("\\", "\\\\")  # 单反斜杠改双反斜杠
-    #     # 再转义引号
-    #     label = label.replace('\\"', '\\\\\"')  # 修复 \" 的情况
-    #     # 保留 \n 换行（变成 \\n）
-    #     label = label.replace('\\\\n', '\\n')
-
-    #     return f'label="{label}"'
-
-    # text = re.sub(r'label="([^"]*)"', fix_label, text)
-
-    # # --- Step 3: 确保文件结构正常
-    # if not text.strip().endswith("}"):
-    #     text += "\n}\n"
-
-    # # --- Step 4: 写入修复后的文件
-    # output_path.write_text(text, encoding="utf-8")
-    # print(f"修复完成，已保存到 {output_path}")
-
-    # print("现在可以尝试运行：")
-    # print(f"  dot -Tpng {output_path} -o output.png")
-    # import subprocess
-    # subprocess.run(["dot", "-Tpng", str(output_path), "-o", str(output_path.with_suffix(".png"))])
-    # print("已生成图片：", output_path.with_suffix(".png"))

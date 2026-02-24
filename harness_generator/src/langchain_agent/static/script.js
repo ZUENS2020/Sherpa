@@ -1,70 +1,60 @@
 // ===== 持久化配置（加载/保存） =====
+let _configSnapshot = null;
+
 async function loadConfigIntoForm() {
   try {
     const res = await fetch("/api/config");
     if (!res.ok) throw new Error(`HTTP 错误 ${res.status}`);
     const cfg = await res.json();
+    _configSnapshot = cfg;
 
     setValue("deepseek_api_key", cfg.openai_api_key || "");
-    setValue("deepseek_base_url", cfg.openai_base_url || "https://api.deepseek.com/v1");
-    setValue("deepseek_model", cfg.openai_model || cfg.opencode_model || "deepseek-reasoner");
-
-    setValue("cfg_time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setValue("cfg_docker_image", cfg.fuzz_docker_image || "auto");
-
-    setValue("oss_fuzz_dir", cfg.oss_fuzz_dir || "");
-
-    setValue("sherpa_git_mirrors", cfg.sherpa_git_mirrors || "");
-    setValue("sherpa_docker_http_proxy", cfg.sherpa_docker_http_proxy || "");
-    setValue("sherpa_docker_https_proxy", cfg.sherpa_docker_https_proxy || "");
-    setValue("sherpa_docker_no_proxy", cfg.sherpa_docker_no_proxy || "");
-    setValue("sherpa_docker_proxy_host", cfg.sherpa_docker_proxy_host || "host.docker.internal");
-
-    // Mirror config into the fuzz form defaults.
-    setValue("total_time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setValue("run_time_budget", String(cfg.fuzz_time_budget ?? 900));
-    setValue("docker_image", cfg.fuzz_docker_image || "auto");
+    const rawBudget = Number.parseInt(String(cfg.fuzz_time_budget ?? 900), 10);
+    const defaultBudget = Number.isFinite(rawBudget) && rawBudget > 0 ? rawBudget : 900;
+    setValue("total_time_budget", String(defaultBudget));
+    setValue("run_time_budget", String(defaultBudget));
   } catch (e) {
     // Silent: page still usable.
     console.warn("load config failed", e);
+    if (!_configSnapshot) _configSnapshot = {};
   }
 }
 
 function gatherConfigFromForm() {
-  const timeBudgetRaw = (getValue("cfg_time_budget") || "900").trim();
-  const fuzzTimeBudget = Number.parseInt(timeBudgetRaw || "900", 10);
+  const current = _configSnapshot || {};
+  const apiKey = (getValue("deepseek_api_key") || "").trim() || null;
 
-  if (!Number.isFinite(fuzzTimeBudget) || fuzzTimeBudget <= 0) {
-    throw new Error("请输入有效的 Fuzz 默认运行时长（秒）");
-  }
+  const rawBudget = Number.parseInt(String(current.fuzz_time_budget ?? 900), 10);
+  const fuzzTimeBudget = Number.isFinite(rawBudget) && rawBudget > 0 ? rawBudget : 900;
 
-  const deepseekBase = (getValue("deepseek_base_url") || "").trim() || "https://api.deepseek.com/v1";
-  const deepseekModel = (getValue("deepseek_model") || "").trim() || "deepseek-reasoner";
-  const normalizedModel = deepseekModel.replace(/^deepseek\//, "");
-  const opencodeModel = deepseekModel.includes("/") ? deepseekModel : `deepseek/${normalizedModel}`;
+  const currentBaseUrl = String(current.openai_base_url || "").trim() || "https://api.deepseek.com/v1";
+  const currentOpenAiModel = String(current.openai_model || "").trim();
+  const currentOpenCodeModel = String(current.opencode_model || "").trim();
+  const normalizedModel = (currentOpenAiModel || currentOpenCodeModel || "deepseek-reasoner").replace(/^deepseek\//, "");
+  const opencodeModel = currentOpenCodeModel || `deepseek/${normalizedModel}`;
 
   return {
-    openai_api_key: (getValue("deepseek_api_key") || "").trim() || null,
-    openai_base_url: deepseekBase,
+    openai_api_key: apiKey,
+    openai_base_url: currentBaseUrl,
     openai_model: normalizedModel,
     opencode_model: opencodeModel,
     openrouter_api_key: null,
-    openrouter_base_url: "",
-    openrouter_model: "",
+    openrouter_base_url: String(current.openrouter_base_url || ""),
+    openrouter_model: String(current.openrouter_model || ""),
 
     fuzz_time_budget: fuzzTimeBudget,
     fuzz_use_docker: true,
-    fuzz_docker_image: (getValue("cfg_docker_image") || "").trim() || "auto",
+    fuzz_docker_image: String(current.fuzz_docker_image || "").trim() || "auto",
 
-    oss_fuzz_dir: (getValue("oss_fuzz_dir") || "").trim() || "",
+    oss_fuzz_dir: String(current.oss_fuzz_dir || ""),
 
-    sherpa_git_mirrors: (getValue("sherpa_git_mirrors") || "").trim() || "",
-    sherpa_docker_http_proxy: (getValue("sherpa_docker_http_proxy") || "").trim() || "",
-    sherpa_docker_https_proxy: (getValue("sherpa_docker_https_proxy") || "").trim() || "",
-    sherpa_docker_no_proxy: (getValue("sherpa_docker_no_proxy") || "").trim() || "",
-    sherpa_docker_proxy_host: (getValue("sherpa_docker_proxy_host") || "").trim() || "host.docker.internal",
+    sherpa_git_mirrors: String(current.sherpa_git_mirrors || ""),
+    sherpa_docker_http_proxy: String(current.sherpa_docker_http_proxy || ""),
+    sherpa_docker_https_proxy: String(current.sherpa_docker_https_proxy || ""),
+    sherpa_docker_no_proxy: String(current.sherpa_docker_no_proxy || ""),
+    sherpa_docker_proxy_host: String(current.sherpa_docker_proxy_host || "host.docker.internal"),
 
-    version: 1,
+    version: Number.isFinite(Number(current.version)) ? Number(current.version) : 1,
   };
 }
 
@@ -216,11 +206,7 @@ async function saveConfigFromForm() {
     }
     const data = await res.json();
     if (!data.ok) throw new Error("保存失败");
-
-    // Update fuzz form defaults immediately.
-    setValue("total_time_budget", String(cfg.fuzz_time_budget));
-    setValue("run_time_budget", String(cfg.fuzz_time_budget));
-    setValue("docker_image", cfg.fuzz_docker_image);
+    _configSnapshot = { ...(_configSnapshot || {}), ...cfg };
 
     statusEl.className = "result-box success";
     statusEl.innerHTML = '<span class="status-icon">✅</span> 配置已保存并立即生效（已持久化）。';
@@ -640,7 +626,7 @@ function renderTaskState(jobId, taskObj) {
     _activeTaskLastStatus = st;
     progressEl.innerHTML = renderProgressPanel(parsed);
     logEl.innerHTML = renderLogPanel(parsed);
-    logEl.scrollTop = logEl.scrollHeight;
+    autoScrollTaskLogToBottom(logEl);
   }
 
   if (st === "queued" || st === "running") {
@@ -759,11 +745,13 @@ function bindSelectedSession() {
 // ===== 模糊测试功能 =====
 document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
   const codeUrl = (document.getElementById("code_url")?.value || "").trim();
-  const email = (document.getElementById("email")?.value || "").trim();
-  const totalTimeBudgetRaw = (document.getElementById("total_time_budget")?.value || "900").trim();
-  const runTimeBudgetRaw = (document.getElementById("run_time_budget")?.value || "900").trim();
   const useDocker = true;
-  const dockerImage = (document.getElementById("docker_image")?.value || "auto").trim();
+  const current = _configSnapshot || {};
+  const rawDefaultBudget = Number.parseInt(String(current.fuzz_time_budget ?? 900), 10);
+  const defaultBudget = Number.isFinite(rawDefaultBudget) && rawDefaultBudget > 0 ? rawDefaultBudget : 900;
+  const totalTimeBudget = parseBudgetInput(getValue("total_time_budget"), defaultBudget);
+  const runTimeBudget = parseBudgetInput(getValue("run_time_budget"), totalTimeBudget);
+  const dockerImage = String(current.fuzz_docker_image || "auto").trim() || "auto";
   const btn = document.getElementById("fuzz_btn");
   const { statusEl, progressEl, logEl, errorPanelEl, errorEl } = getTaskUiElements();
 
@@ -771,16 +759,12 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
     alert("请输入代码仓库地址");
     return;
   }
-
-  const totalTimeBudget = Number.parseInt(totalTimeBudgetRaw || "900", 10);
-  if (!Number.isFinite(totalTimeBudget) || totalTimeBudget <= 0) {
-    alert("请输入有效的总时长（秒）");
+  if (!Number.isFinite(totalTimeBudget)) {
+    alert("总时长限制必须是大于 0 的整数");
     return;
   }
-
-  const runTimeBudget = Number.parseInt(runTimeBudgetRaw || "900", 10);
-  if (!Number.isFinite(runTimeBudget) || runTimeBudget <= 0) {
-    alert("请输入有效的单次运行时长（秒）");
+  if (!Number.isFinite(runTimeBudget)) {
+    alert("单次时长限制必须是大于 0 的整数");
     return;
   }
 
@@ -805,7 +789,7 @@ document.getElementById("fuzz_btn")?.addEventListener("click", async () => {
         jobs: [
           {
             code_url: codeUrl,
-            email: email || null,
+            email: null,
             time_budget: totalTimeBudget,
             total_time_budget: totalTimeBudget,
             run_time_budget: runTimeBudget,
@@ -903,6 +887,21 @@ function getValue(id) {
 function setValue(id, value) {
   const el = document.getElementById(id);
   if (el) el.value = value;
+}
+
+function parseBudgetInput(rawValue, fallback) {
+  const raw = String(rawValue ?? "").trim();
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Number.NaN;
+}
+
+function autoScrollTaskLogToBottom(logEl) {
+  if (!logEl) return;
+  requestAnimationFrame(() => {
+    const scrollTarget = logEl.querySelector(".event-log-list") || logEl;
+    scrollTarget.scrollTop = scrollTarget.scrollHeight;
+  });
 }
 
 function parseWorkflowLog(log) {
