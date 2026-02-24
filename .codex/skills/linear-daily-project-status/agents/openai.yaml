@@ -1,0 +1,9 @@
+interface:
+  display_name: "Linear Project Status"
+  short_description: "Upsert one daily project status in Linear"
+  default_prompt: "Use $linear-daily-project-status only when this skill is explicitly requested, then overwrite or create today's project status issue in Linear."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "linear"
+      description: "Linear MCP server"
