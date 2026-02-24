@@ -25,7 +25,7 @@ If trigger is not present:
 
 ## Change Scope Gate (Applied After Trigger)
 
-After trigger is received, summarize cumulative same-day status with focus on material changes:
+After trigger is received, produce a same-day final-style summary (full and complete) with focus on material changes:
 1. Workflow graph, node routing, retry/termination policy.
 2. Docker/compose/container network/build/runtime path.
 3. Memory/session semantics and cross-step context flow.
@@ -41,6 +41,7 @@ Use these defaults unless the user explicitly overrides:
 3. Label: `project status`
 4. Issue title format: `Sherpa 项目进度同步（YYYY-MM-DD）`
 5. Status: `In Progress`
+6. Branch progress and branch-diff summary: mandatory in every write.
 
 ## MCP Access Policy (Mandatory)
 
@@ -59,22 +60,25 @@ Use Linear MCP for all reads and writes.
 
 Before every write, read today's full issue body first and reconcile.
 1. If today's issue exists, always call MCP `get_issue` and load `description`.
-2. Merge existing same-day content with new facts from current run.
-3. Keep "今日关键进展" as cumulative same-day progress up to now, not just the newest delta.
-4. Preserve already-confirmed entries unless they are explicitly corrected by newer evidence.
-5. Deduplicate by commit hash, change topic, and test command/result pairs.
-6. Write back a fully replaced body after reconciliation.
+2. Use old body only as context, then regenerate today's full snapshot from current project inspection.
+3. Keep the work section as "当日完成工作清单（全量）", covering all completed work up to now, not only the newest delta.
+4. Drop stale items that cannot be verified in current repository state.
+5. Deduplicate by change topic and test command/result pairs.
+6. Write back a fully replaced body after regeneration.
 
 ## Upsert Workflow (No Comments)
 
 Follow this sequence strictly:
 1. Collect snapshot data:
-   1. Branch, head commit, remote sync state.
-   2. `main` vs current branch divergence and unique commits.
-   3. Latest validation result (tests/build/run command + pass/fail).
-   4. Major changes, risks, and next actions.
+   1. Current branch and working tree status.
+   2. Branch progress and divergence (`main` vs current working branch), including unique change size on each side.
+   3. Remote sync state for each compared branch.
+   4. Convert commit-level facts into high-level themes and completion items.
+   5. Key runtime/workflow/config checks from current repository files.
+   6. Latest validation result (tests/build/run command + pass/fail).
+   7. Major changes, risks, and next actions.
 2. If today's issue exists, read current `description` first with MCP `get_issue`.
-3. Reconcile old body + new facts into one cumulative same-day snapshot.
+3. Reconcile old body + new facts, then regenerate one cumulative same-day snapshot.
 4. Build full replacement markdown from `references/daily_status_template.md`.
 5. Find today's status issue:
    1. Search team issues with label `project status`.
@@ -92,9 +96,13 @@ Always enforce:
 1. Description body is the source of truth.
 2. One date, one status issue.
 3. Every major update rewrites the full body, not incremental comments.
-4. Include concrete values (commit hashes, dates, command results).
+4. Keep output highly summarized; use change themes, impact, and completion status.
 5. Use absolute dates (`YYYY-MM-DD`) instead of relative words.
 6. Ensure the body represents cumulative same-day progress to current time.
+7. Summary style must look like a same-day final comprehensive summary, not phased notes.
+8. Branch progress and branch-diff summary is mandatory.
+9. Do not use heading text `今日关键进展（YYYY-MM-DD，累计到当前时点）`.
+10. Do not output raw commit hashes, commit messages, or commit lists in the final description.
 
 ## Fast Path Commands
 

@@ -11,32 +11,27 @@
 
 - 仓库：`{{REPO_URL}}`
 - 当前工作分支：`{{CURRENT_BRANCH}}`
+- 当前版本摘要：{{CURRENT_VERSION_SUMMARY}}
 - 工作区状态：{{WORKTREE_STATUS}}
 
-## 双分支进度（分别说明）
+## 分支进度与差异（必填）
 
-### 分支 A：`main`
-
-- 最新提交：`{{MAIN_HEAD}}`
-- 远端同步状态：`{{MAIN_REMOTE_SYNC}}`
-- 相对 `{{CURRENT_BRANCH}}` 的独有提交：
-{{MAIN_UNIQUE_COMMITS}}
-
-### 分支 B：`{{CURRENT_BRANCH}}`
-
-- 最新提交：`{{CURRENT_HEAD}}`
-- 远端同步状态：`{{CURRENT_REMOTE_SYNC}}`
-- 相对 `main` 的独有提交：
-{{CURRENT_UNIQUE_COMMITS}}
-
-### 两分支关系结论
-
+- `main` 远端同步：`{{MAIN_REMOTE_SYNC}}`
+- `{{CURRENT_BRANCH}}` 远端同步：`{{CURRENT_BRANCH_REMOTE_SYNC}}`
+- `main` 相对 `{{CURRENT_BRANCH}}` 的变更规模：{{MAIN_UNIQUE_SIZE}}
+- `{{CURRENT_BRANCH}}` 相对 `main` 的变更规模：{{CURRENT_BRANCH_UNIQUE_SIZE}}
 - 分叉计数：`main...{{CURRENT_BRANCH}} = {{DIVERGENCE_COUNT}}`
-- 合并判断：{{MERGEABILITY_NOTE}}
+- 差异总结（高层）：{{BRANCH_DIFF_SUMMARY}}
 
-## 今日关键进展（{{DATE}}，累计到当前时点）
+## 项目检查结果（当前代码）
 
-{{MAJOR_CHANGES_CUMULATIVE}}
+- 运行/配置检查：{{RUNTIME_CONFIG_CHECKS}}
+- 工作流检查：{{WORKFLOW_CHECKS}}
+- 文档/接口检查：{{DOC_API_CHECKS}}
+
+## 当日完成工作清单（全量）
+
+{{ALL_WORK_COMPLETED_SUMMARY}}
 
 ## 验证结果
 
