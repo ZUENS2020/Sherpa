@@ -13,3 +13,4 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - Before each write, read today's existing issue content first and upsert a cumulative same-day summary.
 - Prefer overwriting the same-day status issue body instead of writing comments.
 - Use label `project status` and keep one canonical issue per date.
+- Enforce `project status` label on every upsert (both create and update).

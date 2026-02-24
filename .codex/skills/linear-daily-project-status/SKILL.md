@@ -53,8 +53,17 @@ Use Linear MCP for all reads and writes.
 2. Write with MCP:
    1. `update_issue` to overwrite today's `description`.
    2. `create_issue` only when today's issue does not exist.
+   3. Always include label `project status` in both `update_issue` and `create_issue`.
 3. Do not use comment logs (`create_comment`) for status snapshots unless the user explicitly asks.
 4. Do not ask the user to update Linear manually when MCP is available.
+
+## Label Enforcement (Mandatory)
+
+The daily status issue must always carry label `project status`.
+1. Before write, call `list_issue_labels` and verify `project status` exists.
+2. If missing, call `create_issue_label` to create `project status` for team `Sherpa_XDU`.
+3. On create, call `create_issue` with `labels: [\"project status\"]`.
+4. On update, call `update_issue` with `labels: [\"project status\"]` together with `description` to enforce label presence.
 
 ## Pre-write Reconciliation (Mandatory)
 
