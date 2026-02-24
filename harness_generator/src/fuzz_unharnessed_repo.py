@@ -2020,11 +2020,6 @@ class NonOssFuzzHarnessGenerator:
             ctx = "=== crash_info.md ===\n" + read_text_safely(self.repo_root / "crash_info.md") + "\n\n=== crash_analysis.md ===\n" + read_text_safely(analysis_path)
             self.patcher.run_codex_command(justification_prompt, additional_context=ctx)
 
-        # 6) Package challenge bundle
-        bundle_name = "challenge_bundle" if self.round_index == 1 else f"challenge_bundle_{self.round_index}"
-        bundle = self.repo_root / bundle_name
-        bundle.mkdir(exist_ok=True)
-
         files_to_copy = [
             "crash_info.md",
             "crash_analysis.md",
@@ -2036,19 +2031,56 @@ class NonOssFuzzHarnessGenerator:
             "run_summary.json",
         ]
 
-        for rel in files_to_copy:
-            src = self.repo_root / rel
-            if src.is_file():
-                shutil.copy2(src, bundle / src.name)
+        # 6) Package challenge bundle
+        bundle_name = "challenge_bundle" if self.round_index == 1 else f"challenge_bundle_{self.round_index}"
+        bundle = self.repo_root / bundle_name
 
-        # Always copy fuzz/ directory after individual files (may contain reproduce deps)
-        rel_dir = FUZZ_DIR
-        src_dir = self.repo_root / rel_dir
-        if src_dir.is_dir():
-            dst = bundle / src_dir.name
+        def _prepare_bundle_dir(dst: Path) -> None:
             if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src_dir, dst)
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink(missing_ok=True)
+            dst.mkdir(parents=True, exist_ok=True)
+
+            for rel in files_to_copy:
+                src = self.repo_root / rel
+                if src.is_file():
+                    shutil.copy2(src, dst / src.name)
+
+            # Always copy fuzz/ directory after individual files (may contain reproduce deps)
+            rel_dir = FUZZ_DIR
+            src_dir = self.repo_root / rel_dir
+            if src_dir.is_dir():
+                out_dir = dst / src_dir.name
+                if out_dir.exists():
+                    shutil.rmtree(out_dir)
+                shutil.copytree(src_dir, out_dir)
+
+        def _move_bundle_to(dst: Path) -> None:
+            # LLM fix/justification steps may unexpectedly mutate the workspace.
+            # Rebuild bundle if missing, then move; fallback to copy+remove if rename fails.
+            if not bundle.is_dir():
+                print(f"[warn] bundle missing before move ({bundle}); rebuilding...")
+                _prepare_bundle_dir(bundle)
+            if not bundle.is_dir():
+                raise HarnessGeneratorError(f"bundle directory missing before move: {bundle}")
+
+            if dst.exists():
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink(missing_ok=True)
+
+            try:
+                bundle.rename(dst)
+                return
+            except Exception as rename_err:
+                print(f"[warn] bundle rename failed ({rename_err}); falling back to copytree")
+                shutil.copytree(bundle, dst)
+                shutil.rmtree(bundle, ignore_errors=True)
+
+        _prepare_bundle_dir(bundle)
         # Final classification policy (single-shot, avoid double-renames):
         # 1) HARNESS ERROR => false_positive
         # 2) reproducer failed => unreproducible
@@ -2078,9 +2110,7 @@ class NonOssFuzzHarnessGenerator:
             self.patcher.run_codex_command(fp_prompt, additional_context=analysis_text)
 
             false_pos_dir = self.repo_root / ("false_positive" if self.round_index == 1 else f"false_positive_{self.round_index}")
-            if false_pos_dir.exists():
-                shutil.rmtree(false_pos_dir)
-            bundle.rename(false_pos_dir)
+            _move_bundle_to(false_pos_dir)
 
             if justification_path.exists():
                 shutil.copy2(justification_path, false_pos_dir / justification_path.name)
@@ -2090,9 +2120,7 @@ class NonOssFuzzHarnessGenerator:
 
         if not reproducer_ok:
             unrepro = self.repo_root / ("unreproducible" if self.round_index == 1 else f"unreproducible_{self.round_index}")
-            if unrepro.exists():
-                shutil.rmtree(unrepro)
-            bundle.rename(unrepro)
+            _move_bundle_to(unrepro)
             print("[!] Could not reliably reproduce the crash → recorded under unreproducible/.")
         else:
             print(f"[*] Challenge bundle ready → {bundle.relative_to(self.repo_root)}")
