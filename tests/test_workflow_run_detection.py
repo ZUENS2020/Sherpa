@@ -56,6 +56,23 @@ class _SlowSeedGenerator(_FakeRunGenerator):
         time.sleep(self._seed_sleep_sec)
 
 
+class _MultiRunGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, run_sleep_sec: float = 0.0) -> None:
+        super().__init__(tmp_path, run_results)
+        self._bins = [self.fuzz_out_dir / "demo_fuzz_1", self.fuzz_out_dir / "demo_fuzz_2", self.fuzz_out_dir / "demo_fuzz_3"]
+        for p in self._bins:
+            p.write_text("", encoding="utf-8")
+        self._run_sleep_sec = run_sleep_sec
+
+    def _discover_fuzz_binaries(self) -> list[Path]:
+        return list(self._bins)
+
+    def _run_fuzzer(self, _bin_path: Path) -> FuzzerRunResult:
+        if self._run_sleep_sec > 0:
+            time.sleep(self._run_sleep_sec)
+        return super()._run_fuzzer(_bin_path)
+
+
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
     gen = _FakeRunGenerator(
         tmp_path,
@@ -188,7 +205,7 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
             "generator": gen,
             "crash_fix_attempts": 0,
             "workflow_started_at": started,
-            "time_budget": 1,
+            "time_budget": 2,
             "run_time_budget": 300,
         }
     )
@@ -196,3 +213,60 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["failed"] is True
     assert "time budget exceeded" in out["last_error"]
     assert out["message"] == "workflow stopped (time budget exceeded)"
+
+
+def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(rc=0, new_artifacts=[], crash_found=False, crash_evidence="none", first_artifact="", log_tail="ok", error="", run_error_kind=""),
+            FuzzerRunResult(rc=0, new_artifacts=[], crash_found=False, crash_evidence="none", first_artifact="", log_tail="ok", error="", run_error_kind=""),
+            FuzzerRunResult(rc=0, new_artifacts=[], crash_found=False, crash_evidence="none", first_artifact="", log_tail="ok", error="", run_error_kind=""),
+        ],
+    )
+
+    out = workflow_graph._node_run(
+        {"generator": gen, "crash_fix_attempts": 0, "workflow_started_at": time.time(), "time_budget": 120, "run_time_budget": 120}
+    )
+    plan = out.get("run_batch_plan") or []
+
+    assert len(plan) == 2
+    assert plan[0]["batch_size"] == 2
+    assert plan[0]["pending_before"] == 3
+    assert plan[0]["rounds_left"] == 2
+    assert plan[0]["round_budget_sec"] in {59, 60}
+    assert plan[1]["batch_size"] == 1
+    assert plan[1]["rounds_left"] == 1
+    assert plan[1]["round_budget_sec"] >= plan[0]["round_budget_sec"]
+
+
+def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "1")
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(rc=0, new_artifacts=[], crash_found=False, crash_evidence="none", first_artifact="", log_tail="ok", error="", run_error_kind=""),
+        ],
+        run_sleep_sec=2.2,
+    )
+
+    started = time.time()
+    out = workflow_graph._node_run(
+        {
+            "generator": gen,
+            "crash_fix_attempts": 0,
+            "workflow_started_at": started,
+            "time_budget": 2,
+            "run_time_budget": 300,
+        }
+    )
+
+    assert out["last_step"] == "run"
+    assert out["failed"] is True
+    assert out["run_error_kind"] == "workflow_time_budget_exceeded"
+    assert out["message"] == "workflow stopped (time budget exceeded)"
+    details = out.get("run_details") or []
+    assert len(details) == 3
+    assert details[1]["run_error_kind"] == "run_exception"
+    assert details[1]["error"].startswith("skipped: workflow total time budget exhausted")
