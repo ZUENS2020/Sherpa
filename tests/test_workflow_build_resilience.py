@@ -9,8 +9,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "harness_generator" / "src" / "langchain_agent"
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
+SRC_DIR = ROOT / "harness_generator" / "src"
+for p in (APP_DIR, SRC_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
 import workflow_graph
 
@@ -74,6 +76,8 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     assert out["message"].startswith("built (")
     assert out["build_rc"] == 0
     assert out["build_attempts"] == 2
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
     assert len(gen.commands) == 2
 
 
@@ -98,6 +102,8 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert out["last_error"] == ""
     assert out["build_rc"] == 0
     assert out["build_attempts"] == 2
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
     assert len(gen.commands) == 2
     assert gen.commands[1][-1] == "--clean"
 
@@ -122,6 +128,8 @@ def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: 
 
     assert out["build_rc"] == 0
     assert "No fuzzer binaries found under fuzz/out/" in out["last_error"]
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "no_fuzzer_binaries"
     assert "build dir artifacts (static libs)" in out["build_stdout_tail"]
     assert out["build_attempts"] == 4
 
@@ -149,6 +157,8 @@ def test_build_sh_uses_sh_when_bash_missing(tmp_path: Path, monkeypatch, _no_sle
     out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
 
     assert out["last_error"] == ""
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
     assert len(gen.commands) == 1
     assert gen.commands[0][0] == "sh"
 
@@ -179,11 +189,56 @@ def test_build_retries_in_repo_root_cwd_for_hardcoded_fuzz_paths(tmp_path: Path,
 
     assert out["last_error"] == ""
     assert out["build_rc"] == 0
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
     assert len(gen.commands) == 2
     assert gen.commands[0] == ["python", "build.py"]
     assert gen.commands[1] == ["python", "fuzz/build.py"]
     assert gen.cwds[0] == fuzz_dir
     assert gen.cwds[1] == tmp_path
+
+
+def test_build_failure_classifies_infra_docker_daemon(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock")],
+        bin_results=[[]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 1
+    assert out["build_error_kind"] == "infra"
+    assert out["build_error_code"] == "docker_daemon_unavailable"
+    assert out["last_error"].startswith("build failed rc=1")
+
+
+def test_route_after_build_stops_on_infra_error() -> None:
+    route = workflow_graph._route_after_build_state(
+        {
+            "failed": False,
+            "last_error": "build failed",
+            "build_error_kind": "infra",
+        }
+    )
+    assert route == "stop"
+
+
+def test_route_after_build_sends_source_error_to_fix_build() -> None:
+    route = workflow_graph._route_after_build_state(
+        {
+            "failed": False,
+            "last_error": "build failed",
+            "build_error_kind": "source",
+        }
+    )
+    assert route == "fix_build"
 
 
 def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):

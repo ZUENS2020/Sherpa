@@ -49,6 +49,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     build_full_log_path: str
     build_error_signature: str
     same_build_error_repeats: int
+    build_error_kind: str
+    build_error_code: str
     build_attempts: int
     fix_build_attempts: int
     codex_hint: str
@@ -154,6 +156,23 @@ def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) 
     return _wf_common.summarize_build_error(last_error, stdout_tail, stderr_tail)
 
 
+def _classify_build_failure(
+    last_error: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    *,
+    build_rc: int,
+    has_fuzzer_binaries: bool,
+) -> tuple[str, str]:
+    return _wf_common.classify_build_failure(
+        last_error,
+        stdout_tail,
+        stderr_tail,
+        build_rc=build_rc,
+        has_fuzzer_binaries=has_fuzzer_binaries,
+    )
+
+
 def _collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:
     return _wf_common.collect_key_artifact_hashes(repo_root)
 
@@ -257,6 +276,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "build_full_log_path": "",
             "build_error_signature": "",
             "same_build_error_repeats": 0,
+            "build_error_kind": "",
+            "build_error_code": "",
             "build_attempts": int(state.get("build_attempts") or 0),
             "fix_build_attempts": int(state.get("fix_build_attempts") or 0),
             "codex_hint": "",
@@ -652,6 +673,13 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "build_full_log_path": str(build_full_log_path),
             "last_step": "build",
         }
+        build_error_kind, build_error_code = _classify_build_failure(
+            str(next_state.get("last_error") or ""),
+            str(next_state.get("build_stdout_tail") or ""),
+            str(next_state.get("build_stderr_tail") or ""),
+            build_rc=int(final_rc),
+            has_fuzzer_binaries=bool(final_bins),
+        )
 
         def _calc_build_error_signature() -> str:
             marker = "rc-fail" if final_rc != 0 else "no-fuzzers"
@@ -677,6 +705,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
             next_state["build_error_signature"] = sig
             next_state["same_build_error_repeats"] = repeats
+            next_state["build_error_kind"] = build_error_kind
+            next_state["build_error_code"] = build_error_code
             if repeats >= max_same_repeats:
                 next_state["failed"] = True
                 next_state["last_error"] = (
@@ -696,6 +726,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
             next_state["build_error_signature"] = sig
             next_state["same_build_error_repeats"] = repeats
+            next_state["build_error_kind"] = build_error_kind
+            next_state["build_error_code"] = build_error_code
             if repeats >= max_same_repeats:
                 next_state["failed"] = True
                 next_state["last_error"] = (
@@ -712,13 +744,22 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         next_state["build_error_signature"] = ""
         next_state["same_build_error_repeats"] = 0
+        next_state["build_error_kind"] = ""
+        next_state["build_error_code"] = ""
         next_state["fix_build_attempts"] = 0
         next_state["last_error"] = ""
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
     except Exception as e:
-        out = {**state, "last_step": "build", "last_error": str(e), "message": "build failed"}
+        out = {
+            **state,
+            "last_step": "build",
+            "last_error": str(e),
+            "message": "build failed",
+            "build_error_kind": "unknown",
+            "build_error_code": "build_node_exception",
+        }
         if "build_full_log_path" in locals():
             out["build_full_log_path"] = str(build_full_log_path)
         _wf_log(cast(dict[str, Any], out), f"<- build err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -741,6 +782,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     last_error = (state.get("last_error") or "").strip()
     stdout_tail = (state.get("build_stdout_tail") or "").strip()
     stderr_tail = (state.get("build_stderr_tail") or "").strip()
+    build_error_kind = (state.get("build_error_kind") or "").strip().lower()
+    build_error_code = (state.get("build_error_code") or "").strip().lower()
     repo_root = str(gen.repo_root)
     diag_text = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
 
@@ -789,12 +832,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     stop_on_infra_raw = (os.environ.get("SHERPA_WORKFLOW_STOP_ON_INFRA_BUILD_ERROR") or "").strip().lower()
     stop_on_infra = stop_on_infra_raw not in {"0", "false", "no", "off"}
-    non_source_reason = _detect_non_source_build_blocker(diag_text)
+    non_source_reason = ""
+    if build_error_kind == "infra":
+        non_source_reason = build_error_code or _detect_non_source_build_blocker(diag_text) or "infra_build_failure"
+    else:
+        non_source_reason = _detect_non_source_build_blocker(diag_text)
     if stop_on_infra and non_source_reason:
         out = {
             **state,
             "last_step": "fix_build",
             "failed": True,
+            "build_error_kind": "infra",
+            "build_error_code": non_source_reason,
             "last_error": f"non-source build blocker detected: {non_source_reason}",
             "message": "fix_build skipped (environment/infrastructure issue)",
         }
@@ -1605,6 +1654,16 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return out
 
 
+def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if not (state.get("last_error") or "").strip():
+        return "run"
+    if (state.get("build_error_kind") or "").strip().lower() == "infra":
+        return "stop"
+    return "fix_build"
+
+
 def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
@@ -1630,11 +1689,7 @@ def build_fuzz_workflow() -> StateGraph:
         return "build"
 
     def _route_after_build(state: FuzzWorkflowRuntimeState) -> str:
-        if bool(state.get("failed")):
-            return "stop"
-        if (state.get("last_error") or "").strip():
-            return "fix_build"
-        return "run"
+        return _route_after_build_state(state)
 
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")):

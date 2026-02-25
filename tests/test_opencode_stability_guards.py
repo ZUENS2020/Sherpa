@@ -44,6 +44,7 @@ if "fuzz_unharnessed_repo" not in sys.modules:
     fmod.HarnessGeneratorError = RuntimeError
     fmod.NonOssFuzzHarnessGenerator = _Dummy
     fmod.RepoSpec = _Dummy
+    fmod.parse_libfuzzer_final_stats = lambda *_args, **_kwargs: {}
     fmod.snapshot_repo_text = lambda *a, **k: ""
     fmod.write_patch_from_snapshot = lambda *a, **k: None
     sys.modules["fuzz_unharnessed_repo"] = fmod
@@ -96,3 +97,29 @@ def test_collect_key_artifact_hashes_only_returns_existing(tmp_path: Path):
 
     assert sorted(hashes.keys()) == ["fuzz/targets.json"]
     assert len(hashes["fuzz/targets.json"]) == 64
+
+
+def test_classify_build_failure_marks_buildx_issue_as_infra():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "BuildKit is enabled but the buildx component is missing or broken.",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+
+    assert kind == "infra"
+    assert code == "buildkit_unavailable"
+
+
+def test_classify_build_failure_marks_compile_error_as_source():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "fatal error: zlib.h: No such file or directory",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+
+    assert kind == "source"
+    assert code in {"missing_source_file", "compile_error"}

@@ -98,6 +98,88 @@ def summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) -
     }
 
 
+def classify_build_failure(
+    last_error: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    *,
+    build_rc: int,
+    has_fuzzer_binaries: bool,
+) -> tuple[str, str]:
+    combined = "\n".join(x for x in [last_error, stdout_tail, stderr_tail] if x).strip()
+    low = combined.lower()
+
+    infra_checks: list[tuple[str, list[str]]] = [
+        (
+            "docker_daemon_unavailable",
+            [
+                "cannot connect to the docker daemon",
+                "is the docker daemon running",
+                "lookup sherpa-docker",
+                "permission denied while trying to connect to the docker daemon",
+                "error during connect",
+            ],
+        ),
+        (
+            "buildkit_unavailable",
+            [
+                "buildx component is missing or broken",
+                "buildkit is enabled but the buildx component is missing or broken",
+                "docker buildx",
+            ],
+        ),
+        (
+            "registry_or_network_unavailable",
+            [
+                "tls handshake timeout",
+                "temporary failure in name resolution",
+                "failed to resolve source metadata",
+                "dial tcp",
+                "no such host",
+                "proxyconnect tcp",
+                "connection refused",
+                "i/o timeout",
+            ],
+        ),
+        (
+            "resource_exhausted",
+            [
+                "no space left on device",
+                "cannot allocate memory",
+                "out of memory",
+                "killed",
+            ],
+        ),
+        (
+            "build_command_timeout",
+            [
+                "[timeout] process exceeded limit and was killed",
+                "process exceeded limit and was killed",
+                "time budget exceeded",
+            ],
+        ),
+    ]
+    for code, needles in infra_checks:
+        if any(n in low for n in needles):
+            return "infra", code
+
+    if build_rc == 0 and not has_fuzzer_binaries:
+        return "source", "no_fuzzer_binaries"
+
+    if "missing fuzz/build.py" in low:
+        return "source", "missing_build_script"
+    if any(k in low for k in ["no such file", "cannot find", "not found"]):
+        return "source", "missing_source_file"
+    if any(k in low for k in ["undefined reference", "ld:", "linker", "collect2"]):
+        return "source", "link_error"
+    if any(k in low for k in ["error:", "fatal error:", "compilation terminated", "clang", "gcc"]):
+        return "source", "compile_error"
+    if any(k in low for k in ["traceback", "exception", "module not found", "syntaxerror"]):
+        return "source", "script_error"
+
+    return "unknown", "unknown_build_failure"
+
+
 def collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:
     pairs = [
         ("fuzz/targets.json", repo_root / "fuzz" / "targets.json"),

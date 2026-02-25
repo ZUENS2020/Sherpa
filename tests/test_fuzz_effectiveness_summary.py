@@ -61,6 +61,8 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
             "step_count": 10,
             "build_attempts": 2,
             "build_rc": 0,
+            "build_error_kind": "",
+            "build_error_code": "",
             "run_rc": 0,
             "last_error": "",
             "crash_found": False,
@@ -103,6 +105,8 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["fuzz_inventory"]["fuzzer_count"] == 1
     assert summary["fuzz_inventory"]["corpus_total_files"] == 2
     assert summary["fuzz_inventory"]["artifact_count"] == 1
+    assert summary["build_error_kind"] == ""
+    assert summary["build_error_code"] == ""
     assert len(summary["run_details"]) == 1
 
     effectiveness = json.loads(fuzz_effectiveness_json.read_text(encoding="utf-8"))
