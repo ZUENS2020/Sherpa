@@ -13,6 +13,8 @@ Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统�
 3. `plan` 节点负责输出后续策略（是否 crash 后修复、最多修复轮次）。
 4. OpenCode 提示词不再硬编码，统一在 `harness_generator/src/langchain_agent/prompts/opencode_prompts.md`。
 5. 前端配置聚焦常用项：API Key、仓库 URL、总时长、单次时长。
+6. 断点续跑默认手动触发：启动阶段不自动恢复，需调用 `POST /api/task/{job_id}/resume`。
+7. run 阶段并行批次预算已显式记录到 `run_batch_plan`，用于回放预算分配与超时行为。
 
 ---
 
@@ -121,6 +123,7 @@ sequenceDiagram
 4. `sherpa-web` 和 `sherpa-docker` 共享 `sherpa-tmp` 与 `sherpa-oss-fuzz`，保证容器内路径一致。
 5. `sherpa-gateway` 统一入口：`/` -> `sherpa-frontend`，`/api/*` -> `sherpa-web`。
 6. `sherpa-job-store` 与 `sherpa-web` 共享 `sherpa-job-store-data`，用于持久化任务状态 SQLite。
+7. `sherpa-job-store` 启动时会初始化 `/data/jobs.sqlite3` 并收紧权限（目录 `0770`、文件 `0660`）。
 
 ### 3.4 容器职责（明确分工）
 
@@ -403,6 +406,18 @@ flowchart TD
 - 环境变量：`SHERPA_PARALLEL_FUZZERS`（默认 `2`，上限被代码限制）。
 - 若仅一个 fuzzer，则强制串行。
 
+### 10.4 并行运行可观测字段
+
+`run` 节点会输出 `run_batch_plan`（按轮次）：
+
+1. `round`: 第几轮批次。
+2. `batch_size`: 当前批次 fuzzer 数量。
+3. `pending_before`: 本轮执行前待运行数量。
+4. `rounds_left`: 预计剩余轮次。
+5. `remaining_total_budget_sec`: 本轮开始时总剩余预算。
+6. `round_budget_sec`: 分配给本轮的 run 预算。
+7. `hard_timeout_sec`: 本轮容器硬超时。
+
 ---
 
 ## 11. API 对接说明
@@ -460,6 +475,7 @@ flowchart TD
 2. `children_status`: 子任务统计。
 3. `children`: 子任务详情（含 `log`, `log_file`, `error`, `result`）。
 4. 恢复相关字段（子任务）：`resume_from_step`, `resume_attempts`, `last_resume_reason`。
+5. run 阶段诊断字段：`run_details` 与 `run_batch_plan`（用于并行轮次预算排查）。
 
 ### 11.4 `POST /api/task/{job_id}/resume` 说明
 
@@ -791,6 +807,11 @@ docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,s
 | 长时间 running 无进展 | 预算过大或卡在外部依赖 | 查看 workflow 日志 step，缩短预算定位 |
 | 多轮 fix 无效果 | 同签名反复失败 | 检查 `same_*_repeats` 保护是否触发 |
 
+补充说明（当前实现）：
+
+1. Docker 网络预检查是 best-effort；若本地无 `busybox:latest`，预检查会自动跳过，不会误报为 DNS 故障。
+2. `no such host` 诊断已收窄：仅在 registry 相关上下文下归类为 registry DNS 问题，避免误判 `sherpa-docker` 服务名异常。
+
 ---
 
 ## 18. 前端对接重点
@@ -838,6 +859,15 @@ pytest -q tests
 3. 前端绑定历史会话，验证进度和错误分区显示。
 4. 验证 `run_summary.md/json` 与 `fuzz_effectiveness.md/json` 结构稳定。
 
+当前基线验证（2026-02-25）：
+
+1. `tests/test_workflow_run_detection.py`
+2. `tests/test_opencode_stability_guards.py`
+3. `tests/test_workflow_build_resilience.py`
+4. `tests/test_api_stability.py`
+5. `tests/test_job_store_persistence.py`
+6. 结果：`44 passed`
+
 ---
 
 ## 20. 运维参数速查
@@ -857,6 +887,7 @@ pytest -q tests
 | `SHERPA_OUTPUT_DIR` | `/shared/output` | 输出根目录 |
 | `SHERPA_DEFAULT_OSS_FUZZ_DIR` | `/shared/oss-fuzz` | oss-fuzz 本地根目录 |
 | `SHERPA_DOCKER_REGISTRY_MIRROR` | 空 | 可选镜像源 |
+| `SHERPA_DOCKER_NETWORK_PRECHECK` | `1` | Docker 网络预检查开关（可设 `0` 跳过） |
 | `SHERPA_DOCKER_PROXY_HOST` | `host.docker.internal` | 本机代理主机映射 |
 
 ### 20.2 日志分流
@@ -868,6 +899,15 @@ pytest -q tests
 - `<job>.cat.docker.log`
 
 用于前端或外部系统按维度检索。
+
+### 20.3 Job Store 权限说明
+
+`sherpa-job-store` 启动时会初始化：
+
+1. `/data` 目录权限：`0770`
+2. `/data/jobs.sqlite3` 文件权限：`0660`
+
+该策略用于避免 `permission denied` 的同时减少 world-writable 风险。
 
 ---
 
