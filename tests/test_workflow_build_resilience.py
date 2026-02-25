@@ -241,6 +241,28 @@ def test_route_after_build_sends_source_error_to_fix_build() -> None:
     assert route == "fix_build"
 
 
+def test_route_after_init_resumes_from_requested_step() -> None:
+    route = workflow_graph._route_after_init_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "resume_from_step": "run",
+        }
+    )
+    assert route == "run"
+
+
+def test_route_after_init_defaults_to_plan_for_invalid_resume_step() -> None:
+    route = workflow_graph._route_after_init_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "resume_from_step": "unknown-step",
+        }
+    )
+    assert route == "plan"
+
+
 def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

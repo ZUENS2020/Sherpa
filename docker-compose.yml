@@ -43,6 +43,8 @@ services:
       - sherpa-config:/app/config
       # Persist per-job logs in a dedicated volume (separate from config).
       - sherpa-job-logs:/app/job-logs
+      # Persist SQLite job state in a dedicated volume managed by sherpa-job-store.
+      - sherpa-job-store-data:/app/job-store
       # Mount opencode config from host
       - ./opencode.json:/app/opencode.json:ro
 
@@ -97,6 +99,7 @@ services:
       OPENAI_MODEL: "deepseek-reasoner"
       OPENCODE_CONFIG: "/opencode.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
+      SHERPA_WEB_JOB_DB_PATH: "/app/job-store/jobs.sqlite3"
 
       # Optional (fuzz patching): where to read ANTHROPIC_API_KEY from.
       # AI_KEY_PATH: "/app/.env"
@@ -104,8 +107,18 @@ services:
     depends_on:
       sherpa-oss-fuzz-init:
         condition: service_completed_successfully
+      sherpa-job-store:
+        condition: service_started
       sherpa-docker:
         condition: service_healthy
+
+  # Dedicated SQLite sidecar for job-state data volume ownership/inspection.
+  sherpa-job-store:
+    image: keinos/sqlite3:latest
+    restart: unless-stopped
+    command: ["sh", "-lc", "mkdir -p /data && touch /data/jobs.sqlite3 && tail -f /dev/null"]
+    volumes:
+      - sherpa-job-store-data:/data
 
   # Docker daemon sidecar (dind): build/run fuzz runtime containers.
   sherpa-docker:
@@ -188,4 +201,5 @@ volumes:
   sherpa-tmp:
   sherpa-config:
   sherpa-job-logs:
+  sherpa-job-store-data:
   sherpa-oss-fuzz:

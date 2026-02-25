@@ -50,6 +50,8 @@ def fuzz_logic(
     ai_key_path: Path | None = None,
     oss_fuzz_dir: str | None = None,
     model: str | None = None,
+    resume_from_step: str | None = None,
+    resume_repo_root: str | Path | None = None,
 ) -> str:
     # Set model in environment so OpenCode can pick it up
     if model and model.strip() and not os.environ.get("OPENCODE_MODEL"):
@@ -68,6 +70,12 @@ def fuzz_logic(
                 docker_image=docker_image,
                 ai_key_path=(ai_key_path or _find_ai_key_path()),
                 model=model,
+                resume_from_step=(resume_from_step or None),
+                resume_repo_root=(
+                    Path(resume_repo_root).expanduser().resolve()
+                    if resume_repo_root
+                    else None
+                ),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")

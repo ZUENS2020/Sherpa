@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
 import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from contextlib import redirect_stdout, redirect_stderr, asynccontextmanager
 from io import StringIO
 from pathlib import Path
 from fuzz_relative_functions import fuzz_logic
+from job_store import SQLiteJobStore
 from persistent_config import (
     WebPersistentConfig,
     apply_config_to_env,
@@ -30,6 +32,8 @@ async def _lifespan(app: FastAPI):
     _cfg_set(cfg)
     apply_config_to_env(cfg)
     os.environ["SHERPA_ACCEPT_DIFF_WITHOUT_DONE"] = "0"
+    _init_job_store()
+    _auto_resume_recoverable_jobs(cfg)
     yield
 
 
@@ -44,10 +48,12 @@ _JOBS_LOCK = threading.Lock()
 _JOBS: dict[str, dict] = {}
 _APP_START = time.time()
 _INIT_LOCK = threading.Lock()
+_JOB_STORE: SQLiteJobStore | None = None
 
 # In-memory API log retention limit (characters).
 # 0 or negative means unlimited (no truncation).
 _JOB_MEMORY_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_JOB_LOG_MAX_CHARS", "0"))
+_JOB_RESTORE_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_RESTORE_LOG_MAX_CHARS", "200000"))
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -79,6 +85,116 @@ def _job_log_path(job_id: str) -> Path:
     return _JOB_LOGS_DIR / f"{job_id}.log"
 
 
+def _read_log_tail(path: Path, *, max_chars: int) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    if max_chars > 0:
+        return text[-max_chars:]
+    return text
+
+
+def _hydrate_job_log_from_disk(job: dict) -> None:
+    if (job.get("log") or "").strip():
+        return
+    raw = str(job.get("log_file") or "").strip()
+    if not raw:
+        return
+    txt = _read_log_tail(Path(raw), max_chars=max(0, _JOB_RESTORE_LOG_MAX_CHARS))
+    if txt:
+        job["log"] = txt
+
+
+def _job_store_mode() -> str:
+    return (os.environ.get("SHERPA_WEB_JOB_STORE_MODE", "sqlite") or "").strip().lower()
+
+
+def _job_store_db_path() -> Path:
+    return Path(
+        os.environ.get("SHERPA_WEB_JOB_DB_PATH", "/app/job-store/jobs.sqlite3")
+    ).expanduser().resolve()
+
+
+def _job_store_enabled() -> bool:
+    return _job_store_mode() not in {"", "memory", "inmemory", "none", "off", "0", "false", "no"}
+
+
+def _persist_job_state(job: dict) -> None:
+    store = _JOB_STORE
+    if store is None:
+        return
+    try:
+        store.upsert_job(job)
+    except Exception:
+        pass
+
+
+def _restore_jobs_from_store() -> None:
+    store = _JOB_STORE
+    if store is None:
+        return
+    restored = store.load_jobs()
+    if not restored:
+        return
+
+    now = time.time()
+    changed_ids: list[str] = []
+    for job_id, job in restored.items():
+        status = str(job.get("status") or "").strip().lower()
+        if status in {"queued", "running", "resuming"}:
+            active_step = str(job.get("workflow_active_step") or "").strip().lower()
+            last_step = str(job.get("workflow_last_step") or "").strip().lower()
+            fallback = "plan" if status == "queued" else "build"
+            resume_step_raw = active_step or last_step
+            repo_root = str(job.get("workflow_repo_root") or "").strip()
+            if not resume_step_raw or not repo_root:
+                infer_step, infer_root = _infer_checkpoint_from_log_text(str(job.get("log") or ""))
+                if infer_step and not resume_step_raw:
+                    resume_step_raw = infer_step
+                if infer_root and not repo_root:
+                    repo_root = infer_root
+            resume_step = _normalize_resume_step(resume_step_raw or fallback)
+            job["status"] = "recoverable"
+            job["recoverable"] = True
+            job["last_interrupted_at"] = now
+            job["last_resume_reason"] = "service_restart"
+            job["error"] = str(job.get("error") or "").strip() or "job interrupted by service restart"
+            if str(job.get("kind") or "") == "fuzz":
+                job["resume_from_step"] = resume_step
+                if repo_root:
+                    job["resume_repo_root"] = repo_root
+            job["updated_at"] = now
+            changed_ids.append(job_id)
+        _hydrate_job_log_from_disk(job)
+
+    with _JOBS_LOCK:
+        _JOBS.clear()
+        _JOBS.update(restored)
+
+    for job_id in changed_ids:
+        job = restored.get(job_id)
+        if job is not None:
+            _persist_job_state(job)
+
+
+def _init_job_store() -> None:
+    global _JOB_STORE
+    if not _job_store_enabled():
+        _JOB_STORE = None
+        return
+    try:
+        store = SQLiteJobStore(_job_store_db_path())
+        store.init_schema()
+        _JOB_STORE = store
+        _restore_jobs_from_store()
+    except Exception as e:
+        print(f"[warn] job store disabled due to init error: {e}")
+        _JOB_STORE = None
+
+
 def _classify_log_level(line: str) -> str:
     txt = (line or "").lower()
     if any(k in txt for k in ["traceback", "exception", " fatal", "error", "failed", "cannot find"]):
@@ -105,18 +221,83 @@ def _classify_log_category(line: str) -> str:
     return "general"
 
 
+_WF_STEP_ENTRY_RE = re.compile(r"\[wf[^\]]*\]\s*->\s*([a-z_]+)")
+_WF_STEP_EXIT_RE = re.compile(r"\[wf[^\]]*\]\s*<-\s*([a-z_]+)")
+_WF_REPO_ROOT_RE = re.compile(r"\brepo_root=(.+?)(?:\s+dt=|$)")
+
+
+def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
+    if not line:
+        return
+    entry = _WF_STEP_ENTRY_RE.search(line)
+    if entry:
+        step = entry.group(1).strip()
+        _job_update(
+            job_id,
+            workflow_last_step=step,
+            workflow_active_step=step,
+            workflow_last_step_ts=time.time(),
+        )
+
+    exit_m = _WF_STEP_EXIT_RE.search(line)
+    if exit_m:
+        step = exit_m.group(1).strip()
+        _job_update(
+            job_id,
+            workflow_last_step=step,
+            workflow_last_completed_step=step,
+            workflow_active_step="",
+            workflow_last_step_ts=time.time(),
+        )
+
+    repo_m = _WF_REPO_ROOT_RE.search(line)
+    if repo_m:
+        repo_root = repo_m.group(1).strip()
+        if repo_root:
+            _job_update(job_id, workflow_repo_root=repo_root)
+
+
+def _infer_checkpoint_from_log_text(text: str) -> tuple[str, str]:
+    if not text:
+        return "", ""
+    active_step = ""
+    last_step = ""
+    repo_root = ""
+    for line in text.splitlines():
+        m1 = _WF_STEP_ENTRY_RE.search(line)
+        if m1:
+            step = m1.group(1).strip().lower()
+            active_step = step
+            last_step = step
+        m2 = _WF_STEP_EXIT_RE.search(line)
+        if m2:
+            step = m2.group(1).strip().lower()
+            last_step = step
+            active_step = ""
+        m3 = _WF_REPO_ROOT_RE.search(line)
+        if m3:
+            repo_root = m3.group(1).strip()
+    step_out = active_step or last_step
+    return step_out, repo_root
+
+
 def _job_update(job_id: str, **fields: object) -> None:
+    snapshot: dict | None = None
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job:
             return
         job.update(fields)
         job["updated_at"] = time.time()
+        snapshot = dict(job)
+    if snapshot is not None:
+        _persist_job_state(snapshot)
 
 
 def _job_append_log(job_id: str, chunk: str) -> None:
     if not chunk:
         return
+    snapshot: dict | None = None
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job:
@@ -127,6 +308,9 @@ def _job_append_log(job_id: str, chunk: str) -> None:
         else:
             job["log"] = buf
         job["updated_at"] = time.time()
+        snapshot = dict(job)
+    if snapshot is not None:
+        _persist_job_state(snapshot)
 
 
 class _Tee(StringIO):
@@ -180,6 +364,7 @@ class _Tee(StringIO):
         if s:
             for line in s.splitlines(keepends=True):
                 self._split_write(line)
+                _update_workflow_checkpoint_from_line(self._job_id, line)
         _job_append_log(self._job_id, s)
         return super().write(s)
 
@@ -202,6 +387,47 @@ def _iso_time(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
+def _status_for_counter(raw: str | None) -> str:
+    s = str(raw or "").strip().lower()
+    if s in {"queued"}:
+        return "queued"
+    if s in {"running", "resuming"}:
+        return "running"
+    if s in {"success", "resumed"}:
+        return "success"
+    if s in {"error", "recoverable", "resume_failed"}:
+        return "error"
+    return "error"
+
+
+def _status_for_parent(raw: str | None) -> str:
+    s = str(raw or "").strip().lower()
+    if s in {"queued"}:
+        return "queued"
+    if s in {"running", "resuming", "recoverable"}:
+        return "running"
+    if s in {"success", "resumed"}:
+        return "success"
+    if s in {"error", "resume_failed"}:
+        return "error"
+    return "error"
+
+
+def _is_status_terminal(raw: str | None) -> bool:
+    s = str(raw or "").strip().lower()
+    return s in {"success", "resumed", "error", "resume_failed"}
+
+
+_RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "fix_crash"}
+
+
+def _normalize_resume_step(raw: str | None) -> str:
+    s = str(raw or "").strip().lower()
+    if s in _RESUMABLE_WORKFLOW_STEPS:
+        return s
+    return "plan"
+
+
 def _dir_size(path: Path) -> int:
     if not path.exists():
         return 0
@@ -219,12 +445,13 @@ def _system_status() -> dict:
     now = time.time()
     with _JOBS_LOCK:
         jobs = list(_JOBS.values())
+    bucketed = [_status_for_counter(str(j.get("status") or "")) for j in jobs]
     counts = {
         "total": len(jobs),
-        "queued": sum(1 for j in jobs if j.get("status") == "queued"),
-        "running": sum(1 for j in jobs if j.get("status") == "running"),
-        "success": sum(1 for j in jobs if j.get("status") == "success"),
-        "error": sum(1 for j in jobs if j.get("status") == "error"),
+        "queued": sum(1 for b in bucketed if b == "queued"),
+        "running": sum(1 for b in bucketed if b == "running"),
+        "success": sum(1 for b in bucketed if b == "success"),
+        "error": sum(1 for b in bucketed if b == "error"),
     }
     counts_by_kind: dict[str, int] = {}
     for j in jobs:
@@ -239,7 +466,7 @@ def _system_status() -> dict:
             "kind": j.get("kind"),
         }
         for j in jobs
-        if j.get("status") in {"queued", "running"}
+        if _status_for_counter(str(j.get("status") or "")) in {"queued", "running"}
     ]
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
@@ -354,6 +581,7 @@ def get_system_status():
 def _create_job(kind: str, repo: str | None = None) -> str:
     job_id = uuid.uuid4().hex
     now = time.time()
+    job_payload: dict | None = None
     with _JOBS_LOCK:
         _JOBS[job_id] = {
             "job_id": job_id,
@@ -369,6 +597,9 @@ def _create_job(kind: str, repo: str | None = None) -> str:
             "log": "",
             "log_file": None,
         }
+        job_payload = dict(_JOBS[job_id])
+    if job_payload is not None:
+        _persist_job_state(job_payload)
     return job_id
 
 
@@ -557,7 +788,9 @@ def _job_snapshot(job_id: str) -> dict | None:
         job = _JOBS.get(job_id)
         if not job:
             return None
-        return dict(job)
+        view = dict(job)
+    _hydrate_job_log_from_disk(view)
+    return view
 
 
 def _derive_task_status(job: dict) -> dict:
@@ -569,14 +802,17 @@ def _derive_task_status(job: dict) -> dict:
         for cid in children:
             cjob = _JOBS.get(cid)
             if cjob:
-                child_jobs.append(dict(cjob))
+                child_view = dict(cjob)
+                _hydrate_job_log_from_disk(child_view)
+                child_jobs.append(child_view)
     total = len(child_jobs)
-    queued = sum(1 for j in child_jobs if j.get("status") == "queued")
-    running = sum(1 for j in child_jobs if j.get("status") == "running")
-    success = sum(1 for j in child_jobs if j.get("status") == "success")
-    error = sum(1 for j in child_jobs if j.get("status") == "error")
+    buckets = [_status_for_parent(str(j.get("status") or "")) for j in child_jobs]
+    queued = sum(1 for b in buckets if b == "queued")
+    running = sum(1 for b in buckets if b == "running")
+    success = sum(1 for b in buckets if b == "success")
+    error = sum(1 for b in buckets if b == "error")
     if total == 0:
-        derived = job.get("status")
+        derived = str(job.get("status") or "queued")
     elif queued or running:
         derived = "running"
     elif error:
@@ -605,10 +841,11 @@ def _derive_task_status_from_snapshot(job: dict, jobs_snapshot: dict[str, dict])
     child_ids = list(job.get("children") or [])
     child_jobs = [dict(jobs_snapshot[cid]) for cid in child_ids if cid in jobs_snapshot]
     total = len(child_jobs)
-    queued = sum(1 for j in child_jobs if j.get("status") == "queued")
-    running = sum(1 for j in child_jobs if j.get("status") == "running")
-    success = sum(1 for j in child_jobs if j.get("status") == "success")
-    error = sum(1 for j in child_jobs if j.get("status") == "error")
+    buckets = [_status_for_parent(str(j.get("status") or "")) for j in child_jobs]
+    queued = sum(1 for b in buckets if b == "queued")
+    running = sum(1 for b in buckets if b == "running")
+    success = sum(1 for b in buckets if b == "success")
+    error = sum(1 for b in buckets if b == "error")
     if total == 0:
         derived = str(job.get("status") or "queued")
     elif queued or running:
@@ -641,7 +878,7 @@ def _list_tasks(limit: int = 50) -> list[dict]:
             continue
         derived_status, children_status, child_jobs = _derive_task_status_from_snapshot(job, jobs_snapshot)
         active_child = next(
-            (c for c in child_jobs if c.get("status") in {"running", "queued"}),
+            (c for c in child_jobs if _status_for_parent(str(c.get("status") or "")) in {"running", "queued"}),
             child_jobs[0] if child_jobs else None,
         )
         tasks.append(
@@ -669,88 +906,298 @@ def _list_tasks(limit: int = 50) -> list[dict]:
     return tasks[:capped_limit]
 
 
+def _mark_resume_failed(job_id: str, *, code: str, message: str) -> None:
+    _job_update(
+        job_id,
+        status="resume_failed",
+        recoverable=False,
+        resume_error_code=code,
+        error=message,
+        finished_at=time.time(),
+    )
+
+
+def _run_fuzz_job(
+    job_id: str,
+    request: fuzz_model,
+    cfg: WebPersistentConfig,
+    *,
+    resumed: bool,
+    trigger: str,
+    resume_from_step: str | None = None,
+    resume_repo_root: str | None = None,
+) -> None:
+    start_ts = time.time()
+    next_status = "resuming" if resumed else "running"
+    _job_update(
+        job_id,
+        status=next_status,
+        started_at=start_ts,
+        finished_at=None,
+        recoverable=False,
+        error=None,
+        request=request.model_dump(),
+        resume_from_step=(_normalize_resume_step(resume_from_step) if resumed else ""),
+        resume_repo_root=(resume_repo_root or ""),
+        last_resume_reason=trigger if resumed else None,
+        last_resume_started_at=start_ts if resumed else None,
+    )
+    log_file = _job_log_path(job_id)
+    _job_update(job_id, log_file=str(log_file))
+    tee = _Tee(job_id, log_file=log_file)
+    try:
+        with redirect_stdout(tee), redirect_stderr(tee):
+            print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
+            print(f"[job {job_id}] about to call fuzz_logic...")
+            docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
+            if not docker_enabled:
+                raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
+            total_time_budget_value = (
+                request.total_time_budget
+                if request.total_time_budget is not None
+                else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
+            )
+            run_time_budget_value = (
+                request.run_time_budget
+                if request.run_time_budget is not None
+                else total_time_budget_value
+            )
+            if int(total_time_budget_value) <= 0:
+                raise RuntimeError("total_time_budget must be > 0")
+            if int(run_time_budget_value) <= 0:
+                raise RuntimeError("run_time_budget must be > 0")
+            openai_key = (
+                os.environ.get("OPENAI_API_KEY")
+                or cfg.openai_api_key
+                or ""
+            ).strip()
+            opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
+            openai_model = (
+                os.environ.get("OPENAI_MODEL")
+                or opencode_model_env
+                or "deepseek-reasoner"
+            ).strip()
+            if openai_key:
+                model_value = request.model or opencode_model_env or openai_model
+            else:
+                model_value = request.model or cfg.openrouter_model
+            print(
+                f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
+                f"time_budget={total_time_budget_value}s run_time_budget={run_time_budget_value}s "
+                f"max_tokens={request.max_tokens} model={model_value}"
+            )
+            print(f"[job {job_id}] log_file={log_file}")
+            docker_image = docker_image_value
+            print(f"[job {job_id}] calling fuzz_logic with docker_image={docker_image}...")
+            try:
+                res = fuzz_logic(
+                    request.code_url,
+                    max_len=request.max_tokens,
+                    time_budget=total_time_budget_value,
+                    run_time_budget=run_time_budget_value,
+                    email=request.email,
+                    docker_image=docker_image,
+                    ai_key_path=opencode_env_path(),
+                    oss_fuzz_dir=cfg.oss_fuzz_dir,
+                    model=model_value,
+                    resume_from_step=(_normalize_resume_step(resume_from_step) if resumed else None),
+                    resume_repo_root=(resume_repo_root if resumed else None),
+                )
+                print(f"[job {job_id}] fuzz_logic returned successfully")
+            except Exception as fuzz_err:
+                print(f"[job {job_id}] fuzz_logic failed: {fuzz_err}")
+                import traceback
+                traceback.print_exc()
+                raise
+            _job_update(
+                job_id,
+                status=("resumed" if resumed else "success"),
+                result=res,
+                recoverable=False,
+                resume_error_code=None,
+                last_resume_finished_at=time.time() if resumed else None,
+            )
+    except Exception as e:
+        fail_status = "resume_failed" if resumed else "error"
+        _job_update(
+            job_id,
+            status=fail_status,
+            error=str(e),
+            recoverable=False,
+            last_resume_finished_at=time.time() if resumed else None,
+        )
+    finally:
+        try:
+            tee.close()
+        except Exception:
+            pass
+        _job_update(job_id, finished_at=time.time())
+
+
 def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
     job_id = _create_job("fuzz", request.code_url)
-
-    def _runner() -> None:
-        _job_update(job_id, status="running", started_at=time.time())
-        log_file = _job_log_path(job_id)
-        _job_update(job_id, log_file=str(log_file))
-        tee = _Tee(job_id, log_file=log_file)
-        try:
-            with redirect_stdout(tee), redirect_stderr(tee):
-                print(f"[job {job_id}] start repo={request.code_url}")
-                print(f"[job {job_id}] about to call fuzz_logic...")
-                docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
-                if not docker_enabled:
-                    raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
-                total_time_budget_value = (
-                    request.total_time_budget
-                    if request.total_time_budget is not None
-                    else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
-                )
-                run_time_budget_value = (
-                    request.run_time_budget
-                    if request.run_time_budget is not None
-                    else total_time_budget_value
-                )
-                if int(total_time_budget_value) <= 0:
-                    raise RuntimeError("total_time_budget must be > 0")
-                if int(run_time_budget_value) <= 0:
-                    raise RuntimeError("run_time_budget must be > 0")
-                openai_key = (
-                    os.environ.get("OPENAI_API_KEY")
-                    or cfg.openai_api_key
-                    or ""
-                ).strip()
-                opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
-                openai_model = (
-                    os.environ.get("OPENAI_MODEL")
-                    or opencode_model_env
-                    or "deepseek-reasoner"
-                ).strip()
-                if openai_key:
-                    model_value = request.model or opencode_model_env or openai_model
-                else:
-                    model_value = request.model or cfg.openrouter_model
-                print(
-                    f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
-                    f"time_budget={total_time_budget_value}s run_time_budget={run_time_budget_value}s "
-                    f"max_tokens={request.max_tokens} model={model_value}"
-                )
-                print(f"[job {job_id}] log_file={log_file}")
-                docker_image = docker_image_value
-                print(f"[job {job_id}] calling fuzz_logic with docker_image={docker_image}...")
-                try:
-                    res = fuzz_logic(
-                        request.code_url,
-                        max_len=request.max_tokens,
-                        time_budget=total_time_budget_value,
-                        run_time_budget=run_time_budget_value,
-                        email=request.email,
-                        docker_image=docker_image,
-                        ai_key_path=opencode_env_path(),
-                        oss_fuzz_dir=cfg.oss_fuzz_dir,
-                        model=model_value,
-                    )
-                    print(f"[job {job_id}] fuzz_logic returned successfully")
-                except Exception as fuzz_err:
-                    print(f"[job {job_id}] fuzz_logic failed: {fuzz_err}")
-                    import traceback
-                    traceback.print_exc()
-                    raise
-                _job_update(job_id, status="success", result=res)
-        except Exception as e:
-            _job_update(job_id, status="error", error=str(e))
-        finally:
-            try:
-                tee.close()
-            except Exception:
-                pass
-            _job_update(job_id, finished_at=time.time())
-
-    executor.submit(_runner)
+    _job_update(
+        job_id,
+        request=request.model_dump(),
+        recoverable=True,
+        resume_attempts=0,
+        resume_error_code=None,
+    )
+    executor.submit(_run_fuzz_job, job_id, request, cfg, resumed=False, trigger="new")
     return job_id
+
+
+def _resume_fuzz_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> dict[str, object]:
+    job = _job_snapshot(job_id)
+    if not job:
+        return {"accepted": False, "reason": "job_not_found"}
+    if str(job.get("kind") or "") != "fuzz":
+        return {"accepted": False, "reason": "job_not_fuzz"}
+
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"queued", "running", "resuming"}:
+        return {"accepted": False, "reason": "already_in_progress"}
+    if status in {"success", "resumed"}:
+        return {"accepted": False, "reason": "already_completed"}
+
+    raw_request = job.get("request")
+    if not isinstance(raw_request, dict):
+        _mark_resume_failed(job_id, code="missing_resume_context", message="missing request payload for resume")
+        return {"accepted": False, "reason": "missing_resume_context"}
+
+    try:
+        req = fuzz_model.model_validate(raw_request)
+    except Exception as e:
+        _mark_resume_failed(job_id, code="invalid_resume_context", message=f"invalid request payload for resume: {e}")
+        return {"accepted": False, "reason": "invalid_resume_context"}
+
+    attempts = int(job.get("resume_attempts") or 0) + 1
+    resume_step = _normalize_resume_step(
+        str(job.get("resume_from_step") or "")
+        or str(job.get("workflow_active_step") or "")
+        or str(job.get("workflow_last_step") or "")
+        or "build"
+    )
+    resume_repo_root = str(job.get("resume_repo_root") or job.get("workflow_repo_root") or "").strip()
+    if resume_step != "plan" and not resume_repo_root:
+        _mark_resume_failed(
+            job_id,
+            code="missing_resume_workspace",
+            message=f"cannot resume from step `{resume_step}` without saved repo_root",
+        )
+        return {"accepted": False, "reason": "missing_resume_workspace"}
+    _job_update(
+        job_id,
+        status="resuming",
+        recoverable=False,
+        error=None,
+        result=None,
+        finished_at=None,
+        resume_attempts=attempts,
+        resume_from_step=resume_step,
+        resume_repo_root=resume_repo_root,
+        last_resume_reason=trigger,
+        last_resume_requested_at=time.time(),
+    )
+    executor.submit(
+        _run_fuzz_job,
+        job_id,
+        req,
+        cfg,
+        resumed=True,
+        trigger=trigger,
+        resume_from_step=resume_step,
+        resume_repo_root=resume_repo_root,
+    )
+    return {"accepted": True, "reason": "resuming", "resume_attempts": attempts}
+
+
+def _resume_task_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> dict[str, object]:
+    job = _job_snapshot(job_id)
+    if not job:
+        return {"accepted": False, "reason": "job_not_found"}
+    if str(job.get("kind") or "") != "task":
+        return {"accepted": False, "reason": "job_not_task"}
+
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"queued", "running", "resuming"}:
+        return {"accepted": False, "reason": "already_in_progress"}
+    if status in {"success", "resumed"}:
+        return {"accepted": False, "reason": "already_completed"}
+
+    child_ids = [str(x) for x in (job.get("children") or []) if str(x).strip()]
+    if not child_ids:
+        _mark_resume_failed(job_id, code="missing_resume_children", message="missing child jobs for task resume")
+        return {"accepted": False, "reason": "missing_resume_children"}
+
+    resumed_any = False
+    for cid in child_ids:
+        child = _job_snapshot(cid)
+        if not child:
+            continue
+        child_status = str(child.get("status") or "").strip().lower()
+        if child_status in {"success", "resumed"}:
+            continue
+        if child_status in {"queued", "running", "resuming"}:
+            resumed_any = True
+            continue
+        out = _resume_fuzz_job(cid, cfg, trigger=f"{trigger}:task:{job_id}")
+        if bool(out.get("accepted")):
+            resumed_any = True
+
+    if resumed_any:
+        attempts = int(job.get("resume_attempts") or 0) + 1
+        _job_update(
+            job_id,
+            status="resuming",
+            recoverable=False,
+            error=None,
+            finished_at=None,
+            resume_attempts=attempts,
+            last_resume_reason=trigger,
+            last_resume_requested_at=time.time(),
+        )
+        return {"accepted": True, "reason": "resuming", "resume_attempts": attempts}
+
+    refreshed = _job_snapshot(job_id) or job
+    derived = _derive_task_status(refreshed)
+    final_status = str(derived.get("status") or "").strip().lower()
+    if final_status in {"success", "error"} and not _is_status_terminal(job.get("status")):
+        _job_update(job_id, status=final_status, finished_at=float(derived.get("finished_at") or time.time()))
+    return {"accepted": False, "reason": "no_resumable_children"}
+
+
+def _auto_resume_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_WEB_AUTO_RESUME_ON_START", "1") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _auto_resume_recoverable_jobs(cfg: WebPersistentConfig) -> None:
+    if not _auto_resume_enabled():
+        return
+    with _JOBS_LOCK:
+        snapshot = {job_id: dict(job) for job_id, job in _JOBS.items()}
+
+    task_ids = [
+        job_id
+        for job_id, job in snapshot.items()
+        if str(job.get("kind") or "") == "task"
+        and str(job.get("status") or "").strip().lower() == "recoverable"
+    ]
+    for tid in task_ids:
+        _resume_task_job(tid, cfg, trigger="auto_startup")
+
+    with _JOBS_LOCK:
+        snapshot2 = {job_id: dict(job) for job_id, job in _JOBS.items()}
+    for job_id, job in snapshot2.items():
+        if str(job.get("kind") or "") != "fuzz":
+            continue
+        if str(job.get("status") or "").strip().lower() != "recoverable":
+            continue
+        parent_id = str(job.get("parent_id") or "").strip()
+        if parent_id and parent_id in snapshot2:
+            continue
+        _resume_fuzz_job(job_id, cfg, trigger="auto_startup")
 
 
 @app.post("/api/task")
@@ -758,6 +1205,13 @@ async def task_api(request: task_model = Body(...)):
     cfg = _cfg_get()
     _enforce_docker_only(request.jobs, cfg)
     job_id = _create_job("task", "batch")
+    _job_update(
+        job_id,
+        request=request.model_dump(),
+        recoverable=True,
+        resume_attempts=0,
+        resume_error_code=None,
+    )
 
     def _runner() -> None:
         _job_update(job_id, status="running", started_at=time.time())
@@ -829,6 +1283,7 @@ async def task_api(request: task_model = Body(...)):
             for job in request.jobs:
                 child_id = _submit_fuzz_job(job, cfg)
                 child_ids.append(child_id)
+                _job_update(child_id, parent_id=job_id)
             if child_ids:
                 _job_update(job_id, result="submitted", children=child_ids)
             else:
@@ -857,6 +1312,26 @@ def get_task(job_id: str):
     if job.get("kind") != "task":
         return {"error": "job_not_task"}
     return _derive_task_status(job)
+
+
+@app.post("/api/task/{job_id}/resume")
+def resume_task(job_id: str):
+    cfg = _cfg_get()
+    snap0 = _job_snapshot(job_id) or {}
+    kind = str(snap0.get("kind") or "")
+    if kind == "fuzz":
+        out = _resume_fuzz_job(job_id, cfg, trigger="manual_api")
+    else:
+        out = _resume_task_job(job_id, cfg, trigger="manual_api")
+    snap = _job_snapshot(job_id)
+    return {
+        "job_id": job_id,
+        "kind": kind or str((snap or {}).get("kind") or ""),
+        "accepted": bool(out.get("accepted")),
+        "reason": str(out.get("reason") or ""),
+        "resume_attempts": int(out.get("resume_attempts") or (snap or {}).get("resume_attempts") or 0),
+        "status": str((snap or {}).get("status") or ""),
+    }
 
 
 @app.get("/api/tasks")

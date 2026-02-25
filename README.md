@@ -23,7 +23,7 @@ flowchart LR
   U["User / CI"] --> GW["sherpa-gateway (Nginx)"]
   GW --> FE["sherpa-frontend (Next.js)"]
   GW --> WEB["sherpa-web (FastAPI API)"]
-  WEB --> JOB["In-memory Job Store (_JOBS)"]
+  WEB --> JOB["SQLite Job Store (/app/job-store/jobs.sqlite3)"]
   WEB --> WF["LangGraph Workflow"]
   WF --> OC["OpenCode via CodexHelper"]
   WF --> DIND["Docker Daemon (sherpa-docker)"]
@@ -38,6 +38,7 @@ flowchart LR
 | 模块 | 文件 | 作用 |
 |---|---|---|
 | Web API | `harness_generator/src/langchain_agent/main.py` | 配置管理、任务提交、任务状态聚合、日志落盘与分类 |
+| 任务状态存储 | `harness_generator/src/langchain_agent/job_store.py` | SQLite 任务状态持久化与重启恢复 |
 | Workflow | `harness_generator/src/langchain_agent/workflow_graph.py` | 节点定义、状态路由、失败策略、summary 输出 |
 | Workflow 公共工具 | `harness_generator/src/langchain_agent/workflow_common.py` | 通用校验、预算控制、prompt 模板加载与渲染 |
 | Workflow Summary | `harness_generator/src/langchain_agent/workflow_summary.py` | 运行产物盘点、run summary/fuzz effectiveness 输出 |
@@ -60,6 +61,7 @@ flowchart TB
     GW["sherpa-gateway (nginx)"]
     FE["sherpa-frontend (Next.js)"]
     WEB["sherpa-web"]
+    STORE["sherpa-job-store (sqlite sidecar)"]
     DIND["sherpa-docker (dind)"]
     OC["sherpa-opencode (profile: opencode)"]
   end
@@ -76,6 +78,8 @@ flowchart TB
 
   WEB --> CFG["volume: sherpa-config (/app/config)"]
   WEB --> JLOG["volume: sherpa-job-logs (/app/job-logs)"]
+  WEB --> JDB["volume: sherpa-job-store-data (/app/job-store)"]
+  STORE --> JDB
 
   WEB -->|"DOCKER_HOST=tcp://sherpa-docker:2375"| DIND
   GW --> FE
@@ -90,6 +94,7 @@ sequenceDiagram
   participant DC as docker compose
   participant Init as sherpa-oss-fuzz-init
   participant Dind as sherpa-docker
+  participant Store as sherpa-job-store
   participant FE as sherpa-frontend
   participant GW as sherpa-gateway
   participant Web as sherpa-web
@@ -100,6 +105,7 @@ sequenceDiagram
   Init-->>DC: complete successfully
   DC->>Dind: start docker daemon container
   Dind-->>DC: healthcheck ready
+  DC->>Store: start sqlite sidecar
   DC->>Web: start API service
   DC->>FE: start Next.js frontend
   DC->>GW: start nginx gateway
@@ -114,6 +120,7 @@ sequenceDiagram
 3. `/shared/output` 是主产物目录（当前映射到仓库 `./output`）。
 4. `sherpa-web` 和 `sherpa-docker` 共享 `sherpa-tmp` 与 `sherpa-oss-fuzz`，保证容器内路径一致。
 5. `sherpa-gateway` 统一入口：`/` -> `sherpa-frontend`，`/api/*` -> `sherpa-web`。
+6. `sherpa-job-store` 与 `sherpa-web` 共享 `sherpa-job-store-data`，用于持久化任务状态 SQLite。
 
 ### 3.4 容器职责（明确分工）
 
@@ -122,6 +129,7 @@ sequenceDiagram
 | `sherpa-gateway` | 唯一入口网关，转发 UI/API | `:8000` |
 | `sherpa-frontend` | Next.js 前端页面与交互 | 内部 `:3000` |
 | `sherpa-web` | FastAPI API + workflow 编排 + 任务状态/日志 | 内部 `:8001` |
+| `sherpa-job-store` | SQLite sidecar（任务状态库管理与运维入口） | 无 |
 | `sherpa-docker` | Docker daemon（dind），负责构建/运行 fuzz 容器 | 内部 `:2375` |
 | `sherpa-oss-fuzz-init` | 初始化/校验 oss-fuzz 工作目录 | 无 |
 
@@ -213,14 +221,27 @@ Sherpa 采用父子任务模型：
 
 ### 6.2 状态定义
 
+子任务（`fuzz`）会出现以下状态：
+
 - `queued`
 - `running`
+- `resuming`
+- `recoverable`
 - `success`
+- `resumed`
 - `error`
+- `resume_failed`
+
+父任务（`task`）聚合时会做状态归一：
+
+- `queued` -> `queued`
+- `running` / `resuming` / `recoverable` -> `running`
+- `success` / `resumed` -> `success`
+- `error` / `resume_failed` -> `error`
 
 ### 6.3 聚合规则（父任务）
 
-1. 任一子任务 `queued/running` -> 父任务 `running`
+1. 任一子任务 `queued/running/resuming/recoverable` -> 父任务 `running`
 2. 全部结束且至少一个 `error` -> 父任务 `error`
 3. 全部 `success` -> 父任务 `success`
 
@@ -245,7 +266,15 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  I["init"] --> P["plan"]
+  I["init"] --> R0{"route_after_init"}
+  R0 -->|"resume_from_step=plan or empty"| P["plan"]
+  R0 -->|"resume_from_step=synthesize"| S["synthesize"]
+  R0 -->|"resume_from_step=build"| B["build"]
+  R0 -->|"resume_from_step=fix_build"| FB["fix_build"]
+  R0 -->|"resume_from_step=run"| R["run"]
+  R0 -->|"resume_from_step=fix_crash"| FC["fix_crash"]
+  R0 -->|"init failed"| E0["END"]
+
   P -->|"ok"| S["synthesize"]
   P -->|"error/failed"| E1["END"]
 
@@ -387,6 +416,7 @@ flowchart TD
 | `GET` | `/api/system` | 系统状态与运行中任务 |
 | `POST` | `/api/task` | 提交父任务（可含多个 repo 子任务） |
 | `GET` | `/api/task/{job_id}` | 查询单任务详情（父任务聚合视图） |
+| `POST` | `/api/task/{job_id}/resume` | 手动恢复中断任务（支持从记录的 workflow step 续跑） |
 | `GET` | `/api/tasks?limit=N` | 最近任务列表（会话选择器） |
 
 ### 11.2 `POST /api/task` 请求体（推荐）
@@ -429,8 +459,17 @@ flowchart TD
 1. `status`: 聚合状态。
 2. `children_status`: 子任务统计。
 3. `children`: 子任务详情（含 `log`, `log_file`, `error`, `result`）。
+4. 恢复相关字段（子任务）：`resume_from_step`, `resume_attempts`, `last_resume_reason`。
 
-### 11.4 前后端时序
+### 11.4 `POST /api/task/{job_id}/resume` 说明
+
+1. 支持 task/fuzz 两类 job_id：
+   1. task：恢复其可恢复子任务；
+   2. fuzz：直接恢复该子任务。
+2. 恢复优先从保存的 `resume_from_step` 继续；若缺少必要上下文会进入 `resume_failed` 并给出结构化原因。
+3. 同一任务重复调用具备幂等保护，不会重复并发调度。
+
+### 11.5 前后端时序
 
 ```mermaid
 sequenceDiagram
@@ -445,6 +484,51 @@ sequenceDiagram
   WF-->>API: update _JOBS state/log
   API-->>UI: aggregated status + logs
   UI->>UI: render status/progress/error/log
+```
+
+### 11.6 断点续跑时序（从当前 step 继续）
+
+```mermaid
+sequenceDiagram
+  participant Store as SQLite Job Store
+  participant API as FastAPI(main.py)
+  participant WF as Workflow(workflow_graph.py)
+  participant UI as Browser UI
+
+  Note over API: 服务启动
+  API->>Store: load_jobs()
+  API->>API: queued/running/resuming -> recoverable
+  API->>API: 推断 resume_from_step / resume_repo_root
+  API->>API: (可选) auto_resume_recoverable_jobs
+
+  UI->>API: POST /api/task/{job_id}/resume
+  API->>API: 读取 request + checkpoint 字段
+  API->>API: 计算 resume_step = resume_from_step|active_step|last_step|build
+  API->>WF: run_fuzz_workflow(resume_from_step, resume_repo_root)
+  WF->>WF: init 后按 route_after_init 跳到目标 step
+  WF-->>API: resumed / resume_failed
+  API-->>UI: 最新状态与日志
+```
+
+### 11.7 Checkpoint 提取与恢复字段更新
+
+```mermaid
+flowchart TD
+  L["workflow log line"] --> M1{"[wf] -> step ?"}
+  M1 -->|"yes"| U1["workflow_active_step=step<br/>workflow_last_step=step"]
+  M1 -->|"no"| M2{"[wf] <- step ?"}
+  M2 -->|"yes"| U2["workflow_last_completed_step=step<br/>workflow_active_step=''"]
+  M2 -->|"no"| M3{"contains repo_root=... ?"}
+  M3 -->|"yes"| U3["workflow_repo_root=repo_root"]
+  M3 -->|"no"| END0["ignore"]
+
+  U1 --> SAVE["persist to sqlite"]
+  U2 --> SAVE
+  U3 --> SAVE
+
+  SAVE --> RST["service restart"]
+  RST --> INF["infer checkpoint from fields/log"]
+  INF --> REC["mark recoverable + set resume_from_step/resume_repo_root"]
 ```
 
 ---
@@ -653,6 +737,7 @@ docker compose ps
 # 2) 看 web 与 dind 日志
 docker compose logs -f sherpa-web
 docker compose logs -f sherpa-docker
+docker compose logs -f sherpa-job-store
 
 # 3) 看最近任务列表
 curl -s 'http://localhost:8000/api/tasks?limit=20' | jq
@@ -662,6 +747,10 @@ curl -s 'http://localhost:8000/api/task/<task_id>' | jq
 
 # 5) 检查 dind 健康
 DOCKER_HOST=tcp://127.0.0.1:2375 docker info
+
+# 6) 查看 SQLite 任务状态库
+docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 '.tables'
+docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,status,updated_at from jobs order by updated_at desc limit 20;'
 ```
 
 ### 17.3 典型错误与处理建议
@@ -733,6 +822,10 @@ pytest -q tests
 | `DOCKER_BUILDKIT` | `0` | 避免 buildx 依赖问题 |
 | `SHERPA_PARALLEL_FUZZERS` | `2` | run 阶段并行数 |
 | `SHERPA_WEB_JOB_LOG_DIR` | `/app/job-logs/jobs` | 任务日志目录 |
+| `SHERPA_WEB_JOB_STORE_MODE` | `sqlite` | 任务状态存储模式，`sqlite` 或 `memory` |
+| `SHERPA_WEB_JOB_DB_PATH` | `/app/job-store/jobs.sqlite3` | SQLite 任务状态库路径 |
+| `SHERPA_WEB_RESTORE_LOG_MAX_CHARS` | `200000` | 重启恢复时从日志文件回填到 API 的最大字符数 |
+| `SHERPA_WEB_AUTO_RESUME_ON_START` | `1` | 服务启动时自动恢复 `recoverable` 任务 |
 | `SHERPA_OUTPUT_DIR` | `/shared/output` | 输出根目录 |
 | `SHERPA_DEFAULT_OSS_FUZZ_DIR` | `/shared/oss-fuzz` | oss-fuzz 本地根目录 |
 | `SHERPA_DOCKER_REGISTRY_MIRROR` | 空 | 可选镜像源 |
@@ -820,6 +913,14 @@ pytest -q tests
 ### 图 I：产物流转图
 
 见 [第 15 节](#15-产物目录与文件生命周期)。
+
+### 图 J：断点续跑时序
+
+见 [第 11 节](#11-api-对接说明) 中 `11.6`。
+
+### 图 K：Checkpoint 提取与恢复
+
+见 [第 11 节](#11-api-对接说明) 中 `11.7`。
 
 ---
 

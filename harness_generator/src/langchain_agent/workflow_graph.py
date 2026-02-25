@@ -38,6 +38,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     docker_image: Optional[str]
     ai_key_path: str
     workflow_started_at: float
+    resume_from_step: str
+    resume_repo_root: str
 
     step_count: int
     max_steps: int
@@ -228,6 +230,8 @@ class FuzzWorkflowInput:
     docker_image: Optional[str]
     ai_key_path: Path
     model: Optional[str] = None
+    resume_from_step: Optional[str] = None
+    resume_repo_root: Optional[Path] = None
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -249,7 +253,14 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         raise ValueError("Docker execution is mandatory; docker_image is required")
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
 
-    workdir = _alloc_output_workdir(repo_url)
+    raw_resume_repo_root = (state.get("resume_repo_root") or "").strip()
+    workdir: Path | None = None
+    if raw_resume_repo_root:
+        candidate = Path(raw_resume_repo_root).expanduser().resolve()
+        if candidate.exists() and candidate.is_dir():
+            workdir = candidate
+    if workdir is None:
+        workdir = _alloc_output_workdir(repo_url)
     generator = NonOssFuzzHarnessGenerator(
         repo_spec=RepoSpec(url=repo_url, workdir=workdir),
         ai_key_path=ai_key_path,
@@ -1664,6 +1675,16 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
     return "fix_build"
 
 
+def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+        return "stop"
+    raw = (state.get("resume_from_step") or "").strip().lower()
+    allowed = {"plan", "synthesize", "build", "fix_build", "run", "fix_crash"}
+    if raw in allowed:
+        return raw
+    return "plan"
+
+
 def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
@@ -1676,7 +1697,6 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("run", _node_run)
 
     graph.set_entry_point("init")
-    graph.add_edge("init", "plan")
 
     def _route_after_plan(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")) or (state.get("last_error") or "").strip():
@@ -1717,6 +1737,19 @@ def build_fuzz_workflow() -> StateGraph:
             return "stop"
         return "build"
 
+    graph.add_conditional_edges(
+        "init",
+        _route_after_init_state,
+        {
+            "plan": "plan",
+            "synthesize": "synthesize",
+            "build": "build",
+            "fix_build": "fix_build",
+            "run": "run",
+            "fix_crash": "fix_crash",
+            "stop": END,
+        },
+    )
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
     graph.add_conditional_edges("build", _route_after_build, {"run": "run", "fix_build": "fix_build", "stop": END})
@@ -1748,11 +1781,14 @@ def _write_run_summary(out: dict[str, Any]) -> None:
 
 
 def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
+    resume_step = (inp.resume_from_step or "").strip().lower()
+    resume_root = str(inp.resume_repo_root or "").strip()
     _wf_log(
         None,
         "workflow start "
         f"repo={inp.repo_url} docker_image={inp.docker_image or '(host)'} "
-        f"time_budget={inp.time_budget}s run_time_budget={inp.run_time_budget}s",
+        f"time_budget={inp.time_budget}s run_time_budget={inp.run_time_budget}s "
+        f"resume_step={resume_step or '-'} resume_root={resume_root or '-'}",
     )
     t0 = time.perf_counter()
     try:
@@ -1771,6 +1807,8 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
             "max_len": inp.max_len,
             "docker_image": inp.docker_image,
             "ai_key_path": str(inp.ai_key_path),
+            "resume_from_step": (inp.resume_from_step or "").strip().lower(),
+            "resume_repo_root": str(inp.resume_repo_root or ""),
             "max_steps": max_steps,
         }
     )

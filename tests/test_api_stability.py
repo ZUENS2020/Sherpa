@@ -30,8 +30,12 @@ class _ImmediateExecutor:
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_state(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("SHERPA_WEB_JOB_STORE_MODE", "memory")
+    monkeypatch.setenv("SHERPA_WEB_AUTO_RESUME_ON_START", "0")
     with web_main._JOBS_LOCK:
         web_main._JOBS.clear()
+    monkeypatch.setattr(web_main, "_JOB_STORE", None)
+    web_main._cfg_set(WebPersistentConfig())
 
     monkeypatch.setattr(web_main, "executor", _ImmediateExecutor())
     monkeypatch.setattr(web_main, "save_config", lambda cfg: None)
@@ -225,3 +229,109 @@ def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     items = response.json()["items"]
     assert len(items) == 1
     assert items[0]["job_id"] == task_latest
+
+
+def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(web_main, "fuzz_logic", lambda *args, **kwargs: {"ok": True})
+
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="recoverable",
+        request={"code_url": "https://github.com/example/repo.git"},
+        resume_from_step="run",
+        workflow_repo_root=str(tmp_path),
+        resume_repo_root=str(tmp_path),
+        parent_id=task_id,
+    )
+    web_main._job_update(task_id, status="recoverable", children=[child_id])
+
+    with TestClient(web_main.app) as client:
+        response = client.post(f"/api/task/{task_id}/resume")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted"] is True
+        task = client.get(f"/api/task/{task_id}").json()
+
+    child = web_main._job_snapshot(child_id)
+    assert child is not None
+    assert child["status"] == "resumed"
+    assert child["result"] == {"ok": True}
+    assert task["status"] == "success"
+
+
+def test_resume_task_missing_child_request_marks_resume_failed(monkeypatch):
+    monkeypatch.setattr(web_main, "fuzz_logic", lambda *args, **kwargs: {"ok": True})
+
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(child_id, status="recoverable", parent_id=task_id)
+    web_main._job_update(task_id, status="recoverable", children=[child_id])
+
+    with TestClient(web_main.app) as client:
+        response = client.post(f"/api/task/{task_id}/resume")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["accepted"] is False
+        assert data["reason"] == "no_resumable_children"
+
+    child = web_main._job_snapshot(child_id)
+    assert child is not None
+    assert child["status"] == "resume_failed"
+    assert child.get("resume_error_code") == "missing_resume_context"
+
+
+def test_resume_task_request_is_idempotent(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(web_main, "fuzz_logic", lambda *args, **kwargs: "ok")
+
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="recoverable",
+        request={"code_url": "https://github.com/example/repo.git"},
+        resume_from_step="run",
+        workflow_repo_root=str(tmp_path),
+        resume_repo_root=str(tmp_path),
+        parent_id=task_id,
+    )
+    web_main._job_update(task_id, status="recoverable", children=[child_id])
+
+    with TestClient(web_main.app) as client:
+        first = client.post(f"/api/task/{task_id}/resume").json()
+        second = client.post(f"/api/task/{task_id}/resume").json()
+
+    assert first["accepted"] is True
+    assert second["accepted"] is False
+    assert second["reason"] in {"already_completed", "no_resumable_children", "already_in_progress"}
+
+
+def test_resume_fuzz_job_uses_saved_resume_step_and_repo(monkeypatch, tmp_path: Path):
+    captured: dict[str, object] = {}
+
+    def _fake_fuzz_logic(*args, **kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(web_main, "fuzz_logic", _fake_fuzz_logic)
+
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="recoverable",
+        request={"code_url": "https://github.com/example/repo.git"},
+        resume_from_step="run",
+        workflow_repo_root=str(tmp_path),
+        resume_repo_root=str(tmp_path),
+    )
+
+    with TestClient(web_main.app) as client:
+        response = client.post(f"/api/task/{child_id}/resume")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["kind"] == "fuzz"
+
+    assert captured.get("resume_from_step") == "run"
+    assert str(captured.get("resume_repo_root")) == str(tmp_path)
