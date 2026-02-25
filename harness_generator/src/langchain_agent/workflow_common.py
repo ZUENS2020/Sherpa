@@ -129,16 +129,32 @@ def classify_build_failure(
             ],
         ),
         (
-            "registry_or_network_unavailable",
+            "registry_dns_resolution_failed",
+            [
+                "temporary failure in name resolution",
+                "no such host",
+                "lookup registry-1.docker.io",
+                "server misbehaving",
+            ],
+        ),
+        (
+            "registry_tls_handshake_timeout",
             [
                 "tls handshake timeout",
-                "temporary failure in name resolution",
+                "tls: handshake failure",
+                "x509: certificate",
+            ],
+        ),
+        (
+            "registry_or_network_unavailable",
+            [
                 "failed to resolve source metadata",
                 "dial tcp",
-                "no such host",
                 "proxyconnect tcp",
                 "connection refused",
                 "i/o timeout",
+                "connection reset by peer",
+                "context deadline exceeded",
             ],
         ),
         (
@@ -178,6 +194,53 @@ def classify_build_failure(
         return "source", "script_error"
 
     return "unknown", "unknown_build_failure"
+
+
+def build_failure_recovery_advice(error_kind: str, error_code: str) -> str:
+    if error_kind != "infra":
+        return ""
+
+    common = (
+        "You can tune/disable retries via SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES "
+        "and SHERPA_DOCKER_BUILD_RETRIES if runtime becomes too long."
+    )
+    recovery: dict[str, str] = {
+        "docker_daemon_unavailable": (
+            "Docker daemon appears unreachable. Verify docker service is running, "
+            "current user has permission to access /var/run/docker.sock, and retry. "
+            + common
+        ),
+        "buildkit_unavailable": (
+            "BuildKit/buildx is unavailable. Install/repair docker buildx plugin or "
+            "temporarily set DOCKER_BUILDKIT=0 for classic builder fallback. "
+            + common
+        ),
+        "registry_dns_resolution_failed": (
+            "Registry DNS resolution failed. Check host/container DNS settings, "
+            "configure stable resolvers (for example 8.8.8.8/1.1.1.1), and retry. "
+            + common
+        ),
+        "registry_tls_handshake_timeout": (
+            "Registry TLS handshake timed out. Check outbound HTTPS path/proxy, "
+            "verify system clock/cert trust chain, and retry with network backoff. "
+            + common
+        ),
+        "registry_or_network_unavailable": (
+            "Container registry/network is unstable. Check proxy/firewall rules and "
+            "egress connectivity to registry endpoints before retrying. "
+            + common
+        ),
+        "resource_exhausted": (
+            "Build host resources are exhausted. Free disk/memory (e.g., docker system prune) "
+            "and retry. "
+            + common
+        ),
+        "build_command_timeout": (
+            "Build command timed out. Increase time budget or reduce retry counts for this run. "
+            + common
+        ),
+    }
+    return recovery.get(error_code, f"Infrastructure build failure detected ({error_code}). {common}")
 
 
 def collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:

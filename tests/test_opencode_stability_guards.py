@@ -123,3 +123,23 @@ def test_classify_build_failure_marks_compile_error_as_source():
 
     assert kind == "source"
     assert code in {"missing_source_file", "compile_error"}
+
+
+def test_classify_build_failure_marks_dns_issue_as_infra():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "failed to do request: Head https://registry-1.docker.io/v2/: dial tcp: lookup registry-1.docker.io: no such host",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+
+    assert kind == "infra"
+    assert code == "registry_dns_resolution_failed"
+
+
+def test_build_failure_recovery_advice_mentions_dns_for_registry_resolution():
+    advice = workflow_graph._build_failure_recovery_advice("infra", "registry_dns_resolution_failed")
+
+    assert "DNS" in advice
+    assert "SHERPA_DOCKER_BUILD_RETRIES" in advice

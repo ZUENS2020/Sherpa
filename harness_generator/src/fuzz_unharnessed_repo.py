@@ -788,6 +788,54 @@ class NonOssFuzzHarnessGenerator:
 
         print(f"[*] Docker image '{image}' not found. Building it now …")
 
+        def _docker_network_precheck() -> None:
+            """Best-effort precheck for common DNS/TLS connectivity failures."""
+            flag = os.environ.get("SHERPA_DOCKER_NETWORK_PRECHECK", "1").strip().lower()
+            if flag in {"0", "false", "no", "off"}:
+                return
+
+            probe_cmd = [
+                "docker",
+                "run",
+                "--rm",
+                "--pull=never",
+                "busybox:latest",
+                "sh",
+                "-lc",
+                "nslookup registry-1.docker.io >/dev/null 2>&1 || nslookup auth.docker.io >/dev/null 2>&1",
+            ]
+            try:
+                proc = subprocess.run(
+                    probe_cmd,
+                    cwd=str(TOOL_ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                    timeout=35,
+                )
+            except Exception:
+                # Best-effort only: do not block build if precheck itself fails unexpectedly.
+                return
+            if proc.returncode == 0:
+                print("[*] Docker network precheck passed (registry DNS reachable).")
+                return
+
+            out = (proc.stdout or "").strip()
+            print(
+                "[warn] Docker network precheck failed: cannot resolve Docker registry DNS from container runtime. "
+                "Build may fail with name-resolution/TLS timeouts."
+            )
+            if out:
+                print("[warn] precheck output tail:\n" + "\n".join(out.splitlines()[-20:]))
+            print(
+                "[warn] recovery: verify DNS/proxy settings for Docker daemon and container network, "
+                "then retry (set SHERPA_DOCKER_NETWORK_PRECHECK=0 to skip this precheck)."
+            )
+
+        _docker_network_precheck()
+
         def _is_transient_registry_error(lines: list[str]) -> bool:
             blob = "\n".join(lines).lower()
             needles = [
@@ -887,8 +935,25 @@ class NonOssFuzzHarnessGenerator:
 
         tail = "".join(last_lines[-120:]).strip()
         if tail:
+            low_tail = tail.lower()
+            recovery = ""
+            if any(x in low_tail for x in ["temporary failure in name resolution", "no such host", "lookup registry-1.docker.io"]):
+                recovery = (
+                    "\nRecovery suggestion: Docker registry DNS lookup failed. Check daemon DNS config and "
+                    "host resolver settings, then retry."
+                )
+            elif "tls handshake timeout" in low_tail or "x509:" in low_tail:
+                recovery = (
+                    "\nRecovery suggestion: Docker registry TLS handshake failed. Check proxy/CA certificates "
+                    "and system clock, then retry."
+                )
+            elif "cannot connect to the docker daemon" in low_tail or "is the docker daemon running" in low_tail:
+                recovery = (
+                    "\nRecovery suggestion: Docker daemon is unreachable. Start/restart Docker service and "
+                    "verify socket permission before retrying."
+                )
             raise HarnessGeneratorError(
-                f"Docker build failed (rc={last_rc}). Last output tail:\n{tail}"
+                f"Docker build failed (rc={last_rc}). Last output tail:\n{tail}{recovery}"
             )
         raise HarnessGeneratorError(f"Docker build failed (rc={last_rc}).")
 

@@ -294,3 +294,24 @@ def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
     assert out["last_error"] == ""
     assert "hotfix" in out["message"]
     assert "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" in build_py.read_text(encoding="utf-8")
+
+
+def test_build_failure_infra_error_includes_recovery_hint(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(1, "", "temporary failure in name resolution")],
+        bin_results=[[]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 1
+    assert out["build_error_kind"] == "infra"
+    assert "recovery:" in out["last_error"]
+    assert "DNS" in out["last_error"]
