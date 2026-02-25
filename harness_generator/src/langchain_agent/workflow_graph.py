@@ -62,6 +62,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_evidence: str
     run_error_kind: str
     run_details: list[dict[str, Any]]
+    run_batch_plan: list[dict[str, Any]]
     last_crash_artifact: str
     last_fuzzer: str
     crash_signature: str
@@ -89,6 +90,19 @@ def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
 
 def _fmt_dt(seconds: float) -> str:
     return _wf_common.fmt_dt(seconds)
+
+
+def _calc_parallel_batch_budget(
+    *,
+    pending_count: int,
+    max_parallel: int,
+    remaining_for_run: int,
+    configured_run_time_budget: int,
+) -> tuple[int, int, int]:
+    rounds_left = (pending_count + max_parallel - 1) // max_parallel
+    round_budget = min(configured_run_time_budget, max(1, remaining_for_run // max(1, rounds_left)))
+    hard_timeout = min(max(60, round_budget + 120), max(60, remaining_for_run + 30))
+    return rounds_left, round_budget, hard_timeout
 
 
 def _llm_or_none() -> ChatOpenAI | None:
@@ -1282,6 +1296,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_error_kind = ""
         run_last_error = ""
         run_details: list[dict[str, Any]] = []
+        run_batch_plan: list[dict[str, Any]] = []
         configured_run_time_budget = max(1, int(state.get("run_time_budget") or state.get("time_budget") or 900))
         prev_crash_sig = str(state.get("crash_signature") or "").strip()
         prev_crash_repeats = int(state.get("same_crash_repeats") or 0)
@@ -1355,14 +1370,28 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     pending_bins = []
                     break
 
-                rounds_left = (len(pending_bins) + max_parallel - 1) // max_parallel
-                round_budget = min(configured_run_time_budget, max(1, remaining_for_run // max(1, rounds_left)))
-                hard_timeout = min(max(60, round_budget + 120), max(60, remaining_for_run + 30))
+                rounds_left, round_budget, hard_timeout = _calc_parallel_batch_budget(
+                    pending_count=len(pending_bins),
+                    max_parallel=max_parallel,
+                    remaining_for_run=remaining_for_run,
+                    configured_run_time_budget=configured_run_time_budget,
+                )
                 setattr(gen, "current_run_time_budget_sec", round_budget)
                 setattr(gen, "current_run_hard_timeout_sec", hard_timeout)
 
                 batch = pending_bins[:max_parallel]
                 pending_bins = pending_bins[max_parallel:]
+                run_batch_plan.append(
+                    {
+                        "round": len(run_batch_plan) + 1,
+                        "batch_size": len(batch),
+                        "pending_before": len(batch) + len(pending_bins),
+                        "rounds_left": rounds_left,
+                        "remaining_total_budget_sec": remaining_for_run,
+                        "round_budget_sec": round_budget,
+                        "hard_timeout_sec": hard_timeout,
+                    }
+                )
                 _wf_log(
                     cast(dict[str, Any], state),
                     (
@@ -1526,6 +1555,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "crash_evidence": crash_evidence,
             "run_error_kind": run_error_kind,
             "run_details": run_details,
+            "run_batch_plan": run_batch_plan,
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "crash_signature": crash_signature,
