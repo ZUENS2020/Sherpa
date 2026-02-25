@@ -72,9 +72,9 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Skipping OpenCode CLI install"; \
         fi
 
-# Run the FastAPI web UI (static + API) from its folder so relative imports work.
+# Run the FastAPI API backend from its folder so relative imports work.
 WORKDIR /app/harness_generator/src/langchain_agent
 
-EXPOSE 8000
+EXPOSE 8001
 
 CMD ["python", "main.py"]

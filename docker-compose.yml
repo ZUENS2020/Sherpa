@@ -1,4 +1,5 @@
 services:
+  # Bootstrap container: ensure shared oss-fuzz checkout exists before web starts.
   sherpa-oss-fuzz-init:
     image: alpine/git:latest
     restart: "no"
@@ -28,14 +29,15 @@ services:
         git clone --depth 1 "$$REPO" /shared/oss-fuzz
         test -f /shared/oss-fuzz/infra/helper.py
 
+  # API backend only: workflow orchestration + task/log/config endpoints.
   sherpa-web:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
       args:
         INSTALL_OPENCODE: "0"
-    ports:
-      - "8000:8000"
+    expose:
+      - "8001"
     volumes:
       # Persist job logs/config inside a docker volume (fully self-hosted).
       - sherpa-config:/app/config
@@ -59,7 +61,7 @@ services:
     environment:
       # Make Uvicorn bind for container networking (main.py reads these).
       HOST: "0.0.0.0"
-      PORT: "8000"
+      PORT: "8001"
 
       # Ensure all temp repos land on the shared volume so Docker mounts work.
       TMPDIR: "/shared/tmp"
@@ -105,6 +107,7 @@ services:
       sherpa-docker:
         condition: service_healthy
 
+  # Docker daemon sidecar (dind): build/run fuzz runtime containers.
   sherpa-docker:
     image: docker:27-dind
     privileged: true
@@ -143,6 +146,7 @@ services:
       - ./output:/shared/output
       - ./opencode.json:/opencode.json:ro
 
+  # Optional helper image for OpenCode CLI.
   sherpa-opencode:
     build:
       context: .
@@ -151,6 +155,33 @@ services:
     restart: "no"
     profiles:
       - opencode
+
+  # Frontend UI service (Next.js).
+  sherpa-frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE: "/api"
+      NEXT_PUBLIC_SENTRY_DSN: "${NEXT_PUBLIC_SENTRY_DSN:-}"
+    depends_on:
+      sherpa-web:
+        condition: service_started
+
+  # Single public entrypoint: "/" -> frontend, "/api/*" -> web backend.
+  sherpa-gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - ./docker/nginx/sherpa.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      sherpa-web:
+        condition: service_started
+      sherpa-frontend:
+        condition: service_started
 
 volumes:
   sherpa-docker-data:

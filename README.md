@@ -20,7 +20,9 @@ Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统�
 
 ```mermaid
 flowchart LR
-  U["User / CI"] --> WEB["sherpa-web (FastAPI + Static UI)"]
+  U["User / CI"] --> GW["sherpa-gateway (Nginx)"]
+  GW --> FE["sherpa-frontend (Next.js)"]
+  GW --> WEB["sherpa-web (FastAPI API)"]
   WEB --> JOB["In-memory Job Store (_JOBS)"]
   WEB --> WF["LangGraph Workflow"]
   WF --> OC["OpenCode via CodexHelper"]
@@ -37,10 +39,12 @@ flowchart LR
 |---|---|---|
 | Web API | `harness_generator/src/langchain_agent/main.py` | 配置管理、任务提交、任务状态聚合、日志落盘与分类 |
 | Workflow | `harness_generator/src/langchain_agent/workflow_graph.py` | 节点定义、状态路由、失败策略、summary 输出 |
+| Workflow 公共工具 | `harness_generator/src/langchain_agent/workflow_common.py` | 通用校验、预算控制、prompt 模板加载与渲染 |
+| Workflow Summary | `harness_generator/src/langchain_agent/workflow_summary.py` | 运行产物盘点、run summary/fuzz effectiveness 输出 |
 | Fuzz 执行器 | `harness_generator/src/fuzz_unharnessed_repo.py` | clone/build/run/crash triage/bundle |
 | OpenCode 封装 | `harness_generator/src/codex_helper.py` | 调用 CLI、超时/重试、done 语义 |
 | 配置层 | `harness_generator/src/langchain_agent/persistent_config.py` | 持久化配置、环境变量同步、key 脱敏 |
-| 前端 | `harness_generator/src/langchain_agent/static/index.html` + `script.js` | 提交任务、绑定会话、进度/日志/错误可视化 |
+| 前端 | `frontend-next/` (Next.js 14 + TS + MUI + TanStack Query + Zustand) | 提交任务、绑定会话、进度/日志/错误可视化 |
 | Prompt 模板 | `harness_generator/src/langchain_agent/prompts/opencode_prompts.md` | plan/synthesize/fix_* 统一模板 |
 
 ---
@@ -53,6 +57,8 @@ flowchart LR
 flowchart TB
   subgraph NET["Docker Compose Network"]
     INIT["sherpa-oss-fuzz-init"]
+    GW["sherpa-gateway (nginx)"]
+    FE["sherpa-frontend (Next.js)"]
     WEB["sherpa-web"]
     DIND["sherpa-docker (dind)"]
     OC["sherpa-opencode (profile: opencode)"]
@@ -72,6 +78,8 @@ flowchart TB
   WEB --> JLOG["volume: sherpa-job-logs (/app/job-logs)"]
 
   WEB -->|"DOCKER_HOST=tcp://sherpa-docker:2375"| DIND
+  GW --> FE
+  GW --> WEB
 ```
 
 ### 3.2 启动时序
@@ -82,6 +90,8 @@ sequenceDiagram
   participant DC as docker compose
   participant Init as sherpa-oss-fuzz-init
   participant Dind as sherpa-docker
+  participant FE as sherpa-frontend
+  participant GW as sherpa-gateway
   participant Web as sherpa-web
 
   Dev->>DC: docker compose up -d --build
@@ -90,9 +100,11 @@ sequenceDiagram
   Init-->>DC: complete successfully
   DC->>Dind: start docker daemon container
   Dind-->>DC: healthcheck ready
-  DC->>Web: start API/UI service
+  DC->>Web: start API service
+  DC->>FE: start Next.js frontend
+  DC->>GW: start nginx gateway
   Web->>Web: load web_config.json + apply env
-  Web-->>Dev: :8000 ready
+  GW-->>Dev: :8000 ready
 ```
 
 ### 3.3 关键 compose 配置点
@@ -101,6 +113,17 @@ sequenceDiagram
 2. dind 支持可选镜像加速：`SHERPA_DOCKER_REGISTRY_MIRROR`（运行时注入，不写死个人源）。
 3. `/shared/output` 是主产物目录（当前映射到仓库 `./output`）。
 4. `sherpa-web` 和 `sherpa-docker` 共享 `sherpa-tmp` 与 `sherpa-oss-fuzz`，保证容器内路径一致。
+5. `sherpa-gateway` 统一入口：`/` -> `sherpa-frontend`，`/api/*` -> `sherpa-web`。
+
+### 3.4 容器职责（明确分工）
+
+| 容器 | 职责 | 对外暴露 |
+|---|---|---|
+| `sherpa-gateway` | 唯一入口网关，转发 UI/API | `:8000` |
+| `sherpa-frontend` | Next.js 前端页面与交互 | 内部 `:3000` |
+| `sherpa-web` | FastAPI API + workflow 编排 + 任务状态/日志 | 内部 `:8001` |
+| `sherpa-docker` | Docker daemon（dind），负责构建/运行 fuzz 容器 | 内部 `:2375` |
+| `sherpa-oss-fuzz-init` | 初始化/校验 oss-fuzz 工作目录 | 无 |
 
 ---
 
@@ -120,8 +143,9 @@ docker compose up -d --build
 
 ### 4.3 访问与健康检查
 
-- UI: `http://localhost:8000`
-- API: `http://localhost:8000/api/*`
+- 统一入口（Gateway）: `http://localhost:8000`
+- 前端（Next.js，经网关访问）: `http://localhost:8000/`
+- API（FastAPI，经网关访问）: `http://localhost:8000/api/*`
 
 ```bash
 curl -s http://localhost:8000/api/system | jq
@@ -168,7 +192,6 @@ curl -s http://localhost:8000/api/task \
 │   │   │   ├── workflow_graph.py
 │   │   │   ├── persistent_config.py
 │   │   │   ├── prompts/opencode_prompts.md
-│   │   │   └── static/{index.html,script.js}
 │   │   ├── fuzz_unharnessed_repo.py
 │   │   └── codex_helper.py
 │   └── requirements.txt
@@ -428,10 +451,12 @@ sequenceDiagram
 
 ## 12. 前端行为说明（当前版本）
 
-前端文件：
+前端工程：
 
-- `harness_generator/src/langchain_agent/static/index.html`
-- `harness_generator/src/langchain_agent/static/script.js`
+- `frontend-next/app/*`
+- `frontend-next/components/*`
+- `frontend-next/lib/api/*`
+- `frontend-next/store/useUiStore.ts`
 
 ### 12.1 页面重点
 
@@ -442,9 +467,9 @@ sequenceDiagram
 
 ### 12.2 日志分类（避免误报）
 
-前端通过显式规则识别错误行，不会把普通运行日志全部归为错误。
+前端通过显式前缀规则识别日志级别，不会把普通运行日志全部归为错误。
 
-分类入口：`classifyLogEvent(line)`。
+分类入口：`frontend-next/components/logUtils.ts` 中的 `detectLevel(line)`。
 
 规则示例：
 
@@ -752,9 +777,9 @@ pytest -q tests
 
 ### 22.3 新增前端面板
 
-1. 在 `index.html` 增加容器块。
-2. 在 `script.js` 增加渲染与轮询逻辑。
-3. 优先复用现有 `render*Panel` 与 `parseWorkflowLog` 数据结构。
+1. 在 `frontend-next/components/*` 新增面板组件。
+2. 在 `frontend-next/lib/api/hooks.ts` 接入数据轮询。
+3. 在 `frontend-next/store/useUiStore.ts` 管理会话绑定与日志 UI 状态。
 
 ---
 

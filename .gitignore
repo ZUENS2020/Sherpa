@@ -34,3 +34,6 @@ oss-fuzz/
 nul
 .pytest_cache/
 .playwright-cli/
+frontend-next/node_modules/
+frontend-next/.next/
+frontend-next/coverage/

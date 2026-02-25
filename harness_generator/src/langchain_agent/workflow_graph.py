@@ -6,10 +6,8 @@ import os
 import re
 import time
 import shutil
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, TypedDict, cast
 
@@ -17,6 +15,9 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from persistent_config import load_config
+
+import workflow_common as _wf_common
+import workflow_summary as _wf_summary
 
 from fuzz_unharnessed_repo import (
     FuzzerRunResult,
@@ -79,23 +80,11 @@ class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
 
 
 def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
-    step_count = ""
-    last_step = ""
-    nxt = ""
-    if state:
-        step_count = str(state.get("step_count") or "")
-        last_step = str(state.get("last_step") or "")
-        nxt = str(state.get("next") or "")
-    prefix = "[wf]"
-    if step_count or last_step or nxt:
-        prefix = f"[wf step={step_count or '-'} last={last_step or '-'} next={nxt or '-'}]"
-    print(f"{prefix} {msg}", flush=True)
+    _wf_common.wf_log(state, msg)
 
 
 def _fmt_dt(seconds: float) -> str:
-    if seconds < 1:
-        return f"{seconds*1000:.0f}ms"
-    return f"{seconds:.2f}s"
+    return _wf_common.fmt_dt(seconds)
 
 
 def _llm_or_none() -> ChatOpenAI | None:
@@ -150,296 +139,64 @@ def _llm_or_none() -> ChatOpenAI | None:
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    # Try to find the first {...} block.
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        return None
-    blob = m.group(0)
-    try:
-        val = json.loads(blob)
-    except Exception:
-        return None
-    return val if isinstance(val, dict) else None
+    return _wf_common.extract_json_object(text)
 
 
 def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    return _wf_common.sha256_text(text)
 
 
 def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
-    targets = repo_root / "fuzz" / "targets.json"
-    if not targets.is_file():
-        return False, "missing fuzz/targets.json"
-    try:
-        data = json.loads(targets.read_text(encoding="utf-8", errors="replace"))
-    except Exception as e:
-        return False, f"invalid json in fuzz/targets.json: {e}"
-
-    if not isinstance(data, list) or not data:
-        return False, "targets.json must be a non-empty JSON array"
-
-    allowed_lang = {"c-cpp", "cpp", "c", "c++", "java"}
-    for i, item in enumerate(data):
-        if not isinstance(item, dict):
-            return False, f"targets[{i}] must be an object"
-        for key in ("name", "api", "lang"):
-            val = item.get(key)
-            if not isinstance(val, str) or not val.strip():
-                return False, f"targets[{i}].{key} must be a non-empty string"
-        lang = str(item.get("lang") or "").strip().lower()
-        if lang not in allowed_lang:
-            return False, f"targets[{i}].lang unsupported: {item.get('lang')}"
-    return True, ""
+    return _wf_common.validate_targets_json(repo_root)
 
 
 def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) -> dict[str, str]:
-    combined = "\n".join(x for x in [last_error, stdout_tail, stderr_tail] if x).strip()
-    low = combined.lower()
-    error_type = "unknown"
-    if any(k in low for k in ["missing fuzz/build.py", "no such file", "cannot find", "not found"]):
-        error_type = "missing_file"
-    elif any(k in low for k in ["undefined reference", "ld:", "linker", "collect2"]):
-        error_type = "link_error"
-    elif any(k in low for k in ["error:", "fatal error:", "compilation terminated", "clang", "gcc"]):
-        error_type = "compile_error"
-    elif any(k in low for k in ["traceback", "exception", "module not found", "syntaxerror"]):
-        error_type = "script_error"
-
-    evidence_lines = [ln.strip() for ln in combined.splitlines() if ln.strip()]
-    evidence = "\n".join(evidence_lines[-12:])
-    return {
-        "error_type": error_type,
-        "evidence": evidence,
-    }
+    return _wf_common.summarize_build_error(last_error, stdout_tail, stderr_tail)
 
 
 def _collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:
-    pairs = [
-        ("fuzz/targets.json", repo_root / "fuzz" / "targets.json"),
-        ("fuzz/build.py", repo_root / "fuzz" / "build.py"),
-        ("fuzz/PLAN.md", repo_root / "fuzz" / "PLAN.md"),
-    ]
-    out: dict[str, str] = {}
-    for name, path in pairs:
-        if not path.is_file():
-            continue
-        try:
-            out[name] = _sha256_text(path.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            continue
-    return out
+    return _wf_common.collect_key_artifact_hashes(repo_root)
 
 
 def _has_codex_key() -> bool:
-    # Check for any available API key (OpenAI, OpenRouter, or OpenCode)
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if openai_key and openai_key.strip():
-        return True
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-    if openrouter_key and openrouter_key.strip():
-        return True
-    try:
-        cfg = load_config()
-        if cfg.openai_api_key and cfg.openai_api_key.strip():
-            return True
-        if cfg.openrouter_api_key and cfg.openrouter_api_key.strip():
-            return True
-    except Exception:
-        pass
-    opencode_key = os.environ.get("OPENCODE_API_KEY")
-    if opencode_key and opencode_key.strip():
-        return True
-    return False
+    return _wf_common.has_codex_key()
 
 
 def _slug_from_repo_url(repo_url: str) -> str:
-    base = repo_url.rstrip("/").split("/")[-1]
-    if base.endswith(".git"):
-        base = base[: -len(".git")]
-    base = re.sub(r"[^a-zA-Z0-9._-]+", "-", base).strip("-")
-    return base or "repo"
+    return _wf_common.slug_from_repo_url(repo_url)
 
 
 def _alloc_output_workdir(repo_url: str) -> Path | None:
-    out_root = os.environ.get("SHERPA_OUTPUT_DIR", "").strip()
-    if not out_root:
-        return None
-    base = Path(out_root).expanduser().resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    slug = _slug_from_repo_url(repo_url)
-    return base / f"{slug}-{uuid.uuid4().hex[:8]}"
+    return _wf_common.alloc_output_workdir(repo_url)
 
 
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
-    started_at = float(state.get("workflow_started_at") or time.time())
-    time_budget = max(1, int(state.get("time_budget") or 900))
-    elapsed = time.time() - started_at
-    if elapsed >= time_budget:
-        out = cast(
-            FuzzWorkflowRuntimeState,
-            {
-                **state,
-                "last_step": step_name,
-                "failed": True,
-                "last_error": f"time budget exceeded: elapsed={elapsed:.1f}s budget={time_budget}s",
-                "message": "workflow stopped (time budget exceeded)",
-            },
-        )
-        _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=time_budget elapsed={elapsed:.1f}s budget={time_budget}s")
-        return out, True
-
-    step_count = int(state.get("step_count") or 0) + 1
-    max_steps = int(state.get("max_steps") or 10)
-    next_state = cast(FuzzWorkflowRuntimeState, {**state, "step_count": step_count})
-    if step_count >= max_steps:
-        failed = bool(next_state.get("last_error")) and not bool(next_state.get("crash_found"))
-        out = cast(
-            FuzzWorkflowRuntimeState,
-            {
-                **next_state,
-                "last_step": step_name,
-                "failed": failed,
-                "message": "workflow stopped (max steps reached)",
-            },
-        )
-        _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=max_steps")
-        return out, True
-    return next_state, False
+    out, stop = _wf_common.enter_step(cast(dict[str, Any], state), step_name)
+    return cast(FuzzWorkflowRuntimeState, out), stop
 
 
 def _remaining_time_budget_sec(state: FuzzWorkflowRuntimeState, *, min_timeout: int = 5) -> int:
-    started_at = float(state.get("workflow_started_at") or time.time())
-    total_budget = max(1, int(state.get("time_budget") or 900))
-    elapsed = max(0.0, time.time() - started_at)
-    remaining = int(total_budget - elapsed)
-    if remaining <= 0:
-        return 0
-    # Do not return a timeout larger than the real remaining total budget.
-    return remaining
+    return _wf_common.remaining_time_budget_sec(cast(dict[str, Any], state), min_timeout=min_timeout)
 
 
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
-    started_at = float(state.get("workflow_started_at") or time.time())
-    time_budget = max(1, int(state.get("time_budget") or 900))
-    elapsed = max(0.0, time.time() - started_at)
-    out = cast(
-        FuzzWorkflowRuntimeState,
-        {
-            **state,
-            "last_step": step_name,
-            "failed": True,
-            "last_error": f"time budget exceeded: elapsed={elapsed:.1f}s budget={time_budget}s",
-            "message": "workflow stopped (time budget exceeded)",
-        },
-    )
-    _wf_log(cast(dict[str, Any], out), f"<- {step_name} stop=time_budget elapsed={elapsed:.1f}s budget={time_budget}s")
-    return out
+    return cast(FuzzWorkflowRuntimeState, _wf_common.time_budget_exceeded_state(cast(dict[str, Any], state), step_name=step_name))
 
 
 def _make_plan_hint(repo_root: Path) -> str:
-    hints: list[str] = []
-    plan_path = repo_root / "fuzz" / "PLAN.md"
-    targets_path = repo_root / "fuzz" / "targets.json"
-
-    if targets_path.is_file():
-        try:
-            raw = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
-            if isinstance(raw, list) and raw:
-                names = [str(it.get("name") or "").strip() for it in raw if isinstance(it, dict)]
-                names = [n for n in names if n]
-                if names:
-                    hints.append(f"Prioritize targets in fuzz/targets.json: {', '.join(names[:3])}.")
-        except Exception:
-            pass
-
-    if plan_path.is_file():
-        try:
-            for line in plan_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                s = line.strip()
-                if s.startswith(("Primary fuzzer:", "Target:")):
-                    hints.append(s)
-                if len(hints) >= 3:
-                    break
-        except Exception:
-            pass
-
-    hints.extend(
-        [
-            "Keep harness deterministic and only touch fuzz/ plus minimal build glue.",
-            "Ensure fuzz/build.py leaves at least one runnable fuzzer under fuzz/out/.",
-        ]
-    )
-    return "\n".join(hints[:6])
+    return _wf_common.make_plan_hint(repo_root)
 
 
 def _derive_plan_policy(repo_root: Path) -> tuple[bool, int]:
-    """Derive stop/repair policy from fuzz/PLAN.md (with safe defaults).
-
-    Supported PLAN.md hints (case-insensitive):
-    - "Crash policy: report-only"  -> do not enter fix_crash
-    - "Crash policy: fix"          -> enter fix_crash (default)
-    - "Max fix rounds: <N>"        -> max fix_crash rounds before stop (default 1)
-    """
-    fix_on_crash = True
-    max_fix_rounds = 1
-    plan_path = repo_root / "fuzz" / "PLAN.md"
-    if not plan_path.is_file():
-        return fix_on_crash, max_fix_rounds
-
-    try:
-        text = plan_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return fix_on_crash, max_fix_rounds
-
-    m_policy = re.search(r"crash\s*policy\s*:\s*([^\n\r]+)", text, re.IGNORECASE)
-    if m_policy:
-        val = m_policy.group(1).strip().lower()
-        if "report" in val or "triage" in val:
-            fix_on_crash = False
-        elif "fix" in val:
-            fix_on_crash = True
-
-    m_rounds = re.search(r"max\s*fix\s*rounds\s*:\s*(\d+)", text, re.IGNORECASE)
-    if m_rounds:
-        try:
-            max_fix_rounds = max(0, min(int(m_rounds.group(1)), 20))
-        except Exception:
-            pass
-
-    return fix_on_crash, max_fix_rounds
+    return _wf_common.derive_plan_policy(repo_root)
 
 
-_OPENCODE_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "opencode_prompts.md"
-
-
-@lru_cache(maxsize=1)
 def _load_opencode_prompt_templates() -> dict[str, str]:
-    if not _OPENCODE_PROMPT_FILE.is_file():
-        raise RuntimeError(f"OpenCode prompt template file not found: {_OPENCODE_PROMPT_FILE}")
-    text = _OPENCODE_PROMPT_FILE.read_text(encoding="utf-8", errors="replace")
-    pattern = re.compile(
-        r"<!--\s*TEMPLATE:\s*([a-zA-Z0-9_]+)\s*-->\s*\n(.*?)\n<!--\s*END TEMPLATE\s*-->",
-        re.DOTALL,
-    )
-    templates: dict[str, str] = {}
-    for name, body in pattern.findall(text):
-        templates[name.strip().lower()] = body.strip()
-    if not templates:
-        raise RuntimeError(f"No templates found in {_OPENCODE_PROMPT_FILE}")
-    return templates
+    return _wf_common.load_opencode_prompt_templates()
 
 
 def _render_opencode_prompt(name: str, **kwargs: object) -> str:
-    templates = _load_opencode_prompt_templates()
-    key = name.strip().lower()
-    if key not in templates:
-        raise RuntimeError(f"OpenCode prompt template '{name}' not found in {_OPENCODE_PROMPT_FILE}")
-    out = templates[key]
-    for k, v in kwargs.items():
-        out = out.replace("{{" + k + "}}", str(v))
-    return out.strip() + "\n"
+    return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -1916,281 +1673,23 @@ def build_fuzz_workflow() -> StateGraph:
 
 
 def _detect_harness_error(repo_root: Path) -> bool:
-    analysis_path = repo_root / "crash_analysis.md"
-    if not analysis_path.is_file():
-        return False
-    try:
-        text = analysis_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return False
-    return bool(re.search(r"HARNESS ERROR", text, re.IGNORECASE))
+    return _wf_summary.detect_harness_error(repo_root)
 
 
 def _bytes_human(num_bytes: int) -> str:
-    n = max(0, int(num_bytes))
-    units = ["B", "KB", "MB", "GB"]
-    idx = 0
-    val = float(n)
-    while val >= 1024.0 and idx < len(units) - 1:
-        val /= 1024.0
-        idx += 1
-    if idx == 0:
-        return f"{int(val)}{units[idx]}"
-    return f"{val:.1f}{units[idx]}"
+    return _wf_summary.bytes_human(num_bytes)
 
 
 def _tree_file_stats(root: Path) -> tuple[int, int]:
-    files = 0
-    total_bytes = 0
-    if not root.is_dir():
-        return files, total_bytes
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        files += 1
-        try:
-            total_bytes += int(p.stat().st_size)
-        except Exception:
-            pass
-    return files, total_bytes
+    return _wf_summary.tree_file_stats(root)
 
 
 def _collect_fuzz_inventory(repo_root: Path) -> dict[str, Any]:
-    fuzz_dir = repo_root / "fuzz"
-    out_dir = fuzz_dir / "out"
-    corpus_dir = fuzz_dir / "corpus"
-    artifacts_dir = out_dir / "artifacts"
-
-    binaries: list[str] = []
-    options_files: list[str] = []
-    if out_dir.is_dir():
-        for p in sorted(out_dir.iterdir()):
-            if not p.is_file():
-                continue
-            name = p.name
-            if name.endswith(".options"):
-                options_files.append(name)
-            if os.access(p, os.X_OK) or p.suffix.lower() == ".exe":
-                binaries.append(name)
-
-    artifact_files: list[str] = []
-    if artifacts_dir.is_dir():
-        for p in sorted(artifacts_dir.rglob("*")):
-            if p.is_file():
-                artifact_files.append(str(p.relative_to(repo_root)))
-
-    corpus_stats: dict[str, dict[str, Any]] = {}
-    corpus_total_files = 0
-    corpus_total_bytes = 0
-    if corpus_dir.is_dir():
-        for d in sorted(corpus_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            files, size_bytes = _tree_file_stats(d)
-            corpus_total_files += files
-            corpus_total_bytes += size_bytes
-            corpus_stats[d.name] = {
-                "files": files,
-                "bytes": size_bytes,
-                "human": _bytes_human(size_bytes),
-            }
-
-    return {
-        "fuzz_dir": str(fuzz_dir),
-        "fuzz_out_dir": str(out_dir),
-        "fuzz_corpus_dir": str(corpus_dir),
-        "fuzzer_binaries": binaries,
-        "fuzzer_count": len(binaries),
-        "options_files": options_files,
-        "artifact_files": artifact_files,
-        "artifact_count": len(artifact_files),
-        "corpus_stats": corpus_stats,
-        "corpus_total_files": corpus_total_files,
-        "corpus_total_bytes": corpus_total_bytes,
-        "corpus_total_human": _bytes_human(corpus_total_bytes),
-    }
+    return _wf_summary.collect_fuzz_inventory(repo_root)
 
 
 def _write_run_summary(out: dict[str, Any]) -> None:
-    repo_root_raw = out.get("repo_root")
-    if not repo_root_raw:
-        return
-    repo_root = Path(str(repo_root_raw))
-    if not repo_root.exists():
-        return
-
-    crash_found = bool(out.get("crash_found"))
-    last_error = str(out.get("last_error") or "").strip()
-    failed = bool(out.get("failed"))
-    status = "error" if (failed or last_error) else ("crash_found" if crash_found else "ok")
-    harness_error = _detect_harness_error(repo_root)
-    run_details = cast(list[dict[str, Any]], out.get("run_details") or [])
-    fuzz_inventory = _collect_fuzz_inventory(repo_root)
-    key_artifact_hashes = _collect_key_artifact_hashes(repo_root)
-
-    bundle_dirs = [
-        d.name
-        for d in repo_root.iterdir()
-        if d.is_dir() and d.name.startswith(("challenge_bundle", "false_positive", "unreproducible"))
-    ]
-
-    data = {
-        "repo_url": out.get("repo_url"),
-        "repo_root": str(repo_root),
-        "status": status,
-        "message": out.get("message"),
-        "last_step": out.get("last_step"),
-        "step_count": out.get("step_count"),
-        "build_attempts": out.get("build_attempts"),
-        "build_rc": out.get("build_rc"),
-        "run_rc": out.get("run_rc"),
-        "last_error": last_error,
-        "crash_found": crash_found,
-        "crash_evidence": out.get("crash_evidence") or "none",
-        "run_error_kind": out.get("run_error_kind") or "",
-        "run_details": run_details,
-        "last_fuzzer": out.get("last_fuzzer"),
-        "last_crash_artifact": out.get("last_crash_artifact"),
-        "harness_error": harness_error,
-        "fix_patch_path": out.get("fix_patch_path") or "",
-        "fix_patch_files": out.get("fix_patch_files") or [],
-        "fix_patch_bytes": out.get("fix_patch_bytes") or 0,
-        "crash_info_path": str(repo_root / "crash_info.md"),
-        "crash_analysis_path": str(repo_root / "crash_analysis.md"),
-        "reproducer_path": str(repo_root / "reproduce.py"),
-        "bundles": bundle_dirs,
-        "fuzz_inventory": fuzz_inventory,
-        "key_artifact_hashes": key_artifact_hashes,
-        "plan_policy": {
-            "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
-            "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
-        },
-        "timestamp": time.time(),
-    }
-
-    summary_json = repo_root / "run_summary.json"
-    summary_md = repo_root / "run_summary.md"
-    try:
-        summary_json.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
-
-    md_lines = [
-        "# Run Summary",
-        "",
-        f"- Status: {status}",
-        f"- Repo: {data['repo_url']}",
-        f"- Repo root: {data['repo_root']}",
-        f"- Last step: {data['last_step']}",
-        f"- Build attempts: {data['build_attempts']}",
-        f"- Run rc: {data['run_rc']}",
-        f"- Crash evidence: {data['crash_evidence']}",
-        f"- Crash found: {crash_found}",
-        f"- Harness error: {harness_error}",
-        f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
-        f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
-        f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
-        f"- Plan crash policy: {'fix' if data['plan_policy']['fix_on_crash'] else 'report-only'}",
-        f"- Plan max fix rounds: {data['plan_policy']['max_fix_rounds']}",
-        f"- Key artifact hashes: {len(key_artifact_hashes)}",
-    ]
-    if key_artifact_hashes:
-        md_lines.extend(["", "## Key Artifact Hashes"])
-        for path, digest in sorted(key_artifact_hashes.items()):
-            md_lines.append(f"- {path}: `{digest}`")
-    if run_details:
-        md_lines.extend(["", "## Fuzzer Effectiveness"])
-        for item in run_details:
-            md_lines.append(
-                "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, corpus={corp_files}/{corp_size}, rss={rss}MB".format(
-                    fuzzer=item.get("fuzzer"),
-                    rc=item.get("rc"),
-                    cov=item.get("final_cov"),
-                    ft=item.get("final_ft"),
-                    corp_files=item.get("final_corpus_files"),
-                    corp_size=_bytes_human(int(item.get("final_corpus_size_bytes") or 0)),
-                    rss=item.get("final_rss_mb"),
-                )
-            )
-    if last_error:
-        md_lines.extend(["", "## Last Error", "```text", last_error, "```"])
-    if crash_found:
-        md_lines.extend(
-            [
-                "",
-                "## Crash",
-                f"- Fuzzer: {data['last_fuzzer']}",
-                f"- Artifact: {data['last_crash_artifact']}",
-                f"- crash_info.md: {data['crash_info_path']}",
-                f"- crash_analysis.md: {data['crash_analysis_path']}",
-            ]
-        )
-    if data["fix_patch_path"]:
-        md_lines.extend(
-            [
-                "",
-                "## Fix Patch",
-                f"- Patch: {data['fix_patch_path']}",
-                f"- Files changed: {len(data['fix_patch_files'])}",
-            ]
-        )
-        if data["fix_patch_files"]:
-            md_lines.extend([f"- {p}" for p in data["fix_patch_files"]])
-    if bundle_dirs:
-        md_lines.extend(["", "## Bundles"] + [f"- {b}" for b in bundle_dirs])
-
-    try:
-        summary_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-    except Exception:
-        pass
-
-    out_dir = Path(str(fuzz_inventory.get("fuzz_out_dir") or ""))
-    if out_dir.is_dir():
-        eff_json = out_dir / "fuzz_effectiveness.json"
-        eff_md = out_dir / "fuzz_effectiveness.md"
-        eff = {
-            "status": status,
-            "repo_url": data.get("repo_url"),
-            "run_rc": data.get("run_rc"),
-            "crash_found": crash_found,
-            "crash_evidence": data.get("crash_evidence"),
-            "run_details": run_details,
-            "fuzz_inventory": fuzz_inventory,
-            "timestamp": data.get("timestamp"),
-        }
-        try:
-            eff_json.write_text(json.dumps(eff, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        except Exception:
-            pass
-        eff_lines = [
-            "# Fuzz Effectiveness",
-            "",
-            f"- Status: {status}",
-            f"- Crash found: {crash_found}",
-            f"- Run rc: {data.get('run_rc')}",
-            f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
-            f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
-            f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
-        ]
-        if run_details:
-            eff_lines.extend(["", "## Per Fuzzer"])
-            for item in run_details:
-                eff_lines.append(
-                    "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, corpus={corp_files}/{corp_size}, exec/s={eps}, rss={rss}MB".format(
-                        fuzzer=item.get("fuzzer"),
-                        rc=item.get("rc"),
-                        cov=item.get("final_cov"),
-                        ft=item.get("final_ft"),
-                        corp_files=item.get("final_corpus_files"),
-                        corp_size=_bytes_human(int(item.get("final_corpus_size_bytes") or 0)),
-                        eps=item.get("final_execs_per_sec"),
-                        rss=item.get("final_rss_mb"),
-                    )
-                )
-        try:
-            eff_md.write_text("\n".join(eff_lines) + "\n", encoding="utf-8")
-        except Exception:
-            pass
+    _wf_summary.write_run_summary(out)
 
 
 def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:

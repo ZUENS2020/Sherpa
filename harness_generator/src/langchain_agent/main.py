@@ -2,8 +2,6 @@
 from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
 import os
 import shutil
 import subprocess
@@ -36,11 +34,6 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LangChain Agent API", version="1.0", lifespan=_lifespan)
-
-# 设置静态文件目录
-current_dir = os.path.dirname(os.path.abspath(__file__))#获取当前绝对路径
-static_dir = os.path.join(current_dir, "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 #创建线程池
 _MAX_WORKERS = int(os.environ.get("SHERPA_WEB_MAX_WORKERS", "5"))
@@ -873,11 +866,13 @@ def list_tasks(limit: int = 50):
     }
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    path = os.path.join(static_dir, "index.html")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+@app.get("/")
+def service_root():
+    return {
+        "service": "sherpa-web",
+        "role": "api-backend-only",
+        "entrypoint": "Use sherpa-gateway at / for UI and /api/* for API",
+    }
 
 
 if __name__ == "__main__":
