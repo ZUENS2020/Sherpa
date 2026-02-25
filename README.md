@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="./assets/banner.svg" alt="Sherpa Banner" width="100%" />
+</p>
+
+# SHERPA
+
 ## 1. 项目定位
 
 Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统。输入一个 Git 仓库 URL，系统会自动完成：
