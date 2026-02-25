@@ -175,6 +175,10 @@ def _classify_build_failure(
     )
 
 
+def _build_failure_recovery_advice(error_kind: str, error_code: str) -> str:
+    return _wf_common.build_failure_recovery_advice(error_kind, error_code)
+
+
 def _collect_key_artifact_hashes(repo_root: Path) -> dict[str, str]:
     return _wf_common.collect_key_artifact_hashes(repo_root)
 
@@ -718,6 +722,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             next_state["same_build_error_repeats"] = repeats
             next_state["build_error_kind"] = build_error_kind
             next_state["build_error_code"] = build_error_code
+            advice = _build_failure_recovery_advice(build_error_kind, build_error_code)
             if repeats >= max_same_repeats:
                 next_state["failed"] = True
                 next_state["last_error"] = (
@@ -728,6 +733,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 _wf_log(cast(dict[str, Any], next_state), f"<- build stop same-error repeats={repeats+1}")
                 return next_state
             next_state["last_error"] = f"build failed rc={final_rc} after {attempts_used} command run(s)"
+            if advice:
+                next_state["last_error"] += f"\nrecovery: {advice}"
             next_state["message"] = "build failed"
             _wf_log(cast(dict[str, Any], next_state), f"<- build fail rc={final_rc} dt={_fmt_dt(time.perf_counter()-t0)}")
             return next_state
