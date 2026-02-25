@@ -37,23 +37,24 @@ After trigger is received, produce a same-day final-style summary (full and comp
 
 Use these defaults unless the user explicitly overrides:
 1. Team: `Sherpa_XDU`
-2. Project: `Sherpa Stabilization & Delivery`
-3. Label: `project status`
-4. Issue title format: `Sherpa 项目进度同步（YYYY-MM-DD）`
-5. Status: `In Progress`
-6. Branch progress and branch-diff summary: mandatory in every write.
+2. Label: `project status`
+3. Issue title format: `Sherpa 项目进度同步（YYYY-MM-DD）`
+4. Status: `In Progress`
+5. Branch progress and branch-diff summary: mandatory in every write.
+6. Project handling: **do not auto-attach project**. Only attach/update `project` when the user explicitly requests a project.
 
 ## MCP Access Policy (Mandatory)
 
 Use Linear MCP for all reads and writes.
 1. Read with MCP:
    1. `list_issue_labels` to confirm label.
-   2. `list_projects` or `get_project` to confirm target project.
-   3. `list_issues` and `get_issue` to find today's issue and inspect body.
+   2. `list_issues` and `get_issue` to find today's issue and inspect body.
+   3. Only when user explicitly asks to set/validate project: `list_projects` / `get_project`.
 2. Write with MCP:
    1. `update_issue` to overwrite today's `description`.
    2. `create_issue` only when today's issue does not exist.
    3. Always include label `project status` in both `update_issue` and `create_issue`.
+   4. Do not send `project` field in `create_issue` / `update_issue` unless user explicitly requested a project binding in this turn.
 3. Do not use comment logs (`create_comment`) for status snapshots unless the user explicitly asks.
 4. Do not ask the user to update Linear manually when MCP is available.
 
