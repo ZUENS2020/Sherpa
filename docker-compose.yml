@@ -116,7 +116,17 @@ services:
   sherpa-job-store:
     image: keinos/sqlite3:latest
     restart: unless-stopped
-    command: ["sh", "-lc", "mkdir -p /data && touch /data/jobs.sqlite3 && tail -f /dev/null"]
+    user: "0:0"
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /data
+        chmod 0777 /data || true
+        touch /data/jobs.sqlite3
+        chmod 0666 /data/jobs.sqlite3 || true
+        exec tail -f /dev/null
     volumes:
       - sherpa-job-store-data:/data
 

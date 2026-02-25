@@ -499,7 +499,7 @@ sequenceDiagram
   API->>Store: load_jobs()
   API->>API: queued/running/resuming -> recoverable
   API->>API: 推断 resume_from_step / resume_repo_root
-  API->>API: (可选) auto_resume_recoverable_jobs
+  API-->>UI: 等待用户手动选择 job 并调用 resume
 
   UI->>API: POST /api/task/{job_id}/resume
   API->>API: 读取 request + checkpoint 字段
@@ -853,7 +853,7 @@ pytest -q tests
 | `SHERPA_WEB_JOB_STORE_MODE` | `sqlite` | 任务状态存储模式，`sqlite` 或 `memory` |
 | `SHERPA_WEB_JOB_DB_PATH` | `/app/job-store/jobs.sqlite3` | SQLite 任务状态库路径 |
 | `SHERPA_WEB_RESTORE_LOG_MAX_CHARS` | `200000` | 重启恢复时从日志文件回填到 API 的最大字符数 |
-| `SHERPA_WEB_AUTO_RESUME_ON_START` | `1` | 服务启动时自动恢复 `recoverable` 任务 |
+| `SHERPA_WEB_AUTO_RESUME_ON_START` | `0` | 保留兼容字段，当前默认不做启动自动恢复（仅手动调用 `/api/task/{job_id}/resume`） |
 | `SHERPA_OUTPUT_DIR` | `/shared/output` | 输出根目录 |
 | `SHERPA_DEFAULT_OSS_FUZZ_DIR` | `/shared/oss-fuzz` | oss-fuzz 本地根目录 |
 | `SHERPA_DOCKER_REGISTRY_MIRROR` | 空 | 可选镜像源 |

@@ -33,7 +33,6 @@ async def _lifespan(app: FastAPI):
     apply_config_to_env(cfg)
     os.environ["SHERPA_ACCEPT_DIFF_WITHOUT_DONE"] = "0"
     _init_job_store()
-    _auto_resume_recoverable_jobs(cfg)
     yield
 
 
@@ -1168,7 +1167,7 @@ def _resume_task_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
 
 
 def _auto_resume_enabled() -> bool:
-    raw = (os.environ.get("SHERPA_WEB_AUTO_RESUME_ON_START", "1") or "").strip().lower()
+    raw = (os.environ.get("SHERPA_WEB_AUTO_RESUME_ON_START", "0") or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
