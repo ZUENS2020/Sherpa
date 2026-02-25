@@ -531,6 +531,34 @@ flowchart TD
   INF --> REC["mark recoverable + set resume_from_step/resume_repo_root"]
 ```
 
+### 11.8 失败后恢复 step 选择决策树
+
+```mermaid
+flowchart TD
+  S0["start resume"] --> K1{"job kind?"}
+  K1 -->|"task"| T1["遍历 children"]
+  K1 -->|"fuzz"| F1["读取 fuzz checkpoint 字段"]
+
+  T1 --> T2{"child status in success/resumed?"}
+  T2 -->|"yes"| T3["跳过该 child"]
+  T2 -->|"no"| F1
+
+  F1 --> C1["resume_step = resume_from_step"]
+  C1 --> C2{"为空?"}
+  C2 -->|"yes"| C3["fallback = workflow_active_step|workflow_last_step|build"]
+  C2 -->|"no"| C4["使用 resume_from_step"]
+  C3 --> C4
+
+  C4 --> C5{"resume_step != plan 且 resume_repo_root 缺失?"}
+  C5 -->|"yes"| R1["resume_failed: missing_resume_workspace"]
+  C5 -->|"no"| R2["提交 _run_fuzz_job(resumed=true)"]
+
+  R2 --> W1["workflow init"]
+  W1 --> W2{"route_after_init"}
+  W2 --> W3["跳转到目标 step 执行"]
+  W3 --> OUT["resumed 或 resume_failed"]
+```
+
 ---
 
 ## 12. 前端行为说明（当前版本）
@@ -921,6 +949,10 @@ pytest -q tests
 ### 图 K：Checkpoint 提取与恢复
 
 见 [第 11 节](#11-api-对接说明) 中 `11.7`。
+
+### 图 L：失败后恢复 step 选择决策树
+
+见 [第 11 节](#11-api-对接说明) 中 `11.8`。
 
 ---
 
