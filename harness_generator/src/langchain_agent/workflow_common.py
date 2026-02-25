@@ -132,7 +132,6 @@ def classify_build_failure(
             "registry_dns_resolution_failed",
             [
                 "temporary failure in name resolution",
-                "no such host",
                 "lookup registry-1.docker.io",
                 "server misbehaving",
             ],

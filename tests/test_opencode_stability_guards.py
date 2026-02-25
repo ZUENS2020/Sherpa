@@ -143,3 +143,16 @@ def test_build_failure_recovery_advice_mentions_dns_for_registry_resolution():
 
     assert "DNS" in advice
     assert "SHERPA_DOCKER_BUILD_RETRIES" in advice
+
+
+def test_classify_build_failure_no_such_host_non_registry_not_misclassified_as_registry_dns():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "error during connect: Post http://sherpa-docker:2375/v1.46/build: dial tcp: lookup sherpa-docker on 127.0.0.11:53: no such host",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+
+    assert kind == "infra"
+    assert code == "docker_daemon_unavailable"

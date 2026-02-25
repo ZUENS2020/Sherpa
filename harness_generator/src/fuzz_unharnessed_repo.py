@@ -794,6 +794,19 @@ class NonOssFuzzHarnessGenerator:
             if flag in {"0", "false", "no", "off"}:
                 return
 
+            # Avoid false DNS warnings when busybox probe image is not available locally.
+            busybox_probe = subprocess.run(
+                ["docker", "image", "inspect", "busybox:latest"],
+                cwd=str(TOOL_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            if busybox_probe.returncode != 0:
+                print("[*] Docker network precheck skipped (busybox:latest not present locally).")
+                return
+
             probe_cmd = [
                 "docker",
                 "run",
@@ -823,6 +836,10 @@ class NonOssFuzzHarnessGenerator:
                 return
 
             out = (proc.stdout or "").strip()
+            low_out = out.lower()
+            if "unable to find image" in low_out and "busybox" in low_out:
+                print("[*] Docker network precheck skipped (busybox image unavailable at runtime).")
+                return
             print(
                 "[warn] Docker network precheck failed: cannot resolve Docker registry DNS from container runtime. "
                 "Build may fail with name-resolution/TLS timeouts."
