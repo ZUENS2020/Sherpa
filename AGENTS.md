@@ -1,19 +1,6 @@
 ## Skills
 
-A skill is a set of local instructions stored in a `SKILL.md` file.
-
-### Available skills
-
-- linear-daily-project-status: Keep one daily project-level status issue in Linear for major repository changes. If today's issue exists, overwrite its description; if not, create one. Linear read/write must use MCP. (file: `/Users/zuens2020/Documents/Sherpa/.codex/skills/linear-daily-project-status/SKILL.md`)
-
-### How to use skills
-
-- Trigger `linear-daily-project-status` only when user explicitly sends `$linear-daily-project-status` (or explicitly asks to execute this skill).
-- Always read/write Linear through MCP tools, not manual web editing.
-- Before each write, read today's existing issue content first and upsert a cumulative same-day summary.
-- Prefer overwriting the same-day status issue body instead of writing comments.
-- Use label `project status` and keep one canonical issue per date.
-- Enforce `project status` label on every upsert (both create and update).
+No repository-local skill is currently enabled.
 
 ## Major Change Rule (Linear)
 
@@ -54,7 +41,6 @@ Labeling rule:
 
 1. Choose at least one primary type label from the mapping above.
 2. If multiple types are involved, apply multiple labels (max 3, most impactful first).
-3. Use `project status` only for daily status sync issues triggered by `$linear-daily-project-status`, not for every major change by default.
 
 Recommended issue body structure for major changes:
 
