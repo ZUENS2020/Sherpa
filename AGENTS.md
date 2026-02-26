@@ -19,17 +19,27 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 
 For every major project change or improvement, follow this workflow strictly:
 
-1. Before writing code, create a new Linear issue via MCP.
-2. Assign the issue to yourself.
-3. Set issue status to `In Progress`.
-4. Complete implementation and verification.
-5. Set issue status to `Done`.
-6. Add one final comment summarizing:
+1. Before writing code, first clarify the change goal and planned scope (what problem this change solves, and the rough implementation content).
+2. Record that goal + scope summary in a new Linear issue via MCP, and auto-apply label `project status`.
+3. Assign the issue to yourself.
+4. Set issue status to `In Progress`.
+5. Ask the user to confirm whether execution should start.
+6. Only after explicit user confirmation, complete implementation and verification.
+7. Set issue status to `Done`.
+8. Add one final comment summarizing:
    - what changed,
    - validation/test result,
    - impact/risk notes.
 
 Constraints:
 
-1. Do not start implementation before the issue is created and set to `In Progress`.
-2. Do not mark `Done` without a completion summary comment.
+1. Do not start implementation before the change purpose and rough scope are written into Linear and the issue is set to `In Progress`.
+2. Do not start implementation without explicit user confirmation after the Linear write is complete.
+3. Do not mark `Done` without a completion summary comment.
+4. Enforce label `project status` on the issue (create the label first if missing, then apply it).
+
+Recommended issue body structure for major changes:
+
+1. `Goal`: Why this change is needed.
+2. `Planned Scope`: Main modules/files and rough implementation plan.
+3. `Out of Scope`: What is intentionally excluded in this round.
