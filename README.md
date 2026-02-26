@@ -21,6 +21,7 @@ Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统�
 5. 前端配置聚焦常用项：API Key、仓库 URL、总时长、单次时长。
 6. 断点续跑默认手动触发：启动阶段不自动恢复，需调用 `POST /api/task/{job_id}/resume`。
 7. run 阶段并行批次预算已显式记录到 `run_batch_plan`，用于回放预算分配与超时行为。
+8. OpenCode 已集成 GitNexus MCP，默认在每次调用前自动分析“仓库快照”增强代码关系理解（避免污染待修复仓库）。
 
 ---
 
@@ -892,6 +893,8 @@ pytest -q tests
 | `SHERPA_WEB_AUTO_RESUME_ON_START` | `0` | 保留兼容字段，当前默认不做启动自动恢复（仅手动调用 `/api/task/{job_id}/resume`） |
 | `SHERPA_OUTPUT_DIR` | `/shared/output` | 输出根目录 |
 | `SHERPA_DEFAULT_OSS_FUZZ_DIR` | `/shared/oss-fuzz` | oss-fuzz 本地根目录 |
+| `SHERPA_GITNEXUS_AUTO_ANALYZE` | `1` | OpenCode 调用前自动执行 GitNexus 分析快照 |
+| `SHERPA_GITNEXUS_SKIP_EMBEDDINGS` | `1` | GitNexus 自动分析时默认跳过 embeddings（更快） |
 | `SHERPA_DOCKER_REGISTRY_MIRROR` | 空 | 可选镜像源 |
 | `SHERPA_DOCKER_NETWORK_PRECHECK` | `1` | Docker 网络预检查开关（可设 `0` 跳过） |
 | `SHERPA_DOCKER_PROXY_HOST` | `host.docker.internal` | 本机代理主机映射 |

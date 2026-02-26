@@ -228,6 +228,20 @@ def _opencode_build_args() -> list[str]:
     return out
 
 
+def _gitnexus_auto_analyze_enabled() -> bool:
+    return _bool_env("SHERPA_GITNEXUS_AUTO_ANALYZE", True)
+
+
+def _gitnexus_skip_embeddings() -> bool:
+    return _bool_env("SHERPA_GITNEXUS_SKIP_EMBEDDINGS", True)
+
+
+def _resolve_opencode_home_dir(shared_out: str) -> str:
+    if shared_out and shared_out.strip():
+        return f"{shared_out.rstrip('/')}/.opencode-home"
+    return "/tmp"
+
+
 def _ensure_opencode_image(image: str, env: dict) -> None:
     if not image or image in _ENSURED_OPENCODE_IMAGES:
         return
@@ -296,6 +310,7 @@ def _build_opencode_cmd(
     # Run opencode inside a dedicated container.
     shim_dir = env.get("SHERPA_OPENCODE_SHIM_DIR", "")
     shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
+    home_dir = _resolve_opencode_home_dir(shared_out)
     path_in_container = "/opencode_shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     config_path = env.get("OPENCODE_CONFIG", "").strip()
     config_mount = config_path or "/opencode.json"
@@ -311,6 +326,8 @@ def _build_opencode_cmd(
         *_docker_opencode_env_args(env),
         "-e",
         f"PATH={path_in_container}",
+        "-e",
+        f"HOME={home_dir}",
         *(
             ["-v", f"{shim_dir}:/opencode_shims:ro"]
             if shim_dir
@@ -511,6 +528,141 @@ class CodexHelper:
         assert self.repo is not None
         return self.repo.git.diff("HEAD")
 
+    def _maybe_prepare_gitnexus_context(self) -> None:
+        """Best-effort: build GitNexus index snapshot for OpenCode MCP usage.
+
+        To avoid polluting the mutable working repository (which affects diff-based
+        success detection), we copy the current working tree into a persistent
+        snapshot under SHERPA_OUTPUT_DIR and analyze that snapshot instead.
+        """
+        if not _gitnexus_auto_analyze_enabled():
+            return
+
+        image = _docker_opencode_image()
+        if not image:
+            return
+
+        env = os.environ.copy()
+        _ensure_opencode_image(image, env)
+
+        shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
+        if not shared_out:
+            LOGGER.warning(
+                "[OpenCodeHelper] GitNexus auto analyze skipped: SHERPA_OUTPUT_DIR is empty"
+            )
+            return
+
+        snapshot_root_raw = (
+            env.get("SHERPA_GITNEXUS_SNAPSHOT_ROOT", "").strip()
+            or f"{shared_out.rstrip('/')}/.gitnexus-snapshots"
+        )
+        snapshot_root = Path(snapshot_root_raw)
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+
+        repo_key = hashlib.sha1(
+            str(self.working_dir.resolve()).encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        snapshot_dir = snapshot_root / f"repo-{repo_key}"
+
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+        shutil.copytree(
+            self.working_dir,
+            snapshot_dir,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".gitnexus"),
+        )
+
+        # Preserve uncommitted state in snapshot by creating a local commit.
+        subprocess.run(
+            ["git", "-C", str(snapshot_dir), "config", "user.email", "sherpa@example.com"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(snapshot_dir), "config", "user.name", "sherpa"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(snapshot_dir), "add", "-A"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(snapshot_dir), "commit", "--allow-empty", "-m", "sherpa gitnexus snapshot"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+        )
+
+        home_dir = _resolve_opencode_home_dir(shared_out)
+        clean_cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{shared_out}:{shared_out}",
+            "-e",
+            f"HOME={home_dir}",
+            image,
+            "gitnexus",
+            "clean",
+            "--all",
+            "--force",
+        ]
+        subprocess.run(
+            clean_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            env=env,
+        )
+
+        analyze_cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{shared_out}:{shared_out}",
+            "-w",
+            str(snapshot_dir),
+            "-e",
+            f"HOME={home_dir}",
+            image,
+            "gitnexus",
+            "analyze",
+            str(snapshot_dir),
+        ]
+        if not _gitnexus_skip_embeddings():
+            analyze_cmd.append("--embeddings")
+
+        proc = subprocess.run(
+            analyze_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            tail = "\n".join((proc.stdout or "").splitlines()[-80:])
+            LOGGER.warning(
+                "[OpenCodeHelper] GitNexus analyze failed (non-fatal, rc=%s). Tail:\n%s",
+                proc.returncode,
+                tail,
+            )
+        else:
+            LOGGER.info("[OpenCodeHelper] GitNexus snapshot analyzed: %s", snapshot_dir)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -560,6 +712,7 @@ class CodexHelper:
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
             "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output).",
+            "GitNexus MCP tooling is available for codebase dependency/call-flow analysis; use it before guessing architecture details.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "
             "not this OpenCode execution environment. Do not infer runtime availability from this environment.",
@@ -613,6 +766,10 @@ class CodexHelper:
         # ----------------------------------------------------------------
         # Outer loop – retry full patch attempt if no diff produced.
         # ----------------------------------------------------------------
+        try:
+            self._maybe_prepare_gitnexus_context()
+        except Exception as e:
+            LOGGER.warning("[OpenCodeHelper] GitNexus pre-analysis skipped (non-fatal): %s", e)
 
         for attempt in range(1, max_attempts + 1):
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)

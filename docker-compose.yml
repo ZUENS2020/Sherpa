@@ -81,6 +81,9 @@ services:
       SHERPA_CODEX_CLI: "${SHERPA_CODEX_CLI:-opencode}"
       SHERPA_OPENCODE_DOCKER_IMAGE: "sherpa-opencode:latest"
       SHERPA_OPENCODE_IGNORE_RETRY_ERRORS: "1"
+      # GitNexus auto-analysis for OpenCode context enhancement.
+      SHERPA_GITNEXUS_AUTO_ANALYZE: ${SHERPA_GITNEXUS_AUTO_ANALYZE:-1}
+      SHERPA_GITNEXUS_SKIP_EMBEDDINGS: ${SHERPA_GITNEXUS_SKIP_EMBEDDINGS:-1}
       SHERPA_PARALLEL_FUZZERS: ${SHERPA_PARALLEL_FUZZERS:-2}
 
       # Optional override for oss-fuzz upstream (mirrors / forks).

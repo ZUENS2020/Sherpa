@@ -22,12 +22,16 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        python3 \
+        make \
+        g++ \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm config set registry "$NPM_CONFIG_REGISTRY" \
-    && npm i -g opencode-ai \
-    && opencode --version || true
+    && npm i -g opencode-ai gitnexus \
+    && opencode --version || true \
+    && gitnexus --version || true
 
 # Create opencode config with Qwen models (simplified format without $schema)
 RUN mkdir -p /root/.opencode && \

@@ -14,3 +14,22 @@ A skill is a set of local instructions stored in a `SKILL.md` file.
 - Prefer overwriting the same-day status issue body instead of writing comments.
 - Use label `project status` and keep one canonical issue per date.
 - Enforce `project status` label on every upsert (both create and update).
+
+## Major Change Rule (Linear)
+
+For every major project change or improvement, follow this workflow strictly:
+
+1. Before writing code, create a new Linear issue via MCP.
+2. Assign the issue to yourself.
+3. Set issue status to `In Progress`.
+4. Complete implementation and verification.
+5. Set issue status to `Done`.
+6. Add one final comment summarizing:
+   - what changed,
+   - validation/test result,
+   - impact/risk notes.
+
+Constraints:
+
+1. Do not start implementation before the issue is created and set to `In Progress`.
+2. Do not mark `Done` without a completion summary comment.

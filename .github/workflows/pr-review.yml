@@ -1,0 +1,254 @@
+name: PR Review Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+      other: ${{ steps.filter.outputs.other }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'harness_generator/**'
+              - 'tests/**'
+              - 'docker/**'
+              - 'docker-compose.yml'
+              - '.env.example'
+              - 'Makefile'
+            frontend:
+              - 'frontend-next/**'
+              - 'docker/nginx/**'
+            docs_only:
+              - 'README.md'
+              - 'docs/**'
+              - 'assets/**'
+            other:
+              - '**'
+              - '!harness_generator/**'
+              - '!tests/**'
+              - '!docker/**'
+              - '!docker-compose.yml'
+              - '!.env.example'
+              - '!Makefile'
+              - '!frontend-next/**'
+              - '!docker/nginx/**'
+              - '!README.md'
+              - '!docs/**'
+              - '!assets/**'
+
+  copilot-review:
+    name: Trigger Copilot Code Review
+    needs: changes
+    if: github.event_name == 'pull_request' && !(needs.changes.outputs.docs_only == 'true' && needs.changes.outputs.backend != 'true' && needs.changes.outputs.frontend != 'true' && needs.changes.outputs.other != 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Request Copilot review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const marker = '<!-- sherpa-copilot-review-request -->';
+            const body = [
+              marker,
+              '@copilot review',
+              '',
+              'Please review this PR for correctness, regressions, and maintainability.',
+              'Focus on changed files and call out concrete risks with actionable suggestions.'
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+
+            for (const c of comments) {
+              if (c.body && c.body.includes(marker)) {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body,
+            });
+
+  backend-checks:
+    name: Backend Checks (pytest)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.other == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r harness_generator/requirements.txt -r docker/requirements.web.txt pytest
+      - name: Run backend tests
+        run: pytest -q tests
+
+  frontend-checks:
+    name: Frontend Checks (lint/test/build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.other == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend-next
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend-next/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  pr-summary:
+    name: PR Review Summary
+    needs: [changes, backend-checks, frontend-checks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build summary
+        id: summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docs_only='${{ needs.changes.outputs.docs_only }}'
+          backend_changed='${{ needs.changes.outputs.backend }}'
+          frontend_changed='${{ needs.changes.outputs.frontend }}'
+          other_changed='${{ needs.changes.outputs.other }}'
+          backend_result='${{ needs.backend-checks.result }}'
+          frontend_result='${{ needs.frontend-checks.result }}'
+
+          if [[ "$docs_only" == "true" && "$backend_changed" != "true" && "$frontend_changed" != "true" && "$other_changed" != "true" ]]; then
+            final_status='pass'
+            title='✅ PR review passed (docs/assets only)'
+          else
+            final_status='pass'
+            title='✅ PR review passed'
+            if [[ "$backend_changed" == "true" && "$backend_result" != "success" ]]; then
+              final_status='fail'
+            fi
+            if [[ "$frontend_changed" == "true" && "$frontend_result" != "success" ]]; then
+              final_status='fail'
+            fi
+            if [[ "$other_changed" == "true" && ( "$backend_result" != "success" || "$frontend_result" != "success" ) ]]; then
+              final_status='fail'
+            fi
+            if [[ "$final_status" == "fail" ]]; then
+              title='❌ PR review failed'
+            fi
+          fi
+
+          {
+            echo "## $title"
+            echo
+            echo "- backend changed: \\`$backend_changed\\`"
+            echo "- backend checks: \\`$backend_result\\`"
+            echo "- frontend changed: \\`$frontend_changed\\`"
+            echo "- frontend checks: \\`$frontend_result\\`"
+            echo "- uncategorized changes: \\`$other_changed\\`"
+            echo "- docs/assets only: \\`$docs_only\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "final_status=$final_status" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Comment to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `${{ toJSON(steps.summary.outputs.title) }}`.replace(/^"|"$/g, '');
+            const body = [
+              '### PR Review Gate',
+              '',
+              title,
+              '',
+              `- backend changed: \`${{ needs.changes.outputs.backend }}\``,
+              `- backend checks: \`${{ needs.backend-checks.result }}\``,
+              `- frontend changed: \`${{ needs.changes.outputs.frontend }}\``,
+              `- frontend checks: \`${{ needs.frontend-checks.result }}\``,
+              `- uncategorized changes: \`${{ needs.changes.outputs.other }}\``,
+              `- docs/assets only: \`${{ needs.changes.outputs.docs_only }}\``
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const marker = '<!-- sherpa-pr-review-gate -->';
+            const fullBody = `${marker}\n${body}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body: fullBody,
+              });
+            }
+
+      - name: Enforce gate
+        if: steps.summary.outputs.final_status == 'fail'
+        run: |
+          echo "PR review gate failed. Check backend/frontend checks above."
+          exit 1

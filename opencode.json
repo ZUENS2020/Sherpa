@@ -18,5 +18,11 @@
         "qwen/qwen3-coder-next": {}
       }
     }
+  },
+  "mcp": {
+    "gitnexus": {
+      "command": "gitnexus",
+      "args": ["mcp"]
+    }
   }
 }
