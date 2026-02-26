@@ -58,7 +58,7 @@ services:
       # Dev override: load latest local source without rebuilding the image.
       - ./harness_generator/src:/app/harness_generator/src
 
-      # (Optional) mount a local .env containing ANTHROPIC_API_KEY.
+      # (Optional) mount a local .env containing API keys (OPENAI_API_KEY / OPENROUTER_API_KEY).
       # - ./.env:/app/.env:ro
     environment:
       # Make Uvicorn bind for container networking (main.py reads these).
@@ -101,7 +101,7 @@ services:
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       SHERPA_WEB_JOB_DB_PATH: "/app/job-store/jobs.sqlite3"
 
-      # Optional (fuzz patching): where to read ANTHROPIC_API_KEY from.
+      # Optional (fuzz patching): where to read API key env file from.
       # AI_KEY_PATH: "/app/.env"
       # SHERPA_ACCEPT_DIFF_WITHOUT_DONE: "1"
     depends_on:
