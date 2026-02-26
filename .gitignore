@@ -30,6 +30,8 @@ web_config.json
 web_codex.env
 
 # Misc local files
+.DS_Store
+**/.DS_Store
 oss-fuzz/
 nul
 .pytest_cache/
