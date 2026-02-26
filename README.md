@@ -19,6 +19,7 @@ Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统�
 3. `plan` 节点负责输出后续策略（是否 crash 后修复、最多修复轮次）。
 4. OpenCode 提示词不再硬编码，统一在 `harness_generator/src/langchain_agent/prompts/opencode_prompts.md`。
 5. 前端配置聚焦常用项：API Key、仓库 URL、总时长、单次时长。
+   另外支持 `Max Tokens` 作为任务提交参数。
 6. 断点续跑默认手动触发：启动阶段不自动恢复，需调用 `POST /api/task/{job_id}/resume`。
 7. run 阶段并行批次预算已显式记录到 `run_batch_plan`，用于回放预算分配与超时行为。
 8. OpenCode 已集成 GitNexus MCP，默认在每次调用前自动分析“仓库快照”增强代码关系理解（避免污染待修复仓库）。
@@ -811,6 +812,7 @@ docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,s
 | `BuildKit is enabled but buildx missing` | 构建器能力不匹配 | 保持 `DOCKER_BUILDKIT=0` 或安装 buildx |
 | `lookup sherpa-docker ... no such host` | 容器网络/DNS 问题 | 检查 compose 网络与服务名、重建容器 |
 | `TLS handshake timeout` 拉基础镜像失败 | 到 Docker Hub 网络不稳 | 配置公共镜像加速、重试、检查代理 |
+| `remote rejected ... workflow ... without workflow scope` | HTTPS/OAuth 凭证缺少 GitHub `workflow` 权限 | 刷新或重建凭证并加入 `workflow` scope，或改用 SSH 推送 |
 | 长时间 running 无进展 | 预算过大或卡在外部依赖 | 查看 workflow 日志 step，缩短预算定位 |
 | 多轮 fix 无效果 | 同签名反复失败 | 检查 `same_*_repeats` 保护是否触发 |
 
