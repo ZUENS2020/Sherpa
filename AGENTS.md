@@ -18,12 +18,27 @@ For every major project change or improvement, follow this workflow strictly:
    - validation/test result,
    - impact/risk notes.
 
+Progress sync requirement (ongoing):
+
+1. Do not sync progress to Linear only once in the first round.
+2. For any subsequent change related to the same topic, continue updating the same Linear issue with progress comments.
+3. Each related progress comment should include:
+   - what was changed in this increment,
+   - current verification result,
+   - remaining work or next step.
+4. Keep comments cumulative and chronological so the issue reflects the latest full context at any point in time.
+
 Constraints:
 
 1. Do not start implementation before the change purpose and rough scope are written into Linear and the issue is set to `In Progress`.
 2. Do not start implementation without explicit user confirmation after the Linear write is complete.
 3. Do not mark `Done` without a completion summary comment.
 4. Enforce type-based labels on the issue (create labels first if missing, then apply them).
+5. If new work is clearly related to an existing in-progress issue, continue in that issue and add progress comments instead of silently updating outside Linear.
+6. All Linear comments must be written in Chinese.
+7. Issue descriptions used for progress sync should also be written in Chinese unless the user explicitly requests another language.
+8. Linear comments must use real line breaks. Never write literal `\n` or `/n` text into comments.
+9. Before posting a Linear comment, verify rendered body uses actual multi-line formatting (single escaping only).
 
 Type-to-label mapping for major changes:
 

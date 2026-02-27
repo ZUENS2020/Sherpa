@@ -1,15 +1,28 @@
 import { z } from 'zod';
 
+export const opencodeProviderSchema = z.object({
+  name: z.string().default(''),
+  enabled: z.boolean().default(true),
+  base_url: z.string().default(''),
+  api_key: z.string().optional().default(''),
+  api_key_set: z.boolean().optional(),
+  clear_api_key: z.boolean().optional().default(false),
+  models: z.array(z.string()).default([]),
+  headers: z.record(z.string(), z.string()).default({}),
+  options: z.record(z.string(), z.any()).default({}),
+});
+
 export const configSchema = z.object({
   openai_api_key: z.string().optional().default(''),
   openai_api_key_set: z.boolean().optional(),
   openai_base_url: z.string().optional().default(''),
   openai_model: z.string().optional().default(''),
   opencode_model: z.string().optional().default(''),
+  opencode_providers: z.array(opencodeProviderSchema).default([]),
   openrouter_api_key: z.string().optional().default(''),
   openrouter_base_url: z.string().optional().default(''),
   openrouter_model: z.string().optional().default(''),
-  fuzz_time_budget: z.number().int().positive().default(900),
+  fuzz_time_budget: z.number().int().nonnegative().default(900),
   fuzz_use_docker: z.boolean().default(true),
   fuzz_docker_image: z.string().default('auto'),
   oss_fuzz_dir: z.string().default(''),
@@ -87,6 +100,7 @@ export const systemSchema = z.object({
 });
 
 export type WebConfig = z.infer<typeof configSchema>;
+export type OpencodeProvider = z.infer<typeof opencodeProviderSchema>;
 export type TaskSummary = z.infer<typeof taskSummarySchema>;
 export type TaskDetail = z.infer<typeof taskDetailSchema>;
 export type SystemStatus = z.infer<typeof systemSchema>;

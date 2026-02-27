@@ -12,6 +12,27 @@ from typing import Any
 
 from persistent_config import load_config
 
+_DEFAULT_TIME_BUDGET_SEC = 900
+_UNLIMITED_TIME_BUDGET_SENTINEL_SEC = 2_147_483_647
+
+
+def parse_budget_value(raw: Any, *, default: int = _DEFAULT_TIME_BUDGET_SEC) -> int:
+    """Parse a budget field while preserving explicit 0 (unlimited)."""
+    if raw is None:
+        return int(default)
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def is_unlimited_budget(raw: Any, *, default: int = _DEFAULT_TIME_BUDGET_SEC) -> bool:
+    return parse_budget_value(raw, default=default) <= 0
+
 
 def wf_log(state: dict[str, Any] | None, msg: str) -> None:
     step_count = ""
@@ -300,9 +321,9 @@ def alloc_output_workdir(repo_url: str) -> Path | None:
 
 def enter_step(state: dict[str, Any], step_name: str) -> tuple[dict[str, Any], bool]:
     started_at = float(state.get("workflow_started_at") or time.time())
-    time_budget = max(1, int(state.get("time_budget") or 900))
+    time_budget = parse_budget_value(state.get("time_budget"), default=_DEFAULT_TIME_BUDGET_SEC)
     elapsed = time.time() - started_at
-    if elapsed >= time_budget:
+    if time_budget > 0 and elapsed >= time_budget:
         out = {
             **state,
             "last_step": step_name,
@@ -332,7 +353,9 @@ def enter_step(state: dict[str, Any], step_name: str) -> tuple[dict[str, Any], b
 def remaining_time_budget_sec(state: dict[str, Any], *, min_timeout: int = 5) -> int:
     _ = min_timeout
     started_at = float(state.get("workflow_started_at") or time.time())
-    total_budget = max(1, int(state.get("time_budget") or 900))
+    total_budget = parse_budget_value(state.get("time_budget"), default=_DEFAULT_TIME_BUDGET_SEC)
+    if total_budget <= 0:
+        return _UNLIMITED_TIME_BUDGET_SENTINEL_SEC
     elapsed = max(0.0, time.time() - started_at)
     remaining = int(total_budget - elapsed)
     if remaining <= 0:
@@ -342,7 +365,7 @@ def remaining_time_budget_sec(state: dict[str, Any], *, min_timeout: int = 5) ->
 
 def time_budget_exceeded_state(state: dict[str, Any], *, step_name: str) -> dict[str, Any]:
     started_at = float(state.get("workflow_started_at") or time.time())
-    time_budget = max(1, int(state.get("time_budget") or 900))
+    time_budget = parse_budget_value(state.get("time_budget"), default=_DEFAULT_TIME_BUDGET_SEC)
     elapsed = max(0.0, time.time() - started_at)
     out = {
         **state,
@@ -430,7 +453,7 @@ def load_opencode_prompt_templates() -> dict[str, str]:
         raise RuntimeError(f"OpenCode prompt template file not found: {_OPENCODE_PROMPT_FILE}")
     text = _OPENCODE_PROMPT_FILE.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(
-        r"<!--\\s*TEMPLATE:\\s*([a-zA-Z0-9_]+)\\s*-->\\s*\\n(.*?)\\n<!--\\s*END TEMPLATE\\s*-->",
+        r"<!--\s*TEMPLATE:\s*([a-zA-Z0-9_]+)\s*-->\s*(.*?)\s*<!--\s*END TEMPLATE\s*-->",
         re.DOTALL,
     )
     templates: dict[str, str] = {}

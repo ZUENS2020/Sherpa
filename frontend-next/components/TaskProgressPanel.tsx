@@ -1,6 +1,6 @@
 'use client';
 
-import { Alert, Card, CardContent, Chip, LinearProgress, Stack, Typography } from '@mui/material';
+import { Alert, Button, Card, CardContent, Chip, LinearProgress, Stack, Typography } from '@mui/material';
 import type { TaskDetail } from '@/lib/api/schemas';
 
 function statusColor(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
@@ -11,7 +11,14 @@ function statusColor(status: string): 'default' | 'warning' | 'success' | 'error
   return 'default';
 }
 
-export function TaskProgressPanel({ detail }: { detail?: TaskDetail }) {
+interface TaskProgressPanelProps {
+  detail?: TaskDetail;
+  onStopTask?: () => void;
+  stopDisabled?: boolean;
+  stopLoading?: boolean;
+}
+
+export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, stopLoading = false }: TaskProgressPanelProps) {
   const c = detail?.children_status;
   const total = c?.total || 0;
   const finished = (c?.success || 0) + (c?.error || 0);
@@ -24,7 +31,18 @@ export function TaskProgressPanel({ detail }: { detail?: TaskDetail }) {
         <Stack spacing={1.5}>
           <Stack direction="row" alignItems="center" justifyContent="space-between">
             <Typography variant="h6">任务进度</Typography>
-            <Chip size="small" color={statusColor(detail?.status || 'unknown')} label={detail?.status || 'unknown'} />
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Chip size="small" color={statusColor(detail?.status || 'unknown')} label={detail?.status || 'unknown'} />
+              <Button
+                variant="outlined"
+                color="error"
+                size="small"
+                onClick={onStopTask}
+                disabled={stopDisabled || stopLoading}
+              >
+                {stopLoading ? '停止中...' : '停止任务'}
+              </Button>
+            </Stack>
           </Stack>
 
           {detail?.error ? <Alert severity="error">{detail.error}</Alert> : null}

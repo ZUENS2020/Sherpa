@@ -271,3 +271,40 @@ def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path
     assert len(details) == 3
     assert details[1]["run_error_kind"] == "run_exception"
     assert details[1]["error"].startswith("skipped: workflow total time budget exhausted")
+
+
+def test_node_run_marks_no_progress_for_execs_zero_with_warning(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail=(
+                    "INFO: seed corpus: files: 5 min: 8b max: 19b total: 67b rss: 27Mb\n"
+                    "#6\tINITED exec/s: 0 rss: 27Mb\n"
+                    "WARNING: no interesting inputs were found so far."
+                ),
+                error="",
+                run_error_kind="",
+                final_execs_per_sec=0,
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["last_step"] == "run"
+    assert out["crash_found"] is False
+    assert out["run_error_kind"] == "run_no_progress"
+    assert "no measurable progress" in out["last_error"]
+
+
+def test_route_after_run_routes_recoverable_run_errors_to_fix_build():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
+    )
+    assert route == "fix_build"

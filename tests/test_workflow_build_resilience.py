@@ -241,6 +241,20 @@ def test_route_after_build_sends_source_error_to_fix_build() -> None:
     assert route == "fix_build"
 
 
+def test_opencode_cli_retries_default_and_bounds(monkeypatch) -> None:
+    monkeypatch.delenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", raising=False)
+    assert workflow_graph._opencode_cli_retries() == 2
+
+    monkeypatch.setenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", "0")
+    assert workflow_graph._opencode_cli_retries() == 1
+
+    monkeypatch.setenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", "99")
+    assert workflow_graph._opencode_cli_retries() == 8
+
+    monkeypatch.setenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", "bad")
+    assert workflow_graph._opencode_cli_retries() == 2
+
+
 def test_route_after_init_resumes_from_requested_step() -> None:
     route = workflow_graph._route_after_init_state(
         {
@@ -294,6 +308,61 @@ def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
     assert out["last_error"] == ""
     assert "hotfix" in out["message"]
     assert "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" in build_py.read_text(encoding="utf-8")
+
+
+def test_fix_build_allows_opencode_edits_under_fuzz_only(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('v1')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            build_py.write_text("print('v2')\n", encoding="utf-8")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "error: missing header",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+
+    assert out["last_error"] == ""
+    assert out["message"] == "opencode fixed build"
+    assert "v2" in build_py.read_text(encoding="utf-8")
+
+
+def test_fix_build_rejects_opencode_source_edits_outside_fuzz(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+    source_file = tmp_path / "upstream.c"
+    source_file.write_text("int x = 1;\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            source_file.write_text("int x = 2;\n", encoding="utf-8")
+            (tmp_path / "done").write_text("upstream.c\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "error: missing include",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+
+    assert out["message"] == "opencode fix_build touched disallowed files"
+    assert "upstream.c" in out["last_error"]
+    assert "Only `fuzz/` and `done` are allowed" in out["last_error"]
 
 
 def test_build_failure_infra_error_includes_recovery_hint(tmp_path: Path, monkeypatch, _no_sleep):

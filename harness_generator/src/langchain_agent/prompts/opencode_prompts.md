@@ -9,6 +9,9 @@ Perform the planning step and produce fuzz/PLAN.md and fuzz/targets.json as requ
 PLAN.md must include a short summary and concrete next-step implementation suggestions for synthesis/build.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+MANDATORY: you MUST create `./done` before finishing this step.
+Write `fuzz/PLAN.md` into `./done` (single line). Missing `./done` means this step fails.
+If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN.md` and schema-valid `fuzz/targets.json`, then write `fuzz/PLAN.md` into `./done`.
 
 Additional instruction from coordinator:
 {{hint}}
@@ -19,6 +22,9 @@ You are coordinating a fuzz harness generation workflow.
 Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+MANDATORY: you MUST create `./done` before finishing this step.
+Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
+If progress stalls, still deliver minimal valid artifacts now: create at least one harness source file and `fuzz/build.py`, then write `fuzz/out/` into `./done`.
 
 If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
@@ -43,7 +49,9 @@ Only edit source files. The build will be executed by the workflow after you fin
 
 Constraints:
 - Keep changes minimal; avoid refactors
-- Prefer edits under fuzz/ and minimal build glue only
+- Only edit files under `fuzz/`
+- The only allowed file outside `fuzz/` is `./done` (sentinel). Any other path change is rejected by the workflow.
+- Do not modify repository source/build files outside `fuzz/` (for example: `*.c`, `*.cc`, `*.cpp`, `*.h`, `CMakeLists.txt`, `Makefile`, `configure`).
 - If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
@@ -53,7 +61,9 @@ Constraints:
 Coordinator instruction:
 {{codex_hint}}
 
+If you are blocked, do not wait idly. Produce the smallest valid `fuzz/` fix set immediately and finish with `./done`.
 When finished, write `fuzz/build.py` into `./done`.
+If `./done` is missing, this step is treated as failed.
 <!-- END TEMPLATE -->
 
 <!-- TEMPLATE: fix_crash_harness_error -->
@@ -73,6 +83,7 @@ Goal (will be verified by a separate automated system — do NOT run these yours
 CRITICAL: Do NOT run any commands. Only edit source files.
 
 When finished, write the key file you modified into ./done.
+If `./done` is missing, this step is treated as failed.
 <!-- END TEMPLATE -->
 
 <!-- TEMPLATE: fix_crash_upstream_bug -->
@@ -91,6 +102,7 @@ Goal (will be verified by a separate automated system — do NOT run these yours
 CRITICAL: Do NOT run any commands. Only edit source files.
 
 When finished, write the key file you modified into ./done.
+If `./done` is missing, this step is treated as failed.
 <!-- END TEMPLATE -->
 
 <!-- TEMPLATE: plan_fix_targets_schema -->
@@ -106,6 +118,8 @@ Constraints:
 - Keep edits minimal
 - Do NOT run any build, compile, or test commands
 - Only edit files
+- MANDATORY: create `./done` when finished, and write `fuzz/targets.json` into it.
+- Missing `./done` means this step fails.
 
 Current validation error:
 {{schema_error}}

@@ -18,11 +18,11 @@ Sherpa 是一个面向 **C/C++ 与 Java 仓库** 的自动化 fuzz 编排系统�
 2. `decide` 节点已删除，路由由条件函数直接决定。
 3. `plan` 节点负责输出后续策略（是否 crash 后修复、最多修复轮次）。
 4. OpenCode 提示词不再硬编码，统一在 `harness_generator/src/langchain_agent/prompts/opencode_prompts.md`。
-5. 前端配置聚焦常用项：API Key、仓库 URL、总时长、单次时长。
-   另外支持 `Max Tokens` 作为任务提交参数。
-6. 断点续跑默认手动触发：启动阶段不自动恢复，需调用 `POST /api/task/{job_id}/resume`。
-7. run 阶段并行批次预算已显式记录到 `run_batch_plan`，用于回放预算分配与超时行为。
-8. OpenCode 已集成 GitNexus MCP，默认在每次调用前自动分析“仓库快照”增强代码关系理解（避免污染待修复仓库）。
+5. 前端配置聚焦常用项：API Key、仓库 URL、总时长、单次时长、`Max Tokens`。
+6. 新增 OpenCode Provider 配置界面：支持多 Provider（含 Minimax）编辑 `base_url/api_key/models/headers/options`，后端会自动生成运行时 `opencode.json`。
+7. 断点续跑默认手动触发：启动阶段不自动恢复，需调用 `POST /api/task/{job_id}/resume`。
+8. run 阶段并行批次预算已显式记录到 `run_batch_plan`，用于回放预算分配与超时行为。
+9. OpenCode 已集成 GitNexus MCP，默认在每次调用前自动分析“仓库快照”增强代码关系理解（避免污染待修复仓库）。
 
 ---
 
@@ -126,7 +126,7 @@ sequenceDiagram
 ### 3.3 关键 compose 配置点
 
 1. `DOCKER_BUILDKIT=0` 在 `sherpa-web` 中默认开启，规避部分环境缺少 buildx 的问题。
-2. dind 支持可选镜像加速：`SHERPA_DOCKER_REGISTRY_MIRROR`（运行时注入，不写死个人源）。
+2. dind 默认启用 xuanyuan 镜像加速：`SHERPA_DOCKER_REGISTRY_MIRROR=https://7m856d3fdvb9yp.xuanyuan.run`，也可通过本地环境变量覆盖。
 3. `/shared/output` 是主产物目录（当前映射到仓库 `./output`）。
 4. `sherpa-web` 和 `sherpa-docker` 共享 `sherpa-tmp` 与 `sherpa-oss-fuzz`，保证容器内路径一致。
 5. `sherpa-gateway` 统一入口：`/` -> `sherpa-frontend`，`/api/*` -> `sherpa-web`。
@@ -636,6 +636,7 @@ flowchart TD
 | `openai_base_url` | OpenAI 兼容 base URL |
 | `openai_model` | OpenAI 模型名 |
 | `opencode_model` | OpenCode 模型名 |
+| `opencode_providers` | OpenCode Provider 配置列表（provider/base_url/api_key/models/headers/options） |
 | `openrouter_api_key` | OpenRouter key（可选） |
 | `fuzz_time_budget` | 默认预算 |
 | `fuzz_use_docker` | Docker 开关（后端强制 true） |
@@ -897,7 +898,8 @@ pytest -q tests
 | `SHERPA_DEFAULT_OSS_FUZZ_DIR` | `/shared/oss-fuzz` | oss-fuzz 本地根目录 |
 | `SHERPA_GITNEXUS_AUTO_ANALYZE` | `1` | OpenCode 调用前自动执行 GitNexus 分析快照 |
 | `SHERPA_GITNEXUS_SKIP_EMBEDDINGS` | `1` | GitNexus 自动分析时默认跳过 embeddings（更快） |
-| `SHERPA_DOCKER_REGISTRY_MIRROR` | 空 | 可选镜像源 |
+| `SHERPA_OPENCODE_CONFIG_PATH` | `/app/config/opencode.generated.json` | OpenCode 运行时配置文件路径（由后端自动生成） |
+| `SHERPA_DOCKER_REGISTRY_MIRROR` | `https://7m856d3fdvb9yp.xuanyuan.run` | Docker 镜像源（可覆盖） |
 | `SHERPA_DOCKER_NETWORK_PRECHECK` | `1` | Docker 网络预检查开关（可设 `0` 跳过） |
 | `SHERPA_DOCKER_PROXY_HOST` | `host.docker.internal` | 本机代理主机映射 |
 

@@ -167,6 +167,14 @@ def write_text_safely(p: Path, s: str) -> None:
     p.write_text(s, encoding="utf-8", errors="replace")
 
 
+def _workflow_opencode_cli_retries() -> int:
+    raw = (os.environ.get("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES") or "2").strip()
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        return 2
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
@@ -864,6 +872,8 @@ class NonOssFuzzHarnessGenerator:
                 "net/http: request canceled",
                 "no such host",
                 "unexpected eof",
+                '": eof',
+                "get \"https://registry-1.docker.io/v2/\": eof",
                 "proxyconnect tcp",
                 "lookup registry-1.docker.io",
             ]
@@ -878,6 +888,15 @@ class NonOssFuzzHarnessGenerator:
                 "dial tcp",
                 "lookup sherpa-docker",
                 "no such host",
+            ]
+            return any(n in blob for n in needles)
+
+        def _is_buildkit_unavailable(lines: list[str]) -> bool:
+            blob = "\n".join(lines).lower()
+            needles = [
+                "buildkit is enabled but the buildx component is missing or broken",
+                "buildx component is missing or broken",
+                "docker: 'buildx' is not a docker command",
             ]
             return any(n in blob for n in needles)
 
@@ -922,18 +941,26 @@ class NonOssFuzzHarnessGenerator:
         backoff_s = 2.0
         last_rc = 1
         last_lines: list[str] = []
+        force_classic_builder = os.environ.get("DOCKER_BUILDKIT", "").strip() == "0"
         for attempt in range(1, max_tries + 1):
-            cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
-            rc, lines = _run_build(cmd, buildkit="1")
+            if force_classic_builder:
+                cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                rc, lines = _run_build(cmd, buildkit="0")
+            else:
+                cmd = ["docker", "build", "--progress=plain", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
+                rc, lines = _run_build(cmd, buildkit="1")
 
             if rc != 0:
                 # Older docker builders do not support --progress; retry without it.
-                if any("unknown flag: --progress" in ln for ln in lines):
+                if not force_classic_builder and any("unknown flag: --progress" in ln for ln in lines):
                     cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
                     rc, lines = _run_build(cmd, buildkit="1")
 
                 # BuildKit can be enabled without buildx; retry with classic builder.
-                if rc != 0 and any("BuildKit is enabled" in ln or "buildx component is missing" in ln for ln in lines):
+                if rc != 0 and _is_buildkit_unavailable(lines):
+                    if not force_classic_builder:
+                        print("[warn] buildx unavailable; switching to classic docker builder (DOCKER_BUILDKIT=0).")
+                    force_classic_builder = True
                     cmd = ["docker", "build", "-t", image, "-f", str(dockerfile), str(TOOL_ROOT)]
                     rc, lines = _run_build(cmd, buildkit="0")
 
@@ -1326,7 +1353,8 @@ class NonOssFuzzHarnessGenerator:
             - If compile_commands.json is needed, note it in `PLAN.md`, but do not generate it yet.
 
             **Do not run commands**; only write the files above and any small metadata you need.
-            When finished, write the path to `{FUZZ_DIR}/PLAN.md` into `./done`.
+            MANDATORY: when finished, you MUST write the path to `{FUZZ_DIR}/PLAN.md` into `./done`.
+            If `./done` is missing, this step is treated as failed.
             """
         ).strip()
 
@@ -1334,7 +1362,7 @@ class NonOssFuzzHarnessGenerator:
             instructions,
             timeout=timeout,
             max_attempts=1,
-            max_cli_retries=1,
+            max_cli_retries=_workflow_opencode_cli_retries(),
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not produce a plan (`fuzz/PLAN.md`).")
@@ -1397,7 +1425,8 @@ class NonOssFuzzHarnessGenerator:
             - The harness reaches some code with a trivial input (will be tested soon).
 
             Do not run any commands here; only create/modify files.
-            When finished, write `{FUZZ_OUT_DIR}` into `./done`.
+            MANDATORY: when finished, you MUST write `{FUZZ_OUT_DIR}` into `./done`.
+            If `./done` is missing, this step is treated as failed.
             """
         ).strip()
 
@@ -1410,7 +1439,7 @@ class NonOssFuzzHarnessGenerator:
             additional_context=context,
             timeout=timeout,
             max_attempts=1,
-            max_cli_retries=1,
+            max_cli_retries=_workflow_opencode_cli_retries(),
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
@@ -1843,19 +1872,22 @@ class NonOssFuzzHarnessGenerator:
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
-        run_time_budget = int(getattr(self, "current_run_time_budget_sec", self.time_budget) or self.time_budget)
-        run_time_budget = max(1, run_time_budget)
+        run_time_budget_raw = getattr(self, "current_run_time_budget_sec", self.time_budget)
+        if run_time_budget_raw is None:
+            run_time_budget_raw = self.time_budget
+        run_time_budget = int(run_time_budget_raw)
         hard_timeout = int(getattr(self, "current_run_hard_timeout_sec", 0) or 0)
-        if hard_timeout <= 0:
+        if hard_timeout <= 0 and run_time_budget > 0:
             hard_timeout = max(60, run_time_budget + 120)
 
         cmd = [
             str(bin_path),
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
-            f"-max_total_time={run_time_budget}",
             f"-max_len={self.max_len}",
         ]
+        if run_time_budget > 0:
+            cmd.append(f"-max_total_time={run_time_budget}")
 
         print(f"[*] ➜  {' '.join(cmd)}")
         rc, out, err = self._run_cmd(

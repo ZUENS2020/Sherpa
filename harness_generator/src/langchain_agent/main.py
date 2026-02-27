@@ -2,11 +2,12 @@
 from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
+import hashlib
 import os
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import threading
 import time
 import queue
@@ -18,9 +19,12 @@ from pathlib import Path
 from fuzz_relative_functions import fuzz_logic
 from job_store import SQLiteJobStore
 from persistent_config import (
+    OpencodeProviderConfig,
     WebPersistentConfig,
     apply_config_to_env,
     as_public_dict,
+    list_opencode_provider_models_resolved,
+    normalize_opencode_providers,
     opencode_env_path,
     load_config,
     save_config,
@@ -31,7 +35,6 @@ async def _lifespan(app: FastAPI):
     cfg = load_config()
     _cfg_set(cfg)
     apply_config_to_env(cfg)
-    os.environ["SHERPA_ACCEPT_DIFF_WITHOUT_DONE"] = "0"
     _init_job_store()
     yield
 
@@ -48,6 +51,8 @@ _JOBS: dict[str, dict] = {}
 _APP_START = time.time()
 _INIT_LOCK = threading.Lock()
 _JOB_STORE: SQLiteJobStore | None = None
+_JOB_FUTURES_LOCK = threading.Lock()
+_JOB_FUTURES: dict[str, Future] = {}
 
 # In-memory API log retention limit (characters).
 # 0 or negative means unlimited (no truncation).
@@ -74,6 +79,95 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
     global _CFG
     with _CFG_LOCK:
         _CFG = cfg
+
+
+def _track_job_future(job_id: str, future: Future) -> None:
+    with _JOB_FUTURES_LOCK:
+        _JOB_FUTURES[job_id] = future
+
+    def _cleanup(_: Future) -> None:
+        with _JOB_FUTURES_LOCK:
+            if _JOB_FUTURES.get(job_id) is future:
+                _JOB_FUTURES.pop(job_id, None)
+
+    add_cb = getattr(future, "add_done_callback", None)
+    if callable(add_cb):
+        add_cb(_cleanup)
+        return
+
+    done_fn = getattr(future, "done", None)
+    if callable(done_fn):
+        try:
+            if bool(done_fn()):
+                _cleanup(future)
+        except Exception:
+            pass
+
+
+def _cancel_job_future(job_id: str) -> bool:
+    with _JOB_FUTURES_LOCK:
+        fut = _JOB_FUTURES.get(job_id)
+    if fut is None:
+        return False
+    cancel_fn = getattr(fut, "cancel", None)
+    if not callable(cancel_fn):
+        return False
+    try:
+        return bool(cancel_fn())
+    except Exception:
+        return False
+
+
+def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            ["docker", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
+    root = str(repo_root or "").strip()
+    if not root:
+        return []
+
+    repo_sha1 = hashlib.sha1(root.encode("utf-8", errors="ignore")).hexdigest()
+    found: set[str] = set()
+    filters = [
+        ["ps", "-q", "--filter", f"label=sherpa.repo_root_sha1={repo_sha1}"],
+        ["ps", "-q", "--filter", f"volume={root}"],
+    ]
+    for cmd in filters:
+        rc, out, _ = _docker_cli(cmd, timeout=15)
+        if rc != 0:
+            continue
+        for line in out.splitlines():
+            cid = line.strip()
+            if cid:
+                found.add(cid)
+    return sorted(found)
+
+
+def _stop_runtime_containers_for_repo(repo_root: str) -> list[str]:
+    killed: list[str] = []
+    for cid in _list_runtime_containers_for_repo(repo_root):
+        rc, _, _ = _docker_cli(["rm", "-f", cid], timeout=20)
+        if rc == 0:
+            killed.append(cid)
+    return killed
+
+
+def _is_cancel_requested(job_id: str) -> bool:
+    snap = _job_snapshot(job_id)
+    return bool(snap and snap.get("cancel_requested"))
 
 
 def _ensure_job_logs_dir() -> None:
@@ -517,6 +611,11 @@ class task_model(BaseModel):
     force_clone: bool = False
 
 
+class provider_models_request(BaseModel):
+    api_key: str | None = None
+    base_url: str | None = None
+
+
 def _resolve_job_docker_policy(request: fuzz_model, cfg: WebPersistentConfig) -> tuple[bool, str]:
     docker_enabled = request.docker if request.docker is not None else cfg.fuzz_use_docker
     docker_image_value = (
@@ -548,12 +647,121 @@ def get_config():
     return as_public_dict(cfg)
 
 
+@app.get("/api/opencode/providers/{provider}/models")
+def get_opencode_provider_models(provider: str):
+    cfg = _cfg_get()
+    normalized, models, source, warning = list_opencode_provider_models_resolved(provider, cfg)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not models:
+        raise HTTPException(status_code=404, detail=f"unsupported provider: {provider}")
+    payload: dict[str, object] = {
+        "provider": normalized,
+        "models": models,
+        "source": source,
+    }
+    if warning:
+        payload["warning"] = warning
+    return payload
+
+
+@app.post("/api/opencode/providers/{provider}/models")
+def post_opencode_provider_models(provider: str, request: provider_models_request = Body(...)):
+    cfg = _cfg_get()
+    normalized, models, source, warning = list_opencode_provider_models_resolved(
+        provider,
+        cfg,
+        api_key_override=request.api_key,
+        base_url_override=request.base_url,
+    )
+    if not normalized:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not models:
+        raise HTTPException(status_code=404, detail=f"unsupported provider: {provider}")
+    payload: dict[str, object] = {
+        "provider": normalized,
+        "models": models,
+        "source": source,
+    }
+    if warning:
+        payload["warning"] = warning
+    return payload
+
+
+def _merge_opencode_provider_secrets(
+    current: WebPersistentConfig,
+    payload: dict,
+) -> None:
+    current_by_name: dict[str, OpencodeProviderConfig] = {
+        str(p.name or "").strip().lower(): p for p in (current.opencode_providers or [])
+    }
+
+    incoming_entries = payload.get("opencode_providers")
+    if not isinstance(incoming_entries, list):
+        payload["opencode_providers"] = []
+        return
+
+    merged_entries: list[OpencodeProviderConfig] = []
+    for raw in incoming_entries:
+        if not isinstance(raw, dict):
+            continue
+
+        name = str(raw.get("name") or "").strip().lower()
+        if not name:
+            continue
+
+        existing = current_by_name.get(name)
+        clear_flag = bool(raw.get("clear_api_key"))
+        raw_key = raw.get("api_key")
+        next_key = ""
+        if isinstance(raw_key, str):
+            next_key = raw_key.strip()
+
+        if clear_flag:
+            resolved_key: str | None = ""
+        elif next_key:
+            resolved_key = next_key
+        elif existing and isinstance(existing.api_key, str) and existing.api_key.strip():
+            resolved_key = existing.api_key
+        else:
+            resolved_key = ""
+
+        models_raw = raw.get("models")
+        models = list(models_raw) if isinstance(models_raw, list) else []
+        headers_raw = raw.get("headers")
+        headers = dict(headers_raw) if isinstance(headers_raw, dict) else {}
+        options_raw = raw.get("options")
+        options = dict(options_raw) if isinstance(options_raw, dict) else {}
+
+        merged_entries.append(
+            OpencodeProviderConfig(
+                name=name,
+                enabled=bool(raw.get("enabled", True)),
+                base_url=str(raw.get("base_url") or "").strip(),
+                api_key=(resolved_key if resolved_key else None),
+                clear_api_key=False,
+                models=models,
+                headers=headers,
+                options=options,
+            )
+        )
+
+    payload["opencode_providers"] = [
+        item.model_dump() for item in normalize_opencode_providers(merged_entries)
+    ]
+
+
 @app.put("/api/config")
 def put_config(request: WebPersistentConfig = Body(...)):
     if request.fuzz_use_docker is False:
         raise HTTPException(
             status_code=400,
             detail="Docker-only policy: fuzz_use_docker must remain enabled.",
+        )
+    if int(request.fuzz_time_budget) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="fuzz_time_budget must be >= 0 (0 means unlimited).",
         )
 
     current = _cfg_get()
@@ -563,6 +771,7 @@ def put_config(request: WebPersistentConfig = Body(...)):
         payload["openai_api_key"] = current.openai_api_key
     if request.openrouter_api_key is None:
         payload["openrouter_api_key"] = current.openrouter_api_key
+    _merge_opencode_provider_secrets(current, payload)
     payload["fuzz_use_docker"] = True
     payload["fuzz_docker_image"] = (payload.get("fuzz_docker_image") or "").strip() or "auto"
     cfg = WebPersistentConfig(**payload)
@@ -595,6 +804,8 @@ def _create_job(kind: str, repo: str | None = None) -> str:
             "result": None,
             "log": "",
             "log_file": None,
+            "cancel_requested": False,
+            "last_cancel_requested_at": None,
         }
         job_payload = dict(_JOBS[job_id])
     if job_payload is not None:
@@ -751,6 +962,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
     max_attempts = 5
     backoff = 3.0
     last_output = ""
+    last_rc = 1
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -758,8 +970,10 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
         except Exception:
             if attempt == max_attempts:
                 raise
+        retry_outer = False
         for cmd in build_cmds:
             rc, output = _run_build(cmd)
+            last_rc = rc
             last_output = output
             if rc == 0:
                 return
@@ -767,17 +981,30 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 # Try without --progress on older Docker.
                 continue
             if _buildkit_unavailable(output):
-                print("[init] buildx unavailable; retrying docker build with DOCKER_BUILDKIT=0")
-                rc2, output2 = _run_build(cmd, buildkit="0")
+                print("[init] buildx unavailable; retrying docker build with classic builder (DOCKER_BUILDKIT=0)")
+                legacy_cmd = [arg for arg in cmd if not arg.startswith("--progress=")]
+                rc2, output2 = _run_build(legacy_cmd, buildkit="0")
+                last_rc = rc2
                 last_output = output2
                 if rc2 == 0:
                     return
+                if _docker_daemon_unreachable(output2) and attempt < max_attempts:
+                    print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    retry_outer = True
+                    break
+                # Keep trying other build command variants before failing.
+                continue
             if _docker_daemon_unreachable(output) and attempt < max_attempts:
                 print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                 time.sleep(backoff)
                 backoff *= 2
+                retry_outer = True
                 break
-            raise RuntimeError(f"docker build failed (rc={rc}) for {image}")
+        if retry_outer:
+            continue
+        raise RuntimeError(f"docker build failed (rc={last_rc}) for {image}")
 
     raise RuntimeError(f"docker build failed after retries for {image}. Last output:\n{last_output}")
 
@@ -926,6 +1153,16 @@ def _run_fuzz_job(
     resume_from_step: str | None = None,
     resume_repo_root: str | None = None,
 ) -> None:
+    cancel_error = "cancelled by user"
+    if _is_cancel_requested(job_id):
+        _job_update(
+            job_id,
+            status="error",
+            error=cancel_error,
+            recoverable=False,
+            finished_at=time.time(),
+        )
+        return
     start_ts = time.time()
     next_status = "resuming" if resumed else "running"
     _job_update(
@@ -947,6 +1184,8 @@ def _run_fuzz_job(
     try:
         with redirect_stdout(tee), redirect_stderr(tee):
             print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
+            if _is_cancel_requested(job_id):
+                raise RuntimeError(cancel_error)
             print(f"[job {job_id}] about to call fuzz_logic...")
             docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
             if not docker_enabled:
@@ -961,10 +1200,14 @@ def _run_fuzz_job(
                 if request.run_time_budget is not None
                 else total_time_budget_value
             )
-            if int(total_time_budget_value) <= 0:
-                raise RuntimeError("total_time_budget must be > 0")
-            if int(run_time_budget_value) <= 0:
-                raise RuntimeError("run_time_budget must be > 0")
+            total_time_budget_value = int(total_time_budget_value)
+            run_time_budget_value = int(run_time_budget_value)
+            if total_time_budget_value < 0:
+                raise RuntimeError("total_time_budget must be >= 0")
+            if run_time_budget_value < 0:
+                raise RuntimeError("run_time_budget must be >= 0")
+            total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
+            run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
             openai_key = (
                 os.environ.get("OPENAI_API_KEY")
                 or cfg.openai_api_key
@@ -982,12 +1225,14 @@ def _run_fuzz_job(
                 model_value = request.model or cfg.openrouter_model
             print(
                 f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
-                f"time_budget={total_time_budget_value}s run_time_budget={run_time_budget_value}s "
+                f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
                 f"max_tokens={request.max_tokens} model={model_value}"
             )
             print(f"[job {job_id}] log_file={log_file}")
             docker_image = docker_image_value
             print(f"[job {job_id}] calling fuzz_logic with docker_image={docker_image}...")
+            if _is_cancel_requested(job_id):
+                raise RuntimeError(cancel_error)
             try:
                 res = fuzz_logic(
                     request.code_url,
@@ -1008,6 +1253,16 @@ def _run_fuzz_job(
                 import traceback
                 traceback.print_exc()
                 raise
+            if _is_cancel_requested(job_id):
+                _job_update(
+                    job_id,
+                    status="error",
+                    error=cancel_error,
+                    result=None,
+                    recoverable=False,
+                    last_resume_finished_at=time.time() if resumed else None,
+                )
+                return
             _job_update(
                 job_id,
                 status=("resumed" if resumed else "success"),
@@ -1017,11 +1272,16 @@ def _run_fuzz_job(
                 last_resume_finished_at=time.time() if resumed else None,
             )
     except Exception as e:
-        fail_status = "resume_failed" if resumed else "error"
+        if _is_cancel_requested(job_id):
+            fail_status = "error"
+            err_text = cancel_error
+        else:
+            fail_status = "resume_failed" if resumed else "error"
+            err_text = str(e)
         _job_update(
             job_id,
             status=fail_status,
-            error=str(e),
+            error=err_text,
             recoverable=False,
             last_resume_finished_at=time.time() if resumed else None,
         )
@@ -1042,7 +1302,8 @@ def _submit_fuzz_job(request: fuzz_model, cfg: WebPersistentConfig) -> str:
         resume_attempts=0,
         resume_error_code=None,
     )
-    executor.submit(_run_fuzz_job, job_id, request, cfg, resumed=False, trigger="new")
+    fut = executor.submit(_run_fuzz_job, job_id, request, cfg, resumed=False, trigger="new")
+    _track_job_future(job_id, fut)
     return job_id
 
 
@@ -1098,7 +1359,7 @@ def _resume_fuzz_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
         last_resume_reason=trigger,
         last_resume_requested_at=time.time(),
     )
-    executor.submit(
+    fut = executor.submit(
         _run_fuzz_job,
         job_id,
         req,
@@ -1108,6 +1369,7 @@ def _resume_fuzz_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
         resume_from_step=resume_step,
         resume_repo_root=resume_repo_root,
     )
+    _track_job_future(job_id, fut)
     return {"accepted": True, "reason": "resuming", "resume_attempts": attempts}
 
 
@@ -1166,6 +1428,97 @@ def _resume_task_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
     return {"accepted": False, "reason": "no_resumable_children"}
 
 
+def _stop_fuzz_job(job_id: str, *, reason: str, trigger: str) -> dict[str, object]:
+    snap = _job_snapshot(job_id)
+    if not snap:
+        return {"accepted": False, "reason": "job_not_found"}
+    if str(snap.get("kind") or "") != "fuzz":
+        return {"accepted": False, "reason": "job_not_fuzz"}
+
+    status = str(snap.get("status") or "").strip().lower()
+    now = time.time()
+    _job_update(
+        job_id,
+        cancel_requested=True,
+        last_cancel_requested_at=now,
+        last_cancel_reason=trigger,
+        recoverable=False,
+    )
+
+    future_cancelled = _cancel_job_future(job_id)
+    repo_root = str(snap.get("workflow_repo_root") or snap.get("resume_repo_root") or "").strip()
+    killed_containers = _stop_runtime_containers_for_repo(repo_root) if repo_root else []
+
+    if status not in {"success", "resumed", "error", "resume_failed"}:
+        _job_update(
+            job_id,
+            status="error",
+            error=reason,
+            result=None,
+            recoverable=False,
+            finished_at=now,
+        )
+
+    current = _job_snapshot(job_id) or snap
+    return {
+        "accepted": True,
+        "reason": "stopped",
+        "status": str(current.get("status") or ""),
+        "future_cancelled": bool(future_cancelled),
+        "killed_containers": killed_containers,
+        "repo_root": repo_root or None,
+    }
+
+
+def _stop_task_job(job_id: str, *, reason: str, trigger: str) -> dict[str, object]:
+    snap = _job_snapshot(job_id)
+    if not snap:
+        return {"accepted": False, "reason": "job_not_found"}
+    if str(snap.get("kind") or "") != "task":
+        return {"accepted": False, "reason": "job_not_task"}
+
+    now = time.time()
+    _job_update(
+        job_id,
+        cancel_requested=True,
+        last_cancel_requested_at=now,
+        last_cancel_reason=trigger,
+        recoverable=False,
+    )
+    parent_future_cancelled = _cancel_job_future(job_id)
+
+    child_ids = [str(x) for x in (snap.get("children") or []) if str(x).strip()]
+    child_results: list[dict[str, object]] = []
+    for cid in child_ids:
+        child_results.append(_stop_fuzz_job(cid, reason=reason, trigger=f"{trigger}:task:{job_id}"))
+
+    _job_update(
+        job_id,
+        status="error",
+        error=reason,
+        recoverable=False,
+        finished_at=now,
+    )
+    refreshed = _job_snapshot(job_id) or snap
+    derived = _derive_task_status(refreshed)
+    _job_update(
+        job_id,
+        status="error",
+        error=reason,
+        recoverable=False,
+        finished_at=time.time(),
+    )
+
+    return {
+        "accepted": True,
+        "reason": "stopped",
+        "status": "error",
+        "children_status": derived.get("children_status"),
+        "stopped_children": child_results,
+        "parent_future_cancelled": bool(parent_future_cancelled),
+    }
+
+
 def _auto_resume_enabled() -> bool:
     raw = (os.environ.get("SHERPA_WEB_AUTO_RESUME_ON_START", "0") or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -1213,6 +1566,16 @@ async def task_api(request: task_model = Body(...)):
     )
 
     def _runner() -> None:
+        cancel_error = "cancelled by user"
+        if _is_cancel_requested(job_id):
+            _job_update(
+                job_id,
+                status="error",
+                error=cancel_error,
+                recoverable=False,
+                finished_at=time.time(),
+            )
+            return
         _job_update(job_id, status="running", started_at=time.time())
         log_file = _job_log_path(job_id)
         _job_update(job_id, log_file=str(log_file))
@@ -1222,8 +1585,12 @@ async def task_api(request: task_model = Body(...)):
         try:
             with redirect_stdout(tee), redirect_stderr(tee):
                 print(f"[task {job_id}] start (jobs={len(request.jobs)})")
+                if _is_cancel_requested(job_id):
+                    raise RuntimeError(cancel_error)
                 if request.auto_init:
                     with _INIT_LOCK:
+                        if _is_cancel_requested(job_id):
+                            raise RuntimeError(cancel_error)
                         repo_url = (
                             (request.oss_fuzz_repo_url or "").strip()
                             or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
@@ -1280,17 +1647,27 @@ async def task_api(request: task_model = Body(...)):
             # redirect_stdout is process-global; keeping it active here can clobber
             # child job log redirection and break frontend progress tracking.
             for job in request.jobs:
+                if _is_cancel_requested(job_id):
+                    break
                 child_id = _submit_fuzz_job(job, cfg)
                 child_ids.append(child_id)
                 _job_update(child_id, parent_id=job_id)
-            if child_ids:
+            if _is_cancel_requested(job_id):
+                _job_update(
+                    job_id,
+                    status="error",
+                    error=cancel_error,
+                    recoverable=False,
+                    finished_at=time.time(),
+                )
+            elif child_ids:
                 _job_update(job_id, result="submitted", children=child_ids)
             else:
                 _job_update(job_id, status="success", result="submitted (0 jobs)", finished_at=time.time())
             tee.write(f"[task {job_id}] submitted {len(child_ids)} fuzz jobs\n")
         except Exception as e:
             had_error = True
-            _job_update(job_id, status="error", error=str(e))
+            _job_update(job_id, status="error", error=(cancel_error if _is_cancel_requested(job_id) else str(e)))
         finally:
             try:
                 tee.close()
@@ -1299,7 +1676,8 @@ async def task_api(request: task_model = Body(...)):
             if had_error:
                 _job_update(job_id, finished_at=time.time())
 
-    executor.submit(_runner)
+    fut = executor.submit(_runner)
+    _track_job_future(job_id, fut)
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -1330,6 +1708,29 @@ def resume_task(job_id: str):
         "reason": str(out.get("reason") or ""),
         "resume_attempts": int(out.get("resume_attempts") or (snap or {}).get("resume_attempts") or 0),
         "status": str((snap or {}).get("status") or ""),
+    }
+
+
+@app.post("/api/task/{job_id}/stop")
+def stop_task(job_id: str):
+    snap0 = _job_snapshot(job_id) or {}
+    kind = str(snap0.get("kind") or "")
+    reason = "cancelled by user"
+    trigger = "manual_api"
+
+    if kind == "fuzz":
+        out = _stop_fuzz_job(job_id, reason=reason, trigger=trigger)
+    else:
+        out = _stop_task_job(job_id, reason=reason, trigger=trigger)
+
+    snap = _job_snapshot(job_id)
+    return {
+        "job_id": job_id,
+        "kind": kind or str((snap or {}).get("kind") or ""),
+        "accepted": bool(out.get("accepted")),
+        "reason": str(out.get("reason") or ""),
+        "status": str((snap or {}).get("status") or ""),
+        "details": out,
     }
 
 

@@ -7,7 +7,7 @@ import { LogPanel } from '@/components/LogPanel';
 import { SessionPanel } from '@/components/SessionPanel';
 import { SystemOverviewCard } from '@/components/SystemOverviewCard';
 import { TaskProgressPanel } from '@/components/TaskProgressPanel';
-import { useSystemQuery, useTaskDetailQuery, useTasksQuery } from '@/lib/api/hooks';
+import { useStopTaskMutation, useSystemQuery, useTaskDetailQuery, useTasksQuery } from '@/lib/api/hooks';
 import { useUiStore } from '@/store/useUiStore';
 
 export default function HomePage() {
@@ -19,6 +19,7 @@ export default function HomePage() {
   const system = useSystemQuery();
   const tasks = useTasksQuery();
   const detail = useTaskDetailQuery(activeTaskId || null);
+  const stopTask = useStopTaskMutation();
 
   useEffect(() => {
     if (!hydrated) hydrate();
@@ -38,6 +39,14 @@ export default function HomePage() {
     () => tasks.data?.find((t) => t.job_id === activeTaskId),
     [tasks.data, activeTaskId],
   );
+
+  const activeStatus = detail.data?.status || activeSummary?.status || '';
+  const canStopTask = ['queued', 'running', 'resuming', 'recoverable'].includes(String(activeStatus).toLowerCase());
+
+  const handleStopTask = async () => {
+    if (!activeTaskId) return;
+    await stopTask.mutateAsync(activeTaskId);
+  };
 
   return (
     <Box sx={{ maxWidth: 1600, mx: 'auto', px: 2.5, py: 2.5 }}>
@@ -66,7 +75,15 @@ export default function HomePage() {
             <Stack spacing={2}>
               {tasks.isError ? <Alert severity="warning">任务列表加载失败</Alert> : null}
               {activeSummary?.error ? <Alert severity="error">{activeSummary.error}</Alert> : null}
-              <TaskProgressPanel detail={detail.data} />
+              {stopTask.isError ? (
+                <Alert severity="error">停止任务失败：{(stopTask.error as Error).message}</Alert>
+              ) : null}
+              <TaskProgressPanel
+                detail={detail.data}
+                onStopTask={handleStopTask}
+                stopDisabled={!activeTaskId || !canStopTask}
+                stopLoading={stopTask.isPending}
+              />
               <LogPanel detail={detail.data} />
             </Stack>
           </Box>

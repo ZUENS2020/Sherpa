@@ -45,8 +45,6 @@ services:
       - sherpa-job-logs:/app/job-logs
       # Persist SQLite job state in a dedicated volume managed by sherpa-job-store.
       - sherpa-job-store-data:/app/job-store
-      # Mount opencode config from host
-      - ./opencode.json:/app/opencode.json:ro
 
       # Shared temp volume (must be mounted into the Docker daemon container too).
       - sherpa-tmp:/shared/tmp
@@ -70,7 +68,7 @@ services:
 
       # Route docker CLI calls to the dind daemon.
       DOCKER_HOST: "tcp://sherpa-docker:2375"
-      DOCKER_BUILDKIT: "0"
+      DOCKER_BUILDKIT: "1"
 
       # Default OSS-Fuzz checkout path inside containers.
       # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
@@ -100,13 +98,12 @@ services:
       # OpenCode model override for OpenAI-compatible endpoints
       OPENCODE_MODEL: "deepseek/deepseek-reasoner"
       OPENAI_MODEL: "deepseek-reasoner"
-      OPENCODE_CONFIG: "/opencode.json"
+      OPENCODE_CONFIG: "/app/config/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       SHERPA_WEB_JOB_DB_PATH: "/app/job-store/jobs.sqlite3"
 
       # Optional (fuzz patching): where to read API key env file from.
       # AI_KEY_PATH: "/app/.env"
-      # SHERPA_ACCEPT_DIFF_WITHOUT_DONE: "1"
     depends_on:
       sherpa-oss-fuzz-init:
         condition: service_completed_successfully
@@ -163,14 +160,21 @@ services:
     environment:
       DOCKER_TLS_CERTDIR: ""
       DOCKER_HOST: unix:///var/run/docker.sock
-      # Optional: pass a non-personal mirror from local env at runtime.
-      SHERPA_DOCKER_REGISTRY_MIRROR: ${SHERPA_DOCKER_REGISTRY_MIRROR:-}
+      # Route docker daemon egress through host proxy (default: host.docker.internal:7897).
+      HTTP_PROXY: ${SHERPA_DOCKER_HTTP_PROXY:-http://host.docker.internal:7897}
+      HTTPS_PROXY: ${SHERPA_DOCKER_HTTPS_PROXY:-http://host.docker.internal:7897}
+      NO_PROXY: ${SHERPA_DOCKER_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,sherpa-docker}
+      http_proxy: ${SHERPA_DOCKER_HTTP_PROXY:-http://host.docker.internal:7897}
+      https_proxy: ${SHERPA_DOCKER_HTTPS_PROXY:-http://host.docker.internal:7897}
+      no_proxy: ${SHERPA_DOCKER_NO_PROXY:-localhost,127.0.0.1,::1,host.docker.internal,sherpa-docker}
+      # Default mirror uses xuanyuan; can still be overridden by local env.
+      SHERPA_DOCKER_REGISTRY_MIRROR: ${SHERPA_DOCKER_REGISTRY_MIRROR:-https://7m856d3fdvb9yp.xuanyuan.run}
     volumes:
       - sherpa-docker-data:/var/lib/docker
+      - sherpa-config:/app/config
       - sherpa-tmp:/shared/tmp
       - sherpa-oss-fuzz:/shared/oss-fuzz
       - ./output:/shared/output
-      - ./opencode.json:/opencode.json:ro
 
   # Optional helper image for OpenCode CLI.
   sherpa-opencode:

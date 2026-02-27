@@ -12,6 +12,11 @@ venv
 myenv
 sherpa_venv
 
+# Frontend build artifacts/deps (re-installed in Docker build)
+frontend-next/node_modules
+frontend-next/.next
+frontend-next/.turbo
+
 # Runtime outputs / logs
 jobs
 output*

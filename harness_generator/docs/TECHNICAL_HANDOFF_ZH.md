@@ -356,7 +356,6 @@ output/
 | `SHERPA_OUTPUT_DIR` | 任务输出根目录 | 空（compose 中 `/shared/output`） |
 | `SHERPA_CODEX_CLI` | OpenCode CLI 名称 | `opencode` |
 | `SHERPA_OPENCODE_DOCKER_IMAGE` | OpenCode 执行容器 | 空（compose 设 `sherpa-opencode:latest`） |
-| `SHERPA_ACCEPT_DIFF_WITHOUT_DONE` | 允许无 sentinel 仅凭 diff 通过 | `0`（web 启动时设置） |
 | `SHERPA_WEB_JOB_LOG_DIR` | Job 日志目录 | `/app/job-logs/jobs` |
 | `SHERPA_WORKFLOW_MAX_STEPS` | workflow 最大步数 | `20` |
 | `SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES` | build 节点本地重试次数 | `2` |
@@ -450,8 +449,8 @@ flowchart LR
 
 1. 默认禁止 OpenCode 执行 build/test/run 类命令（PATH shim blocklist）
 2. 仅允许读命令辅助定位（如 `rg/ls/cat`）
-3. 通过 `done` sentinel + `git diff HEAD` 双条件判定成功
-4. 可配置“无 sentinel 但有 diff”是否接受（`SHERPA_ACCEPT_DIFF_WITHOUT_DONE`）
+3. 严格通过 `done` sentinel + `git diff HEAD` 双条件判定成功
+4. 未写 `./done` 一律失败（即使产生 diff 也不会判成功）
 
 重要边界提示（模板中明确）：
 
@@ -544,4 +543,3 @@ pytest -q
 11. `docker/Dockerfile.fuzz-cpp`
 12. `docker/Dockerfile.fuzz-java`
 13. `docker/Dockerfile.opencode`
-

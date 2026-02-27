@@ -7,6 +7,7 @@ import {
   getTask,
   getTasks,
   putConfig,
+  stopTask,
   submitTask,
   type SubmitTaskInput,
 } from './client';
@@ -61,6 +62,18 @@ export function useSubmitTaskMutation() {
     mutationFn: (input: SubmitTaskInput) => submitTask(input),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['tasks'] });
+      void qc.invalidateQueries({ queryKey: ['system'] });
+    },
+  });
+}
+
+export function useStopTaskMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => stopTask(taskId),
+    onSuccess: (_out, taskId) => {
+      void qc.invalidateQueries({ queryKey: ['tasks'] });
+      void qc.invalidateQueries({ queryKey: ['task', taskId] });
       void qc.invalidateQueries({ queryKey: ['system'] });
     },
   });

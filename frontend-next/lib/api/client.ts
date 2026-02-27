@@ -56,6 +56,36 @@ export async function getTask(jobId: string): Promise<TaskDetail> {
   return taskDetailSchema.parse(data);
 }
 
+export async function stopTask(jobId: string): Promise<{ accepted: boolean; reason: string; status: string }> {
+  return request(`/task/${encodeURIComponent(jobId)}/stop`, { method: 'POST' });
+}
+
+export interface ProviderModelsResponse {
+  provider: string;
+  models: string[];
+  source?: string;
+  warning?: string;
+}
+
+export interface ProviderModelsRequest {
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+export async function getOpencodeProviderModels(
+  provider: string,
+  req?: ProviderModelsRequest,
+): Promise<ProviderModelsResponse> {
+  const body = {
+    api_key: req?.apiKey || '',
+    base_url: req?.baseUrl || '',
+  };
+  return request(`/opencode/providers/${encodeURIComponent(provider)}/models`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
 export interface SubmitTaskInput {
   repoUrl: string;
   model?: string;

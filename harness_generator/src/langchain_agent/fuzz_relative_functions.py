@@ -43,7 +43,7 @@ def _find_ai_key_path() -> Path:
 def fuzz_logic(
     repo_url: str,
     max_len: int = 1024,
-    time_budget: int = 900,
+    time_budget: int | None = 900,
     run_time_budget: int | None = None,
     email: str | None = None,
     docker_image: str | None = None,
@@ -53,6 +53,13 @@ def fuzz_logic(
     resume_from_step: str | None = None,
     resume_repo_root: str | Path | None = None,
 ) -> str:
+    resolved_time_budget = 900 if time_budget is None else int(time_budget)
+    resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
+    if resolved_time_budget < 0:
+        raise ValueError("time_budget must be >= 0")
+    if resolved_run_time_budget < 0:
+        raise ValueError("run_time_budget must be >= 0")
+
     # Set model in environment so OpenCode can pick it up
     if model and model.strip() and not os.environ.get("OPENCODE_MODEL"):
         os.environ["OPENCODE_MODEL"] = model.strip()
@@ -64,8 +71,8 @@ def fuzz_logic(
             FuzzWorkflowInput(
                 repo_url=repo_url,
                 email=email,
-                time_budget=int(time_budget or 900),
-                run_time_budget=int(run_time_budget or time_budget or 900),
+                time_budget=resolved_time_budget,
+                run_time_budget=resolved_run_time_budget,
                 max_len=int(max_len or 1024),
                 docker_image=docker_image,
                 ai_key_path=(ai_key_path or _find_ai_key_path()),
