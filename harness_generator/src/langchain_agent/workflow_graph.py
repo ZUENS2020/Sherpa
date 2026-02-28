@@ -53,14 +53,23 @@ class FuzzWorkflowState(TypedDict, total=False):
     same_build_error_repeats: int
     build_error_kind: str
     build_error_code: str
+    build_error_signature_short: str
     build_attempts: int
     fix_build_attempts: int
+    fix_build_noop_streak: int
+    fix_build_attempt_history: list[dict[str, Any]]
+    fix_build_rule_hits: list[str]
+    fix_build_terminal_reason: str
+    fix_build_last_diff_paths: list[str]
     codex_hint: str
     failed: bool
     repo_root: str
     run_rc: int
     crash_evidence: str
     run_error_kind: str
+    run_terminal_reason: str
+    run_idle_seconds: int
+    run_children_exit_count: int
     run_details: list[dict[str, Any]]
     run_batch_plan: list[dict[str, Any]]
     last_crash_artifact: str
@@ -239,6 +248,53 @@ def _opencode_cli_retries() -> int:
         return 2
 
 
+def _fix_build_max_noop_streak() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_NOOP_STREAK") or "3").strip()
+    try:
+        return max(1, min(int(raw), 20))
+    except Exception:
+        return 3
+
+
+def _fix_build_max_attempts() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_ATTEMPTS") or "8").strip()
+    try:
+        return max(1, min(int(raw), 50))
+    except Exception:
+        return 8
+
+
+def _fix_build_feedback_history_limit() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_FEEDBACK_HISTORY") or "6").strip()
+    try:
+        return max(1, min(int(raw), 30))
+    except Exception:
+        return 6
+
+
+def _fix_build_ruleset() -> str:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_RULESET") or "extended").strip().lower()
+    if raw in {"legacy", "extended"}:
+        return raw
+    return "extended"
+
+
+def _run_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_IDLE_TIMEOUT_SEC") or "120").strip()
+    try:
+        return max(0, min(int(raw), 86400))
+    except Exception:
+        return 120
+
+
+def _run_finalize_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FINALIZE_TIMEOUT_SEC") or "60").strip()
+    try:
+        return max(0, min(int(raw), 3600))
+    except Exception:
+        return 60
+
+
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
     return cast(FuzzWorkflowRuntimeState, _wf_common.time_budget_exceeded_state(cast(dict[str, Any], state), step_name=step_name))
 
@@ -336,14 +392,23 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "same_build_error_repeats": 0,
             "build_error_kind": "",
             "build_error_code": "",
+            "build_error_signature_short": "",
             "build_attempts": int(state.get("build_attempts") or 0),
             "fix_build_attempts": int(state.get("fix_build_attempts") or 0),
+            "fix_build_noop_streak": int(state.get("fix_build_noop_streak") or 0),
+            "fix_build_attempt_history": list(state.get("fix_build_attempt_history") or []),
+            "fix_build_rule_hits": list(state.get("fix_build_rule_hits") or []),
+            "fix_build_terminal_reason": str(state.get("fix_build_terminal_reason") or ""),
+            "fix_build_last_diff_paths": list(state.get("fix_build_last_diff_paths") or []),
             "codex_hint": "",
             "failed": False,
             "repo_root": str(generator.repo_root),
             "run_rc": 0,
             "crash_evidence": "none",
             "run_error_kind": "",
+            "run_terminal_reason": "",
+            "run_idle_seconds": 0,
+            "run_children_exit_count": 0,
             "last_crash_artifact": "",
             "last_fuzzer": "",
             "crash_signature": "",
@@ -788,6 +853,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         if final_rc != 0:
             sig = _calc_build_error_signature()
+            next_state["build_error_signature_short"] = sig[:12]
             repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
             next_state["build_error_signature"] = sig
             next_state["same_build_error_repeats"] = repeats
@@ -812,6 +878,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         if not final_bins:
             sig = _calc_build_error_signature()
+            next_state["build_error_signature_short"] = sig[:12]
             repeats = (prev_repeats + 1) if (prev_sig and prev_sig == sig) else 0
             next_state["build_error_signature"] = sig
             next_state["same_build_error_repeats"] = repeats
@@ -832,10 +899,14 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             return next_state
 
         next_state["build_error_signature"] = ""
+        next_state["build_error_signature_short"] = ""
         next_state["same_build_error_repeats"] = 0
         next_state["build_error_kind"] = ""
         next_state["build_error_code"] = ""
         next_state["fix_build_attempts"] = 0
+        next_state["fix_build_noop_streak"] = 0
+        next_state["fix_build_terminal_reason"] = ""
+        next_state["fix_build_last_diff_paths"] = []
         next_state["last_error"] = ""
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -875,6 +946,69 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     build_error_code = (state.get("build_error_code") or "").strip().lower()
     repo_root = str(gen.repo_root)
     diag_text = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+    prev_noop_streak = int(state.get("fix_build_noop_streak") or 0)
+    history = list(state.get("fix_build_attempt_history") or [])
+    rule_hits = list(state.get("fix_build_rule_hits") or [])
+    max_noop_streak = _fix_build_max_noop_streak()
+    max_fix_attempts = _fix_build_max_attempts()
+    history_limit = _fix_build_feedback_history_limit()
+    error_sig = (state.get("build_error_signature_short") or "").strip()
+    if not error_sig:
+        error_sig = _sha256_text("\n".join([last_error, stdout_tail, stderr_tail]))[:12]
+
+    if fix_attempts > max_fix_attempts:
+        out = {
+            **state,
+            "last_step": "fix_build",
+            "failed": True,
+            "fix_build_terminal_reason": "fix_build_max_attempts_exceeded",
+            "last_error": f"fix_build stopped: max attempts exceeded ({max_fix_attempts})",
+            "message": "fix_build stopped (max attempts exceeded)",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- fix_build stop=max-attempts limit={max_fix_attempts}")
+        return out
+
+    def _append_attempt(outcome: str, *, rejection_reason: str = "", rule_hit: str = "", changed_paths_count: int = 0) -> tuple[list[dict[str, Any]], list[str]]:
+        updated_rule_hits = list(rule_hits)
+        if rule_hit and rule_hit not in updated_rule_hits:
+            updated_rule_hits.append(rule_hit)
+        row = {
+            "attempt_index": fix_attempts,
+            "build_error_kind": build_error_kind or "unknown",
+            "build_error_code": build_error_code or "unknown",
+            "classified_signature": error_sig,
+            "changed_paths_count": int(changed_paths_count),
+            "outcome": outcome,
+            "rejection_reason": rejection_reason,
+            "rule_hit": rule_hit,
+        }
+        updated_history = history + [row]
+        if len(updated_history) > history_limit:
+            updated_history = updated_history[-history_limit:]
+        return updated_history, updated_rule_hits
+
+    def _success_out(message: str, *, outcome: str, rule_hit: str = "", changed_paths_count: int = 1, last_diff_paths: list[str] | None = None) -> FuzzWorkflowRuntimeState:
+        updated_history, updated_rule_hits = _append_attempt(
+            outcome,
+            rule_hit=rule_hit,
+            changed_paths_count=changed_paths_count,
+        )
+        out = cast(
+            FuzzWorkflowRuntimeState,
+            {
+                **state,
+                "last_step": "fix_build",
+                "last_error": "",
+                "codex_hint": "",
+                "message": message,
+                "fix_build_noop_streak": 0,
+                "fix_build_attempt_history": updated_history,
+                "fix_build_rule_hits": updated_rule_hits,
+                "fix_build_terminal_reason": "",
+                "fix_build_last_diff_paths": list(last_diff_paths or []),
+            },
+        )
+        return out
 
     def _detect_non_source_build_blocker(diag: str) -> str:
         checks: list[tuple[str, list[str]]] = [
@@ -927,12 +1061,20 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     else:
         non_source_reason = _detect_non_source_build_blocker(diag_text)
     if stop_on_infra and non_source_reason:
+        updated_history, updated_rule_hits = _append_attempt(
+            "infra_blocked",
+            rejection_reason=non_source_reason,
+            changed_paths_count=0,
+        )
         out = {
             **state,
             "last_step": "fix_build",
             "failed": True,
             "build_error_kind": "infra",
             "build_error_code": non_source_reason,
+            "fix_build_terminal_reason": "fix_build_infra_blocked",
+            "fix_build_attempt_history": updated_history,
+            "fix_build_rule_hits": updated_rule_hits,
             "last_error": f"non-source build blocker detected: {non_source_reason}",
             "message": "fix_build skipped (environment/infrastructure issue)",
         }
@@ -1208,7 +1350,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     def _try_hotfix_missing_lz() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
-        if "cannot find -lz" not in diag:
+        if "cannot find -lz" not in diag and "undefined reference to `gz" not in diag and "undefined reference to `inflate" not in diag:
             return False
 
         build_py = gen.repo_root / "fuzz" / "build.py"
@@ -1221,28 +1363,60 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             return False
 
         changed = False
+        if "import glob" not in text:
+            if "import os" in text:
+                text = text.replace("import os", "import os\nimport glob", 1)
+                changed = True
+            elif "import subprocess" in text:
+                text = text.replace("import subprocess", "import os\nimport glob\nimport subprocess", 1)
+                changed = True
+
+        # Strengthen search path first.
         if "-L' + os.path.join(build_dir, 'lib')" not in text:
-            text = text.replace(
+            text2 = text.replace(
                 "lib_path = ['-L' + build_dir]",
                 "lib_path = ['-L' + build_dir, '-L' + os.path.join(build_dir, 'lib')]",
             )
-            changed = True
+            if text2 != text:
+                text = text2
+                changed = True
 
-        if "lib_patterns = [" not in text and "libs = ['-lz']" in text:
-            inject = (
-                "libs = ['-lz']\n"
-                "    # Hotfix: resolve zlib by full path when -lz is not discoverable\n"
-                "    lib_patterns = [os.path.join(build_dir, 'libz.*'),\n"
-                "                    os.path.join(build_dir, 'lib', 'libz.*'),\n"
-                "                    os.path.join(build_dir, '**', 'libz.*')]\n"
-                "    for pattern in lib_patterns:\n"
-                "        matches = glob.glob(pattern, recursive=True)\n"
-                "        if matches:\n"
-                "            libs = [matches[0]]\n"
-                "            lib_path = []\n"
-                "            break"
-            )
-            text = text.replace("libs = ['-lz']", inject)
+        # Prefer explicit static archive path to avoid flaky '-lz' resolution in container builds.
+        if "zlib_link_arg = '-lz'" not in text:
+            marker = "libs = ['-lz']"
+            if marker in text:
+                inject = (
+                    "zlib_link_arg = '-lz'\n"
+                    "    zlib_candidates = [\n"
+                    "        os.path.join(build_dir, 'libz.a'),\n"
+                    "        os.path.join(build_dir, 'lib', 'libz.a'),\n"
+                    "    ]\n"
+                    "    for p in glob.glob(os.path.join(build_dir, '**', 'libz.a'), recursive=True):\n"
+                    "        if p not in zlib_candidates:\n"
+                    "            zlib_candidates.append(p)\n"
+                    "    for p in zlib_candidates:\n"
+                    "        if os.path.exists(p):\n"
+                    "            zlib_link_arg = p\n"
+                    "            break\n"
+                    "    libs = [zlib_link_arg]"
+                )
+                text = text.replace(marker, inject, 1)
+                changed = True
+
+        # Generic fallback for scripts that embed '-lz' directly in command arrays.
+        replaced = re.sub(r"(['\"])\\-lz\\1", "zlib_link_arg", text)
+        if replaced != text:
+            if "zlib_link_arg = '-lz'" not in replaced:
+                # Keep insertion local and simple for ad-hoc scripts.
+                if "def build_target(" in replaced:
+                    replaced = replaced.replace(
+                        "def build_target(",
+                        "zlib_link_arg = '-lz'\n\n\ndef build_target(",
+                        1,
+                    )
+                else:
+                    replaced = "zlib_link_arg = '-lz'\n" + replaced
+            text = replaced
             changed = True
 
         if not changed:
@@ -1255,28 +1429,237 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
+    def _try_hotfix_collapsed_include_flags() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        # High-frequency generation issue: '-I/a -I/b' produced as one argv token.
+        has_file_signal = bool(re.search(r"['\"][^'\"]*-I[^'\"]+\\s+-I[^'\"]*['\"]", text))
+        has_diag_signal = ("no such file or directory" in diag and " -i/" in diag)
+        if not (has_file_signal or has_diag_signal):
+            return False
+
+        def _split_token(tok: str) -> str:
+            parts = [x for x in tok.strip().split() if x]
+            if len(parts) <= 1 or not all(x.startswith("-I") for x in parts):
+                return tok
+            return ", ".join(f"'{x}'" for x in parts)
+
+        changed = False
+
+        def _repl_single(m: re.Match[str]) -> str:
+            nonlocal changed
+            inner = m.group(1)
+            out = _split_token(inner)
+            if out != inner:
+                changed = True
+                return out
+            return m.group(0)
+
+        # Single-quoted combined include flags.
+        text2 = re.sub(r"'([^']*-I[^']+\\s+-I[^']*)'", lambda m: _repl_single(m), text)
+        # Double-quoted combined include flags.
+        text3 = re.sub(r"\"([^\"]*-I[^\"]+\\s+-I[^\"]*)\"", lambda m: _repl_single(m), text2)
+        if text3 != text:
+            text = text3
+        if not changed:
+            return False
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for collapsed include flags")
+            return True
+        except Exception:
+            return False
+
+    def _try_hotfix_compiler_fuzzer_flag_mismatch() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        has_diag_signal = ("-fsanitize=" in diag and "fuzzer" in diag and "unrecognized argument" in diag)
+        has_file_signal = ("gcc" in text and "-fsanitize=fuzzer" in text)
+        if not (has_diag_signal or has_file_signal):
+            return False
+        text2 = text.replace("'gcc'", "'clang'").replace('"gcc"', '"clang"')
+        text2 = text2.replace("'g++'", "'clang++'").replace('"g++"', '"clang++"')
+        if text2 == text:
+            return False
+        try:
+            build_py.write_text(text2, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for compiler_fuzzer_flag_mismatch")
+            return True
+        except Exception:
+            return False
+
+    def _try_hotfix_missing_llvmfuzzer_entrypoint() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        has_diag_signal = "undefined reference to `llvmfuzzertestoneinput'" in diag
+        has_file_signal = ("clang++" in text and ".c" in text)
+        if not (has_diag_signal or has_file_signal):
+            return False
+        changed = False
+        if "'clang++'" in text and ".c" in text:
+            text2 = text.replace("'clang++'", "'clang'").replace('"clang++"', '"clang"')
+            if text2 != text:
+                text = text2
+                changed = True
+        if "'-x'" not in text and '"-x"' not in text:
+            if "flags = [" in text:
+                text2 = text.replace("flags = [", "flags = ['-x', 'c', ", 1)
+                if text2 != text:
+                    text = text2
+                    changed = True
+        if not changed:
+            return False
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for missing_llvmfuzzer_entrypoint")
+            return True
+        except Exception:
+            return False
+
+    def _try_hotfix_cxx_for_c_source_mismatch() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        if "treating 'c' input as 'c++'" not in diag and "treated as c++" not in diag:
+            return False
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        text2 = text.replace("'clang++'", "'clang'").replace('"clang++"', '"clang"')
+        if text2 == text:
+            return False
+        try:
+            build_py.write_text(text2, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for cxx_for_c_source_mismatch")
+            return True
+        except Exception:
+            return False
+
+    def _try_hotfix_fuzz_out_path_mismatch() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        has_diag_signal = ("no fuzzer binaries found under fuzz/out" in diag or "build produced no fuzzers" in diag)
+        has_file_signal = ('out_dir="fuzz/out"' in text)
+        if not (has_diag_signal or has_file_signal):
+            return False
+        changed = False
+        if 'out_dir="fuzz/out"' in text:
+            text = text.replace('out_dir="fuzz/out"', 'out_dir="out"')
+            changed = True
+        if "os.path.abspath(out_dir)" not in text and "def build_all(" in text and "os.makedirs(out_dir" in text:
+            text = text.replace("os.makedirs(out_dir, exist_ok=True)", "abs_out_dir = os.path.abspath(out_dir)\n    os.makedirs(abs_out_dir, exist_ok=True)")
+            text = text.replace("compile_target(name, target_info, out_dir, cc)", "compile_target(name, target_info, abs_out_dir, cc)")
+            changed = True
+        if not changed:
+            return False
+        try:
+            build_py.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for fuzz_out_path_mismatch")
+            return True
+        except Exception:
+            return False
+
+    if _fix_build_ruleset() == "extended":
+        if _try_hotfix_compiler_fuzzer_flag_mismatch():
+            out = _success_out(
+                "local hotfix for compiler_fuzzer_flag_mismatch applied",
+                outcome="rule_fixed",
+                rule_hit="compiler_fuzzer_flag_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_llvmfuzzer_entrypoint():
+            out = _success_out(
+                "local hotfix for missing_llvmfuzzer_entrypoint applied",
+                outcome="rule_fixed",
+                rule_hit="missing_llvmfuzzer_entrypoint",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_cxx_for_c_source_mismatch():
+            out = _success_out(
+                "local hotfix for cxx_for_c_source_mismatch applied",
+                outcome="rule_fixed",
+                rule_hit="cxx_for_c_source_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_collapsed_include_flags():
+            out = _success_out(
+                "local hotfix for collapsed include flags applied",
+                outcome="rule_fixed",
+                rule_hit="collapsed_include_flags",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_fuzz_out_path_mismatch():
+            out = _success_out(
+                "local hotfix for fuzz_out_path_mismatch applied",
+                outcome="rule_fixed",
+                rule_hit="fuzz_out_path_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
     if _try_hotfix_stdlib_mismatch_and_main_conflict():
-        out = {
-            **state,
-            "last_step": "fix_build",
-            "last_error": "",
-            "codex_hint": "",
-            "message": "local hotfix for stdlib mismatch/main conflict applied",
-        }
+        out = _success_out(
+            "local hotfix for stdlib mismatch/main conflict applied",
+            outcome="rule_fixed",
+            rule_hit="stdlib_mismatch_or_abi",
+        )
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
     if _try_hotfix_libfuzzer_main_conflict():
-        out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for libfuzzer main conflict applied"}
+        out = _success_out(
+            "local hotfix for libfuzzer main conflict applied",
+            outcome="rule_fixed",
+            rule_hit="main_symbol_conflict",
+        )
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
     if _try_hotfix_missing_lz():
-        out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "local hotfix for -lz applied"}
+        out = _success_out(
+            "local hotfix for -lz applied",
+            outcome="rule_fixed",
+            rule_hit="missing_zlib_link_flag",
+        )
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
     summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
+    recent_history = history[-history_limit:] if history else []
 
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
@@ -1323,12 +1706,19 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "If include/link flags are wrong, fix them from fuzz/build.py or fuzz harness code only.\n"
                 "Do not refactor production code or edit upstream source files."
             )
+        if recent_history and any(str(x.get("outcome") or "") == "noop" for x in recent_history):
+            codex_hint = (
+                codex_hint.strip()
+                + "\nPrevious attempts were no-op; this attempt MUST produce at least one meaningful change under fuzz/."
+            )
 
     # Now call OpenCode with a purpose-built prompt including diagnostics.
     context_parts: list[str] = []
     if build_log_file:
         context_parts.append("=== full build log file ===\n" + build_log_file)
     context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
+    if recent_history:
+        context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
     if last_error:
         context_parts.append("=== last_error ===\n" + last_error)
     if stdout_tail:
@@ -1359,6 +1749,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             for p in (set(baseline_step_hashes.keys()) | set(post_step_hashes.keys()))
             if baseline_step_hashes.get(p) != post_step_hashes.get(p)
         )
+        changed_paths_count = len(changed_paths)
         disallowed_paths = [p for p in changed_paths if not _is_fix_build_allowed_path(p)]
         if disallowed_paths:
             preview = ", ".join(disallowed_paths[:5])
@@ -1369,11 +1760,20 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "opencode fix_build touched disallowed path(s): "
                 f"{preview}{suffix}. Only `fuzz/` and `done` are allowed"
             )
+            updated_history, updated_rule_hits = _append_attempt(
+                "disallowed_paths",
+                rejection_reason="disallowed_paths",
+                changed_paths_count=changed_paths_count,
+            )
             out = {
                 **state,
                 "last_step": "fix_build",
                 "last_error": err,
                 "message": "opencode fix_build touched disallowed files",
+                "fix_build_noop_streak": 0,
+                "fix_build_attempt_history": updated_history,
+                "fix_build_rule_hits": updated_rule_hits,
+                "fix_build_last_diff_paths": changed_paths,
             }
             _wf_log(
                 cast(dict[str, Any], out),
@@ -1381,19 +1781,68 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             )
             return out
         if post_fix_hashes == baseline_fix_hashes:
+            updated_noop_streak = prev_noop_streak + 1
+            updated_history, updated_rule_hits = _append_attempt(
+                "noop",
+                rejection_reason="no_relevant_file_changes",
+                changed_paths_count=changed_paths_count,
+            )
+            terminal_reason = ""
+            failed = False
+            msg = "opencode fix_build no-op"
+            err = "opencode fix_build made no relevant file changes"
+            if updated_noop_streak >= max_noop_streak:
+                failed = True
+                terminal_reason = "fix_build_noop_streak_exceeded"
+                msg = "fix_build stopped (no-op streak exceeded)"
+                err = f"fix_build stopped: no-op streak exceeded ({max_noop_streak})"
             out = {
                 **state,
                 "last_step": "fix_build",
-                "last_error": "opencode fix_build made no relevant file changes",
-                "message": "opencode fix_build no-op",
+                "last_error": err,
+                "message": msg,
+                "failed": failed,
+                "fix_build_terminal_reason": terminal_reason,
+                "fix_build_noop_streak": updated_noop_streak,
+                "fix_build_attempt_history": updated_history,
+                "fix_build_rule_hits": updated_rule_hits,
+                "fix_build_last_diff_paths": changed_paths,
             }
             _wf_log(cast(dict[str, Any], out), f"<- fix_build err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
-        out = {**state, "last_step": "fix_build", "last_error": "", "codex_hint": "", "message": "opencode fixed build"}
+        updated_history, updated_rule_hits = _append_attempt(
+            "llm_fixed",
+            changed_paths_count=changed_paths_count,
+        )
+        out = {
+            **state,
+            "last_step": "fix_build",
+            "last_error": "",
+            "codex_hint": "",
+            "message": "opencode fixed build",
+            "fix_build_noop_streak": 0,
+            "fix_build_attempt_history": updated_history,
+            "fix_build_rule_hits": updated_rule_hits,
+            "fix_build_terminal_reason": "",
+            "fix_build_last_diff_paths": changed_paths,
+        }
         _wf_log(cast(dict[str, Any], out), f"<- fix_build ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
-        out = {**state, "last_step": "fix_build", "last_error": str(e), "message": "opencode fix_build failed"}
+        updated_history, updated_rule_hits = _append_attempt(
+            "exception",
+            rejection_reason=str(e),
+            changed_paths_count=0,
+        )
+        out = {
+            **state,
+            "last_step": "fix_build",
+            "last_error": str(e),
+            "message": "opencode fix_build failed",
+            "fix_build_attempt_history": updated_history,
+            "fix_build_rule_hits": updated_rule_hits,
+            "fix_build_last_diff_paths": [],
+        }
         _wf_log(cast(dict[str, Any], out), f"<- fix_build err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -1433,9 +1882,12 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_rc = 0
         crash_evidence = "none"
         run_error_kind = ""
+        run_terminal_reason = ""
+        run_idle_seconds = 0
         run_last_error = ""
         run_details: list[dict[str, Any]] = []
         run_batch_plan: list[dict[str, Any]] = []
+        run_children_exit_count = 0
         total_time_budget = _wf_common.parse_budget_value(state.get("time_budget"), default=900)
         run_time_budget_raw = state.get("run_time_budget")
         if run_time_budget_raw is None:
@@ -1459,6 +1911,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             max_parallel = 2
         if len(bins) <= 1:
             max_parallel = 1
+        idle_timeout_sec = _run_idle_timeout_sec()
+        finalize_timeout_sec = _run_finalize_timeout_sec()
 
         _wf_log(cast(dict[str, Any], state), f"run: fuzzers={len(bins)} parallel={max_parallel}")
 
@@ -1499,6 +1953,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         def _run_one(bin_path: Path) -> tuple[str, FuzzerRunResult]:
             return bin_path.name, gen._run_fuzzer(bin_path)
+
+        def _capture_timeout_from_error(err_text: str) -> tuple[str, int]:
+            lowered = (err_text or "").lower()
+            if "idle-timeout" in lowered:
+                return "run_idle_timeout", idle_timeout_sec
+            if "timed out after" in lowered or "[timeout]" in lowered:
+                return "run_timeout", 0
+            return "", 0
 
         # Execute fuzzers in parallel batches and cap each batch to remaining total budget.
         pending_bins = list(bins)
@@ -1554,8 +2016,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         try:
                             name, run = _run_one(bin_path)
                             run_results[name] = run
+                            run_children_exit_count += 1
                         except Exception as e:
                             run_exec_errors[bin_path.name] = str(e)
+                            run_children_exit_count += 1
+                            detected_kind, detected_idle = _capture_timeout_from_error(str(e))
+                            if detected_kind and not run_error_kind:
+                                run_error_kind = detected_kind
+                                run_terminal_reason = detected_kind
+                                if detected_idle > 0:
+                                    run_idle_seconds = detected_idle
                 else:
                     with ThreadPoolExecutor(max_workers=len(batch)) as pool:
                         futures = {pool.submit(_run_one, bin_path): bin_path for bin_path in batch}
@@ -1564,16 +2034,43 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                             try:
                                 name, run = fut.result()
                                 run_results[name] = run
+                                run_children_exit_count += 1
                             except Exception as e:
                                 run_exec_errors[bin_path.name] = str(e)
+                                run_children_exit_count += 1
+                                detected_kind, detected_idle = _capture_timeout_from_error(str(e))
+                                if detected_kind and not run_error_kind:
+                                    run_error_kind = detected_kind
+                                    run_terminal_reason = detected_kind
+                                    if detected_idle > 0:
+                                        run_idle_seconds = detected_idle
         finally:
             setattr(gen, "current_run_time_budget_sec", prev_run_budget)
             setattr(gen, "current_run_hard_timeout_sec", prev_run_hard_timeout)
+
+        _wf_log(cast(dict[str, Any], state), "run children exited, collecting results...")
+        finalize_started = time.perf_counter()
+        finalize_deadline = (
+            finalize_started + float(finalize_timeout_sec) if finalize_timeout_sec > 0 else None
+        )
+
+        def _finalize_timed_out(stage: str) -> bool:
+            nonlocal run_error_kind, run_terminal_reason, run_last_error
+            if finalize_deadline is None:
+                return False
+            if time.perf_counter() <= finalize_deadline:
+                return False
+            run_error_kind = "run_finalize_timeout"
+            run_terminal_reason = "run_finalize_timeout"
+            run_last_error = f"run finalize timed out while {stage} (>{finalize_timeout_sec}s)"
+            return True
 
         first_nonzero_rc = 0
         crash_candidates: list[tuple[str, Path, FuzzerRunResult]] = []
 
         for bin_path in bins:
+            if _finalize_timed_out("collecting run details"):
+                break
             fuzzer_name = bin_path.name
             exec_err = run_exec_errors.get(fuzzer_name, "")
             if exec_err:
@@ -1581,6 +2078,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     run_last_error = f"fuzzer run crashed for {fuzzer_name}: {exec_err}"
                 if not run_error_kind:
                     run_error_kind = "run_exception"
+                detected_kind, detected_idle = _capture_timeout_from_error(exec_err)
+                if detected_kind and not run_terminal_reason:
+                    run_terminal_reason = detected_kind
+                    if detected_idle > 0:
+                        run_idle_seconds = detected_idle
                 if first_nonzero_rc == 0:
                     first_nonzero_rc = 1
                 run_details.append(
@@ -1643,6 +2145,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 first_nonzero_rc = rc
             if not run_error_kind and run.run_error_kind:
                 run_error_kind = run.run_error_kind
+            if run.run_error_kind in {"run_idle_timeout", "run_timeout"} and not run_terminal_reason:
+                run_terminal_reason = run.run_error_kind
+                if run.run_error_kind == "run_idle_timeout":
+                    run_idle_seconds = idle_timeout_sec
 
             run_details.append(
                 {
@@ -1698,12 +2204,17 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
 
         if crash_candidates:
-            last_fuzzer, first, crash_run = crash_candidates[0]
-            gen._analyze_and_package(last_fuzzer, first)
-            crash_found = True
-            last_artifact = str(first)
-            run_rc = int(crash_run.rc)
-            crash_evidence = crash_run.crash_evidence
+            if _finalize_timed_out("packaging crash artifacts"):
+                crash_found = False
+                run_rc = 1
+                crash_evidence = "none"
+            else:
+                last_fuzzer, first, crash_run = crash_candidates[0]
+                gen._analyze_and_package(last_fuzzer, first)
+                crash_found = True
+                last_artifact = str(first)
+                run_rc = int(crash_run.rc)
+                crash_evidence = crash_run.crash_evidence
         else:
             run_rc = first_nonzero_rc
             crash_evidence = "none"
@@ -1729,6 +2240,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_rc": run_rc,
             "crash_evidence": crash_evidence,
             "run_error_kind": run_error_kind,
+            "run_terminal_reason": run_terminal_reason,
+            "run_idle_seconds": int(run_idle_seconds or 0),
+            "run_children_exit_count": int(run_children_exit_count),
             "run_details": run_details,
             "run_batch_plan": run_batch_plan,
             "last_crash_artifact": last_artifact,
@@ -1741,6 +2255,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             out["failed"] = True
             out["last_error"] = out.get("last_error") or "time budget exceeded during run phase"
             out["message"] = "workflow stopped (time budget exceeded)"
+        if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
+            if run_error_kind == "run_idle_timeout":
+                out["message"] = "run stalled (idle timeout), routing to fix_build"
+                if not out.get("last_error"):
+                    out["last_error"] = f"run stalled: no output for >= {idle_timeout_sec}s"
+            elif run_error_kind == "run_finalize_timeout":
+                out["message"] = "run finalize timed out, routing to fix_build"
+            else:
+                out["message"] = "run timed out, routing to fix_build"
         if crash_found and same_crash_repeats >= max_same_crash_repeats:
             out["failed"] = True
             out["last_error"] = (
@@ -1891,7 +2414,14 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")):
         return "stop"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
-    if run_error_kind in {"run_no_progress", "nonzero_exit_without_crash", "run_exception"}:
+    if run_error_kind in {
+        "run_no_progress",
+        "nonzero_exit_without_crash",
+        "run_exception",
+        "run_idle_timeout",
+        "run_timeout",
+        "run_finalize_timeout",
+    }:
         return "fix_build"
     if bool(state.get("crash_found")):
         fix_on_crash = bool(state.get("plan_fix_on_crash", True))
@@ -1941,6 +2471,8 @@ def build_fuzz_workflow() -> StateGraph:
 
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")):
+            return "stop"
+        if (state.get("fix_build_terminal_reason") or "").strip():
             return "stop"
         if (state.get("last_error") or "").strip():
             return "stop"
@@ -1999,7 +2531,7 @@ def _write_run_summary(out: dict[str, Any]) -> None:
     _wf_summary.write_run_summary(out)
 
 
-def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
+def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     total_budget_log = "unlimited" if int(inp.time_budget) == 0 else f"{int(inp.time_budget)}s"
     run_budget_log = "unlimited" if int(inp.run_time_budget) == 0 else f"{int(inp.run_time_budget)}s"
     resume_step = (inp.resume_from_step or "").strip().lower()
@@ -2041,6 +2573,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
     msg = str(out.get("message") or "Fuzzing completed.").strip()
     if bool(out.get("failed")):
         _wf_log(out, f"workflow end status=failed dt={_fmt_dt(time.perf_counter()-t0)}")
+        terminal_reason = str(out.get("run_terminal_reason") or "").strip() or str(
+            out.get("fix_build_terminal_reason") or ""
+        ).strip()
+        if terminal_reason:
+            msg = f"{terminal_reason}: {msg}"
         raise RuntimeError(msg or "workflow failed")
     # If we stopped due to an error but didn't mark failed, still surface it.
     last_error = str(out.get("last_error") or "").strip()
@@ -2049,4 +2586,15 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> str:
         raise RuntimeError(last_error)
 
     _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
-    return msg
+    return {
+        "message": msg,
+        "fix_build_terminal_reason": str(out.get("fix_build_terminal_reason") or ""),
+        "fix_build_noop_streak": int(out.get("fix_build_noop_streak") or 0),
+        "fix_build_rule_hits": list(out.get("fix_build_rule_hits") or []),
+        "run_error_kind": str(out.get("run_error_kind") or ""),
+        "run_terminal_reason": str(out.get("run_terminal_reason") or ""),
+        "run_idle_seconds": int(out.get("run_idle_seconds") or 0),
+        "run_children_exit_count": int(out.get("run_children_exit_count") or 0),
+        "build_error_kind": str(out.get("build_error_kind") or ""),
+        "build_error_code": str(out.get("build_error_code") or ""),
+    }

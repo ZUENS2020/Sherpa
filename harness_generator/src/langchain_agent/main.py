@@ -1278,10 +1278,18 @@ def _run_fuzz_job(
         else:
             fail_status = "resume_failed" if resumed else "error"
             err_text = str(e)
+        fail_result = None
+        if isinstance(err_text, str) and ":" in err_text:
+            reason = err_text.split(":", 1)[0].strip()
+            if reason.startswith("fix_build_"):
+                fail_result = {"fix_build_terminal_reason": reason}
+            elif reason.startswith("run_"):
+                fail_result = {"run_terminal_reason": reason}
         _job_update(
             job_id,
             status=fail_status,
             error=err_text,
+            result=fail_result,
             recoverable=False,
             last_resume_finished_at=time.time() if resumed else None,
         )

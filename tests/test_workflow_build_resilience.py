@@ -384,3 +384,228 @@ def test_build_failure_infra_error_includes_recovery_hint(tmp_path: Path, monkey
     assert out["build_error_kind"] == "infra"
     assert "recovery:" in out["last_error"]
     assert "DNS" in out["last_error"]
+
+
+def test_fix_build_stops_after_noop_streak_threshold(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    monkeypatch.setenv("SHERPA_FIX_BUILD_MAX_NOOP_STREAK", "3")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+        "fix_build_noop_streak": 2,
+        "fix_build_attempt_history": [],
+    }
+
+    out = workflow_graph._node_fix_build(state)
+    assert out["failed"] is True
+    assert out["fix_build_terminal_reason"] == "fix_build_noop_streak_exceeded"
+    assert "no-op streak exceeded" in out["last_error"]
+
+
+def test_fix_build_noop_streak_resets_after_effective_change(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('v1')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            build_py.write_text("print('v2')\n", encoding="utf-8")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+        "fix_build_noop_streak": 2,
+        "fix_build_attempt_history": [],
+    }
+    out = workflow_graph._node_fix_build(state)
+    assert out["last_error"] == ""
+    assert out["fix_build_noop_streak"] == 0
+    assert out["message"] == "opencode fixed build"
+
+
+def test_fix_build_rule_compiler_fuzzer_flag_mismatch(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("cc = 'gcc'\ncmd = ['gcc', '-fsanitize=fuzzer']\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "gcc: error: unrecognized argument to '-fsanitize=' option: 'fuzzer'",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "compiler_fuzzer_flag_mismatch" in (out.get("fix_build_rule_hits") or [])
+    assert "clang" in build_py.read_text(encoding="utf-8")
+
+
+def test_fix_build_rule_missing_llvmfuzzer_entrypoint(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("flags = ['-O2']\ncmd = ['clang++', 'a.c']\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "undefined reference to `LLVMFuzzerTestOneInput'",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "missing_llvmfuzzer_entrypoint" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "clang++" not in txt
+
+
+def test_fix_build_rule_fuzz_out_path_mismatch(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "def build_all(out_dir=\"fuzz/out\", cc=\"clang\"):\n"
+        "    os.makedirs(out_dir, exist_ok=True)\n"
+        "    compile_target(name, target_info, out_dir, cc)\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "No fuzzer binaries found under fuzz/out/ after 1 command run(s)",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "fuzz_out_path_mismatch" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "out_dir=\"out\"" in txt
+    assert "os.path.abspath(out_dir)" in txt
+
+
+def test_fix_build_feedback_history_appended_and_trimmed(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    monkeypatch.setenv("SHERPA_FIX_BUILD_FEEDBACK_HISTORY", "2")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+        "fix_build_attempt_history": [
+            {"attempt_index": 1, "outcome": "noop"},
+            {"attempt_index": 2, "outcome": "noop"},
+        ],
+    }
+    out = workflow_graph._node_fix_build(state)
+    hist = out.get("fix_build_attempt_history") or []
+    assert len(hist) == 2
+    assert hist[-1]["outcome"] == "noop"
+
+
+def test_fix_build_rule_missing_zlib_link_flag_prefers_explicit_archive(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "import os\n"
+        "build_dir = '/work/build'\n"
+        "lib_path = ['-L' + build_dir]\n"
+        "libs = ['-lz']\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "/usr/bin/ld: cannot find -lz: No such file or directory",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "missing_zlib_link_flag" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "zlib_link_arg = '-lz'" in txt
+    assert "libz.a" in txt
+    assert "libs = [zlib_link_arg]" in txt
+
+
+def test_fix_build_rule_collapsed_include_flags_split(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "cmd = ['clang++', '-I/work -I/work/build', 'harness.c', '-o', 'out/fz']\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "fatal error: zlib.h: No such file or directory",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "collapsed_include_flags" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "'-I/work', '-I/work/build'" in txt
+
+
+def test_fix_build_rule_cxx_for_c_source_mismatch(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("cmd = ['clang++', 'harness.c', '-o', 'out/fz']\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "clang++: warning: treating 'c' input as 'c++' when in C++ mode",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "cxx_for_c_source_mismatch" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "clang++" not in txt
+    assert "clang" in txt

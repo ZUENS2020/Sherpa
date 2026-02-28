@@ -442,6 +442,69 @@ def test_task_submit_accepts_unlimited_total_and_run_budget(monkeypatch):
     assert captured["run_time_budget"] == 0
 
 
+def test_task_detail_preserves_fix_build_metadata_in_result(monkeypatch):
+    def _fake_fuzz_logic(*args, **kwargs):
+        return {
+            "message": "done",
+            "fix_build_terminal_reason": "fix_build_noop_streak_exceeded",
+            "fix_build_noop_streak": 3,
+            "fix_build_rule_hits": ["compiler_fuzzer_flag_mismatch"],
+        }
+
+    monkeypatch.setattr(web_main, "fuzz_logic", _fake_fuzz_logic)
+
+    with TestClient(web_main.app) as client:
+        response = client.post(
+            "/api/task",
+            json={
+                "jobs": [{"code_url": "https://github.com/example/repo.git"}],
+                "auto_init": False,
+            },
+        )
+        assert response.status_code == 200
+        task_id = response.json()["job_id"]
+        status = client.get(f"/api/task/{task_id}").json()
+
+    assert status["status"] == "success"
+    children = status.get("children") or []
+    assert len(children) == 1
+    result = children[0].get("result") or {}
+    assert result.get("fix_build_terminal_reason") == "fix_build_noop_streak_exceeded"
+    assert result.get("fix_build_noop_streak") == 3
+
+
+def test_task_detail_preserves_run_metadata_in_result(monkeypatch):
+    def _fake_fuzz_logic(*args, **kwargs):
+        return {
+            "message": "done",
+            "run_terminal_reason": "run_idle_timeout",
+            "run_idle_seconds": 120,
+            "run_children_exit_count": 2,
+        }
+
+    monkeypatch.setattr(web_main, "fuzz_logic", _fake_fuzz_logic)
+
+    with TestClient(web_main.app) as client:
+        response = client.post(
+            "/api/task",
+            json={
+                "jobs": [{"code_url": "https://github.com/example/repo.git"}],
+                "auto_init": False,
+            },
+        )
+        assert response.status_code == 200
+        task_id = response.json()["job_id"]
+        status = client.get(f"/api/task/{task_id}").json()
+
+    assert status["status"] == "success"
+    children = status.get("children") or []
+    assert len(children) == 1
+    result = children[0].get("result") or {}
+    assert result.get("run_terminal_reason") == "run_idle_timeout"
+    assert result.get("run_idle_seconds") == 120
+    assert result.get("run_children_exit_count") == 2
+
+
 def test_list_tasks_returns_recent_tasks_with_child_summary():
     task_old = web_main._create_job("task", "batch")
     time.sleep(0.001)

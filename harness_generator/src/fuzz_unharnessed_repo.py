@@ -1879,6 +1879,11 @@ class NonOssFuzzHarnessGenerator:
         hard_timeout = int(getattr(self, "current_run_hard_timeout_sec", 0) or 0)
         if hard_timeout <= 0 and run_time_budget > 0:
             hard_timeout = max(60, run_time_budget + 120)
+        run_idle_timeout_raw = os.environ.get("SHERPA_RUN_IDLE_TIMEOUT_SEC", "120")
+        try:
+            run_idle_timeout = max(0, min(int(str(run_idle_timeout_raw).strip()), 86400))
+        except Exception:
+            run_idle_timeout = 120
 
         cmd = [
             str(bin_path),
@@ -1896,6 +1901,7 @@ class NonOssFuzzHarnessGenerator:
             env=env,
             extra_inputs=[str(corpus_dir)],
             timeout=hard_timeout,
+            idle_timeout=run_idle_timeout,
         )
 
         # Dump the tail for quick reading.
@@ -1950,8 +1956,19 @@ class NonOssFuzzHarnessGenerator:
         error = ""
         run_error_kind = ""
         if rc != 0 and not crash_found:
-            run_error_kind = "nonzero_exit_without_crash"
-            error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
+            lowered = log.lower()
+            if "idle-timeout" in lowered:
+                run_error_kind = "run_idle_timeout"
+                error = (
+                    f"fuzzer run idle-timeout for {bin_path.name}: "
+                    f"no output for {run_idle_timeout}s"
+                )
+            elif "[timeout]" in lowered:
+                run_error_kind = "run_timeout"
+                error = f"fuzzer run timed out for {bin_path.name}"
+            else:
+                run_error_kind = "nonzero_exit_without_crash"
+                error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
 
         corpus_files = 0
         corpus_size_bytes = 0
@@ -2696,6 +2713,7 @@ class NonOssFuzzHarnessGenerator:
         env: Optional[Dict[str, str]] = None,
         extra_inputs: Optional[List[str]] = None,
         timeout: int = 7200,
+        idle_timeout: int = 0,
     ) -> Tuple[int, str, str]:
         def _redact_cmd(argv: Sequence[str]) -> List[str]:
             """Redact sensitive values from commands before printing.
@@ -2779,8 +2797,10 @@ class NonOssFuzzHarnessGenerator:
 
         done_readers = 0
         timed_out = False
+        idle_timed_out = False
         heartbeat_sec = 10.0
         last_heartbeat = time.monotonic()
+        last_activity = time.monotonic()
 
         try:
             while done_readers < 2:
@@ -2804,6 +2824,12 @@ class NonOssFuzzHarnessGenerator:
                         stderr_chunks.append(text)
                         # Keep stderr visible in real-time to avoid silent failures.
                         print(text, end="", flush=True)
+                    last_activity = time.monotonic()
+
+                if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
+                    idle_timed_out = True
+                    timed_out = True
+                    break
 
                 now = time.monotonic()
                 if now - last_heartbeat >= heartbeat_sec:
@@ -2848,7 +2874,9 @@ class NonOssFuzzHarnessGenerator:
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
-        if timed_out:
+        if idle_timed_out:
+            err = (err or "") + f"\n[idle-timeout] no output for {idle_timeout}s; process was killed."
+        elif timed_out:
             err = (err or "") + "\n[timeout] process exceeded limit and was killed."
 
         rc = proc.wait() if proc.poll() is None else proc.returncode

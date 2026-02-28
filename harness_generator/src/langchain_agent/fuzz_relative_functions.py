@@ -52,7 +52,7 @@ def fuzz_logic(
     model: str | None = None,
     resume_from_step: str | None = None,
     resume_repo_root: str | Path | None = None,
-) -> str:
+) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
     if resolved_time_budget < 0:

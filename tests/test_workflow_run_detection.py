@@ -308,3 +308,44 @@ def test_route_after_run_routes_recoverable_run_errors_to_fix_build():
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
     )
     assert route == "fix_build"
+
+
+def test_route_after_run_routes_idle_timeout_to_fix_build():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
+    )
+    assert route == "fix_build"
+
+
+def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_execs_per_sec=1,
+            )
+        ],
+    )
+    monkeypatch.setenv("SHERPA_RUN_FINALIZE_TIMEOUT_SEC", "1")
+    original_perf = workflow_graph.time.perf_counter
+    base = original_perf()
+    ticks = [base, base + 2.1, base + 2.2, base + 2.3, base + 2.4, base + 2.5]
+
+    def _fake_perf() -> float:
+        if ticks:
+            return ticks.pop(0)
+        return original_perf() + 3.0
+
+    monkeypatch.setattr(workflow_graph.time, "perf_counter", _fake_perf)
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["failed"] is True
+    assert out["run_error_kind"] == "run_finalize_timeout"
+    assert out["run_terminal_reason"] == "run_finalize_timeout"

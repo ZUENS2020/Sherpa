@@ -57,6 +57,8 @@ Constraints:
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
 - Full build output from the previous failed attempts is available in `{{build_log_file}}`.
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
+- If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.
+- You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
 
 Coordinator instruction:
 {{codex_hint}}
