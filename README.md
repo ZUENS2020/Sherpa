@@ -154,13 +154,37 @@ sequenceDiagram
 2. Docker Compose plugin。
 3. 可用的 OpenAI 兼容 API Key（常见为 DeepSeek/OpenAI/OpenRouter）。
 
-### 4.2 启动
+### 4.2 首次启动建议（镜像预热）
+
+首次部署或网络不稳定环境，建议先预热运行时镜像，再启动 compose，避免任务内现场构建导致长时间停在 `init/plan`。
+
+```bash
+# 预热 opencode 运行镜像（使用国内镜像源基底）
+docker build -t sherpa-opencode:latest \
+  -f docker/Dockerfile.opencode \
+  --build-arg OPENCODE_BASE_IMAGE=m.daocloud.io/docker.io/library/node:20-slim \
+  .
+
+# 预热 C/C++ fuzz 运行镜像
+docker pull m.daocloud.io/docker.io/library/ubuntu:24.04
+docker tag m.daocloud.io/docker.io/library/ubuntu:24.04 ubuntu:24.04
+docker build -t sherpa-fuzz-cpp:latest -f docker/Dockerfile.fuzz-cpp .
+```
+
+快速验收：
+
+```bash
+docker run --rm sherpa-opencode:latest sh -lc 'opencode --version && gitnexus --version'
+docker run --rm sherpa-fuzz-cpp:latest sh -lc 'clang --version | head -n 1 && python3 --version'
+```
+
+### 4.3 启动
 
 ```bash
 docker compose up -d --build
 ```
 
-### 4.3 访问与健康检查
+### 4.4 访问与健康检查
 
 - 统一入口（Gateway）: `http://localhost:8000`
 - 前端（Next.js，经网关访问）: `http://localhost:8000/`
@@ -170,7 +194,7 @@ docker compose up -d --build
 curl -s http://localhost:8000/api/system | jq
 ```
 
-### 4.4 提交最小任务
+### 4.5 提交最小任务
 
 ```bash
 curl -s http://localhost:8000/api/task \
@@ -813,6 +837,8 @@ docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,s
 | `BuildKit is enabled but buildx missing` | 构建器能力不匹配 | 保持 `DOCKER_BUILDKIT=0` 或安装 buildx |
 | `lookup sherpa-docker ... no such host` | 容器网络/DNS 问题 | 检查 compose 网络与服务名、重建容器 |
 | `TLS handshake timeout` 拉基础镜像失败 | 到 Docker Hub 网络不稳 | 配置公共镜像加速、重试、检查代理 |
+| 卡在 `plan` 且日志停在 `building opencode image` | 首次动态构建 `sherpa-opencode`（npm 全局安装慢） | 先手动预构建 `sherpa-opencode:latest`，再提交任务 |
+| 卡在 `init` 且日志停在 `building sherpa-fuzz-cpp` | 首次动态构建 `sherpa-fuzz-cpp`（apt 下载慢） | 先手动预构建 `sherpa-fuzz-cpp:latest`，再提交任务 |
 | `remote rejected ... workflow ... without workflow scope` | HTTPS/OAuth 凭证缺少 GitHub `workflow` 权限 | 刷新或重建凭证并加入 `workflow` scope，或改用 SSH 推送 |
 | 长时间 running 无进展 | 预算过大或卡在外部依赖 | 查看 workflow 日志 step，缩短预算定位 |
 | 多轮 fix 无效果 | 同签名反复失败 | 检查 `same_*_repeats` 保护是否触发 |
@@ -821,6 +847,30 @@ docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,s
 
 1. Docker 网络预检查是 best-effort；若本地无 `busybox:latest`，预检查会自动跳过，不会误报为 DNS 故障。
 2. `no such host` 诊断已收窄：仅在 registry 相关上下文下归类为 registry DNS 问题，避免误判 `sherpa-docker` 服务名异常。
+
+### 17.4 镜像预热（推荐）
+
+在网络不稳定或首次部署时，建议先预热运行时镜像，避免任务内现场构建导致“看起来卡住”。
+
+```bash
+# 预热 opencode 运行镜像（使用国内镜像源基底）
+docker build -t sherpa-opencode:latest \
+  -f docker/Dockerfile.opencode \
+  --build-arg OPENCODE_BASE_IMAGE=m.daocloud.io/docker.io/library/node:20-slim \
+  .
+
+# 预热 C/C++ fuzz 运行镜像
+docker pull m.daocloud.io/docker.io/library/ubuntu:24.04
+docker tag m.daocloud.io/docker.io/library/ubuntu:24.04 ubuntu:24.04
+docker build -t sherpa-fuzz-cpp:latest -f docker/Dockerfile.fuzz-cpp .
+```
+
+快速验收：
+
+```bash
+docker run --rm sherpa-opencode:latest sh -lc 'opencode --version && gitnexus --version'
+docker run --rm sherpa-fuzz-cpp:latest sh -lc 'clang --version | head -n 1 && python3 --version'
+```
 
 ---
 
