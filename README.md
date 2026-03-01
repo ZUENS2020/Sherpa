@@ -839,6 +839,7 @@ docker compose exec sherpa-job-store sqlite3 /data/jobs.sqlite3 'select job_id,s
 | `TLS handshake timeout` 拉基础镜像失败 | 到 Docker Hub 网络不稳 | 配置公共镜像加速、重试、检查代理 |
 | 卡在 `plan` 且日志停在 `building opencode image` | 首次动态构建 `sherpa-opencode`（npm 全局安装慢） | 先手动预构建 `sherpa-opencode:latest`，再提交任务 |
 | 卡在 `init` 且日志停在 `building sherpa-fuzz-cpp` | 首次动态构建 `sherpa-fuzz-cpp`（apt 下载慢） | 先手动预构建 `sherpa-fuzz-cpp:latest`，再提交任务 |
+| `workflow stopped (time budget exceeded)` 且 `last=synthesize/plan` | 总流程预算已被前置节点耗尽（非 run 阶段） | 提高 `total_time_budget`（或设 `0` 不限时），并降低 `SHERPA_OPENCODE_IDLE_TIMEOUT_SEC` 快速回收无进展尝试 |
 | `remote rejected ... workflow ... without workflow scope` | HTTPS/OAuth 凭证缺少 GitHub `workflow` 权限 | 刷新或重建凭证并加入 `workflow` scope，或改用 SSH 推送 |
 | 长时间 running 无进展 | 预算过大或卡在外部依赖 | 查看 workflow 日志 step，缩短预算定位 |
 | 多轮 fix 无效果 | 同签名反复失败 | 检查 `same_*_repeats` 保护是否触发 |
@@ -1085,6 +1086,11 @@ A：warning 与 error 分级独立；只有显式失败条件才进入错误面�
 ### Q6：能否并行跑多个 fuzzer？
 
 A：可以，`SHERPA_PARALLEL_FUZZERS` 控制并行度，run 阶段按批次执行。
+
+### Q7：怎么从日志快速判断当前卡在哪个节点？
+
+A：看每条工作流日志前缀：`[wf step=<n> last=<node> next=-]`。  
+`last` 是当前（或刚完成）节点名，例如 `last=synthesize` 表示耗时主要在合成阶段，`last=run` 才是 fuzz 运行阶段。
 
 ---
 
