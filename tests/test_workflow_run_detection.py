@@ -310,11 +310,11 @@ def test_route_after_run_routes_recoverable_run_errors_to_fix_build():
     assert route == "fix_build"
 
 
-def test_route_after_run_routes_idle_timeout_to_fix_build():
+def test_route_after_run_routes_idle_timeout_to_stop():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
-    assert route == "fix_build"
+    assert route == "stop"
 
 
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
@@ -395,4 +395,43 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert out["run_error_kind"] == "run_timeout"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "fix_build"
+    assert route == "stop"
+
+
+def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
+    timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
+    timeout_artifact.parent.mkdir(parents=True, exist_ok=True)
+    timeout_artifact.write_text("hang candidate", encoding="utf-8")
+
+    def _make_result() -> FuzzerRunResult:
+        return FuzzerRunResult(
+            rc=70,
+            new_artifacts=[timeout_artifact],
+            crash_found=False,
+            crash_evidence="timeout_artifact",
+            first_artifact=str(timeout_artifact),
+            log_tail="libFuzzer timeout",
+            error="fuzzer produced timeout-like artifacts for demo_fuzz (count=1)",
+            run_error_kind="run_timeout",
+        )
+
+    first = workflow_graph._node_run(
+        {"generator": _FakeRunGenerator(tmp_path, [_make_result()]), "crash_fix_attempts": 0}
+    )
+    assert first.get("failed") is not True
+    sig = str(first.get("timeout_signature") or "")
+    assert sig
+
+    second = workflow_graph._node_run(
+        {
+            "generator": _FakeRunGenerator(tmp_path, [_make_result()]),
+            "crash_fix_attempts": 0,
+            "timeout_signature": sig,
+            "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
+        }
+    )
+    assert second["failed"] is True
+    assert second["run_error_kind"] == "run_timeout"
+    assert second["same_timeout_repeats"] >= 1
+    assert "same timeout/no-progress signature repeated" in second["last_error"]

@@ -76,6 +76,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     last_fuzzer: str
     crash_signature: str
     same_crash_repeats: int
+    timeout_signature: str
+    same_timeout_repeats: int
     crash_fix_attempts: int
     next: str
     fix_patch_path: str
@@ -309,6 +311,14 @@ def _run_unlimited_round_budget_sec() -> int:
         return max(0, min(int(raw), 86400))
     except Exception:
         return 7200
+
+
+def _max_same_timeout_repeats() -> int:
+    raw = (os.environ.get("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS") or "1").strip()
+    try:
+        return max(0, min(int(raw), 10))
+    except Exception:
+        return 1
 
 
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
@@ -1455,7 +1465,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
         # High-frequency generation issue: '-I/a -I/b' produced as one argv token.
-        has_file_signal = bool(re.search(r"['\"][^'\"]*-I[^'\"]+\\s+-I[^'\"]*['\"]", text))
+        has_file_signal = bool(re.search(r"['\"][^'\"]*-I[^'\"]+\s+-I[^'\"]*['\"]", text))
         has_diag_signal = ("no such file or directory" in diag and " -i/" in diag)
         if not (has_file_signal or has_diag_signal):
             return False
@@ -1478,9 +1488,9 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             return m.group(0)
 
         # Single-quoted combined include flags.
-        text2 = re.sub(r"'([^']*-I[^']+\\s+-I[^']*)'", lambda m: _repl_single(m), text)
+        text2 = re.sub(r"'([^']*-I[^']+\s+-I[^']*)'", lambda m: _repl_single(m), text)
         # Double-quoted combined include flags.
-        text3 = re.sub(r"\"([^\"]*-I[^\"]+\\s+-I[^\"]*)\"", lambda m: _repl_single(m), text2)
+        text3 = re.sub(r"\"([^\"]*-I[^\"]+\s+-I[^\"]*)\"", lambda m: _repl_single(m), text2)
         if text3 != text:
             text = text3
         if not changed:
@@ -1526,7 +1536,12 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
         has_diag_signal = "undefined reference to `llvmfuzzertestoneinput'" in diag
-        has_file_signal = ("clang++" in text and ".c" in text)
+        # Fallback file-based signal is intentionally strict to avoid stealing
+        # other rules (e.g. include-flag collapse / C-vs-C++ mismatch).
+        has_file_signal = (
+            build_error_code == "missing_llvmfuzzer_entrypoint"
+            and ("clang++" in text and ".c" in text)
+        )
         if not (has_diag_signal or has_file_signal):
             return False
         changed = False
@@ -1611,15 +1626,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
 
-        if _try_hotfix_missing_llvmfuzzer_entrypoint():
-            out = _success_out(
-                "local hotfix for missing_llvmfuzzer_entrypoint applied",
-                outcome="rule_fixed",
-                rule_hit="missing_llvmfuzzer_entrypoint",
-            )
-            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
-            return out
-
         if _try_hotfix_cxx_for_c_source_mismatch():
             out = _success_out(
                 "local hotfix for cxx_for_c_source_mismatch applied",
@@ -1634,6 +1640,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for collapsed include flags applied",
                 outcome="rule_fixed",
                 rule_hit="collapsed_include_flags",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_llvmfuzzer_entrypoint():
+            out = _success_out(
+                "local hotfix for missing_llvmfuzzer_entrypoint applied",
+                outcome="rule_fixed",
+                rule_hit="missing_llvmfuzzer_entrypoint",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -1915,11 +1930,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         total_budget_unlimited = total_time_budget <= 0
         prev_crash_sig = str(state.get("crash_signature") or "").strip()
         prev_crash_repeats = int(state.get("same_crash_repeats") or 0)
+        prev_timeout_sig = str(state.get("timeout_signature") or "").strip()
+        prev_timeout_repeats = int(state.get("same_timeout_repeats") or 0)
         max_same_crash_repeats_raw = os.environ.get("SHERPA_WORKFLOW_MAX_SAME_CRASH_REPEATS", "1")
         try:
             max_same_crash_repeats = max(0, min(int(max_same_crash_repeats_raw), 10))
         except Exception:
             max_same_crash_repeats = 1
+        max_same_timeout_repeats = _max_same_timeout_repeats()
         max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "2")
         try:
             max_parallel = max(1, min(int(max_parallel_raw), 16))
@@ -1946,6 +1964,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 tail = "\n".join(txt.splitlines()[-400:])
                 parts.append(f"== {p.name} ==\n{tail}")
             return _sha256_text("\n\n".join(parts))
+
+        def _calc_timeout_signature(kind: str, details: list[dict[str, Any]]) -> str:
+            parts: list[str] = [f"kind={kind}"]
+            for d in details[:5]:
+                parts.append(
+                    "|".join(
+                        [
+                            str(d.get("fuzzer") or ""),
+                            str(d.get("run_error_kind") or ""),
+                            str(d.get("effective_rc") or d.get("rc") or ""),
+                            str(d.get("error") or "")[:400],
+                            str(d.get("first_artifact") or ""),
+                        ]
+                    )
+                )
+            return _sha256_text("\n".join(parts))
 
         # Seed generation uses OpenCode and shared repo context; keep it serial.
         prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
@@ -2090,6 +2124,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             fuzzer_name = bin_path.name
             exec_err = run_exec_errors.get(fuzzer_name, "")
             if exec_err:
+                detail_kind = "run_exception"
+                detail_rc = 1
                 if not run_last_error:
                     run_last_error = f"fuzzer run crashed for {fuzzer_name}: {exec_err}"
                 if not run_error_kind:
@@ -2099,15 +2135,19 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     run_terminal_reason = detected_kind
                     if detected_idle > 0:
                         run_idle_seconds = detected_idle
+                    detail_kind = detected_kind
+                    detail_rc = 124 if detected_kind in {"run_timeout", "run_idle_timeout"} else 1
                 if first_nonzero_rc == 0:
-                    first_nonzero_rc = 1
+                    first_nonzero_rc = detail_rc
                 run_details.append(
                     {
                         "fuzzer": fuzzer_name,
-                        "rc": 1,
+                        "rc": detail_rc,
+                        "effective_rc": detail_rc,
                         "crash_found": False,
                         "crash_evidence": "none",
-                        "run_error_kind": "run_exception",
+                        "run_error_kind": detail_kind,
+                        "exception_kind": detail_kind,
                         "error": exec_err,
                         "new_artifacts": [],
                         "first_artifact": "",
@@ -2137,9 +2177,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     {
                         "fuzzer": fuzzer_name,
                         "rc": 1,
+                        "effective_rc": 1,
                         "crash_found": False,
                         "crash_evidence": "none",
                         "run_error_kind": "run_exception",
+                        "exception_kind": "run_exception",
                         "error": "missing run result",
                         "new_artifacts": [],
                         "first_artifact": "",
@@ -2170,9 +2212,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 {
                     "fuzzer": fuzzer_name,
                     "rc": rc,
+                    "effective_rc": rc,
                     "crash_found": bool(run.crash_found),
                     "crash_evidence": run.crash_evidence,
                     "run_error_kind": run.run_error_kind,
+                    "exception_kind": "",
                     "error": run.error or "",
                     "log_tail": run.log_tail or "",
                     "new_artifacts": [str(p) for p in (run.new_artifacts or [])],
@@ -2248,6 +2292,17 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             crash_signature = _calc_crash_signature(last_fuzzer, last_artifact)
             same_crash_repeats = (prev_crash_repeats + 1) if (prev_crash_sig and crash_signature == prev_crash_sig) else 0
 
+        timeout_signature = ""
+        same_timeout_repeats = 0
+        timeout_like_kinds = {"run_timeout", "run_idle_timeout", "run_finalize_timeout", "run_no_progress"}
+        if run_error_kind in timeout_like_kinds:
+            timeout_signature = _calc_timeout_signature(run_error_kind, run_details)
+            same_timeout_repeats = (
+                (prev_timeout_repeats + 1)
+                if (prev_timeout_sig and timeout_signature == prev_timeout_sig)
+                else 0
+            )
+
         out = {
             **state,
             "last_step": "run",
@@ -2265,6 +2320,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_fuzzer": last_fuzzer,
             "crash_signature": crash_signature,
             "same_crash_repeats": same_crash_repeats,
+            "timeout_signature": timeout_signature,
+            "same_timeout_repeats": same_timeout_repeats,
             "message": msg,
         }
         if run_error_kind == "workflow_time_budget_exceeded":
@@ -2287,11 +2344,19 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 f"(repeats={same_crash_repeats + 1}, threshold={max_same_crash_repeats + 1})"
             )
             out["message"] = "workflow stopped (same crash repeated)"
+        if run_error_kind in timeout_like_kinds and same_timeout_repeats >= max_same_timeout_repeats:
+            out["failed"] = True
+            out["last_error"] = (
+                "same timeout/no-progress signature repeated "
+                f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
+            )
+            out["message"] = "workflow stopped (same timeout/no-progress repeated)"
         _wf_log(
             cast(dict[str, Any], out),
             (
                 f"<- run ok crash_found={crash_found} rc={run_rc} evidence={crash_evidence} "
-                f"same_crash_repeats={same_crash_repeats} dt={_fmt_dt(time.perf_counter()-t0)}"
+                f"same_crash_repeats={same_crash_repeats} same_timeout_repeats={same_timeout_repeats} "
+                f"dt={_fmt_dt(time.perf_counter()-t0)}"
             ),
         )
         return out
@@ -2434,11 +2499,10 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         "run_no_progress",
         "nonzero_exit_without_crash",
         "run_exception",
-        "run_idle_timeout",
-        "run_timeout",
-        "run_finalize_timeout",
     }:
         return "fix_build"
+    if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
+        return "stop"
     if bool(state.get("crash_found")):
         fix_on_crash = bool(state.get("plan_fix_on_crash", True))
         max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 1))
