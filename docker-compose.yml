@@ -202,10 +202,16 @@ services:
 
   # Single public entrypoint: "/" -> frontend, "/api/*" -> web backend.
   sherpa-gateway:
-    image: nginx:1.27-alpine
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gateway
     restart: unless-stopped
+    environment:
+      SHERPA_GATEWAY_TLS_HOST: ${SHERPA_GATEWAY_TLS_HOST:-sherpa-gateway.sherpa.orb.local}
+      SHERPA_GATEWAY_TLS_DAYS: ${SHERPA_GATEWAY_TLS_DAYS:-3650}
     ports:
       - "8000:80"
+      - "${SHERPA_GATEWAY_HTTPS_PORT:-443}:443"
     volumes:
       - ./docker/nginx/sherpa.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:

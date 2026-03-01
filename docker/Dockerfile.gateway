@@ -1,0 +1,8 @@
+FROM nginx:1.27-alpine
+
+RUN apk add --no-cache openssl
+
+COPY docker/nginx/entrypoint.sh /usr/local/bin/sherpa-gateway-entrypoint.sh
+RUN chmod +x /usr/local/bin/sherpa-gateway-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/sherpa-gateway-entrypoint.sh"]
