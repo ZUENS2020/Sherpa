@@ -31,8 +31,10 @@ RUN apt-get update \
 
 RUN npm config set registry "$NPM_CONFIG_REGISTRY" \
     && npm i -g opencode-ai gitnexus \
-    && opencode --version || true \
-    && gitnexus --version || true
+    && command -v opencode \
+    && command -v gitnexus \
+    && opencode --version \
+    && gitnexus --version
 
 # Create opencode config with Qwen models (simplified format without $schema)
 RUN mkdir -p /root/.opencode && \
