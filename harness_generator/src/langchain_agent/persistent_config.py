@@ -99,6 +99,9 @@ class WebPersistentConfig(BaseModel):
 
     # Fuzz defaults
     fuzz_time_budget: int = 900
+    # Per-round cap (seconds) when both total/run budgets are unlimited (0).
+    # 0 means fully unlimited.
+    sherpa_run_unlimited_round_budget_sec: int = 7200
     fuzz_use_docker: bool = True
     fuzz_docker_image: str = "auto"
 
@@ -589,6 +592,10 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     _set_env_if_value("SHERPA_DOCKER_HTTPS_PROXY", cfg.sherpa_docker_https_proxy)
     _set_env_if_value("SHERPA_DOCKER_NO_PROXY", cfg.sherpa_docker_no_proxy)
     _set_env_if_value("SHERPA_DOCKER_PROXY_HOST", cfg.sherpa_docker_proxy_host)
+    _set_env_if_value(
+        "SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC",
+        str(int(cfg.sherpa_run_unlimited_round_budget_sec)),
+    )
 
     # Keep the OpenCode key file in sync for fuzz pipeline.
     write_opencode_env_file(cfg)

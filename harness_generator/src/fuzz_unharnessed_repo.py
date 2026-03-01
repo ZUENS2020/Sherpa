@@ -1920,10 +1920,23 @@ class NonOssFuzzHarnessGenerator:
                 print("    •", p.relative_to(self.repo_root))
         crash_evidence = "none"
         first_artifact = ""
+        timeout_artifact_count = 0
 
         if new_artifacts:
-            crash_evidence = "artifact"
-            first_artifact = str(sorted(new_artifacts)[0])
+            sorted_artifacts = sorted(new_artifacts)
+            timeout_like_artifacts = [
+                p for p in sorted_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
+            ]
+            timeout_artifact_count = len(timeout_like_artifacts)
+            crash_like_artifacts = [p for p in sorted_artifacts if p not in timeout_like_artifacts]
+
+            if crash_like_artifacts:
+                crash_evidence = "artifact"
+                first_artifact = str(crash_like_artifacts[0])
+            elif timeout_like_artifacts:
+                # timeout-/slow-unit-* are performance/hang signals, not stable crash proof.
+                crash_evidence = "timeout_artifact"
+                first_artifact = str(timeout_like_artifacts[0])
 
         def _is_sanitizer_crash(text: str) -> bool:
             if not text:
@@ -1955,6 +1968,12 @@ class NonOssFuzzHarnessGenerator:
         crash_found = crash_evidence in {"artifact", "sanitizer_log"}
         error = ""
         run_error_kind = ""
+        if crash_evidence == "timeout_artifact":
+            run_error_kind = "run_timeout"
+            error = (
+                f"fuzzer produced timeout-like artifacts for {bin_path.name} "
+                f"(count={timeout_artifact_count})"
+            )
         if rc != 0 and not crash_found:
             lowered = log.lower()
             if "idle-timeout" in lowered:
@@ -1964,11 +1983,15 @@ class NonOssFuzzHarnessGenerator:
                     f"no output for {run_idle_timeout}s"
                 )
             elif "[timeout]" in lowered:
-                run_error_kind = "run_timeout"
-                error = f"fuzzer run timed out for {bin_path.name}"
+                if not run_error_kind:
+                    run_error_kind = "run_timeout"
+                if not error:
+                    error = f"fuzzer run timed out for {bin_path.name}"
             else:
-                run_error_kind = "nonzero_exit_without_crash"
-                error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
+                if not run_error_kind:
+                    run_error_kind = "nonzero_exit_without_crash"
+                if not error:
+                    error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
 
         corpus_files = 0
         corpus_size_bytes = 0

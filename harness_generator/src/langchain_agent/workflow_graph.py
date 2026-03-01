@@ -113,8 +113,15 @@ def _calc_parallel_batch_budget(
     base_round_budget = max(1, remaining_for_run // max(1, rounds_left))
     if configured_run_time_budget <= 0:
         if total_budget_unlimited:
-            round_budget = 0
-            hard_timeout = 0
+            # Unlimited workflow budgets can still produce pathological multi-hour
+            # single-fuzzer runs; cap each run round by default unless explicitly disabled.
+            unlimited_round_cap = _run_unlimited_round_budget_sec()
+            if unlimited_round_cap <= 0:
+                round_budget = 0
+                hard_timeout = 0
+                return rounds_left, round_budget, hard_timeout
+            round_budget = unlimited_round_cap
+            hard_timeout = max(60, round_budget + 120)
             return rounds_left, round_budget, hard_timeout
         round_budget = base_round_budget
     else:
@@ -293,6 +300,15 @@ def _run_finalize_timeout_sec() -> int:
         return max(0, min(int(raw), 3600))
     except Exception:
         return 60
+
+
+def _run_unlimited_round_budget_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC") or "7200").strip()
+    try:
+        # 0 means fully unlimited (legacy behavior).
+        return max(0, min(int(raw), 86400))
+    except Exception:
+        return 7200
 
 
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:

@@ -33,6 +33,11 @@ function parseBudgetSeconds(input: string, fallback: number, unlimited: boolean)
   return toPositiveInt(input, fallback);
 }
 
+function toNonNegativeInt(input: string, fallback: number): number {
+  const num = Number.parseInt(input, 10);
+  return Number.isFinite(num) && num >= 0 ? num : fallback;
+}
+
 type ProviderType = 'minimax' | 'glm' | 'deepseek' | 'openrouter';
 
 interface ProviderMeta {
@@ -128,6 +133,7 @@ export function ConfigPanel() {
   const [totalBudgetUnlimited, setTotalBudgetUnlimited] = useState(false);
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
   const [maxTokens, setMaxTokens] = useState('1000');
+  const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
 
   const [selectedProvider, setSelectedProvider] = useState<ProviderType>('openrouter');
   const [providerStore, setProviderStore] = useState<Record<ProviderType, ProviderState>>(defaultProviderStore);
@@ -146,6 +152,12 @@ export function ConfigPanel() {
     setRunBudget(String(normalizedBudget));
     setTotalBudgetUnlimited(isUnlimitedBudget);
     setRunBudgetUnlimited(isUnlimitedBudget);
+    const configuredUnlimitedRoundBudget = Number(cfgQuery.data.sherpa_run_unlimited_round_budget_sec);
+    const normalizedUnlimitedRoundBudget =
+      Number.isFinite(configuredUnlimitedRoundBudget) && configuredUnlimitedRoundBudget >= 0
+        ? Math.floor(configuredUnlimitedRoundBudget)
+        : 7200;
+    setUnlimitedRoundBudget(String(normalizedUnlimitedRoundBudget));
 
     const nextStore = defaultProviderStore();
     let activeProvider: ProviderType | null = null;
@@ -209,6 +221,7 @@ export function ConfigPanel() {
     const selectedMeta = PROVIDER_META[selectedProvider];
     const selectedModel = providerStore[selectedProvider]?.model?.trim() || '';
     const selectedProviderApiKey = providerStore[selectedProvider]?.apiKey?.trim() || '';
+    const unlimitedRoundBudgetSec = toNonNegativeInt(unlimitedRoundBudget, 7200);
     return {
       ...cfgQuery.data,
       openai_api_key: selectedProviderApiKey,
@@ -216,11 +229,12 @@ export function ConfigPanel() {
       openai_model: selectedModel,
       opencode_model: selectedModel,
       fuzz_time_budget: total,
+      sherpa_run_unlimited_round_budget_sec: unlimitedRoundBudgetSec,
       fuzz_use_docker: true,
       fuzz_docker_image: cfgQuery.data.fuzz_docker_image || 'auto',
       opencode_providers: parsedProviders.value,
     };
-  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, selectedProvider, providerStore, parsedProviders.value]);
+  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, selectedProvider, providerStore, parsedProviders.value, unlimitedRoundBudget]);
 
   const updateCurrentProvider = (patch: Partial<ProviderState>) => {
     setProviderStore((prev) => ({
@@ -404,6 +418,16 @@ export function ConfigPanel() {
             size="small"
             type="number"
             fullWidth
+          />
+
+          <TextField
+            label="不限时时单轮上限(秒)"
+            value={unlimitedRoundBudget}
+            onChange={(e) => setUnlimitedRoundBudget(e.target.value)}
+            size="small"
+            type="number"
+            fullWidth
+            helperText="0 表示完全不限时；建议默认 7200（2小时）"
           />
 
           <Card variant="outlined" sx={{ p: 1.2 }}>

@@ -763,6 +763,11 @@ def put_config(request: WebPersistentConfig = Body(...)):
             status_code=400,
             detail="fuzz_time_budget must be >= 0 (0 means unlimited).",
         )
+    if int(request.sherpa_run_unlimited_round_budget_sec) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
+        )
 
     current = _cfg_get()
     payload = request.model_dump()

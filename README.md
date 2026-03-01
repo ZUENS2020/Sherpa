@@ -939,6 +939,7 @@ pytest -q tests
 | `DOCKER_HOST` | `tcp://sherpa-docker:2375` | web 调 dind |
 | `DOCKER_BUILDKIT` | `0` | 避免 buildx 依赖问题 |
 | `SHERPA_PARALLEL_FUZZERS` | `2` | run 阶段并行数 |
+| `SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC` | `7200` | 当总时长/单次时长设为不限时时，run 阶段每轮默认上限秒数；设 `0` 恢复完全不限时 |
 | `SHERPA_WEB_JOB_LOG_DIR` | `/app/job-logs/jobs` | 任务日志目录 |
 | `SHERPA_WEB_JOB_STORE_MODE` | `sqlite` | 任务状态存储模式，`sqlite` 或 `memory` |
 | `SHERPA_WEB_JOB_DB_PATH` | `/app/job-store/jobs.sqlite3` | SQLite 任务状态库路径 |
