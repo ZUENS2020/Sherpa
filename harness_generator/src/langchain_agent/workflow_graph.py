@@ -296,6 +296,32 @@ def _run_idle_timeout_sec() -> int:
         return 120
 
 
+def _synthesize_opencode_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "900").strip()
+    try:
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 900
+
+
+def _synthesize_activity_watch_paths() -> list[str]:
+    return [
+        "fuzz/build.py",
+        "fuzz/README.md",
+        "fuzz/system_packages.txt",
+        "fuzz/*.c",
+        "fuzz/*.cc",
+        "fuzz/*.cpp",
+        "fuzz/*.cxx",
+        "fuzz/*.java",
+        "fuzz/**/*.c",
+        "fuzz/**/*.cc",
+        "fuzz/**/*.cpp",
+        "fuzz/**/*.cxx",
+        "fuzz/**/*.java",
+    ]
+
+
 def _run_finalize_timeout_sec() -> int:
     raw = (os.environ.get("SHERPA_RUN_FINALIZE_TIMEOUT_SEC") or "60").strip()
     try:
@@ -589,6 +615,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+                activity_watch_paths=_synthesize_activity_watch_paths(),
             )
             grace_raw = os.environ.get("SHERPA_SYNTHESIZE_GRACE_SEC", "15").strip()
             try:

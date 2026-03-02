@@ -91,14 +91,15 @@ services:
       # Optional Git mirrors for clone operations.
       SHERPA_GIT_MIRRORS: ""
 
-      # OpenRouter API (for all AI features)
-      OPENROUTER_API_KEY: ""
-      OPENROUTER_MODEL: ""
-      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-
-      # OpenCode model override for OpenAI-compatible endpoints
-      OPENCODE_MODEL: "deepseek/deepseek-reasoner"
-      OPENAI_MODEL: "deepseek-reasoner"
+      # MiniMax-only provider source (recommended in .env).
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
+      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
+      # Compatibility vars consumed by existing tooling.
+      OPENAI_API_KEY: ${MINIMAX_API_KEY:-}
+      OPENAI_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
+      OPENAI_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
+      OPENCODE_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
       OPENCODE_CONFIG: "/app/config/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       SHERPA_WEB_JOB_DB_PATH: "/app/job-store/jobs.sqlite3"

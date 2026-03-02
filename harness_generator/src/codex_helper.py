@@ -49,6 +49,7 @@ import json
 import hashlib
 import os
 import re
+import shlex
 import queue
 import shutil
 import subprocess
@@ -56,6 +57,7 @@ import tempfile
 import textwrap
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import List, Sequence
 
@@ -259,6 +261,49 @@ def _is_opencode_build_transient_error(output: str) -> bool:
     return any(n in low for n in needles)
 
 
+def _run_streaming_combined(
+    cmd: Sequence[str],
+    *,
+    env: dict | None = None,
+    cwd: Path | str | None = None,
+    tail_lines: int = 160,
+) -> tuple[int, str, str]:
+    """Run command with stdout/stderr merged and stream all output.
+
+    Returns: (returncode, output_for_scan, output_tail)
+    """
+    print(f"[*] ➜  {shlex.join(list(cmd))}")
+    proc = subprocess.Popen(
+        list(cmd),
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        text=True,
+        errors="replace",
+    )
+    assert proc.stdout is not None
+
+    tail_buf: deque[str] = deque(maxlen=max(20, tail_lines))
+    scan_buf: deque[str] = deque(maxlen=2400)
+
+    try:
+        for line in proc.stdout:
+            print(line, end="")
+            tail_buf.append(line.rstrip("\n"))
+            scan_buf.append(line)
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+
+    rc = proc.wait()
+    output_for_scan = "".join(scan_buf)
+    output_tail = "\n".join(tail_buf)
+    return rc, output_for_scan, output_tail
+
+
 def _gitnexus_auto_analyze_enabled() -> bool:
     return _bool_env("SHERPA_GITNEXUS_AUTO_ANALYZE", True)
 
@@ -421,23 +466,14 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
                 *user_build_args,
                 context_dir,
             ]
-            proc = subprocess.run(
-                build_cmd,
-                env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-            last_rc = int(proc.returncode) if proc.returncode is not None else 1
-            out = proc.stdout or ""
-            tail = "\n".join(out.splitlines()[-120:])
+            rc, out_scan, tail = _run_streaming_combined(build_cmd, env=env)
+            last_rc = int(rc) if rc is not None else 1
             last_tail = tail
             attempts.append(f"base={base_image} attempt={attempt} rc={last_rc}")
             if last_rc == 0:
                 _ENSURED_OPENCODE_IMAGES.add(image)
                 return
-            if attempt < max_retries and _is_opencode_build_transient_error(out):
+            if attempt < max_retries and _is_opencode_build_transient_error(out_scan):
                 backoff_s = min(2 ** (attempt - 1), 10)
                 print(
                     f"[OpenCodeHelper] opencode image build transient error; "
@@ -843,19 +879,11 @@ class CodexHelper:
         if not _gitnexus_skip_embeddings():
             analyze_cmd.append("--embeddings")
 
-        proc = subprocess.run(
-            analyze_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            text=True,
-            env=env,
-        )
-        if proc.returncode != 0:
-            tail = "\n".join((proc.stdout or "").splitlines()[-80:])
+        rc, _scan, tail = _run_streaming_combined(analyze_cmd, env=env)
+        if rc != 0:
             LOGGER.warning(
                 "[OpenCodeHelper] GitNexus analyze failed (non-fatal, rc=%s). Tail:\n%s",
-                proc.returncode,
+                rc,
                 tail,
             )
         else:
@@ -874,15 +902,40 @@ class CodexHelper:
         timeout: int = 1800,
         max_cli_retries: int = 3,
         initial_backoff: float = 3.0,
+        idle_timeout_override: int | None = None,
+        activity_watch_paths: Sequence[str] | None = None,
+        activity_probe_interval_sec: float | None = None,
     ) -> str | None:
         """Execute OpenCode with robust retry logic and return its stdout or *None*."""
 
         SENTINEL = "done"
-        idle_timeout_raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "300").strip()
-        try:
-            idle_timeout_sec = max(0, min(int(idle_timeout_raw), 86_400))
-        except Exception:
-            idle_timeout_sec = 300
+
+        def _parse_idle_timeout(v: int | None) -> int:
+            if v is not None:
+                try:
+                    return max(0, min(int(v), 86_400))
+                except Exception:
+                    return 300
+            raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "300").strip()
+            try:
+                return max(0, min(int(raw), 86_400))
+            except Exception:
+                return 300
+
+        def _parse_activity_probe_interval(v: float | None) -> float:
+            if v is not None:
+                try:
+                    return max(0.2, min(float(v), 60.0))
+                except Exception:
+                    return 4.0
+            raw = (os.environ.get("SHERPA_OPENCODE_ACTIVITY_PROBE_SEC") or "4").strip()
+            try:
+                return max(0.2, min(float(raw), 60.0))
+            except Exception:
+                return 4.0
+
+        idle_timeout_sec = _parse_idle_timeout(idle_timeout_override)
+        activity_probe_sec = _parse_activity_probe_interval(activity_probe_interval_sec)
         RETRY_ERRORS = (
             "Connection closed prematurely",
             "internal error",
@@ -906,6 +959,75 @@ class CodexHelper:
         )
 
         done_path = self.working_dir / SENTINEL
+        watch_specs: List[str] = []
+        for spec in (activity_watch_paths or ()):
+            txt = str(spec).strip()
+            if txt:
+                watch_specs.append(txt)
+
+        def _watch_targets(spec: str) -> List[Path]:
+            p = Path(spec)
+            if any(ch in spec for ch in "*?[]"):
+                try:
+                    return [x for x in self.working_dir.glob(spec)]
+                except Exception:
+                    return []
+            if p.is_absolute():
+                return [p]
+            return [self.working_dir / p]
+
+        def _to_rel(path: Path) -> str:
+            try:
+                return path.resolve().relative_to(self.working_dir.resolve()).as_posix()
+            except Exception:
+                return str(path)
+
+        def _snapshot_path(path: Path) -> list[object]:
+            try:
+                if not path.exists():
+                    return ["missing", _to_rel(path)]
+                if path.is_file():
+                    st = path.stat()
+                    return ["file", _to_rel(path), int(st.st_mtime_ns), int(st.st_size)]
+                if path.is_dir():
+                    max_mtime = 0
+                    file_count = 0
+                    total_size = 0
+                    for child in path.rglob("*"):
+                        if not child.is_file():
+                            continue
+                        try:
+                            st = child.stat()
+                        except Exception:
+                            continue
+                        file_count += 1
+                        total_size += int(st.st_size)
+                        if int(st.st_mtime_ns) > max_mtime:
+                            max_mtime = int(st.st_mtime_ns)
+                    try:
+                        dir_st = path.stat()
+                        max_mtime = max(max_mtime, int(dir_st.st_mtime_ns))
+                    except Exception:
+                        pass
+                    return ["dir", _to_rel(path), max_mtime, file_count, total_size]
+                st = path.stat()
+                return ["other", _to_rel(path), int(st.st_mtime_ns), int(st.st_size)]
+            except Exception as e:
+                return ["error", str(path), str(e)]
+
+        def _activity_signature() -> str:
+            if not watch_specs:
+                return ""
+            rows: List[list[object]] = []
+            for spec in watch_specs:
+                targets = _watch_targets(spec)
+                if not targets and any(ch in spec for ch in "*?[]"):
+                    rows.append(["glob-miss", spec])
+                    continue
+                for target in targets:
+                    rows.append(_snapshot_path(target))
+            rows.sort(key=lambda item: json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+            return _sha256_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
 
         # Build prompt body once (mirrors original behaviour).
         if isinstance(instructions, (list, tuple)):
@@ -975,6 +1097,7 @@ class CodexHelper:
                 baseline_diff = self._git_diff_head()
             except Exception:
                 baseline_diff = ""
+            baseline_activity_sig = _activity_signature()
 
             run_meta: dict = {
                 "ts": time.time(),
@@ -1079,8 +1202,9 @@ class CodexHelper:
                 saw_retry_error = False
                 last_heartbeat = 0.0
                 last_activity_ts = start_time
-                last_diff_probe_ts = start_time
+                last_progress_probe_ts = start_time
                 last_seen_diff = baseline_diff
+                last_seen_activity_sig = baseline_activity_sig
 
                 def _cleanup_docker_run() -> None:
                     if not run_name:
@@ -1136,6 +1260,34 @@ class CodexHelper:
                         now = time.time()
                         elapsed = now - start_time
 
+                        if elapsed > timeout:
+                            LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
+                            saw_retry_error = True
+                            print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
+                            _kill_proc()
+                            break
+
+                        if idle_timeout_sec > 0 and (now - last_progress_probe_ts) >= activity_probe_sec:
+                            last_progress_probe_ts = now
+                            progress_changed = False
+                            try:
+                                probed_diff = self._git_diff_head()
+                                if probed_diff != last_seen_diff:
+                                    last_seen_diff = probed_diff
+                                    progress_changed = True
+                            except Exception:
+                                pass
+                            if watch_specs:
+                                try:
+                                    sig_now = _activity_signature()
+                                    if sig_now != last_seen_activity_sig:
+                                        last_seen_activity_sig = sig_now
+                                        progress_changed = True
+                                except Exception:
+                                    pass
+                            if progress_changed:
+                                last_activity_ts = now
+
                         if idle_timeout_sec > 0:
                             idle_for = now - last_activity_ts
                             if idle_for > idle_timeout_sec:
@@ -1151,26 +1303,10 @@ class CodexHelper:
                                 _kill_proc()
                                 break
 
-                        if elapsed > timeout:
-                            LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
-                            saw_retry_error = True
-                            print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
-                            _kill_proc()
-                            break
-
                         # Heartbeat so job logs keep moving even if the agent is quiet.
                         if (now - last_heartbeat) > 10.0:
                             last_heartbeat = now
                             print(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
-                            if idle_timeout_sec > 0 and (now - last_diff_probe_ts) >= 8.0:
-                                last_diff_probe_ts = now
-                                try:
-                                    probed_diff = self._git_diff_head()
-                                    if probed_diff != last_seen_diff:
-                                        last_seen_diff = probed_diff
-                                        last_activity_ts = now
-                                except Exception:
-                                    pass
 
                         if done_path.exists():
                             LOGGER.info("[OpenCodeHelper] done flag detected")

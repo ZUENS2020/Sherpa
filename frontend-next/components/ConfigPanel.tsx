@@ -8,19 +8,14 @@ import {
   Card,
   CardContent,
   CircularProgress,
-  FormControl,
   FormControlLabel,
-  InputLabel,
-  MenuItem,
-  Select,
   Stack,
   Switch,
   TextField,
   Typography,
 } from '@mui/material';
-import { getOpencodeProviderModels } from '@/lib/api/client';
 import { useConfigQuery, useSaveConfigMutation, useSubmitTaskMutation } from '@/lib/api/hooks';
-import type { OpencodeProvider, WebConfig } from '@/lib/api/schemas';
+import type { WebConfig } from '@/lib/api/schemas';
 import { useUiStore } from '@/store/useUiStore';
 
 function toPositiveInt(input: string, fallback: number): number {
@@ -38,89 +33,6 @@ function toNonNegativeInt(input: string, fallback: number): number {
   return Number.isFinite(num) && num >= 0 ? num : fallback;
 }
 
-type ProviderType = 'minimax' | 'glm' | 'deepseek' | 'openrouter';
-
-interface ProviderMeta {
-  label: string;
-  providerId: string;
-  baseUrl: string;
-  models: string[];
-}
-
-interface ProviderState {
-  apiKey: string;
-  apiKeySet: boolean;
-  clearApiKey: boolean;
-  model: string;
-  customModel: boolean;
-  availableModels: string[];
-  loadingModels: boolean;
-  fetchError: string;
-}
-
-const PROVIDER_ORDER: ProviderType[] = ['minimax', 'glm', 'deepseek', 'openrouter'];
-const CUSTOM_MODEL_VALUE = '__custom__';
-
-const PROVIDER_META: Record<ProviderType, ProviderMeta> = {
-  minimax: {
-    label: 'MiniMax',
-    providerId: 'minimax',
-    baseUrl: 'https://api.minimax.io/v1',
-    models: ['minimax/minimax-m2.1', 'minimax/minimax-m2'],
-  },
-  glm: {
-    label: 'GLM (Z.AI)',
-    providerId: 'zai',
-    baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
-    models: ['zai/glm-4.7', 'zai/glm-4.6', 'zai/glm-4.5'],
-  },
-  deepseek: {
-    label: 'DeepSeek',
-    providerId: 'deepseek',
-    baseUrl: 'https://api.deepseek.com/v1',
-    models: ['deepseek/deepseek-reasoner', 'deepseek/deepseek-chat'],
-  },
-  openrouter: {
-    label: 'OpenRouter',
-    providerId: 'openrouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    models: ['qwen/qwen3-coder-next', 'deepseek/deepseek-reasoner', 'anthropic/claude-3.7-sonnet'],
-  },
-};
-
-function providerTypeFromConfigName(raw: string): ProviderType | null {
-  const name = (raw || '').trim().toLowerCase();
-  if (!name) return null;
-  if (name === 'minimax') return 'minimax';
-  if (name === 'deepseek') return 'deepseek';
-  if (name === 'openrouter') return 'openrouter';
-  if (name === 'zai' || name === 'zhipuai' || name === 'glm') return 'glm';
-  return null;
-}
-
-function makeDefaultProviderState(type: ProviderType): ProviderState {
-  const models = [...PROVIDER_META[type].models];
-  return {
-    apiKey: '',
-    apiKeySet: false,
-    clearApiKey: false,
-    model: models[0] || '',
-    customModel: false,
-    availableModels: models,
-    loadingModels: false,
-    fetchError: '',
-  };
-}
-
-function defaultProviderStore(): Record<ProviderType, ProviderState> {
-  return {
-    minimax: makeDefaultProviderState('minimax'),
-    glm: makeDefaultProviderState('glm'),
-    deepseek: makeDefaultProviderState('deepseek'),
-    openrouter: makeDefaultProviderState('openrouter'),
-  };
-}
-
 export function ConfigPanel() {
   const cfgQuery = useConfigQuery();
   const saveCfg = useSaveConfigMutation();
@@ -134,9 +46,6 @@ export function ConfigPanel() {
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
   const [maxTokens, setMaxTokens] = useState('1000');
   const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
-
-  const [selectedProvider, setSelectedProvider] = useState<ProviderType>('openrouter');
-  const [providerStore, setProviderStore] = useState<Record<ProviderType, ProviderState>>(defaultProviderStore);
 
   const [statusText, setStatusText] = useState('');
   const [statusType, setStatusType] = useState<'success' | 'error' | 'info'>('info');
@@ -158,151 +67,23 @@ export function ConfigPanel() {
         ? Math.floor(configuredUnlimitedRoundBudget)
         : 7200;
     setUnlimitedRoundBudget(String(normalizedUnlimitedRoundBudget));
-
-    const nextStore = defaultProviderStore();
-    let activeProvider: ProviderType | null = null;
-
-    for (const item of cfgQuery.data.opencode_providers || []) {
-      const type = providerTypeFromConfigName(item.name || '');
-      if (!type) continue;
-      const base = nextStore[type];
-      const model = (item.models || [])[0] || base.model;
-      const customModel = Boolean(model) && !base.availableModels.includes(model);
-
-      nextStore[type] = {
-        ...base,
-        apiKey: item.api_key || '',
-        apiKeySet: Boolean(item.api_key_set),
-        clearApiKey: Boolean(item.clear_api_key),
-        model,
-        customModel,
-      };
-
-      if (item.enabled && activeProvider == null) {
-        activeProvider = type;
-      }
-    }
-
-    setProviderStore(nextStore);
-    setSelectedProvider(activeProvider || 'openrouter');
   }, [cfgQuery.data]);
-
-  const currentProviderState = providerStore[selectedProvider];
-
-  const parsedProviders = useMemo(() => {
-    const providers: OpencodeProvider[] = [];
-
-    for (const type of PROVIDER_ORDER) {
-      const state = providerStore[type];
-      const meta = PROVIDER_META[type];
-      providers.push({
-        name: meta.providerId,
-        enabled: type === selectedProvider,
-        base_url: meta.baseUrl,
-        api_key: state.apiKey.trim(),
-        clear_api_key: state.clearApiKey,
-        models: state.model.trim() ? [state.model.trim()] : [],
-        headers: {},
-        options: {},
-      });
-    }
-
-    const selectedModel = providerStore[selectedProvider].model.trim();
-    if (!selectedModel) {
-      return { error: `${PROVIDER_META[selectedProvider].label} 需要选择模型。`, value: providers };
-    }
-
-    return { error: '', value: providers };
-  }, [providerStore, selectedProvider]);
 
   const mergedConfig = useMemo<WebConfig | null>(() => {
     if (!cfgQuery.data) return null;
     const total = parseBudgetSeconds(totalBudget, 900, totalBudgetUnlimited);
-    const selectedMeta = PROVIDER_META[selectedProvider];
-    const selectedModel = providerStore[selectedProvider]?.model?.trim() || '';
-    const selectedProviderApiKey = providerStore[selectedProvider]?.apiKey?.trim() || '';
     const unlimitedRoundBudgetSec = toNonNegativeInt(unlimitedRoundBudget, 7200);
     return {
       ...cfgQuery.data,
-      openai_api_key: selectedProviderApiKey,
-      openai_base_url: selectedMeta.baseUrl,
-      openai_model: selectedModel,
-      opencode_model: selectedModel,
       fuzz_time_budget: total,
       sherpa_run_unlimited_round_budget_sec: unlimitedRoundBudgetSec,
       fuzz_use_docker: true,
       fuzz_docker_image: cfgQuery.data.fuzz_docker_image || 'auto',
-      opencode_providers: parsedProviders.value,
     };
-  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, selectedProvider, providerStore, parsedProviders.value, unlimitedRoundBudget]);
-
-  const updateCurrentProvider = (patch: Partial<ProviderState>) => {
-    setProviderStore((prev) => ({
-      ...prev,
-      [selectedProvider]: {
-        ...prev[selectedProvider],
-        ...patch,
-      },
-    }));
-  };
-
-  const handleFetchModels = async () => {
-    const meta = PROVIDER_META[selectedProvider];
-    updateCurrentProvider({ loadingModels: true, fetchError: '' });
-
-    try {
-      const out = await getOpencodeProviderModels(selectedProvider, {
-        apiKey: currentProviderState.apiKey.trim(),
-        baseUrl: meta.baseUrl,
-      });
-      const models = Array.from(new Set((out.models || []).map((x) => String(x || '').trim()).filter(Boolean)));
-      if (!models.length) {
-        updateCurrentProvider({ loadingModels: false, fetchError: '未获取到可用模型列表。' });
-        return;
-      }
-
-      setProviderStore((prev) => {
-        const current = prev[selectedProvider];
-        const keepCurrent = current.customModel
-          ? current.model
-          : models.includes(current.model)
-            ? current.model
-            : models[0];
-        return {
-          ...prev,
-          [selectedProvider]: {
-            ...current,
-            loadingModels: false,
-            fetchError: '',
-            availableModels: models,
-            model: keepCurrent,
-            customModel: current.customModel,
-          },
-        };
-      });
-
-      if ((out.source || '').toLowerCase() === 'remote') {
-        setStatusType('success');
-        setStatusText(`${meta.label} 模型列表已从远端更新。`);
-      } else if (out.warning) {
-        setStatusType('info');
-        setStatusText(`${meta.label} 使用内置模型列表（${out.warning}）。`);
-      } else {
-        setStatusType('info');
-        setStatusText(`${meta.label} 模型列表已更新（内置列表）。`);
-      }
-    } catch (e) {
-      updateCurrentProvider({ loadingModels: false, fetchError: e instanceof Error ? e.message : '获取模型列表失败' });
-    }
-  };
+  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, unlimitedRoundBudget]);
 
   const handleSave = async () => {
     if (!mergedConfig) return;
-    if (parsedProviders.error) {
-      setStatusType('error');
-      setStatusText(parsedProviders.error);
-      return;
-    }
     try {
       setStatusType('info');
       setStatusText('正在保存配置...');
@@ -430,99 +211,11 @@ export function ConfigPanel() {
             helperText="0 表示完全不限时；建议默认 7200（2小时）"
           />
 
-          <Card variant="outlined" sx={{ p: 1.2 }}>
-            <Stack spacing={1.5}>
-              <Typography variant="subtitle1" fontWeight={600}>OpenCode Provider</Typography>
-
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1}>
-                <FormControl fullWidth size="small">
-                  <InputLabel id="provider-select-label">供应商</InputLabel>
-                  <Select
-                    labelId="provider-select-label"
-                    label="供应商"
-                    value={selectedProvider}
-                    onChange={(e) => setSelectedProvider(String(e.target.value) as ProviderType)}
-                  >
-                    {PROVIDER_ORDER.map((type) => (
-                      <MenuItem key={type} value={type}>
-                        {PROVIDER_META[type].label}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                <Button
-                  variant="outlined"
-                  onClick={handleFetchModels}
-                  disabled={currentProviderState.loadingModels}
-                >
-                  {currentProviderState.loadingModels ? '获取中...' : '获取模型列表'}
-                </Button>
-              </Stack>
-
-              <TextField
-                label="API Key"
-                type="password"
-                value={currentProviderState.apiKey}
-                onChange={(e) => updateCurrentProvider({ apiKey: e.target.value, clearApiKey: false })}
-                size="small"
-                fullWidth
-                helperText={currentProviderState.apiKeySet && !currentProviderState.apiKey ? '已保存密钥（留空则保持不变）' : undefined}
-              />
-
-              <FormControl fullWidth size="small">
-                <InputLabel id="provider-model-label">模型</InputLabel>
-                <Select
-                  labelId="provider-model-label"
-                  label="模型"
-                  value={currentProviderState.customModel ? CUSTOM_MODEL_VALUE : currentProviderState.model}
-                  onChange={(e) => {
-                    const selected = String(e.target.value || '');
-                    if (selected === CUSTOM_MODEL_VALUE) {
-                      updateCurrentProvider({ customModel: true, model: '' });
-                      return;
-                    }
-                    updateCurrentProvider({ customModel: false, model: selected });
-                  }}
-                >
-                  {currentProviderState.availableModels.map((m) => (
-                    <MenuItem key={m} value={m}>{m}</MenuItem>
-                  ))}
-                  <MenuItem value={CUSTOM_MODEL_VALUE}>自定义模型</MenuItem>
-                </Select>
-              </FormControl>
-
-              {currentProviderState.customModel ? (
-                <TextField
-                  label="自定义模型"
-                  value={currentProviderState.model}
-                  onChange={(e) => updateCurrentProvider({ model: e.target.value })}
-                  size="small"
-                  fullWidth
-                />
-              ) : null}
-
-              <FormControlLabel
-                control={(
-                  <Switch
-                    checked={currentProviderState.clearApiKey}
-                    onChange={(e) => updateCurrentProvider({ clearApiKey: e.target.checked })}
-                  />
-                )}
-                label="保存时清空该 Provider 的 API Key"
-              />
-
-              {currentProviderState.fetchError ? <Alert severity="error">{currentProviderState.fetchError}</Alert> : null}
-            </Stack>
-          </Card>
-
-          {parsedProviders.error ? <Alert severity="error">{parsedProviders.error}</Alert> : null}
-
           <Stack direction="row" spacing={1}>
             <Button
               variant="outlined"
               onClick={handleSave}
-              disabled={saveCfg.isPending || !mergedConfig || Boolean(parsedProviders.error)}
+              disabled={saveCfg.isPending || !mergedConfig}
             >
               保存配置
             </Button>

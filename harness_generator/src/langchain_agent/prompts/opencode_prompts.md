@@ -20,6 +20,10 @@ Additional instruction from coordinator:
 <!-- TEMPLATE: synthesize_with_hint -->
 You are coordinating a fuzz harness generation workflow.
 Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
+Execution strategy requirement:
+- Do not wait for a full design before writing files.
+- First create minimal skeleton artifacts immediately: one harness source file and `fuzz/build.py`.
+- Then iterate to improve content in place.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
 MANDATORY: you MUST create `./done` before finishing this step.

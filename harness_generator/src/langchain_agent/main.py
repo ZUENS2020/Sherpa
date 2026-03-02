@@ -19,12 +19,11 @@ from pathlib import Path
 from fuzz_relative_functions import fuzz_logic
 from job_store import SQLiteJobStore
 from persistent_config import (
-    OpencodeProviderConfig,
     WebPersistentConfig,
+    apply_minimax_env_source,
     apply_config_to_env,
     as_public_dict,
     list_opencode_provider_models_resolved,
-    normalize_opencode_providers,
     opencode_env_path,
     load_config,
     save_config,
@@ -688,69 +687,6 @@ def post_opencode_provider_models(provider: str, request: provider_models_reques
     return payload
 
 
-def _merge_opencode_provider_secrets(
-    current: WebPersistentConfig,
-    payload: dict,
-) -> None:
-    current_by_name: dict[str, OpencodeProviderConfig] = {
-        str(p.name or "").strip().lower(): p for p in (current.opencode_providers or [])
-    }
-
-    incoming_entries = payload.get("opencode_providers")
-    if not isinstance(incoming_entries, list):
-        payload["opencode_providers"] = []
-        return
-
-    merged_entries: list[OpencodeProviderConfig] = []
-    for raw in incoming_entries:
-        if not isinstance(raw, dict):
-            continue
-
-        name = str(raw.get("name") or "").strip().lower()
-        if not name:
-            continue
-
-        existing = current_by_name.get(name)
-        clear_flag = bool(raw.get("clear_api_key"))
-        raw_key = raw.get("api_key")
-        next_key = ""
-        if isinstance(raw_key, str):
-            next_key = raw_key.strip()
-
-        if clear_flag:
-            resolved_key: str | None = ""
-        elif next_key:
-            resolved_key = next_key
-        elif existing and isinstance(existing.api_key, str) and existing.api_key.strip():
-            resolved_key = existing.api_key
-        else:
-            resolved_key = ""
-
-        models_raw = raw.get("models")
-        models = list(models_raw) if isinstance(models_raw, list) else []
-        headers_raw = raw.get("headers")
-        headers = dict(headers_raw) if isinstance(headers_raw, dict) else {}
-        options_raw = raw.get("options")
-        options = dict(options_raw) if isinstance(options_raw, dict) else {}
-
-        merged_entries.append(
-            OpencodeProviderConfig(
-                name=name,
-                enabled=bool(raw.get("enabled", True)),
-                base_url=str(raw.get("base_url") or "").strip(),
-                api_key=(resolved_key if resolved_key else None),
-                clear_api_key=False,
-                models=models,
-                headers=headers,
-                options=options,
-            )
-        )
-
-    payload["opencode_providers"] = [
-        item.model_dump() for item in normalize_opencode_providers(merged_entries)
-    ]
-
-
 @app.put("/api/config")
 def put_config(request: WebPersistentConfig = Body(...)):
     if request.fuzz_use_docker is False:
@@ -771,18 +707,36 @@ def put_config(request: WebPersistentConfig = Body(...)):
 
     current = _cfg_get()
     payload = request.model_dump()
-    # Preserve existing secrets when frontend submits null/omits key fields.
-    if request.openai_api_key is None:
-        payload["openai_api_key"] = current.openai_api_key
-    if request.openrouter_api_key is None:
-        payload["openrouter_api_key"] = current.openrouter_api_key
-    _merge_opencode_provider_secrets(current, payload)
+
+    # Frontend no longer controls provider/API fields.
+    controlled_fields = (
+        "openai_api_key",
+        "openai_base_url",
+        "openai_model",
+        "opencode_model",
+        "opencode_providers",
+        "openrouter_api_key",
+        "openrouter_base_url",
+        "openrouter_model",
+    )
+    for key in controlled_fields:
+        payload[key] = getattr(current, key)
+
     payload["fuzz_use_docker"] = True
     payload["fuzz_docker_image"] = (payload.get("fuzz_docker_image") or "").strip() or "auto"
-    cfg = WebPersistentConfig(**payload)
-    save_config(cfg)
-    _cfg_set(cfg)
-    apply_config_to_env(cfg)
+    runtime_cfg = apply_minimax_env_source(WebPersistentConfig(**payload))
+
+    # Keep persisted config free of API secrets; runtime values come from environment.
+    persisted_cfg = WebPersistentConfig(**runtime_cfg.model_dump())
+    persisted_cfg.openai_api_key = None
+    persisted_cfg.openrouter_api_key = None
+    for item in persisted_cfg.opencode_providers:
+        item.api_key = None
+        item.clear_api_key = False
+
+    save_config(persisted_cfg)
+    _cfg_set(runtime_cfg)
+    apply_config_to_env(runtime_cfg)
     return {"ok": True}
 
 

@@ -33,22 +33,27 @@ def test_ensure_opencode_image_falls_back_to_mirror_base_image(monkeypatch: pyte
         c = [str(x) for x in cmd]
         if c[:3] == ["docker", "image", "inspect"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _fake_stream(cmd, *args, **kwargs):
+        c = [str(x) for x in cmd]
         if c[:2] == ["docker", "build"]:
             build_calls.append(c)
             base = _extract_build_arg(c, "OPENCODE_BASE_IMAGE")
             if base == "node:20-slim":
-                return SimpleNamespace(
-                    returncode=1,
-                    stdout=(
+                return (
+                    1,
+                    (
                         "failed to fetch anonymous token: "
                         'Get "https://auth.docker.io/token?...": net/http: TLS handshake timeout'
                     ),
-                    stderr="",
+                    "tls handshake timeout",
                 )
-            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return (0, "ok", "ok")
+        return (0, "", "")
 
     monkeypatch.setattr(ch.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ch, "_run_streaming_combined", _fake_stream)
     monkeypatch.setattr(ch.time, "sleep", lambda _: None)
     monkeypatch.setenv(
         "SHERPA_OPENCODE_BASE_IMAGES",

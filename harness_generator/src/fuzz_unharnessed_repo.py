@@ -175,6 +175,32 @@ def _workflow_opencode_cli_retries() -> int:
         return 2
 
 
+def _synthesize_opencode_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "900").strip()
+    try:
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 900
+
+
+def _synthesize_activity_watch_paths() -> list[str]:
+    return [
+        "fuzz/build.py",
+        "fuzz/README.md",
+        "fuzz/system_packages.txt",
+        "fuzz/*.c",
+        "fuzz/*.cc",
+        "fuzz/*.cpp",
+        "fuzz/*.cxx",
+        "fuzz/*.java",
+        "fuzz/**/*.c",
+        "fuzz/**/*.cc",
+        "fuzz/**/*.cpp",
+        "fuzz/**/*.cxx",
+        "fuzz/**/*.java",
+    ]
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
@@ -1440,6 +1466,8 @@ class NonOssFuzzHarnessGenerator:
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_workflow_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
@@ -2802,7 +2830,8 @@ class NonOssFuzzHarnessGenerator:
 
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
-        out_queue: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        reader_eof = object()
+        out_queue: queue.Queue[tuple[str, str] | object] = queue.Queue()
 
         def _reader(pipe: Optional[object], kind: str) -> None:
             try:
@@ -2811,7 +2840,7 @@ class NonOssFuzzHarnessGenerator:
                 for line in pipe:
                     out_queue.put((kind, line))
             finally:
-                out_queue.put(None)
+                out_queue.put(reader_eof)
 
         t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
         t_err = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
@@ -2821,7 +2850,11 @@ class NonOssFuzzHarnessGenerator:
         done_readers = 0
         timed_out = False
         idle_timed_out = False
-        heartbeat_sec = 10.0
+        heartbeat_raw = (os.environ.get("SHERPA_CMD_KEEPALIVE_SEC") or "0").strip()
+        try:
+            heartbeat_sec = max(0.0, min(float(heartbeat_raw), 3600.0))
+        except Exception:
+            heartbeat_sec = 0.0
         last_heartbeat = time.monotonic()
         last_activity = time.monotonic()
 
@@ -2834,9 +2867,10 @@ class NonOssFuzzHarnessGenerator:
                 try:
                     item = out_queue.get(timeout=0.2)
                 except queue.Empty:
-                    item = None
+                    # Queue timeout only means "no new output yet", not reader EOF.
+                    continue
 
-                if item is None:
+                if item is reader_eof:
                     done_readers += 1
                 else:
                     kind, text = item
@@ -2854,11 +2888,12 @@ class NonOssFuzzHarnessGenerator:
                     timed_out = True
                     break
 
-                now = time.monotonic()
-                if now - last_heartbeat >= heartbeat_sec:
-                    elapsed = now - start_mono
-                    print(f"[keepalive] command still running... elapsed={elapsed:.0f}s", flush=True)
-                    last_heartbeat = now
+                if heartbeat_sec > 0:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= heartbeat_sec:
+                        elapsed = now - start_mono
+                        print(f"[keepalive] command still running... elapsed={elapsed:.0f}s", flush=True)
+                        last_heartbeat = now
         finally:
             if timed_out and proc.poll() is None:
                 try:
@@ -2887,7 +2922,7 @@ class NonOssFuzzHarnessGenerator:
                     item = out_queue.get_nowait()
                 except queue.Empty:
                     break
-                if item is None:
+                if item is reader_eof:
                     continue
                 kind, text = item
                 if kind == "stdout":

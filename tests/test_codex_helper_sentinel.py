@@ -167,3 +167,51 @@ def test_run_codex_command_idle_timeout_retries_cli(monkeypatch: pytest.MonkeyPa
     assert first.returncode is not None
     assert out is not None
     assert done_path.is_file()
+
+
+def test_run_codex_command_treats_file_progress_as_activity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    fuzz_dir = helper.working_dir / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    watched_file = fuzz_dir / "build.py"
+
+    proc = _FakeProc(stdout_text="")
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+
+    ticks = {"n": 0}
+
+    def _fake_time() -> float:
+        ticks["n"] += 1
+        now = ticks["n"] * 0.25
+        if now >= 0.75 and not watched_file.exists():
+            watched_file.write_text("# progress\n", encoding="utf-8")
+        if now >= 1.25 and not done_path.exists():
+            done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return now
+
+    monkeypatch.setattr(ch.time, "time", _fake_time)
+
+    def _fake_git_diff_head() -> str:
+        return "M fuzz/build.py" if done_path.exists() else ""
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz build script",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=30,
+        initial_backoff=0,
+        idle_timeout_override=1,
+        activity_probe_interval_sec=0.2,
+        activity_watch_paths=["fuzz/build.py"],
+    )
+
+    assert out is not None
+    assert done_path.is_file()
+    assert proc.returncode is not None

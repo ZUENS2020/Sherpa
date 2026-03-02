@@ -13,32 +13,23 @@ from pydantic import BaseModel, Field
 
 
 _OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
+_MINIMAX_PROVIDER = "minimax"
+_MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic/v1"
+_MINIMAX_DEFAULT_MODEL = "MiniMax-M2.5"
 _OPENCODE_PROVIDER_MODEL_CANDIDATES: dict[str, list[str]] = {
-    "openrouter": [
-        "qwen/qwen3-coder-next",
-        "anthropic/claude-3.7-sonnet",
-        "deepseek/deepseek-reasoner",
-    ],
-    "deepseek": [
-        "deepseek/deepseek-reasoner",
-        "deepseek/deepseek-chat",
-        "deepseek/deepseek-v3.2",
-    ],
-    "minimax": [
-        "minimax/minimax-m2.1",
-        "minimax/minimax-m2",
-        "minimax/minimax-m2.1-lightning",
-    ],
-    "zai": [
-        "zai/glm-4.7",
-        "zai/glm-4.6",
-        "zai/glm-4.5",
+    _MINIMAX_PROVIDER: [
+        "MiniMax-M2.5",
+        "MiniMax-Text-01",
     ],
 }
 _OPENCODE_PROVIDER_ALIASES: dict[str, str] = {
-    "glm": "zai",
-    "zai": "zai",
-    "zhipuai": "zai",
+    _MINIMAX_PROVIDER: _MINIMAX_PROVIDER,
+    "mini-max": _MINIMAX_PROVIDER,
+    "minimaxi": _MINIMAX_PROVIDER,
+}
+_OPENCODE_PROVIDER_NPM: dict[str, str] = {
+    # MiniMax follows Anthropic-compatible SDK wiring in OpenCode provider config.
+    _MINIMAX_PROVIDER: "@ai-sdk/anthropic",
 }
 
 
@@ -56,28 +47,10 @@ class OpencodeProviderConfig(BaseModel):
 def _default_opencode_providers() -> list[OpencodeProviderConfig]:
     return [
         OpencodeProviderConfig(
-            name="openrouter",
+            name=_MINIMAX_PROVIDER,
             enabled=True,
-            base_url="https://openrouter.ai/api/v1",
-            models=["qwen/qwen3-coder-next"],
-        ),
-        OpencodeProviderConfig(
-            name="zai",
-            enabled=False,
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            models=["zai/glm-4.7"],
-        ),
-        OpencodeProviderConfig(
-            name="deepseek",
-            enabled=False,
-            base_url="https://api.deepseek.com/v1",
-            models=["deepseek/deepseek-reasoner"],
-        ),
-        OpencodeProviderConfig(
-            name="minimax",
-            enabled=False,
-            base_url="https://api.minimax.io/v1",
-            models=[],
+            base_url=_MINIMAX_BASE_URL,
+            models=[_MINIMAX_DEFAULT_MODEL],
         ),
     ]
 
@@ -191,14 +164,8 @@ def _provider_from_base_url(raw_url: str) -> str:
     url = (raw_url or "").strip().lower()
     if not url:
         return ""
-    if "openrouter.ai" in url:
-        return "openrouter"
-    if "deepseek.com" in url:
-        return "deepseek"
-    if "bigmodel.cn" in url or "zhipuai.cn" in url:
-        return "zai"
-    if "minimax.io" in url:
-        return "minimax"
+    if "minimax.io" in url or "minimaxi.com" in url:
+        return _MINIMAX_PROVIDER
     return ""
 
 
@@ -207,12 +174,10 @@ def _best_provider_api_key(cfg: "WebPersistentConfig", provider: str) -> str:
     item = _provider_config_by_name(cfg, normalized)
     if item and item.api_key and item.api_key.strip():
         return item.api_key.strip()
-    if normalized == "openrouter" and cfg.openrouter_api_key and cfg.openrouter_api_key.strip():
-        return cfg.openrouter_api_key.strip()
     # Legacy fallback for OPENAI_* fields: only when base_url clearly maps to the same provider.
     openai_provider = _provider_from_base_url(cfg.openai_base_url)
     if (
-        normalized in {"deepseek", "zai", "minimax"}
+        normalized == _MINIMAX_PROVIDER
         and normalized == openai_provider
         and cfg.openai_api_key
         and cfg.openai_api_key.strip()
@@ -318,14 +283,11 @@ def list_opencode_provider_models_resolved(
     api_key = (api_key_override or "").strip() or _best_provider_api_key(cfg, normalized)
     if not base_url:
         return normalized, fallback, "builtin", "provider base_url not configured"
-    if normalized in {"deepseek", "zai", "minimax"} and not api_key:
+    if normalized == _MINIMAX_PROVIDER and not api_key:
         return normalized, fallback, "builtin", "provider api_key not configured"
 
     try:
-        if normalized == "openrouter":
-            remote = _fetch_models_openrouter(base_url, api_key=api_key)
-        else:
-            remote = _fetch_models_openai_compatible(base_url, api_key=api_key)
+        remote = _fetch_models_openai_compatible(base_url, api_key=api_key)
         remote = _dedupe_keep_order(remote)
         if remote:
             return normalized, remote, "remote", ""
@@ -342,13 +304,9 @@ def _normalize_provider_entry(entry: OpencodeProviderConfig) -> OpencodeProvider
     name = _normalize_provider_name(entry.name)
     if not name:
         return None
-
-    base_url = (entry.base_url or "").strip()
-    if name == "zai":
-        legacy = "https://open.bigmodel.cn/api/paas/v4"
-        coding = "https://open.bigmodel.cn/api/coding/paas/v4"
-        if base_url.rstrip("/") == legacy:
-            base_url = coding
+    if name != _MINIMAX_PROVIDER:
+        return None
+    base_url = (entry.base_url or "").strip() or _MINIMAX_BASE_URL
 
     models: list[str] = []
     seen_models: set[str] = set()
@@ -404,6 +362,9 @@ def normalize_opencode_providers(entries: list[OpencodeProviderConfig] | None) -
 def _build_provider_node(entry: OpencodeProviderConfig) -> dict[str, Any]:
     node: dict[str, Any] = {}
     options: dict[str, Any] = {}
+    npm_pkg = _OPENCODE_PROVIDER_NPM.get(entry.name)
+    if npm_pkg:
+        node["npm"] = npm_pkg
 
     if isinstance(entry.options, dict):
         options.update(entry.options)
@@ -429,7 +390,7 @@ def _build_provider_node(entry: OpencodeProviderConfig) -> dict[str, Any]:
     for m in entry.models:
         model_name = str(m or "").strip()
         if model_name:
-            models[model_name] = {}
+            models[model_name] = {"name": model_name}
     if models:
         node["models"] = models
 
@@ -442,35 +403,6 @@ def build_opencode_runtime_config(cfg: WebPersistentConfig) -> dict[str, Any]:
         if not item.enabled:
             continue
         providers[item.name] = _build_provider_node(item)
-
-    # Compatibility fallback for legacy fields when provider list is empty.
-    if not providers:
-        openrouter_node: dict[str, Any] = {}
-        openrouter_options: dict[str, Any] = {}
-        if cfg.openrouter_base_url.strip():
-            openrouter_options["baseURL"] = cfg.openrouter_base_url.strip()
-        if cfg.openrouter_api_key and cfg.openrouter_api_key.strip():
-            openrouter_options["apiKey"] = cfg.openrouter_api_key.strip()
-        if openrouter_options:
-            openrouter_node["options"] = openrouter_options
-        if cfg.openrouter_model.strip():
-            openrouter_node["models"] = {cfg.openrouter_model.strip(): {}}
-        if openrouter_node:
-            providers["openrouter"] = openrouter_node
-
-        openai_node: dict[str, Any] = {}
-        openai_options: dict[str, Any] = {}
-        if cfg.openai_base_url.strip():
-            openai_options["baseURL"] = cfg.openai_base_url.strip()
-        if cfg.openai_api_key and cfg.openai_api_key.strip():
-            openai_options["apiKey"] = cfg.openai_api_key.strip()
-        if openai_options:
-            openai_node["options"] = openai_options
-        model_name = (cfg.opencode_model or cfg.openai_model or "").strip()
-        if model_name:
-            openai_node["models"] = {model_name: {}}
-        if openai_node:
-            providers["openai"] = openai_node
 
     return {
         "$schema": _OPENCODE_SCHEMA_URL,
@@ -504,6 +436,46 @@ def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
     return p
 
 
+def _resolve_minimax_env_values() -> tuple[str, str, str]:
+    key = (
+        os.environ.get("MINIMAX_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    base_url = (
+        os.environ.get("MINIMAX_BASE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or _MINIMAX_BASE_URL
+    )
+    model = (
+        os.environ.get("OPENCODE_MODEL", "").strip()
+        or os.environ.get("OPENAI_MODEL", "").strip()
+        or os.environ.get("MINIMAX_MODEL", "").strip()
+        or _MINIMAX_DEFAULT_MODEL
+    )
+    return key, base_url, model
+
+
+def apply_minimax_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
+    key, base_url, model = _resolve_minimax_env_values()
+    cfg.openai_api_key = key or None
+    cfg.openai_base_url = base_url
+    cfg.openai_model = model
+    cfg.opencode_model = model
+    cfg.opencode_providers = [
+        OpencodeProviderConfig(
+            name=_MINIMAX_PROVIDER,
+            enabled=True,
+            base_url=base_url,
+            api_key=(key or None),
+            clear_api_key=False,
+            models=[model],
+            headers={},
+            options={},
+        )
+    ]
+    return cfg
+
+
 def load_config() -> WebPersistentConfig:
     path = config_path()
     if not path.is_file():
@@ -514,7 +486,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return cfg
+        return apply_minimax_env_source(cfg)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
@@ -528,7 +500,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return cfg
+        return apply_minimax_env_source(cfg)
     except Exception:
         cfg = WebPersistentConfig()
         cfg.fuzz_use_docker = True
@@ -537,7 +509,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return cfg
+        return apply_minimax_env_source(cfg)
 
 
 def save_config(cfg: WebPersistentConfig) -> None:
@@ -571,6 +543,7 @@ def _set_env_if_value(name: str, value: str | None) -> None:
 
 
 def apply_config_to_env(cfg: WebPersistentConfig) -> None:
+    apply_minimax_env_source(cfg)
     # Chat / OpenRouter
     _set_env_if_value("OPENROUTER_API_KEY", cfg.openrouter_api_key)
     _set_env_if_value("OPENROUTER_BASE_URL", cfg.openrouter_base_url)
