@@ -1,9 +1,14 @@
 # OpenCode runner image (separate from web UI)
-ARG OPENCODE_BASE_IMAGE=node:20-slim
+ARG OPENCODE_BASE_IMAGE=m.daocloud.io/docker.io/library/node:20-slim
 FROM ${OPENCODE_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    NPM_CONFIG_REGISTRY="https://registry.npmmirror.com"
+    NPM_CONFIG_REGISTRY="https://registry.npmmirror.com" \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_FACTOR=2 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=2000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=30000 \
+    NPM_CONFIG_FETCH_TIMEOUT=300000
 
 # Use CN mirrors by default (override with build args if needed).
 ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian"
@@ -29,8 +34,28 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm config set registry "$NPM_CONFIG_REGISTRY" \
-    && npm i -g opencode-ai gitnexus \
+RUN set -eux; \
+    npm config set registry "$NPM_CONFIG_REGISTRY"; \
+    npm config set fetch-retries "$NPM_CONFIG_FETCH_RETRIES"; \
+    npm config set fetch-retry-factor "$NPM_CONFIG_FETCH_RETRY_FACTOR"; \
+    npm config set fetch-retry-mintimeout "$NPM_CONFIG_FETCH_RETRY_MINTIMEOUT"; \
+    npm config set fetch-retry-maxtimeout "$NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT"; \
+    npm config set fetch-timeout "$NPM_CONFIG_FETCH_TIMEOUT"; \
+    for pkg in opencode-ai gitnexus; do \
+      ok=0; \
+      for attempt in 1 2 3; do \
+        echo "[npm] installing $pkg (attempt $attempt/3)"; \
+        if npm i -g --loglevel=info "$pkg"; then \
+          ok=1; \
+          break; \
+        fi; \
+        sleep $((attempt * 2)); \
+      done; \
+      if [ "$ok" -ne 1 ]; then \
+        echo "[npm] failed to install $pkg after retries"; \
+        exit 1; \
+      fi; \
+    done; \
     && command -v opencode \
     && command -v gitnexus \
     && opencode --version \

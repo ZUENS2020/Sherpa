@@ -79,7 +79,10 @@ DOCKERFILE_FUZZ_JAVA = TOOL_ROOT / "docker" / "Dockerfile.fuzz-java"
 DEFAULT_DOCKER_IMAGE_CPP = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
 DEFAULT_DOCKER_IMAGE_JAVA = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
 
-DEFAULT_GIT_DOCKER_IMAGE = os.environ.get("SHERPA_GIT_DOCKER_IMAGE", "alpine/git")
+DEFAULT_GIT_DOCKER_IMAGE = os.environ.get(
+    "SHERPA_GIT_DOCKER_IMAGE",
+    "m.daocloud.io/docker.io/alpine/git",
+)
 
 # Clone reliability knobs (useful on restricted networks).
 GIT_CLONE_RETRIES = int(os.environ.get("SHERPA_GIT_CLONE_RETRIES", "2"))

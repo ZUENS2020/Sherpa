@@ -32,7 +32,10 @@ class OssFuzzAutoError(RuntimeError):
 
 def _oss_fuzz_repo_url() -> str:
     # Allow overriding for mirrors or internal forks.
-    return os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "https://github.com/google/oss-fuzz.git").strip()
+    return os.environ.get(
+        "SHERPA_OSS_FUZZ_REPO_URL",
+        "https://gitclone.com/github.com/google/oss-fuzz.git",
+    ).strip()
 
 
 def _which(cmd: str) -> Optional[str]:

@@ -1,16 +1,23 @@
-FROM node:20-alpine AS deps
+ARG FRONTEND_NODE_IMAGE=m.daocloud.io/docker.io/library/node:20-alpine
+FROM ${FRONTEND_NODE_IMAGE} AS deps
+ENV NPM_CONFIG_REGISTRY="https://registry.npmmirror.com" \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_FACTOR=2 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=2000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=30000 \
+    NPM_CONFIG_FETCH_TIMEOUT=300000
 WORKDIR /app
 COPY frontend-next/package.json ./
 RUN npm install
 
-FROM node:20-alpine AS builder
+FROM ${FRONTEND_NODE_IMAGE} AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend-next ./
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM ${FRONTEND_NODE_IMAGE} AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

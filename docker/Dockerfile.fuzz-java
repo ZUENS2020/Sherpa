@@ -1,7 +1,17 @@
 # Java fuzz runtime image (Jazzer toolchain)
-FROM ubuntu:24.04
+ARG FUZZ_JAVA_BASE_IMAGE=m.daocloud.io/docker.io/library/ubuntu:24.04
+FROM ${FUZZ_JAVA_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+RUN set -e; \
+  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+    [ -f "$f" ] || continue; \
+    sed -i -E "s#https?://archive.ubuntu.com/ubuntu#${APT_MIRROR}#g" "$f"; \
+    sed -i -E "s#https?://ports.ubuntu.com/ubuntu-ports#${APT_MIRROR}#g" "$f"; \
+    sed -i -E "s#https?://security.ubuntu.com/ubuntu#${APT_MIRROR}#g" "$f"; \
+  done
 
 RUN apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
   && apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 \
