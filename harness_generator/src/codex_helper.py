@@ -1083,9 +1083,18 @@ class CodexHelper:
         else:
             tasks = str(instructions)
 
+        repo_root = str(self.working_dir.resolve())
+        if _docker_opencode_image():
+            repo_path_hint = "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output)."
+        else:
+            repo_path_hint = (
+                f"The repository root is {repo_root}. "
+                "Use relative paths from the current working directory and do not assume /repo exists."
+            )
+
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
-            "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output).",
+            repo_path_hint,
             "GitNexus MCP tooling is available for codebase dependency/call-flow analysis; use it before guessing architecture details.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "

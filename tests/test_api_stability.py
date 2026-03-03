@@ -673,7 +673,10 @@ def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
     child = web_main._job_snapshot(child_id)
     assert child is not None
     assert child["status"] == "resumed"
-    assert child["result"] == {"ok": True}
+    assert isinstance(child["result"], dict)
+    assert child["result"].get("ok") is True
+    assert isinstance(child["result"].get("stage_results"), list)
+    assert child["result"].get("stage_job_names")
     assert task["status"] == "success"
 
 

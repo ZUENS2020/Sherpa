@@ -215,3 +215,45 @@ def test_run_codex_command_treats_file_progress_as_activity(monkeypatch: pytest.
     assert out is not None
     assert done_path.is_file()
     assert proc.returncode is not None
+
+
+def test_run_codex_command_prompt_uses_real_repo_root_in_native_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+
+    def _fake_popen(*args, **kwargs):
+        cmd = args[0]
+        captured["cmd"] = cmd
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert "do not assume /repo exists" in prompt
+    assert f"The repository root is {helper.working_dir.resolve()}" in prompt
+    assert "mounted at /repo" not in prompt

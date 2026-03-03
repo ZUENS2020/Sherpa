@@ -432,6 +432,31 @@ def _execute_k8s_job(
     return doc.get("result")
 
 
+def _k8s_stage_wait_timeout_sec(
+    *,
+    stage: str,
+    total_time_budget_sec: int,
+    run_time_budget_sec: int,
+) -> int:
+    """Compute outer k8s-job timeout with explicit grace to avoid false timeouts."""
+    try:
+        grace_run = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "300"))
+    except Exception:
+        grace_run = 300
+    try:
+        grace_default = int(os.environ.get("SHERPA_K8S_STAGE_TIMEOUT_GRACE_SEC", "180"))
+    except Exception:
+        grace_default = 180
+    grace_run = max(60, grace_run)
+    grace_default = max(30, grace_default)
+
+    total_base = total_time_budget_sec if total_time_budget_sec > 0 else 7200
+    run_base = run_time_budget_sec if run_time_budget_sec > 0 else total_base
+    base = run_base if stage == "run" else total_base
+    grace = grace_run if stage == "run" else grace_default
+    return max(300, base + grace)
+
+
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
     if _executor_mode() == "k8s_job":
         return []
@@ -1221,11 +1246,24 @@ def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -
     if target_dir.is_dir() and (target_dir / "infra" / "helper.py").is_file():
         print("[init] oss-fuzz already present")
         return
+
+    auto_repair = (os.environ.get("SHERPA_OSS_FUZZ_AUTO_REPAIR", "1") or "").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    should_repair = bool(force or auto_repair)
+
     if target_dir.exists():
-        if not force:
+        if not should_repair:
             raise RuntimeError(
                 f"oss-fuzz dir exists but invalid (missing infra/helper.py): {target_dir}"
             )
+        print(
+            "[init] oss-fuzz directory exists but invalid; "
+            f"auto-repair enabled, resetting: {target_dir}"
+        )
         for child in target_dir.iterdir():
             try:
                 if child.is_dir():
@@ -1706,7 +1744,11 @@ def _run_fuzz_job(
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                     }
-                    wait_timeout = max(120, run_time_budget_value if run_time_budget_value > 0 else 7200)
+                    wait_timeout = _k8s_stage_wait_timeout_sec(
+                        stage=stage,
+                        total_time_budget_sec=total_time_budget_value,
+                        run_time_budget_sec=run_time_budget_value,
+                    )
                     stage_result = _execute_k8s_job(
                         job_id=job_id,
                         job_name=job_name,

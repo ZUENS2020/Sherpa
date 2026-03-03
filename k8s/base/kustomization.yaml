@@ -5,8 +5,6 @@ resources:
   - namespace.yaml
   - serviceaccount-rbac.yaml
   - configmap.yaml
-  - minimax-secret.example.yaml
-  - postgres-secret.example.yaml
   - pvc-shared.yaml
   - postgres-statefulset.yaml
   - web-deployment.yaml
