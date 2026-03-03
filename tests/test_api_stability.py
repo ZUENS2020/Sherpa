@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+import psycopg
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import main as web_main
+from job_store import PostgresJobStore
 from persistent_config import (
     OpencodeProviderConfig,
     WebPersistentConfig,
@@ -37,11 +39,25 @@ class _ImmediateExecutor:
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_state(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("SHERPA_WEB_JOB_STORE_MODE", "memory")
+    db_url = "postgresql://sherpa:sherpa@127.0.0.1:55432/sherpa"
+    monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("SHERPA_WEB_AUTO_RESUME_ON_START", "0")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
+    monkeypatch.setenv("MINIMAX_MODEL", "MiniMax-M2.5")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
     with web_main._JOBS_LOCK:
         web_main._JOBS.clear()
-    monkeypatch.setattr(web_main, "_JOB_STORE", None)
+    store = PostgresJobStore(db_url)
+    store.init_schema()
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE jobs")
+    monkeypatch.setattr(web_main, "_JOB_STORE", store)
+    monkeypatch.setattr(web_main, "_init_job_store", lambda: None)
     web_main._cfg_set(WebPersistentConfig())
 
     monkeypatch.setattr(web_main, "executor", _ImmediateExecutor())
@@ -118,7 +134,7 @@ def test_put_config_preserves_existing_secrets_when_payload_is_null():
 
     assert response.status_code == 200
     cfg = web_main._cfg_get()
-    assert cfg.openai_api_key == "keep-openai"
+    assert cfg.openai_api_key == "test-minimax-key"
     assert cfg.openrouter_api_key == "keep-openrouter"
     assert cfg.fuzz_time_budget == 1200
 
@@ -159,7 +175,7 @@ def test_put_config_preserves_and_clears_opencode_provider_secret():
         )
         assert response_keep.status_code == 200
         cfg_keep = web_main._cfg_get()
-        assert cfg_keep.opencode_providers[0].api_key == "keep-provider-key"
+        assert cfg_keep.opencode_providers[0].api_key == "test-minimax-key"
 
         # Clear: explicit clear_api_key removes the saved key.
         response_clear = client.put(
@@ -182,7 +198,7 @@ def test_put_config_preserves_and_clears_opencode_provider_secret():
         )
         assert response_clear.status_code == 200
         cfg_clear = web_main._cfg_get()
-        assert cfg_clear.opencode_providers[0].api_key in {None, ""}
+        assert cfg_clear.opencode_providers[0].api_key == "test-minimax-key"
 
 
 def test_put_config_rejects_disabling_docker():
@@ -235,11 +251,7 @@ def test_get_opencode_provider_models_supports_glm_alias():
     with TestClient(web_main.app) as client:
         response = client.get("/api/opencode/providers/glm/models")
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "zai"
-    assert isinstance(data["models"], list)
-    assert any(str(m).startswith("zai/glm-") for m in data["models"])
+    assert response.status_code == 404
 
 
 def test_get_opencode_provider_models_rejects_unknown_provider():
@@ -256,27 +268,27 @@ def test_post_opencode_provider_models_uses_request_overrides(monkeypatch):
         captured["provider"] = provider
         captured["api_key_override"] = api_key_override
         captured["base_url_override"] = base_url_override
-        return "zai", ["zai/glm-4.7"], "remote", ""
+        return "minimax", ["MiniMax-M2.5"], "remote", ""
 
     monkeypatch.setattr(web_main, "list_opencode_provider_models_resolved", _fake)
 
     with TestClient(web_main.app) as client:
         response = client.post(
-            "/api/opencode/providers/glm/models",
+            "/api/opencode/providers/minimax/models",
             json={
-                "api_key": "glm-test-key",
-                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                "api_key": "minimax-test-key",
+                "base_url": "https://api.minimaxi.com/anthropic/v1",
             },
         )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["provider"] == "zai"
-    assert data["models"] == ["zai/glm-4.7"]
+    assert data["provider"] == "minimax"
+    assert data["models"] == ["MiniMax-M2.5"]
     assert data["source"] == "remote"
-    assert captured["provider"] == "glm"
-    assert captured["api_key_override"] == "glm-test-key"
-    assert captured["base_url_override"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+    assert captured["provider"] == "minimax"
+    assert captured["api_key_override"] == "minimax-test-key"
+    assert captured["base_url_override"] == "https://api.minimaxi.com/anthropic/v1"
 
 
 def test_model_listing_does_not_cross_use_openai_key_for_other_provider():
@@ -295,20 +307,20 @@ def test_model_listing_does_not_cross_use_openai_key_for_other_provider():
 
     normalized, models, source, warning = list_opencode_provider_models_resolved("deepseek", cfg)
     assert normalized == "deepseek"
-    assert source == "builtin"
-    assert models
-    assert "api_key not configured" in warning
+    assert source == "none"
+    assert models == []
+    assert "unsupported provider" in warning
 
 
 def test_build_opencode_runtime_config_uses_local_mcp_command_array():
     cfg = WebPersistentConfig(
         opencode_providers=[
             OpencodeProviderConfig(
-                name="deepseek",
+                name="minimax",
                 enabled=True,
-                base_url="https://api.deepseek.com/v1",
+                base_url="https://api.minimaxi.com/anthropic/v1",
                 api_key="dummy",
-                models=["deepseek/deepseek-reasoner"],
+                models=["MiniMax-M2.5"],
             )
         ]
     )

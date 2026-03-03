@@ -43,9 +43,6 @@ services:
       - sherpa-config:/app/config
       # Persist per-job logs in a dedicated volume (separate from config).
       - sherpa-job-logs:/app/job-logs
-      # Persist SQLite job state in a dedicated volume managed by sherpa-job-store.
-      - sherpa-job-store-data:/app/job-store
-
       # Shared temp volume (must be mounted into the Docker daemon container too).
       - sherpa-tmp:/shared/tmp
 
@@ -102,35 +99,33 @@ services:
       OPENCODE_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
       OPENCODE_CONFIG: "/app/config/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
-      SHERPA_WEB_JOB_DB_PATH: "/app/job-store/jobs.sqlite3"
+      DATABASE_URL: ${DATABASE_URL:-postgresql://sherpa:sherpa@postgres:5432/sherpa}
 
       # Optional (fuzz patching): where to read API key env file from.
       # AI_KEY_PATH: "/app/.env"
     depends_on:
       sherpa-oss-fuzz-init:
         condition: service_completed_successfully
-      sherpa-job-store:
-        condition: service_started
+      postgres:
+        condition: service_healthy
       sherpa-docker:
         condition: service_healthy
 
-  # Dedicated SQLite sidecar for job-state data volume ownership/inspection.
-  sherpa-job-store:
-    image: keinos/sqlite3:latest
+  postgres:
+    image: m.daocloud.io/docker.io/library/postgres:16
     restart: unless-stopped
-    user: "0:0"
-    command:
-      - sh
-      - -lc
-      - |
-        set -eu
-        mkdir -p /data
-        chmod 0770 /data || true
-        touch /data/jobs.sqlite3
-        chmod 0660 /data/jobs.sqlite3 || true
-        exec tail -f /dev/null
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sherpa}
+      POSTGRES_USER: ${POSTGRES_USER:-sherpa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sherpa}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sherpa} -d ${POSTGRES_DB:-sherpa}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     volumes:
-      - sherpa-job-store-data:/data
+      - sherpa-postgres-data:/var/lib/postgresql/data
 
   # Docker daemon sidecar (dind): build/run fuzz runtime containers.
   sherpa-docker:
@@ -226,5 +221,5 @@ volumes:
   sherpa-tmp:
   sherpa-config:
   sherpa-job-logs:
-  sherpa-job-store-data:
+  sherpa-postgres-data:
   sherpa-oss-fuzz:

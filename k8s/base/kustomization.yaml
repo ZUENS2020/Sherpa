@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sherpa
+resources:
+  - namespace.yaml
+  - serviceaccount-rbac.yaml
+  - configmap.yaml
+  - minimax-secret.example.yaml
+  - postgres-secret.example.yaml
+  - pvc-shared.yaml
+  - postgres-statefulset.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+  - gateway-configmap.yaml
+  - gateway-deployment.yaml
+  - gateway-service.yaml
+  - ingress.yaml

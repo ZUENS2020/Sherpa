@@ -52,6 +52,19 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
     && docker --version \
     && rm -rf /var/lib/apt/lists/*
 
+# Install kubectl for Kubernetes Job executor mode.
+ARG KUBECTL_VERSION="v1.30.5"
+RUN set -e; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) karch="amd64" ;; \
+      arm64) karch="arm64" ;; \
+      *) echo "Unsupported architecture for kubectl: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl" -o /usr/local/bin/kubectl; \
+    chmod +x /usr/local/bin/kubectl; \
+    kubectl version --client --output=yaml >/dev/null
+
 COPY docker/requirements.web.txt /app/docker/requirements.web.txt
 RUN python -m pip install -r /app/docker/requirements.web.txt
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel
+import json
 import hashlib
 import os
 import re
@@ -16,8 +17,10 @@ from datetime import datetime, timezone
 from contextlib import redirect_stdout, redirect_stderr, asynccontextmanager
 from io import StringIO
 from pathlib import Path
+import base64
+import yaml
 from fuzz_relative_functions import fuzz_logic
-from job_store import SQLiteJobStore
+from job_store import JobStore, PostgresJobStore
 from persistent_config import (
     WebPersistentConfig,
     apply_minimax_env_source,
@@ -49,7 +52,7 @@ _JOBS_LOCK = threading.Lock()
 _JOBS: dict[str, dict] = {}
 _APP_START = time.time()
 _INIT_LOCK = threading.Lock()
-_JOB_STORE: SQLiteJobStore | None = None
+_JOB_STORE: JobStore | None = None
 _JOB_FUTURES_LOCK = threading.Lock()
 _JOB_FUTURES: dict[str, Future] = {}
 
@@ -133,6 +136,219 @@ def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
+def _executor_mode() -> str:
+    return (os.environ.get("SHERPA_EXECUTOR_MODE", "local_thread") or "").strip().lower()
+
+
+def _k8s_enabled() -> bool:
+    return _executor_mode() == "k8s_job"
+
+
+def _k8s_namespace() -> str:
+    return (os.environ.get("SHERPA_K8S_NAMESPACE", "sherpa") or "").strip() or "sherpa"
+
+
+def _k8s_worker_image() -> str:
+    return (os.environ.get("SHERPA_K8S_WORKER_IMAGE", "sherpa-web:latest") or "").strip()
+
+
+def _k8s_kubectl_bin() -> str:
+    return (os.environ.get("SHERPA_KUBECTL_BIN", "kubectl") or "").strip() or "kubectl"
+
+
+def _k8s_keep_finished_jobs() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_KEEP_FINISHED_JOBS", "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _k8s_job_ttl_seconds() -> int:
+    try:
+        return max(0, int(os.environ.get("SHERPA_K8S_JOB_TTL_SECONDS", "3600")))
+    except Exception:
+        return 3600
+
+
+def _k8s_enable_docker_socket() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_ENABLE_DOCKER_SOCKET", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _k8s_docker_socket_path() -> str:
+    return (os.environ.get("SHERPA_K8S_DOCKER_SOCKET_PATH", "/var/run/docker.sock") or "").strip() or "/var/run/docker.sock"
+
+
+def _kubectl(args: list[str], *, input_text: str | None = None, timeout: int = 30) -> tuple[int, str, str]:
+    cmd = [_k8s_kubectl_bin(), "-n", _k8s_namespace(), *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _k8s_job_name(job_id: str, *, resumed: bool) -> str:
+    suffix = "resume" if resumed else "new"
+    return f"sherpa-fuzz-{job_id[:16]}-{suffix}"
+
+
+def _k8s_result_paths(job_id: str) -> tuple[Path, Path]:
+    base = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser().resolve()
+    root = base / "_k8s_jobs" / job_id
+    return (root / "result.json", root / "error.txt")
+
+
+def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+    ttl = _k8s_job_ttl_seconds()
+    keep_finished = _k8s_keep_finished_jobs()
+
+    config_name = (os.environ.get("SHERPA_K8S_CONFIGMAP_NAME", "sherpa-config") or "").strip()
+    minimax_secret = (os.environ.get("SHERPA_K8S_MINIMAX_SECRET_NAME", "sherpa-minimax") or "").strip()
+    pg_secret = (os.environ.get("SHERPA_K8S_POSTGRES_SECRET_NAME", "sherpa-postgres") or "").strip()
+
+    pvc_tmp = (os.environ.get("SHERPA_K8S_PVC_TMP", "sherpa-shared-tmp") or "").strip()
+    pvc_output = (os.environ.get("SHERPA_K8S_PVC_OUTPUT", "sherpa-shared-output") or "").strip()
+    pvc_oss = (os.environ.get("SHERPA_K8S_PVC_OSS_FUZZ", "sherpa-oss-fuzz") or "").strip()
+    pvc_cfg = (os.environ.get("SHERPA_K8S_PVC_CONFIG", "sherpa-config") or "").strip()
+    pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
+
+    manifest = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": job_name,
+            "labels": {
+                "app.kubernetes.io/name": "sherpa",
+                "sherpa/job-id": str(payload.get("job_id") or ""),
+                "sherpa/job-kind": "fuzz",
+            },
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": ttl,
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "app.kubernetes.io/name": "sherpa",
+                        "sherpa/job-id": str(payload.get("job_id") or ""),
+                    },
+                },
+                "spec": {
+                    "restartPolicy": "Never",
+                    "serviceAccountName": (os.environ.get("SHERPA_K8S_JOB_SERVICE_ACCOUNT", "sherpa-web") or "sherpa-web"),
+                    "containers": [
+                        {
+                            "name": "worker",
+                            "image": _k8s_worker_image(),
+                            "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
+                            "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
+                            "env": [
+                                {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
+                            ],
+                            "volumeMounts": [
+                                {"name": "shared-tmp", "mountPath": "/shared/tmp"},
+                                {"name": "shared-output", "mountPath": "/shared/output"},
+                                {"name": "oss-fuzz", "mountPath": "/shared/oss-fuzz"},
+                                {"name": "config", "mountPath": "/app/config"},
+                                {"name": "job-logs", "mountPath": "/app/job-logs"},
+                            ],
+                        }
+                    ],
+                    "volumes": [
+                        {"name": "shared-tmp", "persistentVolumeClaim": {"claimName": pvc_tmp}},
+                        {"name": "shared-output", "persistentVolumeClaim": {"claimName": pvc_output}},
+                        {"name": "oss-fuzz", "persistentVolumeClaim": {"claimName": pvc_oss}},
+                        {"name": "config", "persistentVolumeClaim": {"claimName": pvc_cfg}},
+                        {"name": "job-logs", "persistentVolumeClaim": {"claimName": pvc_logs}},
+                    ],
+                },
+            },
+        },
+    }
+
+    if _k8s_enable_docker_socket():
+        sock = _k8s_docker_socket_path()
+        manifest["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append(
+            {"name": "docker-sock", "mountPath": sock}
+        )
+        manifest["spec"]["template"]["spec"]["volumes"].append(
+            {"name": "docker-sock", "hostPath": {"path": sock, "type": "Socket"}}
+        )
+
+    env_from = []
+    if config_name:
+        env_from.append({"configMapRef": {"name": config_name}})
+    if minimax_secret:
+        env_from.append({"secretRef": {"name": minimax_secret}})
+    if pg_secret:
+        env_from.append({"secretRef": {"name": pg_secret}})
+    if env_from:
+        manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
+
+    if keep_finished:
+        manifest["spec"]["ttlSecondsAfterFinished"] = None
+
+    return yaml.safe_dump(manifest, sort_keys=False)
+
+
+def _k8s_delete_job(job_name: str) -> None:
+    if not job_name:
+        return
+    _kubectl(["delete", "job", job_name, "--ignore-not-found=true"], timeout=20)
+
+
+def _k8s_collect_job_logs(job_name: str, *, tail: int = 200) -> str:
+    if not job_name:
+        return ""
+    rc, out, err = _kubectl(["logs", f"job/{job_name}", f"--tail={tail}"], timeout=30)
+    if rc == 0:
+        return out
+    return (out + "\n" + err).strip()
+
+
+def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
+    deadline = time.time() + max(1, timeout_sec)
+    last_phase = "Unknown"
+    while time.time() < deadline:
+        rc, out, _ = _kubectl(["get", "job", job_name, "-o", "json"], timeout=15)
+        if rc != 0:
+            time.sleep(2)
+            continue
+        try:
+            doc = json.loads(out)
+        except Exception:
+            time.sleep(2)
+            continue
+        status = doc.get("status") or {}
+        if int(status.get("succeeded") or 0) > 0:
+            return "Succeeded", last_phase
+        if int(status.get("failed") or 0) > 0:
+            return "Failed", last_phase
+        conditions = status.get("conditions") or []
+        if isinstance(conditions, list):
+            for c in conditions:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("status") == "True":
+                    t = str(c.get("type") or "")
+                    if t in {"Complete", "Failed"}:
+                        return ("Succeeded" if t == "Complete" else "Failed"), last_phase
+        active = int(status.get("active") or 0)
+        last_phase = "Running" if active > 0 else "Pending"
+        time.sleep(2)
+    return "Timeout", last_phase
+
+
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
     root = str(repo_root or "").strip()
     if not root:
@@ -200,18 +416,8 @@ def _hydrate_job_log_from_disk(job: dict) -> None:
         job["log"] = txt
 
 
-def _job_store_mode() -> str:
-    return (os.environ.get("SHERPA_WEB_JOB_STORE_MODE", "sqlite") or "").strip().lower()
-
-
-def _job_store_db_path() -> Path:
-    return Path(
-        os.environ.get("SHERPA_WEB_JOB_DB_PATH", "/app/job-store/jobs.sqlite3")
-    ).expanduser().resolve()
-
-
-def _job_store_enabled() -> bool:
-    return _job_store_mode() not in {"", "memory", "inmemory", "none", "off", "0", "false", "no"}
+def _job_store_database_url() -> str:
+    return str(os.environ.get("DATABASE_URL", "") or "").strip()
 
 
 def _persist_job_state(job: dict) -> None:
@@ -274,17 +480,13 @@ def _restore_jobs_from_store() -> None:
 
 def _init_job_store() -> None:
     global _JOB_STORE
-    if not _job_store_enabled():
-        _JOB_STORE = None
-        return
-    try:
-        store = SQLiteJobStore(_job_store_db_path())
-        store.init_schema()
-        _JOB_STORE = store
-        _restore_jobs_from_store()
-    except Exception as e:
-        print(f"[warn] job store disabled due to init error: {e}")
-        _JOB_STORE = None
+    db_url = _job_store_database_url()
+    if not db_url:
+        raise RuntimeError("DATABASE_URL is required (Postgres-only job store)")
+    store = PostgresJobStore(db_url)
+    store.init_schema()
+    _JOB_STORE = store
+    _restore_jobs_from_store()
 
 
 def _classify_log_level(line: str) -> str:
@@ -745,6 +947,11 @@ def get_system_status():
     return _system_status()
 
 
+@app.get("/api/health")
+def health_check():
+    return {"ok": True}
+
+
 def _create_job(kind: str, repo: str | None = None) -> str:
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -1189,23 +1396,90 @@ def _run_fuzz_job(
             )
             print(f"[job {job_id}] log_file={log_file}")
             docker_image = docker_image_value
-            print(f"[job {job_id}] calling fuzz_logic with docker_image={docker_image}...")
+            mode = _executor_mode()
+            print(f"[job {job_id}] executor_mode={mode} docker_image={docker_image}")
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
             try:
-                res = fuzz_logic(
-                    request.code_url,
-                    max_len=request.max_tokens,
-                    time_budget=total_time_budget_value,
-                    run_time_budget=run_time_budget_value,
-                    email=request.email,
-                    docker_image=docker_image,
-                    ai_key_path=opencode_env_path(),
-                    oss_fuzz_dir=cfg.oss_fuzz_dir,
-                    model=model_value,
-                    resume_from_step=(_normalize_resume_step(resume_from_step) if resumed else None),
-                    resume_repo_root=(resume_repo_root if resumed else None),
-                )
+                if _k8s_enabled():
+                    job_name = _k8s_job_name(job_id, resumed=resumed)
+                    result_path, error_path = _k8s_result_paths(job_id)
+                    _job_update(
+                        job_id,
+                        k8s_job_name=job_name,
+                        k8s_result_path=str(result_path),
+                        k8s_error_path=str(error_path),
+                        k8s_phase="Submitting",
+                    )
+                    payload = {
+                        "job_id": job_id,
+                        "repo_url": request.code_url,
+                        "max_len": int(request.max_tokens),
+                        "time_budget": int(total_time_budget_value),
+                        "run_time_budget": int(run_time_budget_value),
+                        "email": request.email,
+                        "docker_image": docker_image,
+                        "ai_key_path": str(opencode_env_path()),
+                        "oss_fuzz_dir": cfg.oss_fuzz_dir,
+                        "model": model_value,
+                        "resume_from_step": (_normalize_resume_step(resume_from_step) if resumed else None),
+                        "resume_repo_root": (resume_repo_root if resumed else None),
+                        "result_path": str(result_path),
+                        "error_path": str(error_path),
+                    }
+                    manifest = _k8s_build_manifest(job_name, payload)
+                    rc_apply, _, err_apply = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
+                    if rc_apply != 0:
+                        raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
+                    _job_update(job_id, k8s_phase="Submitted")
+                    wait_timeout = max(60, run_time_budget_value if run_time_budget_value > 0 else 7200)
+                    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout)
+                    _job_update(job_id, k8s_phase=status)
+                    if status == "Timeout":
+                        _k8s_delete_job(job_name)
+                        raise RuntimeError("k8s_job_timeout")
+                    if status == "Failed":
+                        logs = _k8s_collect_job_logs(job_name)
+                        err_txt = ""
+                        if error_path.is_file():
+                            err_txt = error_path.read_text(encoding="utf-8", errors="replace")
+                        if not _k8s_keep_finished_jobs():
+                            _k8s_delete_job(job_name)
+                        msg = f"k8s_job_failed phase={last_phase}"
+                        if err_txt.strip():
+                            msg += f": {err_txt.strip()}"
+                        if logs.strip():
+                            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+                        raise RuntimeError(msg)
+                    if not result_path.is_file():
+                        logs = _k8s_collect_job_logs(job_name)
+                        if logs.strip():
+                            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+                        raise RuntimeError("k8s_job_missing_result")
+                    raw = result_path.read_text(encoding="utf-8", errors="replace")
+                    try:
+                        doc = json.loads(raw)
+                    except Exception as e:
+                        raise RuntimeError(f"k8s_job_bad_result_json: {e}")
+                    if not _k8s_keep_finished_jobs():
+                        _k8s_delete_job(job_name)
+                    if not bool(doc.get("ok")):
+                        raise RuntimeError(str(doc.get("error") or "k8s_worker_failed"))
+                    res = doc.get("result")
+                else:
+                    res = fuzz_logic(
+                        request.code_url,
+                        max_len=request.max_tokens,
+                        time_budget=total_time_budget_value,
+                        run_time_budget=run_time_budget_value,
+                        email=request.email,
+                        docker_image=docker_image,
+                        ai_key_path=opencode_env_path(),
+                        oss_fuzz_dir=cfg.oss_fuzz_dir,
+                        model=model_value,
+                        resume_from_step=(_normalize_resume_step(resume_from_step) if resumed else None),
+                        resume_repo_root=(resume_repo_root if resumed else None),
+                    )
                 print(f"[job {job_id}] fuzz_logic returned successfully")
             except Exception as fuzz_err:
                 print(f"[job {job_id}] fuzz_logic failed: {fuzz_err}")
@@ -1415,6 +1689,9 @@ def _stop_fuzz_job(job_id: str, *, reason: str, trigger: str) -> dict[str, objec
     future_cancelled = _cancel_job_future(job_id)
     repo_root = str(snap.get("workflow_repo_root") or snap.get("resume_repo_root") or "").strip()
     killed_containers = _stop_runtime_containers_for_repo(repo_root) if repo_root else []
+    k8s_job_name = str(snap.get("k8s_job_name") or "").strip()
+    if k8s_job_name:
+        _k8s_delete_job(k8s_job_name)
 
     if status not in {"success", "resumed", "error", "resume_failed"}:
         _job_update(
@@ -1433,6 +1710,7 @@ def _stop_fuzz_job(job_id: str, *, reason: str, trigger: str) -> dict[str, objec
         "status": str(current.get("status") or ""),
         "future_cancelled": bool(future_cancelled),
         "killed_containers": killed_containers,
+        "k8s_job_name": (k8s_job_name or None),
         "repo_root": repo_root or None,
     }
 
