@@ -115,6 +115,30 @@ def test_get_config_masks_opencode_provider_secret_values():
     assert providers[0]["api_key_set"] is True
 
 
+def test_redact_sensitive_text_masks_env_and_bearer(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-123")
+    src = "OPENAI_API_KEY=sk-secret-123 Authorization: Bearer sk-secret-123"
+    out = web_main._redact_sensitive_text(src)
+    assert "sk-secret-123" not in out
+    assert "OPENAI_API_KEY=***" in out
+    assert "Authorization: Bearer ***" in out
+
+
+def test_tee_write_redacts_sensitive_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-log-secret")
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    tee = web_main._Tee(job_id, log_file=log_path)
+    try:
+        tee.write("token=sk-log-secret OPENAI_API_KEY=sk-log-secret\n")
+    finally:
+        tee.close()
+    snap = web_main._job_snapshot(job_id) or {}
+    log_text = str(snap.get("log") or "")
+    assert "sk-log-secret" not in log_text
+    assert "***" in log_text
+
+
 def test_put_config_preserves_existing_secrets_when_payload_is_null():
     with TestClient(web_main.app) as client:
         web_main._cfg_set(

@@ -62,6 +62,34 @@ _JOB_FUTURES: dict[str, Future] = {}
 _JOB_MEMORY_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_JOB_LOG_MAX_CHARS", "0"))
 _JOB_RESTORE_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_RESTORE_LOG_MAX_CHARS", "200000"))
 
+_SENSITIVE_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MINIMAX_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DATABASE_URL",
+    "POSTGRES_PASSWORD",
+)
+
+_SENSITIVE_KV_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASS))\s*=\s*([^\s,;]+)"
+)
+_AUTH_BEARER_RE = re.compile(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)")
+
+
+def _redact_sensitive_text(text: str) -> str:
+    if not text:
+        return text
+    out = text
+    for key in _SENSITIVE_ENV_KEYS:
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            out = out.replace(val, "***")
+    out = _SENSITIVE_KV_RE.sub(lambda m: f"{m.group(1)}=***", out)
+    out = _AUTH_BEARER_RE.sub(lambda m: f"{m.group(1)}***", out)
+    return out
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _JOB_LOGS_DIR = Path(
@@ -635,19 +663,20 @@ class _Tee(StringIO):
                 pass
 
     def write(self, s: str) -> int:
-        if self._fh is not None and s:
+        safe = _redact_sensitive_text(s) if s else s
+        if self._fh is not None and safe:
             try:
-                self._fh.write(s)
+                self._fh.write(safe)
                 self._fh.flush()
             except Exception:
                 # Do not break the job if disk logging fails mid-run.
                 pass
-        if s:
-            for line in s.splitlines(keepends=True):
+        if safe:
+            for line in safe.splitlines(keepends=True):
                 self._split_write(line)
                 _update_workflow_checkpoint_from_line(self._job_id, line)
-        _job_append_log(self._job_id, s)
-        return super().write(s)
+        _job_append_log(self._job_id, safe)
+        return super().write(safe)
 
     def close(self) -> None:
         try:
@@ -1609,7 +1638,7 @@ def _run_fuzz_job(
             err_text = cancel_error
         else:
             fail_status = "resume_failed" if resumed else "error"
-            err_text = str(e)
+            err_text = _redact_sensitive_text(str(e))
         fail_result = None
         if isinstance(err_text, str) and ":" in err_text:
             reason = err_text.split(":", 1)[0].strip()

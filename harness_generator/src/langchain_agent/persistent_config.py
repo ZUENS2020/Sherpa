@@ -427,6 +427,10 @@ def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
         Path(tmp_name).replace(p)
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
     finally:
         try:
             if Path(tmp_name).exists() and str(Path(tmp_name)) != str(p):
@@ -525,6 +529,10 @@ def save_config(cfg: WebPersistentConfig) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
         Path(tmp_name).replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
     finally:
         try:
             if Path(tmp_name).exists() and str(Path(tmp_name)) != str(path):
@@ -602,6 +610,10 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             f.write(content)
         Path(tmp_name).replace(p)
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
     finally:
         try:
             if Path(tmp_name).exists() and str(Path(tmp_name)) != str(p):

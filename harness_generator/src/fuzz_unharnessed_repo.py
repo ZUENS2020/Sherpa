@@ -2815,6 +2815,30 @@ class NonOssFuzzHarnessGenerator:
                 i += 1
             return redacted
 
+        def _redact_text(text: str) -> str:
+            if not text:
+                return text
+            out = text
+            for key in (
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "MINIMAX_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "DATABASE_URL",
+                "POSTGRES_PASSWORD",
+            ):
+                val = str((env or {}).get(key) or os.environ.get(key) or "").strip()
+                if val:
+                    out = out.replace(val, "***")
+            out = re.sub(
+                r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASS))\s*=\s*([^\s,;]+)",
+                lambda m: f"{m.group(1)}=***",
+                out,
+            )
+            out = re.sub(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)", r"\1***", out)
+            return out
+
         if extra_inputs:
             # Append corpus/extra inputs directly. libFuzzer treats a bare "--" as an ignored flag
             # and logs noisy warnings that can look like failures in UI streams.
@@ -2884,13 +2908,14 @@ class NonOssFuzzHarnessGenerator:
                     done_readers += 1
                 else:
                     kind, text = item
+                    safe_text = _redact_text(text)
                     if kind == "stdout":
-                        stdout_chunks.append(text)
-                        print(text, end="", flush=True)
+                        stdout_chunks.append(safe_text)
+                        print(safe_text, end="", flush=True)
                     else:
-                        stderr_chunks.append(text)
+                        stderr_chunks.append(safe_text)
                         # Keep stderr visible in real-time to avoid silent failures.
-                        print(text, end="", flush=True)
+                        print(safe_text, end="", flush=True)
                     last_activity = time.monotonic()
 
                 if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
@@ -2935,10 +2960,11 @@ class NonOssFuzzHarnessGenerator:
                 if item is reader_eof:
                     continue
                 kind, text = item
+                safe_text = _redact_text(text)
                 if kind == "stdout":
-                    stdout_chunks.append(text)
+                    stdout_chunks.append(safe_text)
                 else:
-                    stderr_chunks.append(text)
+                    stderr_chunks.append(safe_text)
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
