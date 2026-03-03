@@ -1,21 +1,49 @@
-# 文档索引
+# Docs 总览
 
-本目录按“当前可执行文档优先”的原则整理。
+本目录为 Sherpa 的对接与运维文档入口，口径统一为：
 
-## 1. 当前基线（优先阅读）
+- Kubernetes-only
+- Postgres-only
+- Native Runtime（无 inner Docker）
+- 多阶段多 Job 执行（`plan -> synthesize -> build -> run`）
 
-1. Docker 背景对接文档：`/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`
-2. 本地 K8s 快速启动：`/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`
-3. Cloudflare Tunnel 内网接入：`/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
-4. Kubernetes 部署：`/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
-5. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
-6. 发布回滚门禁：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
-7. E2E 验收报告：`/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
-8. Compose->K8s 映射：`/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
-9. 迁移清单（计划与验收对照）：`/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`
+## 文档索引
 
-## 2. 历史参考
+1. `/Users/zuens2020/Documents/Sherpa/docs/PROJECT_HANDOFF_STATUS.md`：当前进度与对接现状
+2. `/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`：Docker 背景团队迁移对接
+3. `/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`：迁移里程碑与验收清单
+4. `/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`：本地最小启动
+5. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`：部署说明
+6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`：运行手册
+7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`：发布门禁
+8. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`：Cloudflare Tunnel 接入
+9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`：Compose 到 K8s 映射
+10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`：E2E 报告模板与样例
 
-1. 项目交接状态：`/Users/zuens2020/Documents/Sherpa/docs/PROJECT_HANDOFF_STATUS.md`
+## 核心图谱
 
-说明：历史参考文档可能包含旧架构描述（例如旧执行路径/旧存储描述），如与当前实现冲突，以 README 和 `docs/k8s/*` 为准。
+```mermaid
+flowchart LR
+  U["User"] --> G["Ingress/Gateway"]
+  G --> FE["Frontend"]
+  G --> API["sherpa-web"]
+  API --> DB[("Postgres")]
+  API --> J1["Job(plan)"]
+  API --> J2["Job(synthesize)"]
+  API --> J3["Job(build)"]
+  API --> J4["Job(run)"]
+```
+
+## 字段口径
+
+任务展示与排障固定关注：
+
+1. `job_id`
+2. `status`
+3. `runtime_mode`
+4. `phase`
+5. `error_code`
+6. `error_kind`
+7. `error_signature`
+8. `k8s_job_name` / `k8s_job_names`
+9. `children_status`
