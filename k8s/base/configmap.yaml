@@ -16,8 +16,6 @@ data:
   SHERPA_K8S_NAMESPACE: "sherpa"
   SHERPA_K8S_WORKER_IMAGE: "sherpa-web:latest"
   SHERPA_K8S_JOB_SERVICE_ACCOUNT: "sherpa-web"
-  SHERPA_K8S_ENABLE_DOCKER_SOCKET: "1"
-  SHERPA_K8S_DOCKER_SOCKET_PATH: "/var/run/docker.sock"
   SHERPA_K8S_PVC_TMP: "sherpa-shared-tmp"
   SHERPA_K8S_PVC_OUTPUT: "sherpa-shared-output"
   SHERPA_K8S_PVC_OSS_FUZZ: "sherpa-oss-fuzz"

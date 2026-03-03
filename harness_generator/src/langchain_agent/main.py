@@ -1,6 +1,6 @@
 # main.py
 from __future__ import annotations
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, Response
 from pydantic import BaseModel
 import json
 import hashlib
@@ -28,6 +28,7 @@ from persistent_config import (
     as_public_dict,
     list_opencode_provider_models_resolved,
     opencode_env_path,
+    opencode_runtime_config_path,
     load_config,
     save_config,
 )
@@ -168,15 +169,6 @@ def _k8s_job_ttl_seconds() -> int:
         return 3600
 
 
-def _k8s_enable_docker_socket() -> bool:
-    raw = (os.environ.get("SHERPA_K8S_ENABLE_DOCKER_SOCKET", "1") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _k8s_docker_socket_path() -> str:
-    return (os.environ.get("SHERPA_K8S_DOCKER_SOCKET_PATH", "/var/run/docker.sock") or "").strip() or "/var/run/docker.sock"
-
-
 def _kubectl(args: list[str], *, input_text: str | None = None, timeout: int = 30) -> tuple[int, str, str]:
     cmd = [_k8s_kubectl_bin(), "-n", _k8s_namespace(), *args]
     try:
@@ -254,6 +246,10 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
+                                {"name": "SHERPA_OPENCODE_DOCKER_IMAGE", "value": ""},
+                                {"name": "OPENCODE_MODEL", "value": str(payload.get("model") or "")},
+                                {"name": "OPENAI_MODEL", "value": str(payload.get("model") or "")},
+                                {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
                             ],
                             "volumeMounts": [
                                 {"name": "shared-tmp", "mountPath": "/shared/tmp"},
@@ -275,15 +271,6 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
             },
         },
     }
-
-    if _k8s_enable_docker_socket():
-        sock = _k8s_docker_socket_path()
-        manifest["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append(
-            {"name": "docker-sock", "mountPath": sock}
-        )
-        manifest["spec"]["template"]["spec"]["volumes"].append(
-            {"name": "docker-sock", "hostPath": {"path": sock, "type": "Socket"}}
-        )
 
     env_from = []
     if config_name:
@@ -722,6 +709,44 @@ def _normalize_resume_step(raw: str | None) -> str:
     return "plan"
 
 
+def _error_code_for_job(job: dict | None) -> str:
+    if not isinstance(job, dict):
+        return ""
+    direct = str(job.get("error_code") or "").strip()
+    if direct:
+        return direct
+    resume = str(job.get("resume_error_code") or "").strip()
+    if resume:
+        return resume
+    result = job.get("result")
+    if isinstance(result, dict):
+        for key in (
+            "fix_build_terminal_reason",
+            "run_terminal_reason",
+            "build_error_code",
+            "run_error_kind",
+            "error_code",
+        ):
+            val = str(result.get(key) or "").strip()
+            if val:
+                return val
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"error", "resume_failed", "recoverable"}:
+        return "unknown_error"
+    return ""
+
+
+def _phase_for_job(job: dict | None) -> str:
+    if not isinstance(job, dict):
+        return "unknown"
+    for key in ("workflow_active_step", "workflow_last_step", "k8s_phase"):
+        val = str(job.get(key) or "").strip()
+        if val:
+            return val
+    status = str(job.get("status") or "").strip()
+    return status or "unknown"
+
+
 def _dir_size(path: Path) -> int:
     if not path.exists():
         return 0
@@ -787,6 +812,67 @@ def _system_status() -> dict:
             "openrouter_model": cfg.openrouter_model,
         },
     }
+
+
+def _metrics_payload() -> str:
+    now = time.time()
+    window_sec = max(60, int(os.environ.get("SHERPA_METRICS_FAILURE_WINDOW_SEC", "3600")))
+    cutoff = now - float(window_sec)
+    with _JOBS_LOCK:
+        jobs = [dict(j) for j in _JOBS.values()]
+
+    bucketed = [_status_for_counter(str(j.get("status") or "")) for j in jobs]
+    status_counts = {
+        "queued": sum(1 for b in bucketed if b == "queued"),
+        "running": sum(1 for b in bucketed if b == "running"),
+        "success": sum(1 for b in bucketed if b == "success"),
+        "error": sum(1 for b in bucketed if b == "error"),
+    }
+    recoverable = sum(1 for j in jobs if str(j.get("status") or "").strip().lower() == "recoverable")
+
+    finished_in_window = []
+    for j in jobs:
+        ts_raw = j.get("finished_at")
+        try:
+            ts = float(ts_raw)
+        except Exception:
+            continue
+        if ts >= cutoff:
+            finished_in_window.append(j)
+
+    failed_in_window = [
+        j
+        for j in finished_in_window
+        if _status_for_counter(str(j.get("status") or "")) == "error"
+    ]
+    finished_total = len(finished_in_window)
+    failed_total = len(failed_in_window)
+    failure_rate = (failed_total / finished_total) if finished_total > 0 else 0.0
+
+    lines = [
+        "# HELP sherpa_jobs_total Total jobs in memory.",
+        "# TYPE sherpa_jobs_total gauge",
+        f"sherpa_jobs_total {len(jobs)}",
+        "# HELP sherpa_jobs_status Jobs by status bucket.",
+        "# TYPE sherpa_jobs_status gauge",
+        f'sherpa_jobs_status{{status="queued"}} {status_counts["queued"]}',
+        f'sherpa_jobs_status{{status="running"}} {status_counts["running"]}',
+        f'sherpa_jobs_status{{status="success"}} {status_counts["success"]}',
+        f'sherpa_jobs_status{{status="error"}} {status_counts["error"]}',
+        "# HELP sherpa_jobs_recoverable_total Recoverable jobs.",
+        "# TYPE sherpa_jobs_recoverable_total gauge",
+        f"sherpa_jobs_recoverable_total {recoverable}",
+        f"# HELP sherpa_jobs_finished_window_total Jobs finished in last {window_sec} seconds.",
+        "# TYPE sherpa_jobs_finished_window_total gauge",
+        f"sherpa_jobs_finished_window_total {finished_total}",
+        f"# HELP sherpa_jobs_failed_window_total Failed jobs finished in last {window_sec} seconds.",
+        "# TYPE sherpa_jobs_failed_window_total gauge",
+        f"sherpa_jobs_failed_window_total {failed_total}",
+        f"# HELP sherpa_jobs_failure_rate_window Failure rate in last {window_sec} seconds.",
+        "# TYPE sherpa_jobs_failure_rate_window gauge",
+        f"sherpa_jobs_failure_rate_window {failure_rate:.6f}",
+    ]
+    return "\n".join(lines) + "\n"
 
 class fuzz_model(BaseModel):
     code_url: str
@@ -945,6 +1031,11 @@ def put_config(request: WebPersistentConfig = Body(...)):
 @app.get("/api/system")
 def get_system_status():
     return _system_status()
+
+
+@app.get("/api/metrics")
+def get_metrics():
+    return Response(content=_metrics_payload(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/health")
@@ -1220,7 +1311,12 @@ def _derive_task_status(job: dict) -> dict:
         "success": success,
         "error": error,
     }
+    for c in child_jobs:
+        c["error_code"] = _error_code_for_job(c)
+        c["phase"] = _phase_for_job(c)
     view["children"] = child_jobs
+    view["error_code"] = _error_code_for_job(view)
+    view["phase"] = _phase_for_job(view)
     if derived in {"success", "error"} and not job.get("finished_at"):
         done_ts = time.time()
         _job_update(job.get("job_id"), finished_at=done_ts, status=derived)
@@ -1287,11 +1383,14 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "finished_at": job.get("finished_at"),
                 "finished_at_iso": _iso_time(job.get("finished_at")),
                 "error": job.get("error"),
+                "error_code": _error_code_for_job(job),
+                "phase": _phase_for_job(job),
                 "result": job.get("result"),
                 "children_status": children_status,
                 "child_count": children_status.get("total", 0),
                 "active_child_id": active_child.get("job_id") if active_child else None,
                 "active_child_status": active_child.get("status") if active_child else None,
+                "active_child_phase": _phase_for_job(active_child) if active_child else None,
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
@@ -1991,7 +2090,7 @@ def service_root():
     return {
         "service": "sherpa-web",
         "role": "api-backend-only",
-        "entrypoint": "Use sherpa-gateway at / for UI and /api/* for API",
+        "entrypoint": "Use Ingress at / for UI and /api/* for API",
     }
 
 

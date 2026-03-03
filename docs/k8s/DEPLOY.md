@@ -6,7 +6,6 @@
 - 已构建并推送镜像：
   - `sherpa-web:latest`
   - `sherpa-frontend:latest`
-- 集群节点可提供 Docker socket（默认 `/var/run/docker.sock`，用于 `k8s_job` worker 执行现有 Docker 构建链路）
 
 ## 2. 准备 Secret
 从示例复制并填值：
@@ -37,6 +36,7 @@ kubectl -n sherpa get ingress
 ```bash
 kubectl -n sherpa port-forward svc/sherpa-web 8001:8001
 curl -sS http://127.0.0.1:8001/api/health
+curl -sS http://127.0.0.1:8001/api/metrics | head
 ```
 
 ## 5. 回滚
@@ -44,17 +44,25 @@ curl -sS http://127.0.0.1:8001/api/health
 ```bash
 kubectl -n sherpa rollout undo deploy/sherpa-web
 kubectl -n sherpa rollout undo deploy/sherpa-frontend
-kubectl -n sherpa rollout undo deploy/sherpa-gateway
 ```
 
 ## 6. 运维注意事项
 - `DATABASE_URL` 缺失时，`sherpa-web` 将启动失败（Postgres-only 设计）。
-- 启用去 DinD 执行链路时，设置 `SHERPA_EXECUTOR_MODE=k8s_job`，并保证 `sherpa-web` Pod 有创建/查询 Job 的 RBAC 权限。
-- 若节点 Docker socket 路径不是 `/var/run/docker.sock`，请在 ConfigMap 中同步修改 `SHERPA_K8S_DOCKER_SOCKET_PATH`。
+- 启用 K8s Job 执行链路时，设置 `SHERPA_EXECUTOR_MODE=k8s_job`，并保证 `sherpa-web` Pod 有创建/查询 Job 的 RBAC 权限。
 - 建议给 `postgres` 配置备份策略（逻辑备份 + PV 快照）。
 - `sherpa-shared-output` 建议配合 TTL 清理策略（CronJob）避免无限增长。
 
-## 7. 本机测试（Python 3.14）
+## 7. CI/CD（GitHub Actions）
+
+- 工作流文件：`.github/workflows/k8s-build-deploy.yml`
+- `push main` 自动构建并推送镜像到 GHCR：
+  - `sherpa-web`
+  - `sherpa-frontend`
+  - `sherpa-fuzz-cpp`
+- 手动触发 `workflow_dispatch` 且 `deploy=true` 时执行 `kubectl apply -k k8s/base`。
+- 部署前需在仓库 Secrets 配置 `KUBE_CONFIG_DATA`（base64 kubeconfig）。
+
+## 8. 本机测试（Python 3.14）
 建议统一使用 Python 3.14 虚拟环境运行测试：
 
 ```bash

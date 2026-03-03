@@ -697,6 +697,13 @@ class NonOssFuzzHarnessGenerator:
 
         self._ensure_fuzz_dirs()
 
+        # In k8s_job mode, Docker client in pod may point to host daemon where
+        # pod-internal repo paths are not mountable. Force host-git operations
+        # for CodexHelper to avoid "not a git repository" failures.
+        git_docker_image = self.docker_image if self.docker_image else None
+        if (os.environ.get("SHERPA_EXECUTOR_MODE", "").strip().lower() == "k8s_job"):
+            git_docker_image = None
+
         self.patcher = CodexHelper(
             repo_path=self.repo_root,
             ai_key_path=str(ai_key_path),
@@ -706,7 +713,7 @@ class NonOssFuzzHarnessGenerator:
             approval_mode=CODEX_APPROVAL_MODE,
             dangerous_bypass=codex_dangerous,
             sandbox_mode=codex_sandbox_mode,
-            git_docker_image=self.docker_image if self.docker_image else None,
+            git_docker_image=git_docker_image,
         )
 
         print(f"[*] Ready (repo={self.repo_root})")

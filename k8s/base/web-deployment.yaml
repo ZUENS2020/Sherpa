@@ -50,8 +50,6 @@ spec:
               mountPath: /shared/output
             - name: oss-fuzz
               mountPath: /shared/oss-fuzz
-            - name: docker-sock
-              mountPath: /var/run/docker.sock
       volumes:
         - name: config
           persistentVolumeClaim:
@@ -68,7 +66,3 @@ spec:
         - name: oss-fuzz
           persistentVolumeClaim:
             claimName: sherpa-oss-fuzz
-        - name: docker-sock
-          hostPath:
-            path: /var/run/docker.sock
-            type: Socket

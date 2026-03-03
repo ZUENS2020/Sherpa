@@ -66,6 +66,13 @@ flowchart LR
 3. 部署文档：`docs/k8s/DEPLOY.md`
 4. 当前状态存储：Postgres-only（`DATABASE_URL` 必填）
 
+### 2.3 可观测与交付闭环（SHE-58）
+
+1. 任务查询字段统一：`job_id`、`phase`、`error_code`
+2. 指标接口：`GET /api/metrics`（Prometheus 文本格式）
+3. CI/CD 工作流：`.github/workflows/k8s-build-deploy.yml`
+4. zlib E2E 报告：`docs/k8s/E2E_ZLIB_REPORT.md`
+
 ---
 
 ## 3. 容器拓扑与启动过程

@@ -553,6 +553,49 @@ def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     assert items[0]["job_id"] == task_latest
 
 
+def test_list_tasks_exposes_error_code_for_task_and_children():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="error",
+        result={"build_error_code": "missing_llvmfuzzer_entrypoint"},
+    )
+    web_main._job_update(task_id, children=[child_id], status="error")
+
+    with TestClient(web_main.app) as client:
+        task = client.get(f"/api/task/{task_id}").json()
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+
+    assert task["error_code"] == "unknown_error"
+    assert task["phase"] == "error"
+    assert task["children"][0]["error_code"] == "missing_llvmfuzzer_entrypoint"
+    assert task["children"][0]["phase"] == "error"
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["error_code"] == "unknown_error"
+    assert listing[0]["phase"] == "error"
+
+
+def test_api_metrics_contains_job_counters():
+    task_id = web_main._create_job("task", "batch")
+    child_a = web_main._create_job("fuzz", "https://github.com/example/repo-a.git")
+    child_b = web_main._create_job("fuzz", "https://github.com/example/repo-b.git")
+    now = time.time()
+    web_main._job_update(child_a, status="success", finished_at=now)
+    web_main._job_update(child_b, status="error", finished_at=now)
+    web_main._job_update(task_id, status="running", children=[child_a, child_b])
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "sherpa_jobs_total " in body
+    assert 'sherpa_jobs_status{status="running"} ' in body
+    assert 'sherpa_jobs_status{status="error"} ' in body
+    assert "sherpa_jobs_failure_rate_window " in body
+
+
 def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_main, "fuzz_logic", lambda *args, **kwargs: {"ok": True})
 

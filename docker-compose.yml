@@ -35,7 +35,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.web
       args:
-        INSTALL_OPENCODE: "0"
+        INSTALL_OPENCODE: "1"
     expose:
       - "8001"
     volumes:

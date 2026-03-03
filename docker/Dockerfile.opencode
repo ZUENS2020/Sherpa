@@ -56,10 +56,10 @@ RUN set -eux; \
         exit 1; \
       fi; \
     done; \
-    && command -v opencode \
-    && command -v gitnexus \
-    && opencode --version \
-    && gitnexus --version
+    command -v opencode; \
+    command -v gitnexus; \
+    opencode --version; \
+    gitnexus --version
 
 # Create opencode config with Qwen models (simplified format without $schema)
 RUN mkdir -p /root/.opencode && \

@@ -34,6 +34,13 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         ca-certificates \
         curl \
         git \
+        make \
+        g++ \
+        clang \
+        cmake \
+        ninja-build \
+        pkg-config \
+        libfuzzer-19-dev \
         docker-cli \
         docker-buildx \
         vim-common \
@@ -93,7 +100,7 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
             npm config set registry "$NPM_CONFIG_REGISTRY"; \
-            npm i -g opencode-ai; \
+            npm i -g opencode-ai gitnexus; \
             opencode --version || true; \
         else \
             echo "Skipping OpenCode CLI install"; \

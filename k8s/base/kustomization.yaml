@@ -13,7 +13,4 @@ resources:
   - web-service.yaml
   - frontend-deployment.yaml
   - frontend-service.yaml
-  - gateway-configmap.yaml
-  - gateway-deployment.yaml
-  - gateway-service.yaml
   - ingress.yaml

@@ -38,13 +38,17 @@ def main() -> int:
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
+        # K8s worker is local-only execution mode.
+        # Never run inner docker from worker; always pass docker_image=None.
+        effective_docker_image = None
+
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),
             max_len=int(payload.get("max_len") or 1024),
             time_budget=int(payload.get("time_budget") or 900),
             run_time_budget=int(payload.get("run_time_budget") or 900),
             email=(str(payload.get("email") or "").strip() or None),
-            docker_image=(str(payload.get("docker_image") or "").strip() or None),
+            docker_image=effective_docker_image,
             ai_key_path=(Path(str(payload.get("ai_key_path") or "")).expanduser() if payload.get("ai_key_path") else None),
             oss_fuzz_dir=(str(payload.get("oss_fuzz_dir") or "").strip() or None),
             model=(str(payload.get("model") or "").strip() or None),
