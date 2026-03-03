@@ -4,10 +4,10 @@
 
 ## 0. 里程碑总览
 
-- [ ] M1：基础设施与路由可用（Ingress + Config + PVC）
-- [ ] M2：核心执行链路完成去 DinD（K8s Job Executor）
-- [ ] M3：状态持久化迁移到 Postgres 并增强幂等/锁
-- [ ] M4：可观测性 + CI/CD + E2E 验收闭环
+- [x] M1：基础设施与路由可用（Ingress + Config + PVC）
+- [x] M2：核心执行链路完成去 DinD（K8s Job Executor）
+- [x] M3：状态持久化迁移到 Postgres 并增强幂等/锁
+- [x] M4：可观测性 + CI/CD + E2E 验收闭环
 
 ---
 
@@ -122,17 +122,16 @@
 
 ## 5. 发布与回滚前检查
 
-- [ ] 变更清单已评审（配置、部署、数据、运行时）
-- [ ] Postgres 备份与回滚路径已验证
-- [ ] 关键告警规则已生效（至少骨架）
-- [ ] 运行手册已更新（故障排查、日志定位、任务重试）
+- [x] 变更清单已评审（配置、部署、数据、运行时）
+- [x] Postgres 备份与回滚路径已验证
+- [x] 关键告警规则已生效（至少骨架）
+- [x] 运行手册已更新（故障排查、日志定位、任务重试）
 
 ---
 
 ## 6. 推荐执行顺序（简版）
 
-1. [ ] 先做 M1：Ingress + Config/Secret + PVC
-2. [ ] 再做 M2：K8s Job Executor 去 DinD
-3. [ ] 然后 M3：Postgres 与幂等/锁
-4. [ ] 最后 M4：Observability + CI/CD + E2E
-
+1. [x] 先做 M1：Ingress + Config/Secret + PVC
+2. [x] 再做 M2：K8s Job Executor 去 DinD
+3. [x] 然后 M3：Postgres 与幂等/锁
+4. [x] 最后 M4：Observability + CI/CD + E2E
