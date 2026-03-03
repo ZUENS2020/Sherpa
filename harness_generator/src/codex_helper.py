@@ -74,6 +74,19 @@ except Exception:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 _ENSURED_OPENCODE_IMAGES: set[str] = set()
+_SENSITIVE_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MINIMAX_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DATABASE_URL",
+    "POSTGRES_PASSWORD",
+)
+_SENSITIVE_KV_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASS))\s*=\s*([^\s,;]+)"
+)
+_AUTH_BEARER_RE = re.compile(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)")
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -81,6 +94,39 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _redact_text(text: str, *, env: dict | None = None) -> str:
+    if not text:
+        return text
+    out = text
+    env_map = env or {}
+    for key in _SENSITIVE_KEYS:
+        val = str(env_map.get(key) or os.environ.get(key) or "").strip()
+        if val:
+            out = out.replace(val, "***")
+    out = _SENSITIVE_KV_RE.sub(lambda m: f"{m.group(1)}=***", out)
+    out = _AUTH_BEARER_RE.sub(lambda m: f"{m.group(1)}***", out)
+    return out
+
+
+def _redact_cmd_for_log(cmd: Sequence[str], *, env: dict | None = None) -> str:
+    items: list[str] = []
+    i = 0
+    while i < len(cmd):
+        tok = str(cmd[i])
+        if tok == "-e" and i + 1 < len(cmd):
+            kv = str(cmd[i + 1])
+            if "=" in kv:
+                k, _ = kv.split("=", 1)
+                items.extend(["-e", f"{k}=***"])
+            else:
+                items.extend(["-e", "***"])
+            i += 2
+            continue
+        items.append(tok)
+        i += 1
+    return _redact_text(shlex.join(items), env=env)
 
 
 def _sha256_text(text: str) -> str:
@@ -272,9 +318,10 @@ def _run_streaming_combined(
 
     Returns: (returncode, output_for_scan, output_tail)
     """
-    print(f"[*] ➜  {shlex.join(list(cmd))}")
+    cmd_list = list(cmd)
+    print(f"[*] ➜  {_redact_cmd_for_log(cmd_list, env=env)}")
     proc = subprocess.Popen(
-        list(cmd),
+        cmd_list,
         cwd=str(cwd) if cwd is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -289,9 +336,10 @@ def _run_streaming_combined(
 
     try:
         for line in proc.stdout:
-            print(line, end="")
-            tail_buf.append(line.rstrip("\n"))
-            scan_buf.append(line)
+            safe_line = _redact_text(line, env=env)
+            print(safe_line, end="")
+            tail_buf.append(safe_line.rstrip("\n"))
+            scan_buf.append(safe_line)
     finally:
         try:
             proc.stdout.close()
@@ -1035,9 +1083,18 @@ class CodexHelper:
         else:
             tasks = str(instructions)
 
+        repo_root = str(self.working_dir.resolve())
+        if _docker_opencode_image():
+            repo_path_hint = "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output)."
+        else:
+            repo_path_hint = (
+                f"The repository root is {repo_root}. "
+                "Use relative paths from the current working directory and do not assume /repo exists."
+            )
+
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
-            "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output).",
+            repo_path_hint,
             "GitNexus MCP tooling is available for codebase dependency/call-flow analysis; use it before guessing architecture details.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "

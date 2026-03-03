@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sherpa-config
+  labels:
+    app.kubernetes.io/name: sherpa
+data:
+  HOST: "0.0.0.0"
+  PORT: "8001"
+  TMPDIR: "/shared/tmp"
+  SHERPA_DEFAULT_OSS_FUZZ_DIR: "/shared/oss-fuzz"
+  SHERPA_OUTPUT_DIR: "/shared/output"
+  SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
+  SHERPA_CODEX_CLI: "opencode"
+  SHERPA_EXECUTOR_MODE: "k8s_job"
+  SHERPA_K8S_NAMESPACE: "sherpa"
+  SHERPA_K8S_WORKER_IMAGE: "sherpa-web:latest"
+  SHERPA_K8S_JOB_SERVICE_ACCOUNT: "sherpa-web"
+  SHERPA_K8S_PVC_TMP: "sherpa-shared-tmp"
+  SHERPA_K8S_PVC_OUTPUT: "sherpa-shared-output"
+  SHERPA_K8S_PVC_OSS_FUZZ: "sherpa-oss-fuzz"
+  SHERPA_K8S_PVC_CONFIG: "sherpa-config"
+  SHERPA_K8S_PVC_JOB_LOGS: "sherpa-job-logs"
+  SHERPA_PARALLEL_FUZZERS: "2"
+  SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC: "7200"
+  SHERPA_GITNEXUS_AUTO_ANALYZE: "1"
+  SHERPA_GITNEXUS_SKIP_EMBEDDINGS: "1"
+  SHERPA_OPENCODE_DOCKER_IMAGE: "sherpa-opencode:latest"
+  SHERPA_OPENCODE_IGNORE_RETRY_ERRORS: "1"
+  SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC: "300"
+  SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz.git"
+  SHERPA_GIT_MIRRORS: "https://github.com"
+  SHERPA_WEB_AUTO_RESUME_ON_START: "0"
+  SHERPA_WEB_RESTORE_LOG_MAX_CHARS: "200000"
+  NEXT_PUBLIC_API_BASE: "/api"

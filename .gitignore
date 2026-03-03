@@ -28,6 +28,7 @@ _submit.json
 .env
 web_config.json
 web_codex.env
+k8s/overlays/cloudflare/cloudflare-tunnel-secret.yaml
 
 # Misc local files
 .DS_Store

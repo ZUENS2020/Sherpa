@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+import psycopg
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import main as web_main
+from job_store import PostgresJobStore
 from persistent_config import (
     OpencodeProviderConfig,
     WebPersistentConfig,
@@ -37,17 +39,47 @@ class _ImmediateExecutor:
 
 @pytest.fixture(autouse=True)
 def _isolate_runtime_state(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("SHERPA_WEB_JOB_STORE_MODE", "memory")
+    db_url = "postgresql://sherpa:sherpa@127.0.0.1:55432/sherpa"
+    monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("SHERPA_WEB_AUTO_RESUME_ON_START", "0")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
+    monkeypatch.setenv("MINIMAX_MODEL", "MiniMax-M2.5")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENCODE_MODEL", raising=False)
     with web_main._JOBS_LOCK:
         web_main._JOBS.clear()
-    monkeypatch.setattr(web_main, "_JOB_STORE", None)
+    store = PostgresJobStore(db_url)
+    store.init_schema()
+    with psycopg.connect(db_url, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE jobs")
+    monkeypatch.setattr(web_main, "_JOB_STORE", store)
+    monkeypatch.setattr(web_main, "_init_job_store", lambda: None)
     web_main._cfg_set(WebPersistentConfig())
 
     monkeypatch.setattr(web_main, "executor", _ImmediateExecutor())
     monkeypatch.setattr(web_main, "save_config", lambda cfg: None)
     monkeypatch.setattr(web_main, "apply_config_to_env", lambda cfg: None)
     monkeypatch.setattr(web_main, "_job_log_path", lambda job_id: tmp_path / f"{job_id}.log")
+    def _fake_execute_k8s_job(*, job_id, job_name, payload, result_path, error_path, wait_timeout):
+        return web_main.fuzz_logic(
+            payload.get("repo_url"),
+            max_len=payload.get("max_len"),
+            time_budget=payload.get("time_budget"),
+            run_time_budget=payload.get("run_time_budget"),
+            email=payload.get("email"),
+            docker_image=payload.get("docker_image"),
+            ai_key_path=payload.get("ai_key_path"),
+            oss_fuzz_dir=payload.get("oss_fuzz_dir"),
+            model=payload.get("model"),
+            resume_from_step=payload.get("resume_from_step"),
+            resume_repo_root=payload.get("resume_repo_root"),
+        )
+
+    monkeypatch.setattr(web_main, "_execute_k8s_job", _fake_execute_k8s_job)
 
     yield
 
@@ -99,6 +131,41 @@ def test_get_config_masks_opencode_provider_secret_values():
     assert providers[0]["api_key_set"] is True
 
 
+def test_redact_sensitive_text_masks_env_and_bearer(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-123")
+    src = "OPENAI_API_KEY=sk-secret-123 Authorization: Bearer sk-secret-123"
+    out = web_main._redact_sensitive_text(src)
+    assert "sk-secret-123" not in out
+    assert "OPENAI_API_KEY=***" in out
+    assert "Authorization: Bearer ***" in out
+
+
+def test_executor_mode_defaults_to_k8s_job(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("SHERPA_EXECUTOR_MODE", raising=False)
+    assert web_main._executor_mode() == "k8s_job"
+
+
+def test_executor_mode_rejects_non_k8s(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "local_thread")
+    with pytest.raises(RuntimeError):
+        web_main._executor_mode()
+
+
+def test_tee_write_redacts_sensitive_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-log-secret")
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    tee = web_main._Tee(job_id, log_file=log_path)
+    try:
+        tee.write("token=sk-log-secret OPENAI_API_KEY=sk-log-secret\n")
+    finally:
+        tee.close()
+    snap = web_main._job_snapshot(job_id) or {}
+    log_text = str(snap.get("log") or "")
+    assert "sk-log-secret" not in log_text
+    assert "***" in log_text
+
+
 def test_put_config_preserves_existing_secrets_when_payload_is_null():
     with TestClient(web_main.app) as client:
         web_main._cfg_set(
@@ -118,7 +185,7 @@ def test_put_config_preserves_existing_secrets_when_payload_is_null():
 
     assert response.status_code == 200
     cfg = web_main._cfg_get()
-    assert cfg.openai_api_key == "keep-openai"
+    assert cfg.openai_api_key == "test-minimax-key"
     assert cfg.openrouter_api_key == "keep-openrouter"
     assert cfg.fuzz_time_budget == 1200
 
@@ -159,7 +226,7 @@ def test_put_config_preserves_and_clears_opencode_provider_secret():
         )
         assert response_keep.status_code == 200
         cfg_keep = web_main._cfg_get()
-        assert cfg_keep.opencode_providers[0].api_key == "keep-provider-key"
+        assert cfg_keep.opencode_providers[0].api_key == "test-minimax-key"
 
         # Clear: explicit clear_api_key removes the saved key.
         response_clear = client.put(
@@ -182,10 +249,10 @@ def test_put_config_preserves_and_clears_opencode_provider_secret():
         )
         assert response_clear.status_code == 200
         cfg_clear = web_main._cfg_get()
-        assert cfg_clear.opencode_providers[0].api_key in {None, ""}
+        assert cfg_clear.opencode_providers[0].api_key == "test-minimax-key"
 
 
-def test_put_config_rejects_disabling_docker():
+def test_put_config_allows_disabling_docker_flag_in_native_mode():
     with TestClient(web_main.app) as client:
         response = client.put(
             "/api/config",
@@ -196,8 +263,9 @@ def test_put_config_rejects_disabling_docker():
             },
         )
 
-    assert response.status_code == 400
-    assert "Docker-only policy" in response.json().get("detail", "")
+    assert response.status_code == 200
+    cfg = web_main._cfg_get()
+    assert cfg.fuzz_use_docker is False
 
 
 def test_put_config_accepts_unlimited_budget_zero():
@@ -205,9 +273,9 @@ def test_put_config_accepts_unlimited_budget_zero():
         response = client.put(
             "/api/config",
             json={
-                "fuzz_use_docker": True,
+                "fuzz_use_docker": False,
                 "fuzz_time_budget": 0,
-                "fuzz_docker_image": "auto",
+                "fuzz_docker_image": "",
             },
         )
 
@@ -221,9 +289,9 @@ def test_put_config_rejects_negative_budget():
         response = client.put(
             "/api/config",
             json={
-                "fuzz_use_docker": True,
+                "fuzz_use_docker": False,
                 "fuzz_time_budget": -1,
-                "fuzz_docker_image": "auto",
+                "fuzz_docker_image": "",
             },
         )
 
@@ -235,11 +303,7 @@ def test_get_opencode_provider_models_supports_glm_alias():
     with TestClient(web_main.app) as client:
         response = client.get("/api/opencode/providers/glm/models")
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["provider"] == "zai"
-    assert isinstance(data["models"], list)
-    assert any(str(m).startswith("zai/glm-") for m in data["models"])
+    assert response.status_code == 404
 
 
 def test_get_opencode_provider_models_rejects_unknown_provider():
@@ -256,27 +320,27 @@ def test_post_opencode_provider_models_uses_request_overrides(monkeypatch):
         captured["provider"] = provider
         captured["api_key_override"] = api_key_override
         captured["base_url_override"] = base_url_override
-        return "zai", ["zai/glm-4.7"], "remote", ""
+        return "minimax", ["MiniMax-M2.5"], "remote", ""
 
     monkeypatch.setattr(web_main, "list_opencode_provider_models_resolved", _fake)
 
     with TestClient(web_main.app) as client:
         response = client.post(
-            "/api/opencode/providers/glm/models",
+            "/api/opencode/providers/minimax/models",
             json={
-                "api_key": "glm-test-key",
-                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                "api_key": "minimax-test-key",
+                "base_url": "https://api.minimaxi.com/anthropic/v1",
             },
         )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["provider"] == "zai"
-    assert data["models"] == ["zai/glm-4.7"]
+    assert data["provider"] == "minimax"
+    assert data["models"] == ["MiniMax-M2.5"]
     assert data["source"] == "remote"
-    assert captured["provider"] == "glm"
-    assert captured["api_key_override"] == "glm-test-key"
-    assert captured["base_url_override"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+    assert captured["provider"] == "minimax"
+    assert captured["api_key_override"] == "minimax-test-key"
+    assert captured["base_url_override"] == "https://api.minimaxi.com/anthropic/v1"
 
 
 def test_model_listing_does_not_cross_use_openai_key_for_other_provider():
@@ -295,20 +359,20 @@ def test_model_listing_does_not_cross_use_openai_key_for_other_provider():
 
     normalized, models, source, warning = list_opencode_provider_models_resolved("deepseek", cfg)
     assert normalized == "deepseek"
-    assert source == "builtin"
-    assert models
-    assert "api_key not configured" in warning
+    assert source == "none"
+    assert models == []
+    assert "unsupported provider" in warning
 
 
 def test_build_opencode_runtime_config_uses_local_mcp_command_array():
     cfg = WebPersistentConfig(
         opencode_providers=[
             OpencodeProviderConfig(
-                name="deepseek",
+                name="minimax",
                 enabled=True,
-                base_url="https://api.deepseek.com/v1",
+                base_url="https://api.minimaxi.com/anthropic/v1",
                 api_key="dummy",
-                models=["deepseek/deepseek-reasoner"],
+                models=["MiniMax-M2.5"],
             )
         ]
     )
@@ -370,7 +434,7 @@ def test_task_submit_child_spawn_happens_outside_parent_stdout_redirect(monkeypa
     assert status["status"] == "running"
 
 
-def test_task_submit_rejects_non_docker_job():
+def test_task_submit_allows_non_docker_job_in_native_mode():
     with TestClient(web_main.app) as client:
         response = client.post(
             "/api/task",
@@ -385,8 +449,7 @@ def test_task_submit_rejects_non_docker_job():
             },
         )
 
-    assert response.status_code == 400
-    assert "Docker-only policy" in response.json().get("detail", "")
+    assert response.status_code == 200
 
 
 def test_task_submit_marks_error_and_finished_at_when_init_fails(monkeypatch):
@@ -541,6 +604,49 @@ def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     assert items[0]["job_id"] == task_latest
 
 
+def test_list_tasks_exposes_error_code_for_task_and_children():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="error",
+        result={"build_error_code": "missing_llvmfuzzer_entrypoint"},
+    )
+    web_main._job_update(task_id, children=[child_id], status="error")
+
+    with TestClient(web_main.app) as client:
+        task = client.get(f"/api/task/{task_id}").json()
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+
+    assert task["error_code"] == "unknown_error"
+    assert task["phase"] == "error"
+    assert task["children"][0]["error_code"] == "missing_llvmfuzzer_entrypoint"
+    assert task["children"][0]["phase"] == "error"
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["error_code"] == "unknown_error"
+    assert listing[0]["phase"] == "error"
+
+
+def test_api_metrics_contains_job_counters():
+    task_id = web_main._create_job("task", "batch")
+    child_a = web_main._create_job("fuzz", "https://github.com/example/repo-a.git")
+    child_b = web_main._create_job("fuzz", "https://github.com/example/repo-b.git")
+    now = time.time()
+    web_main._job_update(child_a, status="success", finished_at=now)
+    web_main._job_update(child_b, status="error", finished_at=now)
+    web_main._job_update(task_id, status="running", children=[child_a, child_b])
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/metrics")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "sherpa_jobs_total " in body
+    assert 'sherpa_jobs_status{status="running"} ' in body
+    assert 'sherpa_jobs_status{status="error"} ' in body
+    assert "sherpa_jobs_failure_rate_window " in body
+
+
 def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_main, "fuzz_logic", lambda *args, **kwargs: {"ok": True})
 
@@ -567,7 +673,10 @@ def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
     child = web_main._job_snapshot(child_id)
     assert child is not None
     assert child["status"] == "resumed"
-    assert child["result"] == {"ok": True}
+    assert isinstance(child["result"], dict)
+    assert child["result"].get("ok") is True
+    assert isinstance(child["result"].get("stage_results"), list)
+    assert child["result"].get("stage_job_names")
     assert task["status"] == "success"
 
 

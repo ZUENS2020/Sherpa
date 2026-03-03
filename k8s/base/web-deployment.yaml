@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sherpa-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sherpa-web
+  template:
+    metadata:
+      labels:
+        app: sherpa-web
+    spec:
+      serviceAccountName: sherpa-web
+      containers:
+        - name: web
+          image: sherpa-web:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+              name: http
+          envFrom:
+            - configMapRef:
+                name: sherpa-config
+            - secretRef:
+                name: sherpa-minimax
+            - secretRef:
+                name: sherpa-postgres
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+            - name: job-logs
+              mountPath: /app/job-logs
+            - name: shared-tmp
+              mountPath: /shared/tmp
+            - name: shared-output
+              mountPath: /shared/output
+            - name: oss-fuzz
+              mountPath: /shared/oss-fuzz
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: sherpa-config
+        - name: job-logs
+          persistentVolumeClaim:
+            claimName: sherpa-job-logs
+        - name: shared-tmp
+          persistentVolumeClaim:
+            claimName: sherpa-shared-tmp
+        - name: shared-output
+          persistentVolumeClaim:
+            claimName: sherpa-shared-output
+        - name: oss-fuzz
+          persistentVolumeClaim:
+            claimName: sherpa-oss-fuzz

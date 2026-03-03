@@ -97,3 +97,47 @@ def test_resolve_opencode_home_dir_isolated_by_repo_name():
     assert a.startswith("/shared/output/.opencode-home/")
     assert b.startswith("/shared/output/.opencode-home/")
     assert a != b
+
+
+def test_redact_cmd_for_log_masks_env_values():
+    cmd = [
+        "docker",
+        "run",
+        "-e",
+        "OPENAI_API_KEY=sk-abc",
+        "-e",
+        "FOO=bar",
+        "img",
+    ]
+    out = ch._redact_cmd_for_log(cmd, env={"OPENAI_API_KEY": "sk-abc"})
+    assert "sk-abc" not in out
+    assert "OPENAI_API_KEY=***" in out
+
+
+def test_run_streaming_combined_redacts_output(monkeypatch: pytest.MonkeyPatch):
+    class _FakeStdout:
+        def __iter__(self):
+            yield "OPENAI_API_KEY=sk-out-secret\n"
+            yield "Authorization: Bearer sk-out-secret\n"
+        def close(self):
+            return None
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = _FakeStdout()
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(
+        ch.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakeProc(),
+    )
+    rc, scan, tail = ch._run_streaming_combined(
+        ["echo", "x"],
+        env={"OPENAI_API_KEY": "sk-out-secret"},
+    )
+    assert rc == 0
+    assert "sk-out-secret" not in scan
+    assert "sk-out-secret" not in tail
+    assert "OPENAI_API_KEY=***" in scan

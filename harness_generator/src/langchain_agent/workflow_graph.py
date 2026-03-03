@@ -40,6 +40,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     workflow_started_at: float
     resume_from_step: str
     resume_repo_root: str
+    stop_after_step: str
 
     step_count: int
     max_steps: int
@@ -379,6 +380,7 @@ class FuzzWorkflowInput:
     model: Optional[str] = None
     resume_from_step: Optional[str] = None
     resume_repo_root: Optional[Path] = None
+    stop_after_step: Optional[str] = None
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -403,9 +405,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     if run_time_budget < 0:
         raise ValueError("run_time_budget must be >= 0")
     max_len = int(state.get("max_len") or 1024)
-    docker_image = (state.get("docker_image") or "").strip()
-    if not docker_image:
-        raise ValueError("Docker execution is mandatory; docker_image is required")
+    docker_image = (state.get("docker_image") or "").strip() or None
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
 
     raw_resume_repo_root = (state.get("resume_repo_root") or "").strip()
@@ -2551,6 +2551,11 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     return "plan"
 
 
+def _should_stage_stop(state: FuzzWorkflowRuntimeState, step_name: str) -> bool:
+    target = (state.get("stop_after_step") or "").strip().lower()
+    return bool(target) and target == step_name
+
+
 def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
@@ -2567,14 +2572,21 @@ def build_fuzz_workflow() -> StateGraph:
     def _route_after_plan(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")) or (state.get("last_error") or "").strip():
             return "stop"
+        if _should_stage_stop(state, "plan"):
+            return "stop"
         return "synthesize"
 
     def _route_after_synthesize(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")) or (state.get("last_error") or "").strip():
             return "stop"
+        if _should_stage_stop(state, "synthesize"):
+            return "stop"
         return "build"
 
     def _route_after_build(state: FuzzWorkflowRuntimeState) -> str:
+        if not bool(state.get("failed")) and not (state.get("last_error") or "").strip():
+            if _should_stage_stop(state, "build"):
+                return "stop"
         return _route_after_build_state(state)
 
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
@@ -2584,15 +2596,22 @@ def build_fuzz_workflow() -> StateGraph:
             return "stop"
         if (state.get("last_error") or "").strip():
             return "stop"
+        if _should_stage_stop(state, "fix_build"):
+            return "stop"
         return "build"
 
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
-        return _route_after_run_state(state)
+        nxt = _route_after_run_state(state)
+        if _should_stage_stop(state, "run") and nxt == "stop":
+            return "stop"
+        return nxt
 
     def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")):
             return "stop"
         if (state.get("last_error") or "").strip():
+            return "stop"
+        if _should_stage_stop(state, "fix_crash"):
             return "stop"
         return "build"
 
@@ -2644,12 +2663,14 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     run_budget_log = "unlimited" if int(inp.run_time_budget) == 0 else f"{int(inp.run_time_budget)}s"
     resume_step = (inp.resume_from_step or "").strip().lower()
     resume_root = str(inp.resume_repo_root or "").strip()
+    stop_after_step = (inp.stop_after_step or "").strip().lower()
     _wf_log(
         None,
         "workflow start "
-        f"repo={inp.repo_url} docker_image={inp.docker_image or '(host)'} "
+        f"repo={inp.repo_url} docker_image={inp.docker_image or '(native)'} "
         f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
-        f"resume_step={resume_step or '-'} resume_root={resume_root or '-'}",
+        f"resume_step={resume_step or '-'} resume_root={resume_root or '-'} "
+        f"stop_after_step={stop_after_step or '-'}",
     )
     t0 = time.perf_counter()
     try:
@@ -2670,6 +2691,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "ai_key_path": str(inp.ai_key_path),
             "resume_from_step": (inp.resume_from_step or "").strip().lower(),
             "resume_repo_root": str(inp.resume_repo_root or ""),
+            "stop_after_step": stop_after_step,
             "max_steps": max_steps,
         }
     )
@@ -2696,6 +2718,10 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
+        "repo_root": str(out.get("repo_root") or ""),
+        "workflow_last_step": str(out.get("last_step") or ""),
+        "workflow_active_step": str(out.get("next") or ""),
+        "stop_after_step": stop_after_step,
         "fix_build_terminal_reason": str(out.get("fix_build_terminal_reason") or ""),
         "fix_build_noop_streak": int(out.get("fix_build_noop_streak") or 0),
         "fix_build_rule_hits": list(out.get("fix_build_rule_hits") or []),

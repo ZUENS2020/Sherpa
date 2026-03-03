@@ -4,13 +4,20 @@ FROM ${FUZZ_CPP_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+ARG APT_MIRROR_AMD64="http://mirrors.ustc.edu.cn/ubuntu"
+ARG APT_MIRROR_ARM64="http://mirrors.ustc.edu.cn/ubuntu-ports"
 RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  if [ "$arch" = "arm64" ]; then \
+    apt_mirror="${APT_MIRROR_ARM64}"; \
+  else \
+    apt_mirror="${APT_MIRROR_AMD64}"; \
+  fi; \
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
     [ -f "$f" ] || continue; \
-    sed -i -E "s#https?://archive.ubuntu.com/ubuntu#${APT_MIRROR}#g" "$f"; \
-    sed -i -E "s#https?://ports.ubuntu.com/ubuntu-ports#${APT_MIRROR}#g" "$f"; \
-    sed -i -E "s#https?://security.ubuntu.com/ubuntu#${APT_MIRROR}#g" "$f"; \
+    sed -i -E "s#https?://archive.ubuntu.com/ubuntu#${apt_mirror}#g" "$f"; \
+    sed -i -E "s#https?://ports.ubuntu.com/ubuntu-ports#${apt_mirror}#g" "$f"; \
+    sed -i -E "s#https?://security.ubuntu.com/ubuntu#${apt_mirror}#g" "$f"; \
   done
 
 RUN apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
