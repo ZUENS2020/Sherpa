@@ -88,3 +88,9 @@ docker run -d --name sherpa-test-pg \
 ```bash
 python -m pytest -q tests/test_job_store_persistence.py tests/test_api_stability.py
 ```
+
+## 9. 运维与收口文档
+
+- 运行手册：`docs/k8s/RUNBOOK.md`
+- 发布回滚门禁：`docs/k8s/RELEASE_GATE.md`
+- E2E 验收报告：`docs/k8s/E2E_ZLIB_REPORT.md`
