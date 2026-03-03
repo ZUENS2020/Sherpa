@@ -166,11 +166,16 @@ def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
 
 
 def _executor_mode() -> str:
-    return (os.environ.get("SHERPA_EXECUTOR_MODE", "local_thread") or "").strip().lower()
+    mode = (os.environ.get("SHERPA_EXECUTOR_MODE", "k8s_job") or "").strip().lower()
+    if mode and mode != "k8s_job":
+        raise RuntimeError(
+            f"unsupported executor mode: {mode}. Only 'k8s_job' is supported."
+        )
+    return "k8s_job"
 
 
 def _k8s_enabled() -> bool:
-    return _executor_mode() == "k8s_job"
+    return True
 
 
 def _k8s_namespace() -> str:
@@ -362,6 +367,56 @@ def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
         last_phase = "Running" if active > 0 else "Pending"
         time.sleep(2)
     return "Timeout", last_phase
+
+
+def _execute_k8s_job(
+    *,
+    job_id: str,
+    job_name: str,
+    payload: dict[str, object],
+    result_path: Path,
+    error_path: Path,
+    wait_timeout: int,
+) -> object:
+    manifest = _k8s_build_manifest(job_name, payload)
+    rc_apply, _, err_apply = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
+    if rc_apply != 0:
+        raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
+    _job_update(job_id, k8s_phase="Submitted")
+
+    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout)
+    _job_update(job_id, k8s_phase=status)
+    if status == "Timeout":
+        _k8s_delete_job(job_name)
+        raise RuntimeError("k8s_job_timeout")
+    if status == "Failed":
+        logs = _k8s_collect_job_logs(job_name)
+        err_txt = ""
+        if error_path.is_file():
+            err_txt = error_path.read_text(encoding="utf-8", errors="replace")
+        if not _k8s_keep_finished_jobs():
+            _k8s_delete_job(job_name)
+        msg = f"k8s_job_failed phase={last_phase}"
+        if err_txt.strip():
+            msg += f": {err_txt.strip()}"
+        if logs.strip():
+            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+        raise RuntimeError(msg)
+    if not result_path.is_file():
+        logs = _k8s_collect_job_logs(job_name)
+        if logs.strip():
+            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+        raise RuntimeError("k8s_job_missing_result")
+    raw = result_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        doc = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError(f"k8s_job_bad_result_json: {e}")
+    if not _k8s_keep_finished_jobs():
+        _k8s_delete_job(job_name)
+    if not bool(doc.get("ok")):
+        raise RuntimeError(str(doc.get("error") or "k8s_worker_failed"))
+    return doc.get("result")
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
@@ -1480,7 +1535,7 @@ def _run_fuzz_job(
             print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
-            print(f"[job {job_id}] about to call fuzz_logic...")
+            print(f"[job {job_id}] about to dispatch k8s worker...")
             docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
             if not docker_enabled:
                 raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
@@ -1529,88 +1584,43 @@ def _run_fuzz_job(
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
             try:
-                if _k8s_enabled():
-                    job_name = _k8s_job_name(job_id, resumed=resumed)
-                    result_path, error_path = _k8s_result_paths(job_id)
-                    _job_update(
-                        job_id,
-                        k8s_job_name=job_name,
-                        k8s_result_path=str(result_path),
-                        k8s_error_path=str(error_path),
-                        k8s_phase="Submitting",
-                    )
-                    payload = {
-                        "job_id": job_id,
-                        "repo_url": request.code_url,
-                        "max_len": int(request.max_tokens),
-                        "time_budget": int(total_time_budget_value),
-                        "run_time_budget": int(run_time_budget_value),
-                        "email": request.email,
-                        "docker_image": docker_image,
-                        "ai_key_path": str(opencode_env_path()),
-                        "oss_fuzz_dir": cfg.oss_fuzz_dir,
-                        "model": model_value,
-                        "resume_from_step": (_normalize_resume_step(resume_from_step) if resumed else None),
-                        "resume_repo_root": (resume_repo_root if resumed else None),
-                        "result_path": str(result_path),
-                        "error_path": str(error_path),
-                    }
-                    manifest = _k8s_build_manifest(job_name, payload)
-                    rc_apply, _, err_apply = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
-                    if rc_apply != 0:
-                        raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
-                    _job_update(job_id, k8s_phase="Submitted")
-                    wait_timeout = max(60, run_time_budget_value if run_time_budget_value > 0 else 7200)
-                    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout)
-                    _job_update(job_id, k8s_phase=status)
-                    if status == "Timeout":
-                        _k8s_delete_job(job_name)
-                        raise RuntimeError("k8s_job_timeout")
-                    if status == "Failed":
-                        logs = _k8s_collect_job_logs(job_name)
-                        err_txt = ""
-                        if error_path.is_file():
-                            err_txt = error_path.read_text(encoding="utf-8", errors="replace")
-                        if not _k8s_keep_finished_jobs():
-                            _k8s_delete_job(job_name)
-                        msg = f"k8s_job_failed phase={last_phase}"
-                        if err_txt.strip():
-                            msg += f": {err_txt.strip()}"
-                        if logs.strip():
-                            print(f"[job {job_id}] k8s logs tail:\n{logs}")
-                        raise RuntimeError(msg)
-                    if not result_path.is_file():
-                        logs = _k8s_collect_job_logs(job_name)
-                        if logs.strip():
-                            print(f"[job {job_id}] k8s logs tail:\n{logs}")
-                        raise RuntimeError("k8s_job_missing_result")
-                    raw = result_path.read_text(encoding="utf-8", errors="replace")
-                    try:
-                        doc = json.loads(raw)
-                    except Exception as e:
-                        raise RuntimeError(f"k8s_job_bad_result_json: {e}")
-                    if not _k8s_keep_finished_jobs():
-                        _k8s_delete_job(job_name)
-                    if not bool(doc.get("ok")):
-                        raise RuntimeError(str(doc.get("error") or "k8s_worker_failed"))
-                    res = doc.get("result")
-                else:
-                    res = fuzz_logic(
-                        request.code_url,
-                        max_len=request.max_tokens,
-                        time_budget=total_time_budget_value,
-                        run_time_budget=run_time_budget_value,
-                        email=request.email,
-                        docker_image=docker_image,
-                        ai_key_path=opencode_env_path(),
-                        oss_fuzz_dir=cfg.oss_fuzz_dir,
-                        model=model_value,
-                        resume_from_step=(_normalize_resume_step(resume_from_step) if resumed else None),
-                        resume_repo_root=(resume_repo_root if resumed else None),
-                    )
-                print(f"[job {job_id}] fuzz_logic returned successfully")
+                job_name = _k8s_job_name(job_id, resumed=resumed)
+                result_path, error_path = _k8s_result_paths(job_id)
+                _job_update(
+                    job_id,
+                    k8s_job_name=job_name,
+                    k8s_result_path=str(result_path),
+                    k8s_error_path=str(error_path),
+                    k8s_phase="Submitting",
+                )
+                payload = {
+                    "job_id": job_id,
+                    "repo_url": request.code_url,
+                    "max_len": int(request.max_tokens),
+                    "time_budget": int(total_time_budget_value),
+                    "run_time_budget": int(run_time_budget_value),
+                    "email": request.email,
+                    "docker_image": docker_image,
+                    "ai_key_path": str(opencode_env_path()),
+                    "oss_fuzz_dir": cfg.oss_fuzz_dir,
+                    "model": model_value,
+                    "resume_from_step": (_normalize_resume_step(resume_from_step) if resumed else None),
+                    "resume_repo_root": (resume_repo_root if resumed else None),
+                    "result_path": str(result_path),
+                    "error_path": str(error_path),
+                }
+                wait_timeout = max(60, run_time_budget_value if run_time_budget_value > 0 else 7200)
+                res = _execute_k8s_job(
+                    job_id=job_id,
+                    job_name=job_name,
+                    payload=payload,
+                    result_path=result_path,
+                    error_path=error_path,
+                    wait_timeout=wait_timeout,
+                )
+                print(f"[job {job_id}] k8s worker returned successfully")
             except Exception as fuzz_err:
-                print(f"[job {job_id}] fuzz_logic failed: {fuzz_err}")
+                print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
                 import traceback
                 traceback.print_exc()
                 raise

@@ -4,12 +4,14 @@
 
 ## 1. 当前基线（优先阅读）
 
-1. Kubernetes 部署：`/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
-2. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
-3. 发布回滚门禁：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
-4. E2E 验收报告：`/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
-5. Compose->K8s 映射：`/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
-6. 迁移清单（计划与验收对照）：`/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`
+1. Docker 背景对接文档：`/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`
+2. 本地 K8s 快速启动：`/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`
+3. Kubernetes 部署：`/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
+4. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
+5. 发布回滚门禁：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
+6. E2E 验收报告：`/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
+7. Compose->K8s 映射：`/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
+8. 迁移清单（计划与验收对照）：`/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`
 
 ## 2. 历史参考
 

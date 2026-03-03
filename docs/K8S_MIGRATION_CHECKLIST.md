@@ -57,9 +57,9 @@
 ## 2. M2 去 DinD（核心改造）
 
 ### 2.1 执行器切换
-- [ ] 移除对 `DOCKER_HOST=tcp://...` 的强依赖
-- [ ] 新增 Kubernetes Job Executor（由 web 创建 Job）
-- [ ] 规范 Job 命名（包含 `job_id` / trace 信息）
+- [x] 移除对 `DOCKER_HOST=tcp://...` 的强依赖
+- [x] 新增 Kubernetes Job Executor（由 web 创建 Job）
+- [x] 规范 Job 命名（包含 `job_id` / trace 信息）
 
 ### 2.2 状态跟踪与结果回收
 - [ ] web 能轮询/监听 Job 状态（Pending/Running/Succeeded/Failed）

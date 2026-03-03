@@ -5,7 +5,7 @@
 - `sherpa-frontend` -> `Deployment/sherpa-frontend` + `Service/sherpa-frontend`
 - `sherpa-job-store`（SQLite sidecar）-> 移除，改为 `StatefulSet/postgres` + `Service/postgres`
 - `sherpa-oss-fuzz-init` -> 由 `sherpa-web` 启动流程按需初始化（后续可拆为 Job）
-- `sherpa-docker`（DinD）-> 已从 k8s 默认链路移除（K8s worker 采用本地执行模式）
+- `sherpa-docker`（DinD）-> 已从 k8s 运行链路移除（统一使用 `k8s_job`）
 
 ## 网络映射
 - compose 默认网络 -> Kubernetes Service + Ingress
