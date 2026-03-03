@@ -81,8 +81,7 @@
 
 ### 3.1 数据库接入
 - [ ] 新增 `DATABASE_URL`
-- [ ] job_store 支持 Postgres（可短期保留 sqlite fallback）
-- [ ] 提供 schema migration（Alembic 或 SQL 脚本）
+- [ ] job_store 改为 Postgres
 
 ### 3.2 索引与查询性能
 - [ ] 建立索引：`job_id`、`status`、`updated_at`
