@@ -1,141 +1,70 @@
-> 注意：本文件为历史交接快照，可能包含旧架构描述；当前实现请以 README 与 docs/k8s/* 为准。
+# Sherpa 对接与进度现状
 
-# Sherpa 对接与进度展示
-
-- 更新日期：2026-02-26
+- 更新日期：2026-03-03
 - 仓库：`https://github.com/ZUENS2020/Sherpa.git`
-- 当前分支：`main`
-- 分支同步：`main...origin/main = 0/0`
-- 工作区状态：`dirty`（当前有本地未提交改动）
+- 主执行模型：`Kubernetes + Native Runtime + 多阶段多 Job`
 
-## 1. 项目目标与当前形态
+## 1. 当前执行模型
 
-Sherpa 是一个面向 C/C++ 与 Java 仓库的自动化 fuzz 编排系统，输入代码仓库 URL 后，自动完成从计划、生成、构建、运行、修复到总结的闭环。
+Sherpa 在 `k8s_job` 模式下，单个 fuzz 子任务会拆分为阶段串行执行：
 
-当前运行主链路：
+`plan -> synthesize -> build -> run`
 
-`plan -> synthesize -> build -> run -> (optional fix_build/fix_crash) -> summary`
+每个阶段对应一个独立的 k8s Job Pod，由 `sherpa-web` 负责编排下一阶段。
 
-当前关键约束与默认行为：
-
-1. 执行器为 Kubernetes Job，worker 内按原生工具链执行（不再依赖 inner Docker）。
-2. `decide` 节点已移除，路由由条件函数直接决策。
-3. `plan` 节点负责总结策略与建议，并参与结束流程报告产出。
-4. 断点续跑默认手动触发（`POST /api/task/{job_id}/resume`），不自动恢复。
-5. 并行 fuzz 默认开启批次执行（`SHERPA_PARALLEL_FUZZERS=2`）。
-
-## 2. 系统架构图（服务视角）
+## 2. 架构图（当前口径）
 
 ```mermaid
 flowchart LR
-  U["User / CI"] --> GW["sherpa-gateway (Nginx)"]
-  GW --> FE["sherpa-frontend (Next.js)"]
-  GW --> WEB["sherpa-web (FastAPI + LangGraph)"]
-  WEB --> DB["postgres"]
-  WEB --> WJ["k8s_job_worker"]
-  WEB --> OUT["/shared/output"]
-  WEB --> LOG["/app/job-logs"]
+  U["User"] --> G["Ingress/Gateway"]
+  G --> FE["sherpa-frontend"]
+  G --> API["sherpa-web"]
+  API --> DB[(Postgres)]
+  API --> J1["Job(plan)"]
+  API --> J2["Job(synthesize)"]
+  API --> J3["Job(build)"]
+  API --> J4["Job(run)"]
+  J1 --> OUT["/shared/output"]
+  J2 --> OUT
+  J3 --> OUT
+  J4 --> OUT
 ```
 
-## 3. 工作流执行图（核心路径）
+## 3. 对接关键事实
 
-```mermaid
-flowchart TD
-  I["init"] --> P["plan"]
-  P --> S["synthesize"]
-  S --> B["build"]
-  B -->|"build ok"| R["run"]
-  B -->|"build fail"| FB["fix_build"]
-  FB --> B
-  R -->|"crash and allowed"| FC["fix_crash"]
-  FC --> B
-  R -->|"no crash or stop condition"| SUM["summary"]
-```
+1. 运行模式仅 `k8s_job`，不再使用 `local_thread`。
+2. 数据存储为 Postgres-only，`DATABASE_URL` 必填。
+3. `docker` / `docker_image` 为兼容字段；在 k8s runtime 下不参与运行时决策。
+4. 任务停止会清理该任务对应的阶段 Job（含历史阶段 Job 名称列表）。
 
-## 4. 恢复机制（手动续跑）
+## 4. 关键观测字段
 
-```mermaid
-sequenceDiagram
-  participant User
-  participant Frontend
-  participant API as Web API
-  participant Store as Job Store
-  participant WF as Workflow
+任务详情和任务列表对接时，建议固定消费以下字段：
 
-  User->>Frontend: 选择 recoverable 任务
-  Frontend->>API: POST /api/task/{job_id}/resume
-  API->>Store: 读取 checkpoint
-  API->>WF: 从记录 step 继续
-  WF-->>Store: 持久化恢复状态
-  API-->>Frontend: 返回 resuming/resumed/resume_failed
-```
+1. `job_id`
+2. `status`
+3. `runtime_mode`
+4. `phase`
+5. `error_code`
+6. `error_kind`
+7. `error_signature`
+8. `k8s_job_name` / `k8s_job_names`
+9. `children_status`
 
-## 5. 当前已完成项（对接重点）
+## 5. 当前完成情况（高层）
 
-1. 前端已完成重构，重点信息（任务进度、日志、报错）展示更清晰。
-2. 容器职责已拆分明确：gateway / frontend / web / postgres / cloudflared / oss-fuzz-init。
-3. 任务状态持久化完成，支持中断后手动从 checkpoint 继续。
-4. 并行 fuzz 批次预算可观测（`run_batch_plan`），便于排查超时与预算分配。
-5. 构建失败分类与修复链路已增强（基础设施问题与源码问题区分更清晰）。
-6. 文档与品牌资产已整理：README、logo/banner、对接资料结构化。
-7. `.env.example` 已与当前实现对齐，旧配置语义残余已清理。
+1. K8s-only 基线已落地（执行器/部署口径统一）。
+2. Postgres 持久化已落地（替代 SQLite）。
+3. 多阶段多 Job 编排已接入主流程（plan/synthesize/build/run）。
+4. 文档已更新 README 与 Docker->K8s handoff 口径。
 
-## 6. 对接时必须对齐的运行事实
+## 6. 待收口项
 
-1. 对外入口统一使用 `sherpa-gateway`（默认 `http://localhost:8000`）。
-2. API 与前端走同一网关，API 前缀为 `/api/*`。
-3. `build/run` 与 `opencode` 不在同一执行环境，修复依赖共享 volume 与日志文件传递。
-4. 如遇网络问题，优先排查 worker Pod 出网连通性、DNS 与代理设置。
+1. 测试补齐与回归验证（`SHE-71`）。
+2. 基于真实任务日志继续细化阶段级错误码和重试策略。
 
-## 7. 关键配置项（团队常用）
+## 7. 快速对接入口
 
-1. `OPENAI_API_KEY`：主流程 LLM key。
-2. `SHERPA_PARALLEL_FUZZERS`：run 阶段并行批次数。
-3. `SHERPA_PARALLEL_FUZZERS`：run 阶段并行批次数。
-4. `SHERPA_WEB_AUTO_RESUME_ON_START=0`：默认关闭自动恢复。
-5. `DATABASE_URL`：Postgres 连接串（必填）。
-
-## 8. 当前风险与建议
-
-风险：
-
-1. 外部网络与源码仓库可达性仍是构建失败主要来源。
-2. 恢复上下文缺失时，任务会进入 `resume_failed`。
-3. 并行执行提升吞吐的同时增加排障复杂度。
-
-建议：
-
-1. 固化一个 `zlib` smoke test 作为每日回归基线。
-2. 持续补充构建失败分类样本，降低误判。
-3. 前端增加 recoverable 任务筛选 + 一键 resume 入口。
-
-## 9. 快速验证命令
-
-```bash
-# 系统状态
-curl -s http://localhost:8000/api/system | jq
-
-# 提交最小任务
-curl -s http://localhost:8000/api/task \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jobs": [{
-      "code_url": "https://github.com/madler/zlib.git",
-      "total_time_budget": 900,
-      "run_time_budget": 300,
-      "max_tokens": 1000
-    }],
-    "auto_init": true,
-    "build_images": true
-  }' | jq
-```
-
-## 10. 代码入口索引
-
-1. `harness_generator/src/langchain_agent/main.py`（Web API 入口）
-2. `harness_generator/src/langchain_agent/workflow_graph.py`（工作流图）
-3. `harness_generator/src/langchain_agent/workflow_common.py`（工作流公共逻辑）
-4. `harness_generator/src/langchain_agent/workflow_summary.py`（报告汇总）
-5. `harness_generator/src/fuzz_unharnessed_repo.py`（构建/运行执行）
-6. `k8s/base/` 与 `k8s/overlays/cloudflare/`（部署编排）
-7. `frontend-next/`（前端）
+1. 主 README：`/Users/zuens2020/Documents/Sherpa/README.md`
+2. 对接文档：`/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`
+3. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`

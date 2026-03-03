@@ -61,6 +61,7 @@ curl -sS http://127.0.0.1:8001/api/task/<job_id> | jq '.log'
 2. `job` 长时间 `running`
 - 检查：
   - `/api/task/<job_id>` 的 `phase`、`error_code`、`children_status`
+  - `/api/task/<job_id>` 的 `k8s_job_name`、`k8s_job_names`
   - `sherpa-web` 日志中对应 job 流
 - 处理：必要时调用 stop 或 resume（见下一节）。
 
@@ -89,6 +90,7 @@ curl -sS -X POST http://127.0.0.1:8001/api/task/<job_id>/stop
 
 1. 默认关闭自动恢复（`SHERPA_WEB_AUTO_RESUME_ON_START=0`）。
 2. 若缺失恢复上下文，任务会进入 `resume_failed` 并给出结构化错误码。
+3. 当前执行为多阶段多 Job，resume 会从记录的阶段 checkpoint 继续。
 
 ## 6. 回滚流程
 
@@ -126,3 +128,4 @@ kubectl -n sherpa exec -i statefulset/postgres -- \
 1. 先看 `/api/system` 和 `/api/metrics` 判断范围。
 2. 再定位 `sherpa-web` 日志与具体 job 日志。
 3. 若单任务问题，优先 stop/resume，而非重启整个服务。
+4. 多阶段排障建议按 `k8s_job_names` 顺序逐个查看对应 Job 日志。
