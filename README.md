@@ -4,85 +4,109 @@
 
 # SHERPA
 
-Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统，运行基线为 **Kubernetes + Native Runtime**。
+Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统。当前实现基线是 **Kubernetes + Native Runtime + 多阶段多 Job**。
 
-## 1. 当前基线
+## 1. 设计目标
 
-1. 运行模式仅 Kubernetes（本地与部署统一）。
-2. 执行器仅支持 `k8s_job`。
-3. 状态存储为 Postgres-only（`DATABASE_URL` 必填）。
-4. 子任务按阶段拆分为多 Job Pod 串行执行：`plan -> synthesize -> build -> run`。
-5. 默认手动续跑：`POST /api/task/{job_id}/resume`。
+1. 输入仓库 URL 后自动完成 `plan -> synthesize -> build -> run`。
+2. 去除 inner Docker 依赖，避免 DinD 与 Docker daemon 稳定性问题。
+3. 任务状态可持久化、可恢复、可观测。
+4. 对外 API 保持简洁，兼容历史字段。
 
-## 2. 文档导航
+## 2. 当前基线（必须对齐）
 
-1. 对接文档：`/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`
-2. 本地快速启动：`/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`
-3. 部署说明：`/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
-4. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
-5. 发布门禁：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
-6. Tunnel 接入：`/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
+1. 运行模式：Kubernetes-only。
+2. 执行器：`k8s_job` only。
+3. 存储：Postgres-only（`DATABASE_URL` 必填）。
+4. 子任务执行：按阶段拆成独立 Job Pod 串行执行。
+5. 任务恢复：默认手动触发 `POST /api/task/{job_id}/resume`。
 
-## 3. 架构总览
+## 3. 核心架构
 
 ```mermaid
 flowchart LR
-  U["User"] --> IN["Ingress / Gateway"]
+  U["User / Script"] --> IN["Ingress / Gateway"]
   IN --> FE["sherpa-frontend"]
-  IN --> API["sherpa-web API"]
+  IN --> API["sherpa-web (FastAPI)"]
   API --> DB[("Postgres")]
-  API --> S1["Job Pod: plan"]
-  API --> S2["Job Pod: synthesize"]
-  API --> S3["Job Pod: build"]
-  API --> S4["Job Pod: run"]
-  S1 --> OUT["/shared/output"]
-  S2 --> OUT
-  S3 --> OUT
-  S4 --> OUT
-  API --> LOG["/app/job-logs"]
+  API --> JOBS["K8s Stage Jobs"]
+  JOBS --> SHARED["/shared/output"]
+  API --> LOGS["/app/job-logs"]
 ```
 
-## 4. 执行链路（多 Pod 分阶段）
+### 组件职责
+
+1. `sherpa-web`：任务编排、状态写库、阶段 Job 管理、API 服务。
+2. `sherpa-frontend`：任务提交、进度与日志展示。
+3. `postgres`：任务状态与恢复上下文持久化。
+4. `k8s stage jobs`：按阶段执行 workflow（plan/synthesize/build/run）。
+
+## 4. 执行模型（多阶段多 Job）
+
+单个 fuzz 子任务不再由一个 Pod 跑完整流程，而是按阶段拆分：
+
+1. `plan` Job（`stop_after_step=plan`）
+2. `synthesize` Job
+3. `build` Job
+4. `run` Job
+
+阶段间通过 `repo_root + resume_from_step` 续接。
 
 ```mermaid
 sequenceDiagram
   participant C as Client
   participant A as sherpa-web
   participant D as Postgres
-  participant J1 as k8s Job(plan)
-  participant J2 as k8s Job(synthesize)
-  participant J3 as k8s Job(build)
-  participant J4 as k8s Job(run)
+  participant P as Job(plan)
+  participant S as Job(synthesize)
+  participant B as Job(build)
+  participant R as Job(run)
 
   C->>A: POST /api/task
-  A->>D: create task + child job
-  A->>J1: create stage job (stop_after_step=plan)
-  J1-->>A: stage result + repo_root
-  A->>J2: create stage job (resume_from_step=synthesize)
-  J2-->>A: stage result + repo_root
-  A->>J3: create stage job (resume_from_step=build)
-  J3-->>A: stage result + repo_root
-  A->>J4: create stage job (resume_from_step=run)
-  J4-->>A: final result
+  A->>D: create task/fuzz job
+  A->>P: submit stage job
+  P-->>A: result(repo_root, last_step)
+  A->>S: submit next stage
+  S-->>A: result(repo_root, last_step)
+  A->>B: submit next stage
+  B-->>A: result(repo_root, last_step)
+  A->>R: submit final stage
+  R-->>A: result(error_kind/error_code/...)
   A->>D: persist terminal status
-  C->>A: GET /api/task/{job_id}
 ```
 
-## 5. 阶段状态机
+## 5. 代码实现位置（关键路径）
+
+1. `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/main.py`
+- API 入口与任务主编排。
+- 阶段 Job 提交与等待：`_execute_k8s_job`。
+- 子任务主循环：`_run_fuzz_job`（当前已切为分阶段编排）。
+
+2. `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/k8s_job_worker.py`
+- Job Pod 入口。
+- 解 payload，调用 `fuzz_logic`，写 `result.json/error.txt`。
+
+3. `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/fuzz_relative_functions.py`
+- `fuzz_logic` 参数归一化与 workflow 调用桥接。
+
+4. `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/workflow_graph.py`
+- LangGraph 节点与路由。
+- `stop_after_step` 控制单阶段结束。
+
+## 6. 状态机与恢复机制
+
+### 子任务状态
 
 ```mermaid
 flowchart TD
-  P["plan"] --> S["synthesize"]
-  S --> B["build"]
-  B -->|"success"| R["run"]
-  B -->|"error"| BF["build_failed"]
-  R -->|"success"| DONE["done"]
-  R -->|"error"| RF["run_failed"]
-  BF --> STOP["stop / manual resume"]
-  RF --> STOP
+  Q["queued"] --> R["running/resuming"]
+  R --> S["success/resumed"]
+  R --> E["error/resume_failed"]
+  R --> RC["recoverable"]
+  RC --> R
 ```
 
-## 6. 任务聚合状态机
+### 父任务聚合
 
 ```mermaid
 flowchart LR
@@ -93,7 +117,15 @@ flowchart LR
   E -->|"no"| OK["task=success"]
 ```
 
-## 7. 关键可观测字段
+### 恢复策略
+
+1. 任务重启恢复基于数据库快照与 workflow checkpoint 字段。
+2. 手动恢复时从 `resume_from_step`（缺省回退到 `build`）继续。
+3. 恢复上下文不足时标记 `resume_failed` 并返回结构化错误。
+
+## 7. 可观测字段（前后端统一）
+
+任务详情与列表建议固定消费：
 
 1. `job_id`
 2. `status`
@@ -102,22 +134,24 @@ flowchart LR
 5. `error_code`
 6. `error_kind`
 7. `error_signature`
-8. `children_status`
-9. `k8s_job_name` / `k8s_job_names`
+8. `k8s_job_name`
+9. `k8s_job_names`
+10. `children_status`
 
-说明：
-1. `status` 看成败。
-2. `phase` 看卡点。
-3. `error_code/error_kind/error_signature` 看失败归类与是否重复。
-4. `k8s_job_names` 用于定位每个阶段对应 Pod。
+字段使用建议：
 
-## 8. API 摘要
+1. `status` 用于大盘状态颜色。
+2. `phase` 用于定位卡点。
+3. `error_code/error_kind/error_signature` 用于错误归类与重复失败判断。
+4. `k8s_job_names` 用于按阶段拉日志。
+
+## 8. API 约定
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `GET` | `/api/config` | 读取配置（脱敏） |
 | `PUT` | `/api/config` | 更新配置 |
-| `GET` | `/api/system` | 系统状态 |
+| `GET` | `/api/system` | 系统状态快照 |
 | `GET` | `/api/metrics` | Prometheus 指标 |
 | `POST` | `/api/task` | 提交任务 |
 | `GET` | `/api/task/{job_id}` | 任务详情 |
@@ -125,11 +159,44 @@ flowchart LR
 | `POST` | `/api/task/{job_id}/stop` | 停止任务 |
 | `GET` | `/api/tasks` | 任务列表 |
 
-兼容说明：
-1. `docker` / `docker_image` 为兼容字段。
-2. 在 `k8s_job` 基线下，这两个字段不参与运行时决策。
+兼容字段说明：
 
-## 9. 本地最小启动
+1. `docker` / `docker_image` 目前仅用于兼容旧调用。
+2. 在 `k8s_job` 基线下，它们不参与运行时决策。
+
+## 9. 配置矩阵
+
+### 必填配置
+
+1. `DATABASE_URL`：Postgres 连接串。
+2. provider API key（当前默认 MiniMax 路径）。
+
+### 常用运行配置
+
+1. `SHERPA_EXECUTOR_MODE=k8s_job`
+2. `SHERPA_PARALLEL_FUZZERS`：run 阶段并发数。
+3. `SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC`：不限时模式单轮上限。
+4. `SHERPA_WEB_AUTO_RESUME_ON_START`：是否开机自动恢复。
+
+## 10. 数据与文件流
+
+```mermaid
+flowchart TB
+  API["sherpa-web"] --> DB[("postgres jobs table")]
+  API --> O1["_k8s_jobs/<job_id>/stage-*.json"]
+  API --> O2["_k8s_jobs/<job_id>/stage-*.error.txt"]
+  API --> L["/app/job-logs/jobs/<job_id>.log"]
+  JOB["stage job pod"] --> O1
+  JOB --> O2
+```
+
+路径说明：
+
+1. 阶段结果：`/shared/output/_k8s_jobs/<job_id>/stage-XX-<stage>.json`
+2. 阶段错误：`/shared/output/_k8s_jobs/<job_id>/stage-XX-<stage>.error.txt`
+3. Web 聚合日志：`/app/job-logs/jobs/<job_id>.log`
+
+## 11. 本地最小启动
 
 ```bash
 kubectl apply -k k8s/base
@@ -139,7 +206,7 @@ curl -sS http://127.0.0.1:8001/api/health
 curl -sS http://127.0.0.1:8001/api/system | jq
 ```
 
-提交任务示例：
+提交任务样例：
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8001/api/task \
@@ -154,15 +221,25 @@ curl -sS -X POST http://127.0.0.1:8001/api/task \
   }'
 ```
 
-## 10. 运维与排障
+## 12. 排障手册（最短流程）
 
-1. 看详情：`status + phase + error_code`。
-2. 看指标：`/api/metrics`。
-3. 看日志：`web 日志 + 对应 stage Job 日志`。
-4. 需要终止时，调用 `POST /api/task/{job_id}/stop`，系统会清理该任务阶段 Job。
+1. 查详情：`GET /api/task/{job_id}`。
+2. 关注 `phase/error_code/error_kind`。
+3. 取 `k8s_job_names` 并逐个拉对应 Job 日志。
+4. 判断是可恢复错误还是环境错误。
+5. 执行 `resume` 或 `stop`。
 
-## 11. 安全约束
+## 13. 安全与合规
 
-1. 日志链路启用敏感信息脱敏（token/key/password）。
+1. 日志输出经过敏感信息脱敏（key/token/password/bearer）。
 2. `/api/config` 不回显明文密钥。
-3. 持久化配置文件写入后尝试收敛文件权限（0600）。
+3. 持久化配置写入后尝试 `0600` 权限收敛。
+4. 建议生产启用最小权限 RBAC 与网络策略。
+
+## 14. 延伸文档
+
+1. 对接文档：`/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`
+2. 本地启动：`/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`
+3. 运行手册：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
+4. 发布门禁：`/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
+5. Cloudflare 接入：`/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
