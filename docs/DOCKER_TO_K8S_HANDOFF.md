@@ -17,9 +17,11 @@
 
 1. Sherpa 已收敛为 **Kubernetes-only** 运行模式。
 2. 执行器仅支持 `k8s_job`，不再走 `local_thread`。
-3. 状态存储为 **Postgres-only**，`DATABASE_URL` 必填。
-4. 对接时优先看 API 字段：`job_id`、`status`、`phase`、`error_code`。
-5. 运维入口固定为：`/api/system`、`/api/metrics`、`/api/task/{job_id}`。
+3. 子任务采用“多阶段多 Job”执行：`plan -> synthesize -> build -> run` 串行 Job Pod。
+4. k8s worker 内部使用原生工具链执行 build/run，不再依赖 inner Docker。
+5. 状态存储为 **Postgres-only**，`DATABASE_URL` 必填。
+6. 对接时优先看 API 字段：`job_id`、`status`、`phase`、`error_code`。
+7. 运维入口固定为：`/api/system`、`/api/metrics`、`/api/task/{job_id}`。
 
 ---
 
@@ -83,9 +85,10 @@ sequenceDiagram
 
   C->>API: POST /api/task
   API->>DB: create task + child jobs
-  API->>J: create job manifest
-  J->>W: run workflow (plan/synthesize/build/run)
-  W-->>API: result.json / error.txt
+  API->>J: create stage job manifest
+  J->>W: run one stage (stop_after_step)
+  W-->>API: stage result.json / error.txt
+  API->>J: create next stage job
   API->>DB: persist status/result
   C->>API: GET /api/task/{job_id}
 ```
@@ -118,9 +121,12 @@ flowchart TD
 
 1. `job_id`：唯一标识。
 2. `status`：聚合状态（running/success/error）。
-3. `phase`：当前阶段（例如 build/run/fix_build）。
-4. `error_code`：结构化错误码。
-5. `children_status`：子任务统计。
+3. `runtime_mode`：执行模式（当前基线为 `native`）。
+4. `phase`：当前阶段（例如 build/run/fix_build）。
+5. `error_code`：结构化错误码（优先取终止原因/分类错误码）。
+6. `error_kind`：错误大类（如 build/run）。
+7. `error_signature`：错误签名（用于判定是否同类重复失败）。
+8. `children_status`：子任务统计。
 
 ### 6.3 为什么要同时看 status 和 phase
 
@@ -159,8 +165,6 @@ curl -sS -X POST http://127.0.0.1:8001/api/task \
   -d '{
     "jobs": [{
       "code_url": "https://github.com/madler/zlib.git",
-      "docker": true,
-      "docker_image": "auto",
       "total_time_budget": 900,
       "run_time_budget": 900,
       "max_tokens": 1000
@@ -183,6 +187,11 @@ curl -sS -X POST http://127.0.0.1:8001/api/task \
 | POST | `/api/task/{job_id}/resume` | 手动续跑 |
 | POST | `/api/task/{job_id}/stop` | 停止任务 |
 | GET | `/api/tasks` | 最近任务列表 |
+
+兼容说明：
+
+1. 请求体中的 `docker` / `docker_image` 字段仍可传，但在当前 `k8s_job` 原生执行基线下不参与运行时决策。
+2. 建议新接入方直接省略这两个字段，避免与历史文档混淆。
 
 建议前端轮询顺序：
 

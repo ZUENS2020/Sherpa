@@ -220,15 +220,27 @@ def _kubectl(args: list[str], *, input_text: str | None = None, timeout: int = 3
         return 1, "", str(e)
 
 
-def _k8s_job_name(job_id: str, *, resumed: bool) -> str:
+def _k8s_job_name(job_id: str, *, resumed: bool, stage: str | None = None, seq: int | None = None) -> str:
     suffix = "resume" if resumed else "new"
+    stage_part = (stage or "").strip().lower()
+    if stage_part:
+        stage_part = re.sub(r"[^a-z0-9-]+", "-", stage_part)[:16]
+    idx_part = f"-{int(seq)}" if seq is not None else ""
+    if stage_part:
+        return f"sherpa-fuzz-{job_id[:10]}-{suffix}-{stage_part}{idx_part}"
     return f"sherpa-fuzz-{job_id[:16]}-{suffix}"
 
 
-def _k8s_result_paths(job_id: str) -> tuple[Path, Path]:
+def _k8s_result_paths(job_id: str, *, stage: str | None = None, seq: int | None = None) -> tuple[Path, Path]:
     base = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser().resolve()
     root = base / "_k8s_jobs" / job_id
-    return (root / "result.json", root / "error.txt")
+    stage_part = (stage or "").strip().lower()
+    if stage_part:
+        stage_part = re.sub(r"[^a-z0-9-]+", "-", stage_part)[:16]
+        prefix = f"stage-{int(seq or 0):02d}-{stage_part}"
+    else:
+        prefix = "result"
+    return (root / f"{prefix}.json", root / f"{prefix}.error.txt")
 
 
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
@@ -256,6 +268,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                 "app.kubernetes.io/name": "sherpa",
                 "sherpa/job-id": str(payload.get("job_id") or ""),
                 "sherpa/job-kind": "fuzz",
+                "sherpa/stage": str(payload.get("stop_after_step") or payload.get("resume_from_step") or "full"),
             },
         },
         "spec": {
@@ -420,6 +433,8 @@ def _execute_k8s_job(
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
+    if _executor_mode() == "k8s_job":
+        return []
     root = str(repo_root or "").strip()
     if not root:
         return []
@@ -442,6 +457,8 @@ def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
 
 
 def _stop_runtime_containers_for_repo(repo_root: str) -> list[str]:
+    if _executor_mode() == "k8s_job":
+        return []
     killed: list[str] = []
     for cid in _list_runtime_containers_for_repo(repo_root):
         rc, _, _ = _docker_cli(["rm", "-f", cid], timeout=20)
@@ -784,6 +801,7 @@ def _is_status_terminal(raw: str | None) -> bool:
 
 
 _RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "fix_crash"}
+_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run")
 
 
 def _normalize_resume_step(raw: str | None) -> str:
@@ -791,6 +809,17 @@ def _normalize_resume_step(raw: str | None) -> str:
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
     return "plan"
+
+
+def _staged_sequence_from(raw_start: str | None) -> list[str]:
+    start = _normalize_resume_step(raw_start)
+    if start in {"fix_build", "fix_crash"}:
+        start = "build"
+    try:
+        idx = _STAGED_WORKFLOW_STEPS.index(start)
+    except ValueError:
+        idx = 0
+    return list(_STAGED_WORKFLOW_STEPS[idx:])
 
 
 def _error_code_for_job(job: dict | None) -> str:
@@ -809,6 +838,7 @@ def _error_code_for_job(job: dict | None) -> str:
             "run_terminal_reason",
             "build_error_code",
             "run_error_kind",
+            "build_error_kind",
             "error_code",
         ):
             val = str(result.get(key) or "").strip()
@@ -818,6 +848,47 @@ def _error_code_for_job(job: dict | None) -> str:
     if status in {"error", "resume_failed", "recoverable"}:
         return "unknown_error"
     return ""
+
+
+def _error_kind_for_job(job: dict | None) -> str:
+    if not isinstance(job, dict):
+        return ""
+    result = job.get("result")
+    if isinstance(result, dict):
+        for key in ("run_error_kind", "build_error_kind", "error_kind"):
+            val = str(result.get(key) or "").strip()
+            if val:
+                return val
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"error", "resume_failed", "recoverable"}:
+        return "unknown"
+    return ""
+
+
+def _error_signature_for_job(job: dict | None) -> str:
+    if not isinstance(job, dict):
+        return ""
+    result = job.get("result")
+    if isinstance(result, dict):
+        for key in (
+            "build_error_signature_short",
+            "build_error_signature",
+            "timeout_signature",
+            "crash_signature",
+            "error_signature",
+        ):
+            val = str(result.get(key) or "").strip()
+            if val:
+                return val
+    return ""
+
+
+def _runtime_mode_for_job(job: dict | None) -> str:
+    if isinstance(job, dict):
+        v = str(job.get("runtime_mode") or "").strip().lower()
+        if v in {"native", "docker"}:
+            return v
+    return "native" if _executor_mode() == "k8s_job" else "docker"
 
 
 def _phase_for_job(job: dict | None) -> str:
@@ -890,6 +961,7 @@ def _system_status() -> dict:
             "size_bytes": _dir_size(log_dir),
         },
         "config": {
+            "runtime_mode": "native",
             "oss_fuzz_dir": cfg.oss_fuzz_dir,
             "openai_base_url": cfg.openai_base_url,
             "openai_api_key_set": bool(cfg.openai_api_key),
@@ -988,6 +1060,10 @@ class provider_models_request(BaseModel):
 
 
 def _resolve_job_docker_policy(request: fuzz_model, cfg: WebPersistentConfig) -> tuple[bool, str]:
+    if _executor_mode() == "k8s_job":
+        # Native runtime baseline: keep API fields for compatibility, but
+        # runtime no longer depends on docker flags/image in k8s mode.
+        return False, ""
     docker_enabled = request.docker if request.docker is not None else cfg.fuzz_use_docker
     docker_image_value = (
         (request.docker_image or "").strip()
@@ -998,18 +1074,8 @@ def _resolve_job_docker_policy(request: fuzz_model, cfg: WebPersistentConfig) ->
 
 
 def _enforce_docker_only(jobs: list[fuzz_model], cfg: WebPersistentConfig) -> None:
-    for idx, job in enumerate(jobs):
-        docker_enabled, docker_image_value = _resolve_job_docker_policy(job, cfg)
-        if not docker_enabled:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Docker-only policy: jobs[{idx}] must set docker=true (or enable default docker in config).",
-            )
-        if not docker_image_value.strip():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Docker-only policy: jobs[{idx}] must provide docker_image (or configure fuzz_docker_image).",
-            )
+    # Native runtime baseline: keep for compatibility hook, no hard enforcement.
+    return None
 
 
 @app.get("/api/config")
@@ -1061,11 +1127,6 @@ def post_opencode_provider_models(provider: str, request: provider_models_reques
 
 @app.put("/api/config")
 def put_config(request: WebPersistentConfig = Body(...)):
-    if request.fuzz_use_docker is False:
-        raise HTTPException(
-            status_code=400,
-            detail="Docker-only policy: fuzz_use_docker must remain enabled.",
-        )
     if int(request.fuzz_time_budget) < 0:
         raise HTTPException(
             status_code=400,
@@ -1094,8 +1155,9 @@ def put_config(request: WebPersistentConfig = Body(...)):
     for key in controlled_fields:
         payload[key] = getattr(current, key)
 
-    payload["fuzz_use_docker"] = True
-    payload["fuzz_docker_image"] = (payload.get("fuzz_docker_image") or "").strip() or "auto"
+    # Native runtime baseline in k8s mode; keep fields for compatibility only.
+    payload["fuzz_use_docker"] = False
+    payload["fuzz_docker_image"] = ""
     runtime_cfg = apply_minimax_env_source(WebPersistentConfig(**payload))
 
     # Keep persisted config free of API secrets; runtime values come from environment.
@@ -1147,6 +1209,7 @@ def _create_job(kind: str, repo: str | None = None) -> str:
             "log_file": None,
             "cancel_requested": False,
             "last_cancel_requested_at": None,
+            "runtime_mode": _runtime_mode_for_job(None),
         }
         job_payload = dict(_JOBS[job_id])
     if job_payload is not None:
@@ -1363,7 +1426,13 @@ def _job_snapshot(job_id: str) -> dict | None:
 def _derive_task_status(job: dict) -> dict:
     children = list(job.get("children") or [])
     if not children:
-        return dict(job)
+        view = dict(job)
+        view["error_code"] = _error_code_for_job(view)
+        view["error_kind"] = _error_kind_for_job(view)
+        view["error_signature"] = _error_signature_for_job(view)
+        view["phase"] = _phase_for_job(view)
+        view["runtime_mode"] = _runtime_mode_for_job(view)
+        return view
     child_jobs = []
     with _JOBS_LOCK:
         for cid in children:
@@ -1397,10 +1466,16 @@ def _derive_task_status(job: dict) -> dict:
     }
     for c in child_jobs:
         c["error_code"] = _error_code_for_job(c)
+        c["error_kind"] = _error_kind_for_job(c)
+        c["error_signature"] = _error_signature_for_job(c)
         c["phase"] = _phase_for_job(c)
+        c["runtime_mode"] = _runtime_mode_for_job(c)
     view["children"] = child_jobs
     view["error_code"] = _error_code_for_job(view)
+    view["error_kind"] = _error_kind_for_job(view)
+    view["error_signature"] = _error_signature_for_job(view)
     view["phase"] = _phase_for_job(view)
+    view["runtime_mode"] = _runtime_mode_for_job(view)
     if derived in {"success", "error"} and not job.get("finished_at"):
         done_ts = time.time()
         _job_update(job.get("job_id"), finished_at=done_ts, status=derived)
@@ -1468,7 +1543,10 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "finished_at_iso": _iso_time(job.get("finished_at")),
                 "error": job.get("error"),
                 "error_code": _error_code_for_job(job),
+                "error_kind": _error_kind_for_job(job),
+                "error_signature": _error_signature_for_job(job),
                 "phase": _phase_for_job(job),
+                "runtime_mode": _runtime_mode_for_job(job),
                 "result": job.get("result"),
                 "children_status": children_status,
                 "child_count": children_status.get("total", 0),
@@ -1537,8 +1615,6 @@ def _run_fuzz_job(
                 raise RuntimeError(cancel_error)
             print(f"[job {job_id}] about to dispatch k8s worker...")
             docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
-            if not docker_enabled:
-                raise RuntimeError("Docker-only policy violation: non-Docker fuzz execution is disabled.")
             total_time_budget_value = (
                 request.total_time_budget
                 if request.total_time_budget is not None
@@ -1572,53 +1648,108 @@ def _run_fuzz_job(
                 model_value = request.model or opencode_model_env or openai_model
             else:
                 model_value = request.model or cfg.openrouter_model
+            runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
             print(
-                f"[job {job_id}] params docker={docker_enabled} docker_image={docker_image_value} "
+                f"[job {job_id}] params runtime={runtime_mode} "
                 f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
                 f"max_tokens={request.max_tokens} model={model_value}"
             )
             print(f"[job {job_id}] log_file={log_file}")
-            docker_image = docker_image_value
             mode = _executor_mode()
-            print(f"[job {job_id}] executor_mode={mode} docker_image={docker_image}")
+            docker_image = None if mode == "k8s_job" else docker_image_value
+            print(
+                f"[job {job_id}] executor_mode={mode} "
+                f"docker_image={docker_image if docker_image else '(native)'}"
+            )
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
             try:
-                job_name = _k8s_job_name(job_id, resumed=resumed)
-                result_path, error_path = _k8s_result_paths(job_id)
-                _job_update(
-                    job_id,
-                    k8s_job_name=job_name,
-                    k8s_result_path=str(result_path),
-                    k8s_error_path=str(error_path),
-                    k8s_phase="Submitting",
-                )
-                payload = {
-                    "job_id": job_id,
-                    "repo_url": request.code_url,
-                    "max_len": int(request.max_tokens),
-                    "time_budget": int(total_time_budget_value),
-                    "run_time_budget": int(run_time_budget_value),
-                    "email": request.email,
-                    "docker_image": docker_image,
-                    "ai_key_path": str(opencode_env_path()),
-                    "oss_fuzz_dir": cfg.oss_fuzz_dir,
-                    "model": model_value,
-                    "resume_from_step": (_normalize_resume_step(resume_from_step) if resumed else None),
-                    "resume_repo_root": (resume_repo_root if resumed else None),
-                    "result_path": str(result_path),
-                    "error_path": str(error_path),
-                }
-                wait_timeout = max(60, run_time_budget_value if run_time_budget_value > 0 else 7200)
-                res = _execute_k8s_job(
-                    job_id=job_id,
-                    job_name=job_name,
-                    payload=payload,
-                    result_path=result_path,
-                    error_path=error_path,
-                    wait_timeout=wait_timeout,
-                )
-                print(f"[job {job_id}] k8s worker returned successfully")
+                start_step = _normalize_resume_step(resume_from_step) if resumed else "plan"
+                stages = _staged_sequence_from(start_step)
+                if not stages:
+                    stages = ["plan", "synthesize", "build", "run"]
+
+                stage_results: list[dict[str, object]] = []
+                stage_job_names: list[str] = []
+                current_repo_root = str(resume_repo_root or "").strip()
+                last_result: object = {}
+
+                for idx, stage in enumerate(stages, start=1):
+                    if _is_cancel_requested(job_id):
+                        raise RuntimeError(cancel_error)
+                    job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
+                    result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=idx)
+                    stage_job_names.append(job_name)
+                    _job_update(
+                        job_id,
+                        k8s_job_name=job_name,
+                        k8s_job_names=stage_job_names,
+                        k8s_result_path=str(result_path),
+                        k8s_error_path=str(error_path),
+                        k8s_phase=f"{stage}:Submitting",
+                        workflow_active_step=stage,
+                    )
+                    payload = {
+                        "job_id": job_id,
+                        "repo_url": request.code_url,
+                        "max_len": int(request.max_tokens),
+                        "time_budget": int(total_time_budget_value),
+                        "run_time_budget": int(run_time_budget_value),
+                        "email": request.email,
+                        "docker_image": docker_image,
+                        "ai_key_path": str(opencode_env_path()),
+                        "oss_fuzz_dir": cfg.oss_fuzz_dir,
+                        "model": model_value,
+                        "resume_from_step": stage,
+                        "resume_repo_root": (current_repo_root or None),
+                        "stop_after_step": stage,
+                        "result_path": str(result_path),
+                        "error_path": str(error_path),
+                    }
+                    wait_timeout = max(120, run_time_budget_value if run_time_budget_value > 0 else 7200)
+                    stage_result = _execute_k8s_job(
+                        job_id=job_id,
+                        job_name=job_name,
+                        payload=payload,
+                        result_path=result_path,
+                        error_path=error_path,
+                        wait_timeout=wait_timeout,
+                    )
+                    if isinstance(stage_result, dict):
+                        current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
+                        stage_results.append(
+                            {
+                                "stage": stage,
+                                "job_name": job_name,
+                                "ok": True,
+                                "repo_root": current_repo_root,
+                                "result": stage_result,
+                            }
+                        )
+                        if current_repo_root:
+                            _job_update(job_id, workflow_repo_root=current_repo_root, resume_repo_root=current_repo_root)
+                    else:
+                        stage_results.append(
+                            {
+                                "stage": stage,
+                                "job_name": job_name,
+                                "ok": True,
+                                "repo_root": current_repo_root,
+                            }
+                        )
+                    _job_update(
+                        job_id,
+                        workflow_last_step=stage,
+                        workflow_active_step="",
+                        k8s_phase=f"{stage}:Succeeded",
+                    )
+                    last_result = stage_result
+                    print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+
+                res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
+                res["stage_results"] = stage_results
+                res["stage_job_names"] = stage_job_names
+                print(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
             except Exception as fuzz_err:
                 print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
                 import traceback
@@ -1828,8 +1959,12 @@ def _stop_fuzz_job(job_id: str, *, reason: str, trigger: str) -> dict[str, objec
     repo_root = str(snap.get("workflow_repo_root") or snap.get("resume_repo_root") or "").strip()
     killed_containers = _stop_runtime_containers_for_repo(repo_root) if repo_root else []
     k8s_job_name = str(snap.get("k8s_job_name") or "").strip()
-    if k8s_job_name:
-        _k8s_delete_job(k8s_job_name)
+    raw_names = snap.get("k8s_job_names") or []
+    k8s_job_names = [str(x).strip() for x in raw_names if str(x).strip()] if isinstance(raw_names, list) else []
+    if k8s_job_name and k8s_job_name not in k8s_job_names:
+        k8s_job_names.append(k8s_job_name)
+    for name in k8s_job_names:
+        _k8s_delete_job(name)
 
     if status not in {"success", "resumed", "error", "resume_failed"}:
         _job_update(
@@ -1849,6 +1984,7 @@ def _stop_fuzz_job(job_id: str, *, reason: str, trigger: str) -> dict[str, objec
         "future_cancelled": bool(future_cancelled),
         "killed_containers": killed_containers,
         "k8s_job_name": (k8s_job_name or None),
+        "k8s_job_names": k8s_job_names,
         "repo_root": repo_root or None,
     }
 
@@ -1992,6 +2128,10 @@ async def task_api(request: task_model = Body(...)):
                         )
 
                         should_build_images = request.build_images
+                        if should_build_images:
+                            if _executor_mode() == "k8s_job":
+                                print("[task] skip prebuild images in k8s native runtime mode")
+                                should_build_images = False
                         if should_build_images:
                             # Only build if any job uses Docker (explicit or default config).
                             use_docker_jobs = any(

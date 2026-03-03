@@ -41,8 +41,6 @@ curl -sS -X POST http://127.0.0.1:8001/api/task \
   -d '{
     "jobs": [{
       "code_url": "https://github.com/madler/zlib.git",
-      "docker": true,
-      "docker_image": "auto",
       "total_time_budget": 900,
       "run_time_budget": 900,
       "max_tokens": 1000

@@ -49,6 +49,7 @@ kubectl -n sherpa rollout undo deploy/sherpa-frontend
 ## 6. 运维注意事项
 - `DATABASE_URL` 缺失时，`sherpa-web` 将启动失败（Postgres-only 设计）。
 - 执行器当前仅支持 `k8s_job`，并要求 `sherpa-web` Pod 具备创建/查询 Job 的 RBAC 权限。
+- 当前 worker 运行基线为原生执行（native）；不再要求 Pod 内可用 Docker daemon/CLI。
 - 建议给 `postgres` 配置备份策略（逻辑备份 + PV 快照）。
 - `sherpa-shared-output` 建议配合 TTL 清理策略（CronJob）避免无限增长。
 

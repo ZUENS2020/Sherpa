@@ -252,7 +252,7 @@ def test_put_config_preserves_and_clears_opencode_provider_secret():
         assert cfg_clear.opencode_providers[0].api_key == "test-minimax-key"
 
 
-def test_put_config_rejects_disabling_docker():
+def test_put_config_allows_disabling_docker_flag_in_native_mode():
     with TestClient(web_main.app) as client:
         response = client.put(
             "/api/config",
@@ -263,8 +263,9 @@ def test_put_config_rejects_disabling_docker():
             },
         )
 
-    assert response.status_code == 400
-    assert "Docker-only policy" in response.json().get("detail", "")
+    assert response.status_code == 200
+    cfg = web_main._cfg_get()
+    assert cfg.fuzz_use_docker is False
 
 
 def test_put_config_accepts_unlimited_budget_zero():
@@ -272,9 +273,9 @@ def test_put_config_accepts_unlimited_budget_zero():
         response = client.put(
             "/api/config",
             json={
-                "fuzz_use_docker": True,
+                "fuzz_use_docker": False,
                 "fuzz_time_budget": 0,
-                "fuzz_docker_image": "auto",
+                "fuzz_docker_image": "",
             },
         )
 
@@ -288,9 +289,9 @@ def test_put_config_rejects_negative_budget():
         response = client.put(
             "/api/config",
             json={
-                "fuzz_use_docker": True,
+                "fuzz_use_docker": False,
                 "fuzz_time_budget": -1,
-                "fuzz_docker_image": "auto",
+                "fuzz_docker_image": "",
             },
         )
 
@@ -433,7 +434,7 @@ def test_task_submit_child_spawn_happens_outside_parent_stdout_redirect(monkeypa
     assert status["status"] == "running"
 
 
-def test_task_submit_rejects_non_docker_job():
+def test_task_submit_allows_non_docker_job_in_native_mode():
     with TestClient(web_main.app) as client:
         response = client.post(
             "/api/task",
@@ -448,8 +449,7 @@ def test_task_submit_rejects_non_docker_job():
             },
         )
 
-    assert response.status_code == 400
-    assert "Docker-only policy" in response.json().get("detail", "")
+    assert response.status_code == 200
 
 
 def test_task_submit_marks_error_and_finished_at_when_init_fails(monkeypatch):

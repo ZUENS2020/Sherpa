@@ -19,7 +19,7 @@ def _payload_b64(payload: dict) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
-def test_worker_passes_payload_docker_image_to_fuzz_logic(tmp_path: Path, monkeypatch):
+def test_worker_forces_native_mode_ignores_payload_docker_image(tmp_path: Path, monkeypatch):
     captured: dict = {}
     result_path = tmp_path / "result.json"
     error_path = tmp_path / "error.txt"
@@ -45,7 +45,7 @@ def test_worker_passes_payload_docker_image_to_fuzz_logic(tmp_path: Path, monkey
 
     rc = k8s_job_worker.main()
     assert rc == 0
-    assert captured["docker_image"] == "sherpa-fuzz-cpp:latest"
+    assert captured["docker_image"] is None
     assert result_path.is_file()
     out = json.loads(result_path.read_text(encoding="utf-8"))
     assert out["ok"] is True
@@ -53,7 +53,7 @@ def test_worker_passes_payload_docker_image_to_fuzz_logic(tmp_path: Path, monkey
     assert out["result"]["message"] == "fake"
 
 
-def test_worker_defaults_docker_image_to_auto_when_missing(tmp_path: Path, monkeypatch):
+def test_worker_forces_native_mode_when_payload_docker_image_missing(tmp_path: Path, monkeypatch):
     captured: dict = {}
     result_path = tmp_path / "result.json"
     error_path = tmp_path / "error.txt"
@@ -78,4 +78,4 @@ def test_worker_defaults_docker_image_to_auto_when_missing(tmp_path: Path, monke
 
     rc = k8s_job_worker.main()
     assert rc == 0
-    assert captured["docker_image"] == "auto"
+    assert captured["docker_image"] is None

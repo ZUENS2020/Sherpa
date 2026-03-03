@@ -24,11 +24,10 @@ RUN set -e; \
       sed -i -E "s#https?://security.debian.org/debian#${APT_SECURITY_MIRROR}#g" "$f"; \
     done
 
-# System deps:
-# - git: optional fallback when GitPython path is used
-# - curl/ca-certificates: install helpers (optional)
-# - docker-cli + docker-buildx: docker CLI + buildx plugin (daemon comes from dind service)
-# - vim-common: provides xxd (nice-to-have)
+# System deps (native k8s runtime baseline):
+# - build toolchain for in-worker compile/run
+# - git/curl/ca-certificates helpers
+# - vim-common provides xxd (nice-to-have)
 RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -41,22 +40,8 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         ninja-build \
         pkg-config \
         libfuzzer-19-dev \
-        docker-cli \
-        docker-buildx \
         vim-common \
         xz-utils \
-    && if ! command -v docker >/dev/null 2>&1; then \
-           echo "docker CLI not found after install"; \
-           ls -l /usr/bin | grep -E 'docker|buildx' || true; \
-           exit 1; \
-       fi \
-    && mkdir -p /usr/local/lib/docker/cli-plugins \
-    && if [ -x /usr/libexec/docker/cli-plugins/docker-buildx ]; then \
-           ln -sf /usr/libexec/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx; \
-       elif [ -x /usr/lib/docker/cli-plugins/docker-buildx ]; then \
-           ln -sf /usr/lib/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx; \
-       fi \
-    && docker --version \
     && rm -rf /var/lib/apt/lists/*
 
 # Install kubectl for Kubernetes Job executor mode.

@@ -75,8 +75,8 @@ class WebPersistentConfig(BaseModel):
     # Per-round cap (seconds) when both total/run budgets are unlimited (0).
     # 0 means fully unlimited.
     sherpa_run_unlimited_round_budget_sec: int = 7200
-    fuzz_use_docker: bool = True
-    fuzz_docker_image: str = "auto"
+    fuzz_use_docker: bool = False
+    fuzz_docker_image: str = ""
 
     # OSS-Fuzz (local checkout root)
     oss_fuzz_dir: str = ""
@@ -484,8 +484,8 @@ def load_config() -> WebPersistentConfig:
     path = config_path()
     if not path.is_file():
         cfg = WebPersistentConfig()
-        cfg.fuzz_use_docker = True
-        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
+        cfg.fuzz_use_docker = False
+        cfg.fuzz_docker_image = ""
         cfg.opencode_providers = normalize_opencode_providers(cfg.opencode_providers)
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
@@ -498,8 +498,8 @@ def load_config() -> WebPersistentConfig:
         else:
             cfg = WebPersistentConfig(**raw)
 
-        cfg.fuzz_use_docker = True
-        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
+        cfg.fuzz_use_docker = bool(cfg.fuzz_use_docker)
+        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip()
         cfg.opencode_providers = normalize_opencode_providers(cfg.opencode_providers)
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
@@ -507,8 +507,8 @@ def load_config() -> WebPersistentConfig:
         return apply_minimax_env_source(cfg)
     except Exception:
         cfg = WebPersistentConfig()
-        cfg.fuzz_use_docker = True
-        cfg.fuzz_docker_image = (cfg.fuzz_docker_image or "").strip() or "auto"
+        cfg.fuzz_use_docker = False
+        cfg.fuzz_docker_image = ""
         cfg.opencode_providers = normalize_opencode_providers(cfg.opencode_providers)
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
@@ -624,6 +624,10 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
 
 def as_public_dict(cfg: WebPersistentConfig) -> dict[str, Any]:
     data = cfg.model_dump()
+    # Native runtime baseline for k8s mode: keep Docker fields for backward
+    # compatibility, but always expose them as disabled to avoid UI confusion.
+    data["fuzz_use_docker"] = False
+    data["fuzz_docker_image"] = ""
 
     for key in ("openai_api_key", "openrouter_api_key"):
         raw = data.get(key)
