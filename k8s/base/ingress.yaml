@@ -25,3 +25,20 @@ spec:
                 name: sherpa-frontend
                 port:
                   number: 3000
+    - host: sherpa.zuens2020.work
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-frontend
+                port:
+                  number: 3000

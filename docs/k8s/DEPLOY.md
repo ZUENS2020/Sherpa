@@ -93,4 +93,15 @@ python -m pytest -q tests/test_job_store_persistence.py tests/test_api_stability
 
 - 运行手册：`docs/k8s/RUNBOOK.md`
 - 发布回滚门禁：`docs/k8s/RELEASE_GATE.md`
+- Cloudflare Tunnel 内网接入：`docs/k8s/CLOUDFLARE_TUNNEL.md`
+
+## 10. 内网域名接入（Cloudflare Tunnel）
+
+如需通过 `https://sherpa.zuens2020.work` 从公网访问内网环境，执行：
+
+```bash
+kubectl apply -k k8s/overlays/cloudflare
+```
+
+详细步骤见：`docs/k8s/CLOUDFLARE_TUNNEL.md`。
 - E2E 验收报告：`docs/k8s/E2E_ZLIB_REPORT.md`

@@ -38,9 +38,9 @@ def main() -> int:
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
-        # K8s worker is local-only execution mode.
-        # Never run inner docker from worker; always pass docker_image=None.
-        effective_docker_image = None
+        # Keep docker_image semantics consistent with API submission path.
+        # `auto` is resolved downstream by the harness generator.
+        effective_docker_image = (str(payload.get("docker_image") or "").strip() or "auto")
 
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),
