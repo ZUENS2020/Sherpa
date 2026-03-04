@@ -258,6 +258,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     pvc_oss = (os.environ.get("SHERPA_K8S_PVC_OSS_FUZZ", "sherpa-oss-fuzz") or "").strip()
     pvc_cfg = (os.environ.get("SHERPA_K8S_PVC_CONFIG", "sherpa-config") or "").strip()
     pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
+    target_node_name = str(payload.get("target_node_name") or "").strip()
 
     manifest = {
         "apiVersion": "batch/v1",
@@ -328,6 +329,9 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     if env_from:
         manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
 
+    if target_node_name:
+        manifest["spec"]["template"]["spec"]["nodeName"] = target_node_name
+
     if keep_finished:
         manifest["spec"]["ttlSecondsAfterFinished"] = None
 
@@ -380,6 +384,90 @@ def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
         last_phase = "Running" if active > 0 else "Pending"
         time.sleep(2)
     return "Timeout", last_phase
+
+
+def _k8s_get_job_node_name(job_name: str) -> str:
+    if not job_name:
+        return ""
+    rc, out, _ = _kubectl(
+        ["get", "pod", "-l", f"job-name={job_name}", "-o", "jsonpath={.items[0].spec.nodeName}"],
+        timeout=15,
+    )
+    if rc != 0:
+        return ""
+    return str(out or "").strip()
+
+
+def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
+    if not node_name:
+        return False, "empty_node"
+
+    rc_get, out_get, err_get = _kubectl(["get", "node", node_name, "-o", "json"], timeout=15)
+    if rc_get != 0:
+        return False, f"get_node_failed:{(err_get or out_get).strip()}"
+    try:
+        node_doc = json.loads(out_get)
+    except Exception as e:
+        return False, f"bad_node_json:{e}"
+
+    spec_doc = node_doc.get("spec") if isinstance(node_doc, dict) else {}
+    if not isinstance(spec_doc, dict):
+        spec_doc = {}
+    if bool(spec_doc.get("unschedulable")):
+        return False, "node_unschedulable"
+
+    status_doc = node_doc.get("status") if isinstance(node_doc, dict) else {}
+    if not isinstance(status_doc, dict):
+        status_doc = {}
+    conds = status_doc.get("conditions")
+    ready = False
+    if isinstance(conds, list):
+        for c in conds:
+            if not isinstance(c, dict):
+                continue
+            if str(c.get("type") or "") == "Ready" and str(c.get("status") or "") == "True":
+                ready = True
+                break
+    if not ready:
+        return False, "node_not_ready"
+
+    max_cpu_pct = 95
+    max_mem_pct = 95
+    try:
+        max_cpu_pct = max(1, min(100, int(os.environ.get("SHERPA_K8S_NODE_MAX_CPU_PCT", "95"))))
+    except Exception:
+        max_cpu_pct = 95
+    try:
+        max_mem_pct = max(1, min(100, int(os.environ.get("SHERPA_K8S_NODE_MAX_MEM_PCT", "95"))))
+    except Exception:
+        max_mem_pct = 95
+
+    rc_top, out_top, err_top = _kubectl(["top", "node", node_name, "--no-headers"], timeout=10)
+    if rc_top != 0:
+        return True, f"node_ready_no_metrics:{(err_top or out_top).strip()}"
+    line = ""
+    for raw in (out_top or "").splitlines():
+        txt = raw.strip()
+        if txt:
+            line = txt
+            break
+    if not line:
+        return True, "node_ready_empty_metrics"
+    parts = line.split()
+    if len(parts) < 5:
+        return True, "node_ready_bad_metrics"
+    cpu_pct_txt = parts[2].rstrip("%")
+    mem_pct_txt = parts[4].rstrip("%")
+    try:
+        cpu_pct = int(cpu_pct_txt)
+        mem_pct = int(mem_pct_txt)
+    except Exception:
+        return True, "node_ready_unparsed_metrics"
+    if cpu_pct >= max_cpu_pct:
+        return False, f"node_cpu_busy:{cpu_pct}%"
+    if mem_pct >= max_mem_pct:
+        return False, f"node_mem_busy:{mem_pct}%"
+    return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
 
 
 def _execute_k8s_job(
@@ -1710,6 +1798,7 @@ def _run_fuzz_job(
                 stage_results: list[dict[str, object]] = []
                 stage_job_names: list[str] = []
                 current_repo_root = str(resume_repo_root or "").strip()
+                current_node_name = ""
                 last_result: object = {}
 
                 for idx, stage in enumerate(stages, start=1):
@@ -1727,6 +1816,16 @@ def _run_fuzz_job(
                         k8s_phase=f"{stage}:Submitting",
                         workflow_active_step=stage,
                     )
+                    can_pin_node = False
+                    if current_node_name:
+                        can_pin_node, node_check_reason = _k8s_node_can_run_job(current_node_name)
+                        if not can_pin_node:
+                            print(
+                                f"[job {job_id}] stage {stage} skip node pinning ({current_node_name}): {node_check_reason}"
+                            )
+                        else:
+                            print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}")
+
                     payload = {
                         "job_id": job_id,
                         "repo_url": request.code_url,
@@ -1743,6 +1842,7 @@ def _run_fuzz_job(
                         "stop_after_step": stage,
                         "result_path": str(result_path),
                         "error_path": str(error_path),
+                        "target_node_name": (current_node_name if can_pin_node else None),
                     }
                     wait_timeout = _k8s_stage_wait_timeout_sec(
                         stage=stage,
@@ -1757,6 +1857,18 @@ def _run_fuzz_job(
                         error_path=error_path,
                         wait_timeout=wait_timeout,
                     )
+                    stage_node_name = _k8s_get_job_node_name(job_name)
+                    if stage_node_name:
+                        if current_node_name and stage_node_name != current_node_name:
+                            print(
+                                f"[job {job_id}] stage {stage} node drift {current_node_name} -> {stage_node_name}, updating pin"
+                            )
+                        elif not current_node_name:
+                            print(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
+                        current_node_name = stage_node_name
+                    else:
+                        print(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
+
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
                         stage_results.append(
