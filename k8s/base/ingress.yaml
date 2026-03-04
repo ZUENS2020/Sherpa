@@ -18,6 +18,27 @@ spec:
                 name: sherpa-web
                 port:
                   number: 8001
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /openapi.json
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
           - path: /
             pathType: Prefix
             backend:
@@ -30,6 +51,27 @@ spec:
         paths:
           - path: /api
             pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /openapi.json
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: sherpa-web

@@ -211,6 +211,9 @@ flowchart LR
 | `GET` | `/api/tasks` | 任务列表 |
 | `POST` | `/api/task/{job_id}/stop` | 停止任务 |
 | `POST` | `/api/task/{job_id}/resume` | 手动续跑 |
+| `GET` | `/docs` | Swagger UI（同域 API 文档） |
+| `GET` | `/redoc` | ReDoc（同域 API 文档） |
+| `GET` | `/openapi.json` | OpenAPI Schema |
 
 ---
 
