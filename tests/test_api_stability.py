@@ -65,18 +65,21 @@ def _isolate_runtime_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_main, "apply_config_to_env", lambda cfg: None)
     monkeypatch.setattr(web_main, "_job_log_path", lambda job_id: tmp_path / f"{job_id}.log")
     def _fake_execute_k8s_job(*, job_id, job_name, payload, result_path, error_path, wait_timeout):
-        return web_main.fuzz_logic(
-            payload.get("repo_url"),
-            max_len=payload.get("max_len"),
-            time_budget=payload.get("time_budget"),
-            run_time_budget=payload.get("run_time_budget"),
-            email=payload.get("email"),
-            docker_image=payload.get("docker_image"),
-            ai_key_path=payload.get("ai_key_path"),
-            oss_fuzz_dir=payload.get("oss_fuzz_dir"),
-            model=payload.get("model"),
-            resume_from_step=payload.get("resume_from_step"),
-            resume_repo_root=payload.get("resume_repo_root"),
+        return (
+            web_main.fuzz_logic(
+                payload.get("repo_url"),
+                max_len=payload.get("max_len"),
+                time_budget=payload.get("time_budget"),
+                run_time_budget=payload.get("run_time_budget"),
+                email=payload.get("email"),
+                docker_image=payload.get("docker_image"),
+                ai_key_path=payload.get("ai_key_path"),
+                oss_fuzz_dir=payload.get("oss_fuzz_dir"),
+                model=payload.get("model"),
+                resume_from_step=payload.get("resume_from_step"),
+                resume_repo_root=payload.get("resume_repo_root"),
+            ),
+            "node-test",
         )
 
     monkeypatch.setattr(web_main, "_execute_k8s_job", _fake_execute_k8s_job)
@@ -149,6 +152,7 @@ def test_executor_mode_rejects_non_k8s(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "local_thread")
     with pytest.raises(RuntimeError):
         web_main._executor_mode()
+
 
 
 def test_tee_write_redacts_sensitive_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

@@ -478,7 +478,7 @@ def _execute_k8s_job(
     result_path: Path,
     error_path: Path,
     wait_timeout: int,
-) -> object:
+) -> tuple[object, str]:
     manifest = _k8s_build_manifest(job_name, payload)
     rc_apply, _, err_apply = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
     if rc_apply != 0:
@@ -513,11 +513,14 @@ def _execute_k8s_job(
         doc = json.loads(raw)
     except Exception as e:
         raise RuntimeError(f"k8s_job_bad_result_json: {e}")
+    # Capture node before deleting the Job/Pod so stage pinning can persist
+    # even when keep-finished-jobs is disabled.
+    stage_node_name = _k8s_get_job_node_name(job_name)
     if not _k8s_keep_finished_jobs():
         _k8s_delete_job(job_name)
     if not bool(doc.get("ok")):
         raise RuntimeError(str(doc.get("error") or "k8s_worker_failed"))
-    return doc.get("result")
+    return doc.get("result"), stage_node_name
 
 
 def _k8s_stage_wait_timeout_sec(
@@ -1849,7 +1852,7 @@ def _run_fuzz_job(
                         total_time_budget_sec=total_time_budget_value,
                         run_time_budget_sec=run_time_budget_value,
                     )
-                    stage_result = _execute_k8s_job(
+                    stage_result, stage_node_name = _execute_k8s_job(
                         job_id=job_id,
                         job_name=job_name,
                         payload=payload,
@@ -1857,7 +1860,6 @@ def _run_fuzz_job(
                         error_path=error_path,
                         wait_timeout=wait_timeout,
                     )
-                    stage_node_name = _k8s_get_job_node_name(job_name)
                     if stage_node_name:
                         if current_node_name and stage_node_name != current_node_name:
                             print(

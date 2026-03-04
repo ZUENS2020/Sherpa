@@ -118,7 +118,7 @@ def test_auto_resume_recoverable_task_resumes_child(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(
         web_main,
         "_execute_k8s_job",
-        lambda **kwargs: {"ok": True, "repo_root": str(tmp_path)},
+        lambda **kwargs: ({"ok": True, "repo_root": str(tmp_path)}, "node-test"),
     )
 
     task_id = web_main._create_job("task", "batch")
