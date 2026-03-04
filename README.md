@@ -439,11 +439,12 @@ kubectl -n sherpa get pods | rg cloudflared
 3. `/Users/zuens2020/Documents/Sherpa/docs/PROJECT_HANDOFF_STATUS.md`
 4. `/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`
 5. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
-6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
-7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
-8. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
-9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
-10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
+6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOYMENT_DETAILED.md`
+7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
+8. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`
+9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
+10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
+11. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
 
 ---
 

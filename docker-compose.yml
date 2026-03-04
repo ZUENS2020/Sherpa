@@ -4,7 +4,7 @@ services:
     image: m.daocloud.io/docker.io/alpine/git:latest
     restart: "no"
     environment:
-      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://gitclone.com/github.com/google/oss-fuzz.git}"
+      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://github.com/google/oss-fuzz.git}"
     volumes:
       - sherpa-oss-fuzz:/shared/oss-fuzz
     entrypoint:
@@ -14,7 +14,7 @@ services:
         set -e
         REPO="$$SHERPA_OSS_FUZZ_REPO_URL"
         if [ -z "$$REPO" ]; then
-          REPO="https://gitclone.com/github.com/google/oss-fuzz.git"
+          REPO="https://github.com/google/oss-fuzz.git"
         fi
         echo "[*] Ensuring oss-fuzz checkout in /shared/oss-fuzz from $$REPO"
         if [ -f /shared/oss-fuzz/infra/helper.py ]; then
@@ -83,10 +83,10 @@ services:
       SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC: ${SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC:-7200}
 
       # Optional override for oss-fuzz upstream (mirrors / forks).
-      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://gitclone.com/github.com/google/oss-fuzz.git}"
+      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://github.com/google/oss-fuzz.git}"
 
       # Optional Git mirrors for clone operations.
-      SHERPA_GIT_MIRRORS: ${SHERPA_GIT_MIRRORS:-https://gitclone.com/github.com}
+      SHERPA_GIT_MIRRORS: ${SHERPA_GIT_MIRRORS:-https://github.com}
 
       # MiniMax-only provider source (recommended in .env).
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}

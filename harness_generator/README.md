@@ -119,7 +119,7 @@ Outputs are stored under `./jobs/<project>_<uuid>/` by default.
 - npm registry: `https://registry.npmmirror.com`
 - pip index: `https://pypi.tuna.tsinghua.edu.cn/simple`
 - APT mirrors (TUNA): `http://mirrors.tuna.tsinghua.edu.cn`
-- Git mirror (default): `https://gitclone.com/github.com/`
+- Git clone default: `https://github.com/`（可通过环境变量覆盖为企业镜像）
 
 ### OpenCode safety
 By default, `SHERPA_OPENCODE_NO_EXEC=1` blocks build/run commands during OpenCode runs. Only read-only inspection commands are permitted.

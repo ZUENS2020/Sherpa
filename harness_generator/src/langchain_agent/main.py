@@ -444,7 +444,11 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
 
     rc_top, out_top, err_top = _kubectl(["top", "node", node_name, "--no-headers"], timeout=10)
     if rc_top != 0:
-        return True, f"node_ready_no_metrics:{(err_top or out_top).strip()}"
+        detail = (err_top or out_top).strip()
+        if detail:
+            detail = re.sub(r"\s+", "_", detail)[:160]
+            return True, f"node_ready_no_metrics_warn:{detail}"
+        return True, "node_ready_no_metrics_warn"
     line = ""
     for raw in (out_top or "").splitlines():
         txt = raw.strip()
@@ -2269,7 +2273,7 @@ async def task_api(request: task_model = Body(...)):
                         repo_url = (
                             (request.oss_fuzz_repo_url or "").strip()
                             or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://gitclone.com/github.com/google/oss-fuzz.git"
+                            or "https://github.com/google/oss-fuzz.git"
                         )
                         target_dir = Path(
                             (cfg.oss_fuzz_dir or "").strip()
