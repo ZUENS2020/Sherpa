@@ -4,7 +4,9 @@ namespace: sherpa-dev
 resources:
   - ../../base
   - namespace.yaml
+  - clusterrolebinding-node-reader.yaml
 patches:
   - path: namespace-delete-patch.yaml
   - path: configmap-patch.yaml
   - path: ingress-patch.yaml
+  - path: node-reader-binding-delete-patch.yaml

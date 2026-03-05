@@ -4,7 +4,7 @@ metadata:
   name: sherpa
 spec:
   rules:
-    - host: dev-sherpa.zuens2020.work
+    - host: dev.local
       http:
         paths:
           - path: /api

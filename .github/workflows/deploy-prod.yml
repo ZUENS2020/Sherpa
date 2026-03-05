@@ -83,6 +83,8 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_PROD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB_PROD || 'sherpa' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER_PROD || 'sherpa' }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN_PROD }}
+          CLOUDFLARE_PUBLIC_HOST: ${{ secrets.CLOUDFLARE_PUBLIC_HOST_PROD }}
         run: |
           set -euo pipefail
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
@@ -104,11 +106,107 @@ jobs:
             --from-literal=DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+          kubectl -n "${NAMESPACE}" create secret generic cloudflare-tunnel \
+            --from-literal=token="${CLOUDFLARE_TUNNEL_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic cloudflare-public-host \
+            --from-literal=host="${CLOUDFLARE_PUBLIC_HOST}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Deploy overlay
         shell: bash
         run: |
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
+
+      - name: Deploy cloudflared tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kubectl -n "${NAMESPACE}" apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: cloudflared-proxy-config
+          data:
+            default.conf: |
+              server {
+                listen 80;
+                server_name _;
+
+                location /api/ {
+                  proxy_pass http://sherpa-web:8001/api/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                }
+
+                location / {
+                  proxy_pass http://sherpa-frontend:3000/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                }
+              }
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: cloudflared
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: cloudflared
+            template:
+              metadata:
+                labels:
+                  app: cloudflared
+              spec:
+                containers:
+                  - name: cloudflared
+                    image: cloudflare/cloudflared:latest
+                    args:
+                      - tunnel
+                      - --no-autoupdate
+                      - --protocol
+                      - http2
+                      - run
+                      - --token
+                      - $(TUNNEL_TOKEN)
+                    env:
+                      - name: TUNNEL_TOKEN
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloudflare-tunnel
+                            key: token
+                  - name: loopback-proxy
+                    image: nginx:1.27-alpine
+                    ports:
+                      - containerPort: 80
+                        name: http
+                    volumeMounts:
+                      - name: loopback-nginx-conf
+                        mountPath: /etc/nginx/conf.d/default.conf
+                        subPath: default.conf
+                volumes:
+                  - name: loopback-nginx-conf
+                    configMap:
+                      name: cloudflared-proxy-config
+          YAML
+
+      - name: Patch ingress host from secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(kubectl -n "${NAMESPACE}" get secret cloudflare-public-host -o jsonpath='{.data.host}' | base64 --decode)"
+          kubectl -n "${NAMESPACE}" patch ingress sherpa --type=json \
+            -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
 
       - name: Pin images and worker image
         shell: bash
@@ -129,6 +227,7 @@ jobs:
           kubectl -n "${NAMESPACE}" rollout status statefulset/postgres --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-web --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s
+          kubectl -n "${NAMESPACE}" rollout status deployment/cloudflared --timeout=300s
 
       - name: Health check
         shell: bash
