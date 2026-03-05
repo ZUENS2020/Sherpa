@@ -1,9 +1,9 @@
 name: Deploy Prod
 
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: ["main"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   deploy-prod:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     environment: prod
 
@@ -43,8 +44,9 @@ jobs:
         run: |
           set -euo pipefail
           owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          sha="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push web image
         uses: docker/build-push-action@v6
