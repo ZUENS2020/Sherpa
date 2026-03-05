@@ -24,6 +24,7 @@ jobs:
     if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux]
     environment: dev
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -31,6 +32,9 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -53,21 +57,57 @@ jobs:
           echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push web image
+      - name: Build and push web image (attempt 1)
+        id: web_build_1
+        continue-on-error: true
+        timeout-minutes: 25
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.web
           push: true
           tags: ${{ steps.prep.outputs.web_image }}
+          cache-from: type=gha,scope=sherpa-web
+          cache-to: type=gha,mode=max,scope=sherpa-web
 
-      - name: Build and push frontend image
+      - name: Build and push web image (attempt 2)
+        if: steps.web_build_1.outcome == 'failure'
+        id: web_build_2
+        timeout-minutes: 25
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          push: true
+          tags: ${{ steps.prep.outputs.web_image }}
+          cache-from: type=gha,scope=sherpa-web
+          cache-to: type=gha,mode=max,scope=sherpa-web
+
+      - name: Build and push frontend image (attempt 1)
+        id: frontend_build_1
+        continue-on-error: true
+        timeout-minutes: 20
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.frontend
           push: true
           tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
+
+      - name: Build and push frontend image (attempt 2)
+        if: steps.frontend_build_1.outcome == 'failure'
+        id: frontend_build_2
+        timeout-minutes: 20
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          push: true
+          tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
