@@ -13,6 +13,7 @@ env:
   REGISTRY: ghcr.io
   NAMESPACE: sherpa-prod
   OVERLAY: k8s/overlays/prod
+  RESET_PROD_BEFORE_DEPLOY: "false"
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
@@ -55,23 +56,8 @@ jobs:
           echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push web image (attempt 1)
-        id: web_build_1
-        continue-on-error: true
-        timeout-minutes: 25
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          push: true
-          tags: ${{ steps.prep.outputs.web_image }}
-          cache-from: type=gha,scope=sherpa-web
-          cache-to: type=gha,mode=max,scope=sherpa-web
-
-      - name: Build and push web image (attempt 2)
-        if: steps.web_build_1.outcome == 'failure'
-        id: web_build_2
-        timeout-minutes: 25
+      - name: Build and push web image
+        timeout-minutes: 75
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -175,6 +161,20 @@ jobs:
         shell: bash
         run: |
           echo "Skip deploy steps because Kubernetes is unreachable from this runner."
+
+      - name: Guardrail (prod no reset)
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RESET_PROD_BEFORE_DEPLOY}" != "false" ]]; then
+            echo "::error::RESET_PROD_BEFORE_DEPLOY must stay false in prod"
+            exit 1
+          fi
+          if [[ "${NAMESPACE}" != "sherpa-prod" ]]; then
+            echo "::error::Unexpected prod namespace: ${NAMESPACE}"
+            exit 1
+          fi
 
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'

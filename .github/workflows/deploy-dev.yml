@@ -14,6 +14,9 @@ env:
   REGISTRY: ghcr.io
   NAMESPACE: sherpa-dev
   OVERLAY: k8s/overlays/dev
+  DEV_NAMESPACE: sherpa-dev
+  DEV_SHARED_ROOT: /shared/dev
+  RESET_DEV_BEFORE_DEPLOY: "true"
 
 concurrency:
   group: deploy-dev-${{ github.ref }}
@@ -60,23 +63,8 @@ jobs:
           echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push web image (attempt 1)
-        id: web_build_1
-        continue-on-error: true
-        timeout-minutes: 25
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          push: true
-          tags: ${{ steps.prep.outputs.web_image }}
-          cache-from: type=gha,scope=sherpa-web
-          cache-to: type=gha,mode=max,scope=sherpa-web
-
-      - name: Build and push web image (attempt 2)
-        if: steps.web_build_1.outcome == 'failure'
-        id: web_build_2
-        timeout-minutes: 25
+      - name: Build and push web image
+        timeout-minutes: 75
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -181,6 +169,51 @@ jobs:
         run: |
           echo "Skip deploy steps because Kubernetes is unreachable from this runner."
 
+      - name: Reset dev environment
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RESET_DEV_BEFORE_DEPLOY}" != "true" ]]; then
+            echo "::error::RESET_DEV_BEFORE_DEPLOY must be true for dev fresh deployment"
+            exit 1
+          fi
+          if [[ "${NAMESPACE}" != "${DEV_NAMESPACE}" || "${DEV_NAMESPACE}" != "sherpa-dev" ]]; then
+            echo "::error::Unsafe namespace guard triggered: NAMESPACE=${NAMESPACE}, DEV_NAMESPACE=${DEV_NAMESPACE}"
+            exit 1
+          fi
+
+          echo "[reset] deleting namespace ${DEV_NAMESPACE}"
+          kubectl delete namespace "${DEV_NAMESPACE}" --ignore-not-found=true --wait=true --timeout=300s || true
+
+          if kubectl get namespace "${DEV_NAMESPACE}" >/dev/null 2>&1; then
+            echo "[reset] namespace still terminating, removing finalizers"
+            kubectl patch namespace "${DEV_NAMESPACE}" --type=merge -p '{"spec":{"finalizers":[]}}' || true
+            kubectl wait --for=delete namespace/"${DEV_NAMESPACE}" --timeout=120s || true
+          fi
+
+          echo "[reset] deleting retained dev PVs"
+          kubectl delete pv \
+            pv-sherpa-dev-postgres \
+            pv-sherpa-dev-config \
+            pv-sherpa-dev-job-logs \
+            pv-sherpa-dev-oss-fuzz \
+            pv-sherpa-dev-shared-output \
+            pv-sherpa-dev-shared-tmp \
+            --ignore-not-found=true || true
+
+          echo "[reset] cleaning ${DEV_SHARED_ROOT}"
+          sudo mkdir -p "${DEV_SHARED_ROOT}"
+          sudo rm -rf "${DEV_SHARED_ROOT:?}/"*
+          sudo mkdir -p \
+            "${DEV_SHARED_ROOT}/postgres" \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/output" \
+            "${DEV_SHARED_ROOT}/tmp"
+          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
+
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
@@ -226,8 +259,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p /shared/dev/postgres /shared/dev/config /shared/dev/job-logs /shared/dev/oss-fuzz /shared/dev/output /shared/dev/tmp
-          sudo chown -R "$(id -u):$(id -g)" /shared/dev
+          sudo mkdir -p "${DEV_SHARED_ROOT}/postgres" "${DEV_SHARED_ROOT}/config" "${DEV_SHARED_ROOT}/job-logs" "${DEV_SHARED_ROOT}/oss-fuzz" "${DEV_SHARED_ROOT}/output" "${DEV_SHARED_ROOT}/tmp"
+          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'

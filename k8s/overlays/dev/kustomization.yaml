@@ -1,6 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: sherpa-dev
+labels:
+  - pairs:
+      app.kubernetes.io/env: dev
+    includeSelectors: false
+    includeTemplates: true
 resources:
   - ../../base
   - namespace.yaml
