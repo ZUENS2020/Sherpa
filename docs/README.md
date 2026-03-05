@@ -12,15 +12,16 @@
 1. `/Users/zuens2020/Documents/Sherpa/docs/PROJECT_HANDOFF_STATUS.md`：当前进度与对接现状
 2. `/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`：Docker 背景团队迁移对接
 3. `/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`：迁移里程碑与验收清单
-4. `/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`：本地最小启动
-5. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`：部署说明（简版）
-6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOYMENT_DETAILED.md`：部署说明（详细版，含故障树）
-7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`：运行手册
-8. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`：发布门禁
-9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`：Cloudflare Tunnel 接入
-10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`：Compose 到 K8s 映射
-11. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`：E2E 报告模板与样例
-12. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY_ISSUES_NON_NETWORK.md`：非网络部署问题总结与 CI/CD 改进项
+4. `/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md`：标准修改流程（SOP）
+5. `/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`：本地最小启动
+6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`：部署说明（简版）
+7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOYMENT_DETAILED.md`：部署说明（详细版，含故障树）
+8. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`：运行手册
+9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/RELEASE_GATE.md`：发布门禁
+10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`：Cloudflare Tunnel 接入
+11. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`：Compose 到 K8s 映射
+12. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`：E2E 报告模板与样例
+13. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY_ISSUES_NON_NETWORK.md`：非网络部署问题总结与 CI/CD 改进项
 
 ## 核心图谱
 
