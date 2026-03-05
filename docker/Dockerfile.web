@@ -103,6 +103,7 @@ COPY . /app
 ARG INSTALL_OPENCODE=1
 ARG NODE_VERSION="20.11.1"
 ARG NODE_MIRROR="https://npmmirror.com/mirrors/node"
+ARG NPM_REGISTRY_CANDIDATES="https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm https://registry.npmjs.org"
 ARG TARGETARCH
 RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing Node.js (for CLI tools)..."; \
@@ -119,8 +120,23 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
         fi \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
-            npm config set registry "$NPM_CONFIG_REGISTRY"; \
-            npm i -g opencode-ai gitnexus; \
+            selected=""; \
+            for r in $NPM_REGISTRY_CANDIDATES; do \
+              if npm --fetch-timeout=12000 --loglevel=error --registry "$r" view lodash version >/dev/null 2>&1; then \
+                selected="$r"; \
+                break; \
+              fi; \
+            done; \
+            if [ -z "$selected" ]; then \
+              selected="$NPM_CONFIG_REGISTRY"; \
+            fi; \
+            npm config set registry "$selected"; \
+            npm config set fetch-retries 5; \
+            npm config set fetch-retry-factor 2; \
+            npm config set fetch-retry-mintimeout 2000; \
+            npm config set fetch-retry-maxtimeout 30000; \
+            npm config set fetch-timeout 180000; \
+            npm i -g opencode-ai; \
             opencode --version || true; \
         else \
             echo "Skipping OpenCode CLI install"; \
