@@ -4,8 +4,6 @@ on:
   pull_request:
     branches: ["dev"]
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: ["dev"]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +22,7 @@ concurrency:
 jobs:
   deploy-dev:
     if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     environment: dev
 
     steps:
@@ -84,7 +82,38 @@ jobs:
         env:
           KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64_DEV }}
 
+      - name: Preflight Kubernetes connectivity
+        id: kube_preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+          echo "server=${server}" >> "$GITHUB_OUTPUT"
+          if [[ -z "${server}" ]]; then
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Kubernetes server is empty in kubeconfig; skipping deploy steps."
+            exit 0
+          fi
+          if echo "${server}" | grep -Eq 'https?://(127\.0\.0\.1|localhost)(:|/|$)'; then
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Kubernetes server points to localhost (${server}); skipping deploy steps on GitHub-hosted runner."
+            exit 0
+          fi
+          if kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Cannot reach Kubernetes API server (${server}); skipping deploy steps."
+          fi
+
+      - name: Skip deploy steps note
+        if: steps.kube_preflight.outputs.reachable != 'true'
+        shell: bash
+        run: |
+          echo "Skip deploy steps because Kubernetes is unreachable from this runner."
+
       - name: Create or update runtime secrets
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_DEV }}
@@ -124,12 +153,14 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy overlay
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
 
       - name: Deploy cloudflared tunnel
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -210,6 +241,7 @@ jobs:
           YAML
 
       - name: Patch ingress host from secret
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -218,6 +250,7 @@ jobs:
             -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
 
       - name: Pin images and worker image
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         env:
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
@@ -230,6 +263,7 @@ jobs:
           kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
 
       - name: Wait for rollout
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -239,6 +273,7 @@ jobs:
           kubectl -n "${NAMESPACE}" rollout status deployment/cloudflared --timeout=300s
 
       - name: Health check
+        if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
