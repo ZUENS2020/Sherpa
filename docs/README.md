@@ -20,6 +20,7 @@
 9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`：Cloudflare Tunnel 接入
 10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`：Compose 到 K8s 映射
 11. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`：E2E 报告模板与样例
+12. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY_ISSUES_NON_NETWORK.md`：非网络部署问题总结与 CI/CD 改进项
 
 ## 核心图谱
 

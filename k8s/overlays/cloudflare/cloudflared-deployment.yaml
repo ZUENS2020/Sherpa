@@ -37,10 +37,14 @@ spec:
               cpu: 200m
               memory: 256Mi
         - name: loopback-proxy
-          image: m.daocloud.io/docker.io/alpine/socat:latest
-          args:
-            - "TCP6-LISTEN:80,ipv6only=0,fork,reuseaddr"
-            - "TCP4:nginx-ingress-local.ingress.svc.cluster.local:80"
+          image: m.daocloud.io/docker.io/library/nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: loopback-nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
           resources:
             requests:
               cpu: 10m
@@ -48,3 +52,7 @@ spec:
             limits:
               cpu: 100m
               memory: 64Mi
+      volumes:
+        - name: loopback-nginx-conf
+          configMap:
+            name: cloudflared-proxy-config

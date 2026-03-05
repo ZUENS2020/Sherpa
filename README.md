@@ -448,6 +448,7 @@ kubectl -n sherpa get pods | rg cloudflared
 9. `/Users/zuens2020/Documents/Sherpa/docs/k8s/CLOUDFLARE_TUNNEL.md`
 10. `/Users/zuens2020/Documents/Sherpa/docs/k8s/MAPPING.md`
 11. `/Users/zuens2020/Documents/Sherpa/docs/k8s/E2E_ZLIB_REPORT.md`
+12. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY_ISSUES_NON_NETWORK.md`
 
 ---
 

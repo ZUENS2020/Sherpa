@@ -1,6 +1,9 @@
 name: Deploy Dev
 
 on:
+  pull_request:
+    branches: ["dev"]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ["dev"]
   workflow_dispatch:
@@ -14,8 +17,13 @@ env:
   NAMESPACE: sherpa-dev
   OVERLAY: k8s/overlays/dev
 
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy-dev:
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     environment: dev
 
@@ -39,8 +47,13 @@ jobs:
         run: |
           set -euo pipefail
           owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            sha="${{ github.event.pull_request.head.sha }}"
+          else
+            sha="${GITHUB_SHA}"
+          fi
+          echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push web image
         uses: docker/build-push-action@v6
@@ -122,5 +135,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          kubectl -n "${NAMESPACE}" rollout status statefulset/postgres --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-web --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s
+
+      - name: Health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" port-forward svc/sherpa-web 18001:8001 >/tmp/pf-web.log 2>&1 &
+          pf_pid=$!
+          cleanup() {
+            kill "${pf_pid}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          sleep 3
+          curl -fsS http://127.0.0.1:18001/api/health
