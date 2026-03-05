@@ -66,7 +66,7 @@
 ### Step 1：创建 issue 与分支
 
 1. 在 Linear/GitHub issue 建立任务（大改动必须）
-2. 分支命名建议：`codex/<topic>`
+2. 分支命名建议：`<user_name>/<topic>`
 3. 禁止直接在受保护分支开发
 
 ### Step 2：设计改动方案
