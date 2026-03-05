@@ -221,12 +221,29 @@ jobs:
             --from-literal=host="${CLOUDFLARE_PUBLIC_HOST}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Prepare dev hostPath directories
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /shared/dev/postgres /shared/dev/config /shared/dev/job-logs /shared/dev/oss-fuzz /shared/dev/output /shared/dev/tmp
+          sudo chown -R "$(id -u):$(id -g)" /shared/dev
+
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
+
+      - name: Cleanup legacy dev tunnel in shared namespace
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n sherpa delete deploy cloudflared-dev --ignore-not-found=true
+          kubectl -n sherpa delete configmap cloudflared-dev-proxy-config --ignore-not-found=true
+          kubectl -n sherpa delete secret cloudflare-tunnel-dev --ignore-not-found=true
 
       - name: Deploy cloudflared tunnel
         if: steps.kube_preflight.outputs.reachable == 'true'

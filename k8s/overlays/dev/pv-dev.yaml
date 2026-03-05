@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-postgres
+spec:
+  capacity:
+    storage: 30Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/postgres
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-config
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/config
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-job-logs
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/job-logs
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-oss-fuzz
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/oss-fuzz
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-shared-output
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/output
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-dev-shared-tmp
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /shared/dev/tmp
