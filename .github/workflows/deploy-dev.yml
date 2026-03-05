@@ -14,6 +14,9 @@ env:
   REGISTRY: ghcr.io
   NAMESPACE: sherpa-dev
   OVERLAY: k8s/overlays/dev
+  DEV_NAMESPACE: sherpa-dev
+  DEV_SHARED_ROOT: /shared/dev
+  RESET_DEV_BEFORE_DEPLOY: "true"
 
 concurrency:
   group: deploy-dev-${{ github.ref }}
@@ -24,6 +27,7 @@ jobs:
     if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux]
     environment: dev
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -31,6 +35,12 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["hfnaroxd1op1q2.xuanyuan.run", "hfnaroxd1op1q2.xuanyuan.dev"]
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -54,23 +64,70 @@ jobs:
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push web image
+        timeout-minutes: 75
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.web
           push: true
           tags: ${{ steps.prep.outputs.web_image }}
+          cache-from: type=gha,scope=sherpa-web
+          cache-to: type=gha,mode=max,scope=sherpa-web
 
-      - name: Build and push frontend image
+      - name: Build and push frontend image (attempt 1)
+        id: frontend_build_1
+        continue-on-error: true
+        timeout-minutes: 20
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.frontend
           push: true
           tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
 
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+      - name: Build and push frontend image (attempt 2)
+        if: steps.frontend_build_1.outcome == 'failure'
+        id: frontend_build_2
+        timeout-minutes: 20
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          push: true
+          tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
+
+      - name: Setup kubectl (self-hosted fast path)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client --output=yaml >/dev/null
+            exit 0
+          fi
+          KVER="${KUBECTL_VERSION:-v1.30.5}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64) KARCH="amd64" ;;
+            aarch64|arm64) KARCH="arm64" ;;
+            *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          for base in \
+            "https://mirrors.aliyun.com/kubernetes-new/core/stable" \
+            "https://dl.k8s.io/release"; do
+            if curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 -fsSL "${base}/${KVER}/bin/linux/${KARCH}/kubectl" -o /tmp/kubectl; then
+              sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+              rm -f /tmp/kubectl
+              kubectl version --client --output=yaml >/dev/null
+              exit 0
+            fi
+          done
+          echo "Failed to install kubectl" >&2
+          exit 1
 
       - name: Configure kubeconfig
         shell: bash
@@ -112,6 +169,50 @@ jobs:
         run: |
           echo "Skip deploy steps because Kubernetes is unreachable from this runner."
 
+      - name: Reset dev environment
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RESET_DEV_BEFORE_DEPLOY}" != "true" ]]; then
+            echo "::error::RESET_DEV_BEFORE_DEPLOY must be true for dev fresh deployment"
+            exit 1
+          fi
+          if [[ "${NAMESPACE}" != "${DEV_NAMESPACE}" || "${DEV_NAMESPACE}" != "sherpa-dev" ]]; then
+            echo "::error::Unsafe namespace guard triggered: NAMESPACE=${NAMESPACE}, DEV_NAMESPACE=${DEV_NAMESPACE}"
+            exit 1
+          fi
+
+          echo "[reset] deleting namespace ${DEV_NAMESPACE}"
+          kubectl delete namespace "${DEV_NAMESPACE}" --ignore-not-found=true --wait=true --timeout=300s || true
+
+          if kubectl get namespace "${DEV_NAMESPACE}" >/dev/null 2>&1; then
+            echo "[reset] namespace still terminating, removing finalizers"
+            kubectl patch namespace "${DEV_NAMESPACE}" --type=merge -p '{"spec":{"finalizers":[]}}' || true
+            kubectl wait --for=delete namespace/"${DEV_NAMESPACE}" --timeout=120s || true
+          fi
+
+          echo "[reset] deleting retained dev PVs"
+          kubectl delete pv \
+            pv-sherpa-dev-postgres \
+            pv-sherpa-dev-config \
+            pv-sherpa-dev-job-logs \
+            pv-sherpa-dev-oss-fuzz \
+            pv-sherpa-dev-shared-output \
+            pv-sherpa-dev-shared-tmp \
+            --ignore-not-found=true || true
+
+          echo "[reset] cleaning ${DEV_SHARED_ROOT}"
+          sudo mkdir -p "${DEV_SHARED_ROOT}"
+          sudo rm -rf "${DEV_SHARED_ROOT:?}/"*
+          sudo mkdir -p \
+            "${DEV_SHARED_ROOT}/postgres" \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/output" \
+            "${DEV_SHARED_ROOT}/tmp"
+          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
@@ -152,12 +253,29 @@ jobs:
             --from-literal=host="${CLOUDFLARE_PUBLIC_HOST}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Prepare dev hostPath directories
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "${DEV_SHARED_ROOT}/postgres" "${DEV_SHARED_ROOT}/config" "${DEV_SHARED_ROOT}/job-logs" "${DEV_SHARED_ROOT}/oss-fuzz" "${DEV_SHARED_ROOT}/output" "${DEV_SHARED_ROOT}/tmp"
+          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
+
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         run: |
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
+
+      - name: Cleanup legacy dev tunnel in shared namespace
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n sherpa delete deploy cloudflared-dev --ignore-not-found=true
+          kubectl -n sherpa delete configmap cloudflared-dev-proxy-config --ignore-not-found=true
+          kubectl -n sherpa delete secret cloudflare-tunnel-dev --ignore-not-found=true
 
       - name: Deploy cloudflared tunnel
         if: steps.kube_preflight.outputs.reachable == 'true'

@@ -76,6 +76,12 @@ kubectl -n sherpa create secret generic sherpa-secrets \
 
 ## 4. 部署步骤（标准流程）
 
+### 4.0 环境重建策略（强约束）
+
+1. `dev`：每次部署前执行全新重建（删除 `sherpa-dev` namespace 与 dev 存储，再重建）。
+2. `prod`：禁止全新重建，只允许滚动更新（保留 Postgres 与历史产物）。
+3. 任何脚本/工作流都不允许对 `sherpa-prod` 执行清空动作。
+
 ### Step 1: 部署基础资源
 
 ```bash
