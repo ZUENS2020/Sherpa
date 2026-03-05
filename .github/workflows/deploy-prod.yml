@@ -13,6 +13,7 @@ env:
   REGISTRY: ghcr.io
   NAMESPACE: sherpa-prod
   OVERLAY: k8s/overlays/prod
+  RESET_PROD_BEFORE_DEPLOY: "false"
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
@@ -23,6 +24,7 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: [self-hosted, linux]
     environment: prod
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -30,6 +32,12 @@ jobs:
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["hfnaroxd1op1q2.xuanyuan.run", "hfnaroxd1op1q2.xuanyuan.dev"]
 
       - name: Login GHCR
         uses: docker/login-action@v3
@@ -49,23 +57,70 @@ jobs:
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push web image
+        timeout-minutes: 75
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.web
           push: true
           tags: ${{ steps.prep.outputs.web_image }}
+          cache-from: type=gha,scope=sherpa-web
+          cache-to: type=gha,mode=max,scope=sherpa-web
 
-      - name: Build and push frontend image
+      - name: Build and push frontend image (attempt 1)
+        id: frontend_build_1
+        continue-on-error: true
+        timeout-minutes: 20
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.frontend
           push: true
           tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
 
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+      - name: Build and push frontend image (attempt 2)
+        if: steps.frontend_build_1.outcome == 'failure'
+        id: frontend_build_2
+        timeout-minutes: 20
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          push: true
+          tags: ${{ steps.prep.outputs.frontend_image }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend
+
+      - name: Setup kubectl (self-hosted fast path)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client --output=yaml >/dev/null
+            exit 0
+          fi
+          KVER="${KUBECTL_VERSION:-v1.30.5}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64) KARCH="amd64" ;;
+            aarch64|arm64) KARCH="arm64" ;;
+            *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          for base in \
+            "https://mirrors.aliyun.com/kubernetes-new/core/stable" \
+            "https://dl.k8s.io/release"; do
+            if curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 -fsSL "${base}/${KVER}/bin/linux/${KARCH}/kubectl" -o /tmp/kubectl; then
+              sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+              rm -f /tmp/kubectl
+              kubectl version --client --output=yaml >/dev/null
+              exit 0
+            fi
+          done
+          echo "Failed to install kubectl" >&2
+          exit 1
 
       - name: Configure kubeconfig
         shell: bash
@@ -107,6 +162,19 @@ jobs:
         run: |
           echo "Skip deploy steps because Kubernetes is unreachable from this runner."
 
+      - name: Guardrail (prod no reset)
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RESET_PROD_BEFORE_DEPLOY}" != "false" ]]; then
+            echo "::error::RESET_PROD_BEFORE_DEPLOY must stay false in prod"
+            exit 1
+          fi
+          if [[ "${NAMESPACE}" != "sherpa-prod" ]]; then
+            echo "::error::Unexpected prod namespace: ${NAMESPACE}"
+            exit 1
+          fi
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
