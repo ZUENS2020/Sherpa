@@ -28,6 +28,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend-next ./
+RUN mkdir -p /app/public
 RUN npm run build
 
 FROM ${FRONTEND_NODE_IMAGE} AS runner

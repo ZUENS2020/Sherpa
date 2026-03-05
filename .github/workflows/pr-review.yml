@@ -30,9 +30,9 @@ jobs:
           head="${{ github.event.pull_request.head.sha }}"
           git diff --name-only "$base" "$head" > changed_files.txt
           total="$(wc -l < changed_files.txt | tr -d ' ')"
-          docs_count="$(grep -E '^(README\.md|docs/|assets/)' changed_files.txt | wc -l | tr -d ' ' || true)"
-          backend_count="$(grep -E '^(harness_generator/|tests/|docker/|docker-compose\.yml|\.env\.example|Makefile)' changed_files.txt | wc -l | tr -d ' ' || true)"
-          frontend_count="$(grep -E '^(frontend-next/|docker/nginx/)' changed_files.txt | wc -l | tr -d ' ' || true)"
+          docs_count="$(grep -Ec '^(README\.md|docs/|assets/)' changed_files.txt || true)"
+          backend_count="$(grep -Ec '^(harness_generator/|tests/|docker/|docker-compose\.yml|\.env\.example|Makefile)' changed_files.txt || true)"
+          frontend_count="$(grep -Ec '^(frontend-next/|docker/nginx/)' changed_files.txt || true)"
 
           if [[ "$total" == "0" ]]; then
             docs_only="false"
