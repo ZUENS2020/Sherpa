@@ -36,3 +36,15 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
+        - name: loopback-proxy
+          image: m.daocloud.io/docker.io/alpine/socat:latest
+          args:
+            - "TCP6-LISTEN:80,ipv6only=0,fork,reuseaddr"
+            - "TCP4:nginx-ingress-local.ingress.svc.cluster.local:80"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

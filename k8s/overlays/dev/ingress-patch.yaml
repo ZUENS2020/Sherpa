@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sherpa
+spec:
+  rules:
+    - host: dev-sherpa.zuens2020.work
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /redoc
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /openapi.json
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: sherpa-web
+                port:
+                  number: 8001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sherpa-frontend
+                port:
+                  number: 3000

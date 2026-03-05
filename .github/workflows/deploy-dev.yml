@@ -1,0 +1,126 @@
+name: Deploy Dev
+
+on:
+  push:
+    branches: ["dev"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: sherpa-dev
+  OVERLAY: k8s/overlays/dev
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          push: true
+          tags: ${{ steps.prep.outputs.web_image }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          push: true
+          tags: ${{ steps.prep.outputs.frontend_image }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG_B64}" | base64 --decode > ~/.kube/config
+          chmod 600 ~/.kube/config
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64_DEV }}
+
+      - name: Create or update runtime secrets
+        shell: bash
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_DEV }}
+          MINIMAX_MODEL: ${{ vars.MINIMAX_MODEL_DEV || 'MiniMax-M2.5' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_DEV }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB_DEV || 'sherpa' }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER_DEV || 'sherpa' }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-minimax \
+            --from-literal=MINIMAX_API_KEY="${MINIMAX_API_KEY}" \
+            --from-literal=MINIMAX_BASE_URL="https://api.minimaxi.com/anthropic/v1" \
+            --from-literal=MINIMAX_MODEL="${MINIMAX_MODEL}" \
+            --from-literal=OPENAI_API_KEY="${MINIMAX_API_KEY}" \
+            --from-literal=OPENAI_BASE_URL="https://api.minimaxi.com/anthropic/v1" \
+            --from-literal=OPENAI_MODEL="${MINIMAX_MODEL}" \
+            --from-literal=OPENCODE_MODEL="${MINIMAX_MODEL}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-postgres \
+            --from-literal=POSTGRES_DB="${POSTGRES_DB}" \
+            --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+            --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            --from-literal=DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -k "${OVERLAY}"
+
+      - name: Pin images and worker image
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
+            -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
+
+      - name: Wait for rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-web --timeout=300s
+          kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s

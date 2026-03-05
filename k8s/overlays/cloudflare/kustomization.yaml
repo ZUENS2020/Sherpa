@@ -4,4 +4,5 @@ namespace: sherpa
 resources:
   - ../../base
   - cloudflare-tunnel-secret.yaml
+  - ingress-local-service.yaml
   - cloudflared-deployment.yaml
