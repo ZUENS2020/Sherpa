@@ -371,7 +371,13 @@ jobs:
             "${PROD_SHARED_ROOT}/oss-fuzz" \
             "${PROD_SHARED_ROOT}/output" \
             "${PROD_SHARED_ROOT}/tmp"
-          sudo chown -R "$(id -u):$(id -g)" "${PROD_SHARED_ROOT}"
+          sudo chown -R 999:999 "${PROD_SHARED_ROOT}/postgres"
+          sudo chown -R "$(id -u):$(id -g)" \
+            "${PROD_SHARED_ROOT}/config" \
+            "${PROD_SHARED_ROOT}/job-logs" \
+            "${PROD_SHARED_ROOT}/oss-fuzz" \
+            "${PROD_SHARED_ROOT}/output" \
+            "${PROD_SHARED_ROOT}/tmp"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'

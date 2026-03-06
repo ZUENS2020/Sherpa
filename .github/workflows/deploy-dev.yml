@@ -313,7 +313,13 @@ jobs:
             "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/output" \
             "${DEV_SHARED_ROOT}/tmp"
-          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
+          sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
+          sudo chown -R "$(id -u):$(id -g)" \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/output" \
+            "${DEV_SHARED_ROOT}/tmp"
 
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -396,8 +402,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo mkdir -p "${DEV_SHARED_ROOT}/postgres" "${DEV_SHARED_ROOT}/config" "${DEV_SHARED_ROOT}/job-logs" "${DEV_SHARED_ROOT}/oss-fuzz" "${DEV_SHARED_ROOT}/output" "${DEV_SHARED_ROOT}/tmp"
-          sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
+          sudo mkdir -p \
+            "${DEV_SHARED_ROOT}/postgres" \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/output" \
+            "${DEV_SHARED_ROOT}/tmp"
+          sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
+          sudo chown -R "$(id -u):$(id -g)" \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/output" \
+            "${DEV_SHARED_ROOT}/tmp"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
