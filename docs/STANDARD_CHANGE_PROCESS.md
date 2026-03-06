@@ -269,6 +269,80 @@ PR 描述至少包含以下 6 段：
 3. 必须说明是否已经过真实链路验证
 4. 不允许带入“只在本地验证、未在 dev 验证”的改动
 
+### 5.5 示例：个人分支 -> dev
+
+适用于功能开发、缺陷修复、文档更新等日常改动。
+
+```md
+标题：fix: stabilize opencode idle timeout retry
+
+## 背景
+当前 synthesize 阶段在长时间无输出时会卡住，导致任务停在 sy。
+
+## 目标
+让 opencode 长时间无进展时自动中止并在同阶段重试。
+
+## 变更范围
+1. 调整 OpenCodeHelper idle timeout 行为
+2. 补充阶段内重试逻辑
+3. 更新相关文档
+
+## 验证
+1. 本地验证：pytest tests/test_codex_helper_sentinel.py -q
+2. dev 验证：触发 dev 工作流并观察 sy 阶段可自动重试
+3. 工作流结果：Deploy Dev 成功
+
+## 环境流转
+- [x] 本 PR 的目标分支是 `dev`
+- [ ] 本次改动已经先在 `dev` 验证
+- [ ] 本 PR 是 `dev -> main`
+
+## 配置 / 数据影响
+- [x] 不涉及配置变更
+
+## 风险
+1. timeout 过短可能提前中断正常思考
+
+## 回滚
+1. 回退 OpenCodeHelper idle timeout 改动
+```
+
+### 5.6 示例：dev -> main
+
+适用于 dev 已验证通过、准备发布到 prod 的场景。
+
+```md
+标题：fix: promote opencode idle timeout recovery to prod
+
+## 背景
+dev 已验证 opencode idle timeout 修复有效，需要发布到 prod。
+
+## 目标
+将已在 dev 验证通过的修复发布到 main/prod。
+
+## 变更范围
+1. dev 当前稳定改动进入 main
+
+## 验证
+1. 本地验证：已在对应 feature PR 中完成
+2. dev 验证：Deploy Dev 成功
+3. 工作流结果：dev 环境任务执行正常，相关日志已确认
+
+## 环境流转
+- [ ] 本 PR 的目标分支是 `dev`
+- [x] 本次改动已经先在 `dev` 验证
+- [x] 本 PR 是 `dev -> main`
+
+## 配置 / 数据影响
+- [x] 不涉及额外配置变更
+
+## 风险
+1. prod 环境仍需观察 rollout 与健康检查
+
+## 回滚
+1. 回滚到上一个 main SHA
+```
+
 ---
 
 ## 6. 变更前自检清单
