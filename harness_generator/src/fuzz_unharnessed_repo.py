@@ -2705,27 +2705,16 @@ class NonOssFuzzHarnessGenerator:
             print(f"[*] Checked out commit {commit}")
             return root
 
-        # Fallback: clone on host.
-        # Prefer GitPython if available, otherwise use the git CLI.
-        if Repo is None or git_exc is None:
-            try:
-                return _clone_with_host_git(root)
-            except FileNotFoundError:
-                raise HarnessGeneratorError(
-                    "GitPython is not available and 'git' is not found in PATH. "
-                    "Enable Docker mode (--docker-image auto) or install Git."
-                )
-
-        print(f"[*] Cloning {spec.url} → {root}")
-        repo = Repo.clone_from(spec.url, root)
-        if spec.ref:
-            try:
-                repo.git.checkout(spec.ref)
-            except git_exc.GitCommandError:
-                repo.git.fetch("origin", spec.ref)
-                repo.git.checkout("FETCH_HEAD")
-        print(f"[*] Checked out commit {repo.head.commit.hexsha}")
-        return root
+        # Fallback: clone on host using git CLI.
+        # This keeps clone behaviour consistent with retries/mirror/proxy logic
+        # used in docker clone path and avoids direct GitPython github.com calls.
+        try:
+            return _clone_with_host_git(root)
+        except FileNotFoundError:
+            raise HarnessGeneratorError(
+                "'git' is not found in PATH. "
+                "Enable Docker mode (--docker-image auto) or install Git."
+            )
 
     def _discover_fuzz_binaries(self) -> List[Path]:
         out = self.fuzz_out_dir

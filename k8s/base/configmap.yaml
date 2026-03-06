@@ -31,6 +31,7 @@ data:
   SHERPA_OSS_FUZZ_REPO_URL: "https://github.com/google/oss-fuzz.git"
   SHERPA_AUTO_INIT_OSS_FUZZ: "0"
   SHERPA_GIT_MIRRORS: "https://github.com"
+  SHERPA_GIT_MIRRORS: "https://ghfast.top/{url},https://ghproxy.net/{url},https://github.com"
   SHERPA_WEB_AUTO_RESUME_ON_START: "0"
   SHERPA_WEB_RESTORE_LOG_MAX_CHARS: "200000"
   NEXT_PUBLIC_API_BASE: "/api"
