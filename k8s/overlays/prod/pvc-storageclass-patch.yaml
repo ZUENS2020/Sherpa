@@ -4,6 +4,7 @@ metadata:
   name: sherpa-shared-tmp
 spec:
   storageClassName: manual
+  volumeName: pv-sherpa-prod-shared-tmp
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -11,6 +12,7 @@ metadata:
   name: sherpa-shared-output
 spec:
   storageClassName: manual
+  volumeName: pv-sherpa-prod-shared-output
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -18,6 +20,7 @@ metadata:
   name: sherpa-config
 spec:
   storageClassName: manual
+  volumeName: pv-sherpa-prod-config
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -25,6 +28,7 @@ metadata:
   name: sherpa-job-logs
 spec:
   storageClassName: manual
+  volumeName: pv-sherpa-prod-job-logs
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -32,3 +36,4 @@ metadata:
   name: sherpa-oss-fuzz
 spec:
   storageClassName: manual
+  volumeName: pv-sherpa-prod-oss-fuzz

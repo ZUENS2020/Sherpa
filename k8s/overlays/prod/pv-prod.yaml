@@ -8,6 +8,9 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: postgres-data-postgres-0
   hostPath:
     path: /shared/prod/postgres
 ---
@@ -21,6 +24,9 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-config
   hostPath:
     path: /shared/prod/config
 ---
@@ -34,6 +40,9 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-job-logs
   hostPath:
     path: /shared/prod/job-logs
 ---
@@ -47,6 +56,9 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-oss-fuzz
   hostPath:
     path: /shared/prod/oss-fuzz
 ---
@@ -60,6 +72,9 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-shared-output
   hostPath:
     path: /shared/prod/output
 ---
@@ -73,5 +88,8 @@ spec:
   accessModes: ["ReadWriteOnce"]
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-shared-tmp
   hostPath:
     path: /shared/prod/tmp
