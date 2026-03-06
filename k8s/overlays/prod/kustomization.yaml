@@ -10,8 +10,11 @@ resources:
   - ../../base
   - namespace.yaml
   - clusterrolebinding-node-reader.yaml
-patches:
-  - path: namespace-delete-patch.yaml
-  - path: configmap-patch.yaml
-  - path: ingress-patch.yaml
-  - path: node-reader-binding-delete-patch.yaml
+  - pv-prod.yaml
+patchesStrategicMerge:
+  - namespace-delete-patch.yaml
+  - configmap-patch.yaml
+  - ingress-patch.yaml
+  - node-reader-binding-delete-patch.yaml
+  - pvc-storageclass-patch.yaml
+  - postgres-storageclass-patch.yaml

@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-postgres
+spec:
+  capacity:
+    storage: 30Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: postgres-data-postgres-0
+  hostPath:
+    path: /shared/prod/postgres
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-config
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-config
+  hostPath:
+    path: /shared/prod/config
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-job-logs
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-job-logs
+  hostPath:
+    path: /shared/prod/job-logs
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-oss-fuzz
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-oss-fuzz
+  hostPath:
+    path: /shared/prod/oss-fuzz
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-shared-output
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-shared-output
+  hostPath:
+    path: /shared/prod/output
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-prod-shared-tmp
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-prod
+    name: sherpa-shared-tmp
+  hostPath:
+    path: /shared/prod/tmp

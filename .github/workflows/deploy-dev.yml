@@ -130,12 +130,116 @@ jobs:
           exit 1
 
       - name: Configure kubeconfig
+        id: kubeconfig
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ~/.kube
-          echo "${KUBE_CONFIG_B64}" | base64 --decode > ~/.kube/config
+
+          selected=""
+          selected_source=""
+          runner_is_self_hosted="false"
+          if [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]; then
+            runner_is_self_hosted="true"
+          fi
+
+          select_candidate() {
+            local source="$1"
+            local path="$2"
+            if [[ -z "$path" || ! -f "$path" ]]; then
+              return 1
+            fi
+            if KUBECONFIG="$path" kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
+              selected="$path"
+              selected_source="$source"
+              return 0
+            fi
+            return 1
+          }
+
+          select_candidate_via_sudo_copy() {
+            local source="$1"
+            local path="$2"
+            local tmp_copy
+            if [[ -z "$path" ]]; then
+              return 1
+            fi
+            tmp_copy="$(mktemp)"
+            if sudo cp "$path" "$tmp_copy" 2>/dev/null; then
+              chmod 600 "$tmp_copy"
+              if select_candidate "$source" "$tmp_copy"; then
+                return 0
+              fi
+            fi
+            rm -f "$tmp_copy"
+            return 1
+          }
+
+          if [[ "$runner_is_self_hosted" == "true" ]]; then
+            if [[ -n "${KUBECONFIG:-}" ]]; then
+              IFS=':' read -r first_kubeconfig _ <<< "${KUBECONFIG}"
+              select_candidate "runner-kubeconfig-env" "$first_kubeconfig" || true
+            fi
+            if [[ -z "$selected" ]]; then
+              select_candidate "runner-home" "$HOME/.kube/config" || true
+            fi
+            if [[ -z "$selected" ]]; then
+              select_candidate_via_sudo_copy "runner-k3s" "/etc/rancher/k3s/k3s.yaml" || true
+            fi
+            if [[ -z "$selected" ]]; then
+              select_candidate_via_sudo_copy "runner-kubeadm" "/etc/kubernetes/admin.conf" || true
+            fi
+          fi
+
+          if [[ -z "$selected" && -n "${KUBE_CONFIG_B64:-}" ]]; then
+            tmp_kubeconfig="$(mktemp)"
+            trap 'rm -f "$tmp_kubeconfig"' EXIT
+            if echo "${KUBE_CONFIG_B64}" | base64 --decode > "$tmp_kubeconfig" 2>/dev/null; then
+              if select_candidate "github-secret" "$tmp_kubeconfig"; then
+                :
+              else
+                echo "::warning::GitHub kubeconfig secret decoded but is not reachable from this runner."
+              fi
+            else
+              echo "::warning::Failed to decode GitHub kubeconfig secret."
+            fi
+          fi
+
+          if [[ -z "$selected" ]]; then
+            echo "::warning::No reachable kubeconfig found on runner or in GitHub secret."
+            if [[ -n "${KUBECONFIG:-}" ]]; then
+              IFS=':' read -r first_kubeconfig _ <<< "${KUBECONFIG}"
+              if [[ -f "$first_kubeconfig" ]]; then
+                selected="$first_kubeconfig"
+                selected_source="runner-kubeconfig-env-unreachable"
+              fi
+            fi
+            if [[ -z "$selected" && -f "$HOME/.kube/config" ]]; then
+              selected="$HOME/.kube/config"
+              selected_source="runner-home-unreachable"
+            fi
+            if [[ -z "$selected" && -n "${KUBE_CONFIG_B64:-}" ]]; then
+              tmp_kubeconfig="$(mktemp)"
+              trap 'rm -f "$tmp_kubeconfig"' EXIT
+              echo "${KUBE_CONFIG_B64}" | base64 --decode > "$tmp_kubeconfig"
+              selected="$tmp_kubeconfig"
+              selected_source="github-secret-unreachable"
+            fi
+          fi
+
+          if [[ -z "$selected" ]]; then
+            echo "::error::Unable to locate any kubeconfig file."
+            exit 1
+          fi
+
+          if [[ "$selected" != "$HOME/.kube/config" ]]; then
+            cp "$selected" ~/.kube/config
+          fi
           chmod 600 ~/.kube/config
+
+          echo "source=${selected_source}" >> "$GITHUB_OUTPUT"
+          echo "path=${selected}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Using kubeconfig source=${selected_source} path=${selected}"
         env:
           KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64_DEV }}
 
@@ -152,9 +256,12 @@ jobs:
             exit 0
           fi
           if echo "${server}" | grep -Eq 'https?://(127\.0\.0\.1|localhost)(:|/|$)'; then
-            echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Kubernetes server points to localhost (${server}); skipping deploy steps on GitHub-hosted runner."
-            exit 0
+            if [[ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]]; then
+              echo "reachable=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Kubernetes server points to localhost (${server}); skipping deploy steps on non-self-hosted runner."
+              exit 0
+            fi
+            echo "::notice::Kubernetes server points to localhost (${server}) on self-hosted runner; continuing."
           fi
           if kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
             echo "reachable=true" >> "$GITHUB_OUTPUT"
@@ -213,6 +320,7 @@ jobs:
             "${DEV_SHARED_ROOT}/output" \
             "${DEV_SHARED_ROOT}/tmp"
           sudo chown -R "$(id -u):$(id -g)" "${DEV_SHARED_ROOT}"
+
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
