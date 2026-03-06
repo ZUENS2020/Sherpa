@@ -157,6 +157,24 @@ jobs:
             return 1
           }
 
+          select_candidate_via_sudo_copy() {
+            local source="$1"
+            local path="$2"
+            local tmp_copy
+            if [[ -z "$path" ]]; then
+              return 1
+            fi
+            tmp_copy="$(mktemp)"
+            if sudo cp "$path" "$tmp_copy" 2>/dev/null; then
+              chmod 600 "$tmp_copy"
+              if select_candidate "$source" "$tmp_copy"; then
+                return 0
+              fi
+            fi
+            rm -f "$tmp_copy"
+            return 1
+          }
+
           if [[ "$runner_is_self_hosted" == "true" ]]; then
             if [[ -n "${KUBECONFIG:-}" ]]; then
               IFS=':' read -r first_kubeconfig _ <<< "${KUBECONFIG}"
@@ -166,10 +184,10 @@ jobs:
               select_candidate "runner-home" "$HOME/.kube/config" || true
             fi
             if [[ -z "$selected" ]]; then
-              select_candidate "runner-k3s" "/etc/rancher/k3s/k3s.yaml" || true
+              select_candidate_via_sudo_copy "runner-k3s" "/etc/rancher/k3s/k3s.yaml" || true
             fi
             if [[ -z "$selected" ]]; then
-              select_candidate "runner-kubeadm" "/etc/kubernetes/admin.conf" || true
+              select_candidate_via_sudo_copy "runner-kubeadm" "/etc/kubernetes/admin.conf" || true
             fi
           fi
 
