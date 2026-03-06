@@ -15,6 +15,7 @@ env:
   OVERLAY: k8s/overlays/dev
   DEV_NAMESPACE: sherpa-dev
   DEV_SHARED_ROOT: /shared/dev
+  DEV_OUTPUT_DIR: /home/deploy/output/dev
   RESET_DEV_BEFORE_DEPLOY: "true"
 
 concurrency:
@@ -308,21 +309,20 @@ jobs:
 
           echo "[reset] cleaning ${DEV_SHARED_ROOT}"
           sudo mkdir -p "${DEV_SHARED_ROOT}"
-          sudo rm -rf "${DEV_SHARED_ROOT:?}/"*
+          sudo mkdir -p "${DEV_OUTPUT_DIR}"
           sudo mkdir -p \
             "${DEV_SHARED_ROOT}/postgres" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
-            "${DEV_SHARED_ROOT}/output" \
             "${DEV_SHARED_ROOT}/tmp"
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
           sudo chown -R "$(id -u):$(id -g)" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
-            "${DEV_SHARED_ROOT}/output" \
-            "${DEV_SHARED_ROOT}/tmp"
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"
 
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -410,15 +410,15 @@ jobs:
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
-            "${DEV_SHARED_ROOT}/output" \
-            "${DEV_SHARED_ROOT}/tmp"
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
           sudo chown -R "$(id -u):$(id -g)" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
-            "${DEV_SHARED_ROOT}/output" \
-            "${DEV_SHARED_ROOT}/tmp"
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
