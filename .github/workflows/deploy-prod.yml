@@ -435,6 +435,42 @@ jobs:
           kubectl -n "${NAMESPACE}" patch ingress sherpa --type=json \
             -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
 
+
+      - name: Pre-pull web and frontend images on runner node
+        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+
+          cri_args=()
+          if sudo test -S /run/k3s/containerd/containerd.sock; then
+            cri_args+=(--runtime-endpoint unix:///run/k3s/containerd/containerd.sock)
+          elif sudo test -S /run/containerd/containerd.sock; then
+            cri_args+=(--runtime-endpoint unix:///run/containerd/containerd.sock)
+          fi
+
+          pull_one() {
+            local image="$1"
+            echo "[pre-pull] pulling ${image}"
+            if command -v crictl >/dev/null 2>&1; then
+              sudo crictl "${cri_args[@]}" pull "${image}"
+              return 0
+            fi
+            if command -v ctr >/dev/null 2>&1; then
+              sudo ctr -n k8s.io images pull "${image}"
+              return 0
+            fi
+            echo "::error::Neither crictl nor ctr is available on the runner node"
+            return 1
+          }
+
+          pull_one "${WEB_IMAGE}"
+          pull_one "${FRONTEND_IMAGE}"
+
       - name: Pin images and worker image
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
