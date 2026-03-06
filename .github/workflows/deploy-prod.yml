@@ -39,7 +39,6 @@ jobs:
             env.http_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
             env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
             env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
-            env.no_proxy=127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["hfnaroxd1op1q2.xuanyuan.run", "hfnaroxd1op1q2.xuanyuan.dev"]
