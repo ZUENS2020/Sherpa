@@ -54,7 +54,11 @@ jobs:
         run: |
           set -euo pipefail
           owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          sha="${{ github.event.pull_request.merge_commit_sha }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            sha="${GITHUB_SHA}"
+          else
+            sha="${{ github.event.pull_request.merge_commit_sha }}"
+          fi
           echo "web_image=${REGISTRY}/${owner_lc}/sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=${REGISTRY}/${owner_lc}/sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
 
