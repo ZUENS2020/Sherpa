@@ -14,6 +14,7 @@ env:
   NAMESPACE: sherpa-prod
   OVERLAY: k8s/overlays/prod
   RESET_PROD_BEFORE_DEPLOY: "false"
+  PROD_SHARED_ROOT: /shared/prod
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
@@ -322,6 +323,20 @@ jobs:
           kubectl -n "${NAMESPACE}" create secret generic cloudflare-public-host \
             --from-literal=host="${CLOUDFLARE_PUBLIC_HOST}" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Prepare prod hostPath directories
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p \
+            "${PROD_SHARED_ROOT}/postgres" \
+            "${PROD_SHARED_ROOT}/config" \
+            "${PROD_SHARED_ROOT}/job-logs" \
+            "${PROD_SHARED_ROOT}/oss-fuzz" \
+            "${PROD_SHARED_ROOT}/output" \
+            "${PROD_SHARED_ROOT}/tmp"
+          sudo chown -R "$(id -u):$(id -g)" "${PROD_SHARED_ROOT}"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
