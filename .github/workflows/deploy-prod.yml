@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   deploy-prod:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: [self-hosted, linux]
     environment: prod
     timeout-minutes: 90
