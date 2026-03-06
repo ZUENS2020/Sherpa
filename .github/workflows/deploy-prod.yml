@@ -145,9 +145,12 @@ jobs:
             exit 0
           fi
           if echo "${server}" | grep -Eq 'https?://(127\.0\.0\.1|localhost)(:|/|$)'; then
-            echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Kubernetes server points to localhost (${server}); skipping deploy steps on GitHub-hosted runner."
-            exit 0
+            if [[ "${RUNNER_ENVIRONMENT:-}" != "self-hosted" ]]; then
+              echo "reachable=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Kubernetes server points to localhost (${server}); skipping deploy steps on non-self-hosted runner."
+              exit 0
+            fi
+            echo "::notice::Kubernetes server points to localhost (${server}) on self-hosted runner; continuing."
           fi
           if kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
             echo "reachable=true" >> "$GITHUB_OUTPUT"
