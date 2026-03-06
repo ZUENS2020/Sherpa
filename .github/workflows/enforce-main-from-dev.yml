@@ -1,0 +1,24 @@
+name: Enforce Main From Dev
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require dev -> main only
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "base_ref=${{ github.base_ref }}"
+          echo "head_ref=${{ github.head_ref }}"
+          if [[ "${{ github.head_ref }}" != "dev" ]]; then
+            echo "::error::Only pull requests from dev to main are allowed."
+            exit 1
+          fi
