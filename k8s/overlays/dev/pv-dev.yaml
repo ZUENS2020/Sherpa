@@ -61,7 +61,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: /shared/dev/output
+    path: /home/deploy/output/dev
 ---
 apiVersion: v1
 kind: PersistentVolume

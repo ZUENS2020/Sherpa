@@ -15,6 +15,7 @@ env:
   OVERLAY: k8s/overlays/prod
   RESET_PROD_BEFORE_DEPLOY: "false"
   PROD_SHARED_ROOT: /shared/prod
+  PROD_OUTPUT_DIR: /home/deploy/output/prod
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
@@ -372,15 +373,15 @@ jobs:
             "${PROD_SHARED_ROOT}/config" \
             "${PROD_SHARED_ROOT}/job-logs" \
             "${PROD_SHARED_ROOT}/oss-fuzz" \
-            "${PROD_SHARED_ROOT}/output" \
-            "${PROD_SHARED_ROOT}/tmp"
+            "${PROD_SHARED_ROOT}/tmp" \
+            "${PROD_OUTPUT_DIR}"
           sudo chown -R 999:999 "${PROD_SHARED_ROOT}/postgres"
           sudo chown -R "$(id -u):$(id -g)" \
             "${PROD_SHARED_ROOT}/config" \
             "${PROD_SHARED_ROOT}/job-logs" \
             "${PROD_SHARED_ROOT}/oss-fuzz" \
-            "${PROD_SHARED_ROOT}/output" \
-            "${PROD_SHARED_ROOT}/tmp"
+            "${PROD_SHARED_ROOT}/tmp" \
+            "${PROD_OUTPUT_DIR}"
 
       - name: Deploy overlay
         if: steps.kube_preflight.outputs.reachable == 'true'
