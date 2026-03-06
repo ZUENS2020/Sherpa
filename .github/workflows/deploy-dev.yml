@@ -494,7 +494,23 @@ jobs:
         run: |
           set -euo pipefail
           kubectl -n "${NAMESPACE}" rollout status statefulset/postgres --timeout=300s
-          kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-web --timeout=300s
+
+          rollout_with_retry() {
+            local kind="$1"
+            local name="$2"
+            local timeout="$3"
+            if kubectl -n "${NAMESPACE}" rollout status "${kind}/${name}" --timeout="${timeout}"; then
+              return 0
+            fi
+            echo "::warning::${kind}/${name} rollout exceeded ${timeout}; collecting diagnostics before retry"
+            kubectl -n "${NAMESPACE}" get "${kind}/${name}" -o wide || true
+            kubectl -n "${NAMESPACE}" describe "${kind}/${name}" || true
+            kubectl -n "${NAMESPACE}" get pods -o wide || true
+            kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 40 || true
+            kubectl -n "${NAMESPACE}" rollout status "${kind}/${name}" --timeout=300s
+          }
+
+          rollout_with_retry deployment sherpa-web 600s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/cloudflared --timeout=300s
 
