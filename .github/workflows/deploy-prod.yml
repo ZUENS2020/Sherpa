@@ -20,7 +20,7 @@ env:
   OVERLAY: k8s/overlays/prod
   RESET_PROD_BEFORE_DEPLOY: "false"
   PROD_SHARED_ROOT: /shared/prod
-  PROD_OUTPUT_DIR: /shared/prod/output
+  PROD_OUTPUT_DIR: /home/deploy/output/prod
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
