@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -80,6 +81,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     timeout_signature: str
     same_timeout_repeats: int
     crash_fix_attempts: int
+    crash_repro_done: bool
+    crash_repro_ok: bool
+    crash_repro_rc: int
+    crash_repro_report_path: str
+    crash_repro_json_path: str
     next: str
     fix_patch_path: str
     fix_patch_files: list[str]
@@ -466,6 +472,11 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "crash_signature": "",
             "same_crash_repeats": 0,
             "crash_fix_attempts": int(state.get("crash_fix_attempts") or 0),
+            "crash_repro_done": bool(state.get("crash_repro_done") or False),
+            "crash_repro_ok": bool(state.get("crash_repro_ok") or False),
+            "crash_repro_rc": int(state.get("crash_repro_rc") or 0),
+            "crash_repro_report_path": str(state.get("crash_repro_report_path") or ""),
+            "crash_repro_json_path": str(state.get("crash_repro_json_path") or ""),
             "plan_fix_on_crash": True,
             "plan_max_fix_rounds": 1,
         },
@@ -2509,6 +2520,183 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return out
 
 
+def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "repro_crash")
+    if stop_now:
+        return state
+
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> repro_crash")
+    repo_root = gen.repo_root
+    report_md = repo_root / "crash_repro_report.md"
+    report_json = repo_root / "crash_repro_report.json"
+
+    if not bool(state.get("crash_found")):
+        out = {
+            **state,
+            "last_step": "repro_crash",
+            "last_error": "",
+            "crash_repro_done": True,
+            "crash_repro_ok": False,
+            "crash_repro_rc": 0,
+            "message": "repro_crash skipped (no crash found)",
+            "crash_repro_report_path": str(report_md),
+            "crash_repro_json_path": str(report_json),
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- repro_crash skip=no-crash dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+    last_fuzzer = str(state.get("last_fuzzer") or "").strip()
+    last_artifact = str(state.get("last_crash_artifact") or "").strip()
+    repo_url = str(state.get("repo_url") or "").strip()
+    artifact_path = Path(last_artifact) if last_artifact else None
+    now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    payload: dict[str, Any] = {
+        "timestamp": now_ts,
+        "repo_url": repo_url,
+        "fuzzer": last_fuzzer,
+        "artifact": last_artifact,
+        "clone_repo_root": "",
+        "clone_ok": False,
+        "clone_rc": 1,
+        "build_ok": False,
+        "build_rc": 1,
+        "reproduce_ok": False,
+        "reproduce_rc": 1,
+        "error": "",
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+    try:
+        if not repo_url:
+            raise HarnessGeneratorError("missing repo_url for crash reproduction")
+        if not last_fuzzer:
+            raise HarnessGeneratorError("missing last_fuzzer for crash reproduction")
+        if artifact_path is None or not artifact_path.is_file():
+            raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
+
+        repro_workspace = repo_root / ".repro_crash"
+        repro_workspace.mkdir(parents=True, exist_ok=True)
+        clone_root = repro_workspace / f"clone-{int(time.time())}"
+        if clone_root.exists():
+            shutil.rmtree(clone_root, ignore_errors=True)
+
+        rem = _remaining_time_budget_sec(state, min_timeout=15)
+        clone_timeout = max(30, min(rem, 300))
+        clone = subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, str(clone_root)],
+            capture_output=True,
+            text=True,
+            timeout=clone_timeout,
+        )
+        payload["clone_rc"] = int(clone.returncode)
+        payload["clone_ok"] = clone.returncode == 0
+        payload["clone_repo_root"] = str(clone_root)
+        if clone.returncode != 0:
+            payload["stderr_tail"] = (clone.stderr or "")[-4000:]
+            raise HarnessGeneratorError(f"crash repro clone failed (rc={clone.returncode})")
+
+        python_runner = "python3"
+        try:
+            python_runner = str(gen._python_runner() or "python3")
+        except Exception:
+            python_runner = "python3"
+
+        build_cmd: list[str]
+        build_cwd: Path
+        if (clone_root / "fuzz" / "build.py").is_file():
+            build_cmd = [python_runner, "build.py"]
+            build_cwd = clone_root / "fuzz"
+        elif (clone_root / "fuzz" / "build.sh").is_file():
+            build_cmd = ["bash", "build.sh"]
+            build_cwd = clone_root / "fuzz"
+        else:
+            raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in cloned repo")
+
+        rem = _remaining_time_budget_sec(state, min_timeout=15)
+        build_timeout = max(30, min(rem, 600))
+        build = subprocess.run(
+            build_cmd,
+            cwd=build_cwd,
+            capture_output=True,
+            text=True,
+            timeout=build_timeout,
+        )
+        payload["build_rc"] = int(build.returncode)
+        payload["build_ok"] = build.returncode == 0
+        if build.returncode != 0:
+            payload["stdout_tail"] = (build.stdout or "")[-4000:]
+            payload["stderr_tail"] = (build.stderr or "")[-4000:]
+            raise HarnessGeneratorError(f"crash repro build failed (rc={build.returncode})")
+
+        fuzzer_bin = clone_root / "fuzz" / "out" / last_fuzzer
+        if not fuzzer_bin.is_file():
+            raise HarnessGeneratorError(f"repro fuzzer binary not found: {fuzzer_bin}")
+
+        rem = _remaining_time_budget_sec(state, min_timeout=15)
+        repro_timeout = max(20, min(rem, 180))
+        repro = subprocess.run(
+            [str(fuzzer_bin), "-runs=1", str(artifact_path)],
+            cwd=clone_root,
+            capture_output=True,
+            text=True,
+            timeout=repro_timeout,
+        )
+        payload["reproduce_rc"] = int(repro.returncode)
+        payload["reproduce_ok"] = repro.returncode != 0
+        payload["stdout_tail"] = (repro.stdout or "")[-4000:]
+        payload["stderr_tail"] = (repro.stderr or "")[-4000:]
+    except Exception as e:
+        payload["error"] = str(e)
+
+    report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_lines = [
+        "# Crash Reproduction Report",
+        "",
+        f"- timestamp: {payload['timestamp']}",
+        f"- repo_url: {payload['repo_url']}",
+        f"- fuzzer: {payload['fuzzer']}",
+        f"- artifact: {payload['artifact']}",
+        f"- clone_ok: {payload['clone_ok']} (rc={payload['clone_rc']})",
+        f"- build_ok: {payload['build_ok']} (rc={payload['build_rc']})",
+        f"- reproduce_ok: {payload['reproduce_ok']} (rc={payload['reproduce_rc']})",
+        "",
+    ]
+    if payload["error"]:
+        md_lines.extend(["## Error", "", str(payload["error"]), ""])
+    if payload["stdout_tail"]:
+        md_lines.extend(["## STDOUT (tail)", "", "```text", str(payload["stdout_tail"]), "```", ""])
+    if payload["stderr_tail"]:
+        md_lines.extend(["## STDERR (tail)", "", "```text", str(payload["stderr_tail"]), "```", ""])
+    report_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    out = {
+        **state,
+        "last_step": "repro_crash",
+        "last_error": "",
+        "crash_repro_done": True,
+        "crash_repro_ok": bool(payload["reproduce_ok"]),
+        "crash_repro_rc": int(payload["reproduce_rc"]),
+        "crash_repro_report_path": str(report_md),
+        "crash_repro_json_path": str(report_json),
+        "message": "crash reproduction validated" if payload["reproduce_ok"] else "crash reproduction not confirmed",
+    }
+    _wf_log(
+        cast(dict[str, Any], out),
+        (
+            "<- repro_crash "
+            f"ok={payload['reproduce_ok']} clone_rc={payload['clone_rc']} "
+            f"build_rc={payload['build_rc']} repro_rc={payload['reproduce_rc']} "
+            f"dt={_fmt_dt(time.perf_counter()-t0)}"
+        ),
+    )
+    return out
+
+
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")):
         return "stop"
@@ -2532,12 +2720,22 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
         return "stop"
     if bool(state.get("crash_found")):
-        fix_on_crash = bool(state.get("plan_fix_on_crash", True))
-        max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 1))
-        attempts = int(state.get("crash_fix_attempts") or 0)
-        if fix_on_crash and attempts < max_fix_rounds:
-            return "fix_crash"
+        return "repro_crash"
+    return "stop"
+
+
+def _route_after_repro_crash_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
         return "stop"
+    if not bool(state.get("crash_found")):
+        return "stop"
+    if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
+        return "stop"
+    fix_on_crash = bool(state.get("plan_fix_on_crash", True))
+    max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 1))
+    attempts = int(state.get("crash_fix_attempts") or 0)
+    if fix_on_crash and attempts < max_fix_rounds:
+        return "fix_crash"
     return "stop"
 
 
@@ -2545,7 +2743,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")) or (state.get("last_error") or "").strip():
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
-    allowed = {"plan", "synthesize", "build", "fix_build", "run", "fix_crash"}
+    allowed = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
     if raw in allowed:
         return raw
     return "plan"
@@ -2564,6 +2762,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
     graph.add_node("fix_build", _node_fix_build)
+    graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("fix_crash", _node_fix_crash)
     graph.add_node("run", _node_run)
 
@@ -2606,6 +2805,12 @@ def build_fuzz_workflow() -> StateGraph:
             return "stop"
         return nxt
 
+    def _route_after_repro_crash(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_repro_crash_state(state)
+        if _should_stage_stop(state, "repro_crash") and nxt == "stop":
+            return "stop"
+        return nxt
+
     def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")):
             return "stop"
@@ -2624,6 +2829,7 @@ def build_fuzz_workflow() -> StateGraph:
             "build": "build",
             "fix_build": "fix_build",
             "run": "run",
+            "repro_crash": "repro_crash",
             "fix_crash": "fix_crash",
             "stop": END,
         },
@@ -2632,7 +2838,12 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
     graph.add_conditional_edges("build", _route_after_build, {"run": "run", "fix_build": "fix_build", "stop": END})
     graph.add_conditional_edges("fix_build", _route_after_fix_build, {"build": "build", "stop": END})
-    graph.add_conditional_edges("run", _route_after_run, {"fix_crash": "fix_crash", "fix_build": "fix_build", "stop": END})
+    graph.add_conditional_edges(
+        "run",
+        _route_after_run,
+        {"repro_crash": "repro_crash", "fix_crash": "fix_crash", "fix_build": "fix_build", "stop": END},
+    )
+    graph.add_conditional_edges("repro_crash", _route_after_repro_crash, {"fix_crash": "fix_crash", "stop": END})
     graph.add_conditional_edges("fix_crash", _route_after_fix_crash, {"build": "build", "stop": END})
 
     return graph
@@ -2729,6 +2940,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "run_terminal_reason": str(out.get("run_terminal_reason") or ""),
         "run_idle_seconds": int(out.get("run_idle_seconds") or 0),
         "run_children_exit_count": int(out.get("run_children_exit_count") or 0),
+        "crash_repro_done": bool(out.get("crash_repro_done") or False),
+        "crash_repro_ok": bool(out.get("crash_repro_ok") or False),
+        "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
+        "crash_repro_report_path": str(out.get("crash_repro_report_path") or ""),
+        "crash_repro_json_path": str(out.get("crash_repro_json_path") or ""),
         "build_error_kind": str(out.get("build_error_kind") or ""),
         "build_error_code": str(out.get("build_error_code") or ""),
     }
