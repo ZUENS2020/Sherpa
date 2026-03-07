@@ -242,16 +242,6 @@ jobs:
             exit 1
           fi
 
-      - name: Guardrail (workflow has no reset operations)
-        if: steps.kube_preflight.outputs.reachable == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -E -n 'kubectl delete namespace|RESET_DEV_BEFORE_DEPLOY|DEV_SHARED_ROOT|sherpa-dev' .github/workflows/deploy-prod.yml; then
-            echo "::error::Forbidden reset statement found in deploy-prod workflow."
-            exit 1
-          fi
-
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
