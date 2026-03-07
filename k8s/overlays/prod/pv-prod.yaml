@@ -76,7 +76,7 @@ spec:
     namespace: sherpa-prod
     name: sherpa-shared-output
   hostPath:
-    path: /home/deploy/output/prod
+    path: /shared/prod/output
 ---
 apiVersion: v1
 kind: PersistentVolume
