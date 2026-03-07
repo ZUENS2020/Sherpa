@@ -15,7 +15,6 @@ permissions:
   contents: read
 
 env:
-  REGISTRY: ghcr.io
   NAMESPACE: sherpa-dev
   OVERLAY: k8s/overlays/dev
   DEV_NAMESPACE: sherpa-dev
@@ -39,6 +38,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Guard no GHCR push path
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=".github/workflows/deploy-dev.yml"
+          if rg -n '^\s*push:\s*true\s*$' "$file"; then
+            echo "::error::Forbidden remote image push configuration found in $file"
+            exit 1
+          fi
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
