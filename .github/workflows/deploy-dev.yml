@@ -5,12 +5,16 @@ on:
     branches: ["dev"]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      force_rebuild_all:
+        description: "Force rebuild web and frontend images"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 env:
-  REGISTRY: ghcr.io
   NAMESPACE: sherpa-dev
   OVERLAY: k8s/overlays/dev
   DEV_NAMESPACE: sherpa-dev
@@ -32,6 +36,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard no GHCR push path
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=".github/workflows/deploy-dev.yml"
+          if rg -n '^\s*push:\s*true\s*$' "$file"; then
+            echo "::error::Forbidden remote image push configuration found in $file"
+            exit 1
+          fi
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -45,58 +61,6 @@ jobs:
             [registry."docker.io"]
               mirrors = ["hfnaroxd1op1q2.xuanyuan.run", "hfnaroxd1op1q2.xuanyuan.dev"]
 
-
-      - name: Prepare local image refs
-        id: prep
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            sha="${{ github.event.pull_request.head.sha }}"
-          else
-            sha="${GITHUB_SHA}"
-          fi
-          echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
-          echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
-          echo "web_tar=/tmp/sherpa-web-${sha}.tar" >> "$GITHUB_OUTPUT"
-          echo "frontend_tar=/tmp/sherpa-frontend-${sha}.tar" >> "$GITHUB_OUTPUT"
-
-      - name: Build and export web image
-        timeout-minutes: 75
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          tags: ${{ steps.prep.outputs.web_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.web_tar }}
-          cache-from: type=gha,scope=sherpa-web
-          cache-to: type=gha,mode=max,scope=sherpa-web,ignore-error=true
-
-      - name: Build and export frontend image (attempt 1)
-        id: frontend_build_1
-        continue-on-error: true
-        timeout-minutes: 20
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          tags: ${{ steps.prep.outputs.frontend_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
-          cache-from: type=gha,scope=sherpa-frontend
-          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
-
-      - name: Build and export frontend image (attempt 2)
-        if: steps.frontend_build_1.outcome == 'failure'
-        id: frontend_build_2
-        timeout-minutes: 20
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          tags: ${{ steps.prep.outputs.frontend_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
-          cache-from: type=gha,scope=sherpa-frontend
-          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
 
       - name: Setup kubectl (self-hosted fast path)
         shell: bash
@@ -310,12 +274,16 @@ jobs:
           echo "[reset] cleaning ${DEV_SHARED_ROOT}"
           sudo mkdir -p "${DEV_SHARED_ROOT}"
           sudo mkdir -p "${DEV_OUTPUT_DIR}"
-          sudo mkdir -p \
+          for d in \
             "${DEV_SHARED_ROOT}/postgres" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
-            "${DEV_SHARED_ROOT}/tmp"
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"; do
+            sudo mkdir -p "$d"
+            sudo find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          done
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
           sudo chown -R "$(id -u):$(id -g)" \
             "${DEV_SHARED_ROOT}/config" \
@@ -427,6 +395,105 @@ jobs:
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
 
+      - name: Prepare local image refs
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            sha="${{ github.event.pull_request.head.sha }}"
+          else
+            sha="${GITHUB_SHA}"
+          fi
+          echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
+          echo "web_tar=/tmp/sherpa-web-${sha}.tar" >> "$GITHUB_OUTPUT"
+          echo "frontend_tar=/tmp/sherpa-frontend-${sha}.tar" >> "$GITHUB_OUTPUT"
+
+      - name: Decide image rebuild scope
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        id: rebuild_scope
+        shell: bash
+        env:
+          FORCE_REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild_all || 'false' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+        run: |
+          set -euo pipefail
+          web_changed=false
+          frontend_changed=false
+
+          if [[ "${FORCE_REBUILD_ALL}" == "true" ]]; then
+            web_changed=true
+            frontend_changed=true
+          else
+            changed_files=""
+            if [[ "${{ github.event_name }}" == "pull_request" && -n "${PR_BASE_SHA}" && -n "${PR_HEAD_SHA}" ]]; then
+              git fetch --no-tags --prune origin "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || true
+              changed_files="$(git diff --name-only "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || true)"
+            elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+              changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+            fi
+
+            while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+              case "$file" in
+                docker/Dockerfile.web|docker/requirements.web.txt|harness_generator/*|k8s/*|scripts/*)
+                  web_changed=true
+                  ;;
+              esac
+              case "$file" in
+                docker/Dockerfile.frontend|sherpa-frontend/*)
+                  frontend_changed=true
+                  ;;
+              esac
+            done <<< "${changed_files}"
+          fi
+
+          echo "web_changed=${web_changed}" >> "$GITHUB_OUTPUT"
+          echo "frontend_changed=${frontend_changed}" >> "$GITHUB_OUTPUT"
+          echo "::notice::force_rebuild_all=${FORCE_REBUILD_ALL}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
+
+      - name: Build and export web image
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
+        timeout-minutes: 75
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          tags: ${{ steps.prep.outputs.web_image }}
+          outputs: type=docker,dest=${{ steps.prep.outputs.web_tar }}
+          cache-from: type=gha,scope=sherpa-web
+          cache-to: type=gha,mode=max,scope=sherpa-web,ignore-error=true
+
+      - name: Build and export frontend image (attempt 1)
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.frontend_changed == 'true'
+        id: frontend_build_1
+        continue-on-error: true
+        timeout-minutes: 20
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          tags: ${{ steps.prep.outputs.frontend_image }}
+          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
+
+      - name: Build and export frontend image (attempt 2)
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.frontend_changed == 'true' && steps.frontend_build_1.outcome == 'failure'
+        id: frontend_build_2
+        timeout-minutes: 20
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.frontend
+          tags: ${{ steps.prep.outputs.frontend_image }}
+          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
+          cache-from: type=gha,scope=sherpa-frontend
+          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
+
       - name: Cleanup legacy dev tunnel in shared namespace
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
@@ -527,15 +594,13 @@ jobs:
             -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
 
 
-      - name: Import local images into containerd
-        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted'
+      - name: Import web image into containerd
+        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted' && steps.rebuild_scope.outputs.web_changed == 'true'
         timeout-minutes: 30
         shell: bash
         env:
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
-          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
           WEB_TAR: ${{ steps.prep.outputs.web_tar }}
-          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
         run: |
           set -euo pipefail
 
@@ -553,8 +618,33 @@ jobs:
           }
 
           import_one "${WEB_TAR}" "${WEB_IMAGE}"
+          rm -f "${WEB_TAR}"
+
+      - name: Import frontend image into containerd
+        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted' && steps.rebuild_scope.outputs.frontend_changed == 'true'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
+        run: |
+          set -euo pipefail
+
+          ctr_cmd=(sudo ctr -n k8s.io)
+          if sudo test -S /run/k3s/containerd/containerd.sock; then
+            ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+          fi
+
+          import_one() {
+            local tar_path="$1"
+            local image="$2"
+            echo "[import] importing ${image} from ${tar_path}"
+            timeout 1800s "${ctr_cmd[@]}" images import "${tar_path}"
+            "${ctr_cmd[@]}" images ls | grep -F "${image}" >/dev/null
+          }
+
           import_one "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
-          rm -f "${WEB_TAR}" "${FRONTEND_TAR}"
+          rm -f "${FRONTEND_TAR}"
 
       - name: Pin images and worker image
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -562,12 +652,22 @@ jobs:
         env:
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
           FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          WEB_CHANGED: ${{ steps.rebuild_scope.outputs.web_changed }}
+          FRONTEND_CHANGED: ${{ steps.rebuild_scope.outputs.frontend_changed }}
         run: |
           set -euo pipefail
-          kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
-            -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
-          kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
-          kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
+          if [[ "${WEB_CHANGED}" == "true" ]]; then
+            kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
+              -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
+            kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
+          else
+            echo "::notice::Skip sherpa-web image pin (web_changed=false)"
+          fi
+          if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
+            kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
+          else
+            echo "::notice::Skip sherpa-frontend image pin (frontend_changed=false)"
+          fi
 
       - name: Wait for rollout
         if: steps.kube_preflight.outputs.reachable == 'true'
