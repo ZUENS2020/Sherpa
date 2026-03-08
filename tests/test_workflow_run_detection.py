@@ -310,9 +310,23 @@ def test_route_after_run_routes_recoverable_run_errors_to_fix_build():
     assert route == "fix_build"
 
 
+def test_route_after_run_routes_crash_to_repro_stage():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "", "failed": False, "crash_found": True}
+    )
+    assert route == "repro_crash"
+
+
 def test_route_after_run_routes_idle_timeout_to_stop():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
+    )
+    assert route == "stop"
+
+
+def test_route_after_repro_crash_stops_when_not_reproduced():
+    route = workflow_graph._route_after_repro_crash_state(
+        {"failed": False, "crash_found": True, "crash_repro_done": True, "crash_repro_ok": False}
     )
     assert route == "stop"
 

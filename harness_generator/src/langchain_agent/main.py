@@ -920,7 +920,7 @@ def _is_status_terminal(raw: str | None) -> bool:
     return s in {"success", "resumed", "error", "resume_failed"}
 
 
-_RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "fix_crash"}
+_RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
 _STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run")
 
 
@@ -933,7 +933,7 @@ def _normalize_resume_step(raw: str | None) -> str:
 
 def _staged_sequence_from(raw_start: str | None) -> list[str]:
     start = _normalize_resume_step(raw_start)
-    if start in {"fix_build", "fix_crash"}:
+    if start in {"fix_build", "repro_crash", "fix_crash"}:
         start = "build"
     try:
         idx = _STAGED_WORKFLOW_STEPS.index(start)
@@ -2270,22 +2270,31 @@ async def task_api(request: task_model = Body(...)):
                     with _INIT_LOCK:
                         if _is_cancel_requested(job_id):
                             raise RuntimeError(cancel_error)
-                        repo_url = (
-                            (request.oss_fuzz_repo_url or "").strip()
-                            or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://github.com/google/oss-fuzz.git"
+                        auto_init_oss_fuzz = (
+                            (os.environ.get("SHERPA_AUTO_INIT_OSS_FUZZ", "0") or "")
+                            .strip()
+                            .lower()
+                            in {"1", "true", "yes", "on"}
                         )
-                        target_dir = Path(
-                            (cfg.oss_fuzz_dir or "").strip()
-                            or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
-                            or str(_REPO_ROOT / "oss-fuzz")
-                        ).expanduser().resolve()
-                        print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
-                        _ensure_oss_fuzz_checkout(
-                            repo_url=repo_url,
-                            target_dir=target_dir,
-                            force=request.force_clone,
-                        )
+                        if auto_init_oss_fuzz:
+                            repo_url = (
+                                (request.oss_fuzz_repo_url or "").strip()
+                                or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
+                                or "https://github.com/google/oss-fuzz.git"
+                            )
+                            target_dir = Path(
+                                (cfg.oss_fuzz_dir or "").strip()
+                                or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
+                                or str(_REPO_ROOT / "oss-fuzz")
+                            ).expanduser().resolve()
+                            print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
+                            _ensure_oss_fuzz_checkout(
+                                repo_url=repo_url,
+                                target_dir=target_dir,
+                                force=request.force_clone,
+                            )
+                        else:
+                            print("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
 
                         should_build_images = request.build_images
                         if should_build_images:

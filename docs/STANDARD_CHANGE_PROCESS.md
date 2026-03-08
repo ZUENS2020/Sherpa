@@ -1,11 +1,19 @@
 # Sherpa 标准修改流程（SOP）
 
-本文档定义 Sherpa 项目的统一改动流程，目标是：
+本文档定义 Sherpa 项目的统一改动流程。当前仓库采用严格的双环境发布流：
+
+1. 所有开发先在个人分支完成
+2. 所有改动先进入 `dev` 做集成验证
+3. 只有 `dev` 验证通过后，才允许进入 `main`
+4. `main` 只用于生产发布
+
+目标是：
 
 1. 改动可追踪
 2. 质量可验证
 3. 发布可回滚
 4. dev/prod 环境不互相污染
+5. `main` 永远保持可发布状态
 
 ---
 
@@ -32,8 +40,9 @@
 
 要求：
 
-1. 仍需分支 + PR
+1. 仍需个人分支 + PR
 2. 至少通过基础校验（workflow lint / manifest check）
+3. 仍需先走 `dev`
 
 ### 2.2 大改动（High Risk）
 
@@ -47,9 +56,9 @@
 要求：
 
 1. 先创建 issue（目标、范围、风险、验收）
-2. 再开分支开发
+2. 再开个人分支开发
 3. 必须补测试与文档
-4. 必须经过 PR 检查后合并
+4. 必须经过 `dev` 验证后再进 `main`
 
 ---
 
@@ -63,11 +72,15 @@
 2. 不做什么（Out of scope）
 3. 验收标准（Done 定义）
 
-### Step 1：创建 issue 与分支
+### Step 1：创建 issue 与个人分支
 
 1. 在 Linear/GitHub issue 建立任务（大改动必须）
-2. 分支命名建议：`<user_name>/<topic>`
-3. 禁止直接在受保护分支开发
+2. 从最新 `dev` 拉出个人分支开发，不要从旧分支或脏分支继续叠加
+3. 分支命名建议：
+   - `codex/<topic>`
+   - `<user_name>/<topic>`
+4. 禁止直接在 `dev` 或 `main` 开发
+5. 禁止直接 push 到受保护分支
 
 ### Step 2：设计改动方案
 
@@ -105,25 +118,48 @@
 2. `/Users/zuens2020/Documents/Sherpa/docs/README.md`
 3. 对应专题文档（`/Users/zuens2020/Documents/Sherpa/docs/k8s/*.md`）
 
-### Step 6：发起 PR
+### Step 6：个人分支先提 PR 到 `dev`
 
-PR 描述建议模板：
+1. 所有功能、修复、文档改动，默认先提 `PR -> dev`
+2. 该 PR 的目标是：
+   - 合并代码到测试环境
+   - 触发 `Deploy Dev`
+   - 验证本次改动在真实部署链路中可工作
+3. 不允许个人分支直接提 `PR -> main`
 
-1. 背景
-2. 变更点（按模块）
-3. 验证结果（命令 + 结论）
-4. 风险与回滚
+### Step 7：等待 `dev` 验证通过
 
-### Step 7：检查通过后合并与部署
+至少满足：
+
+1. PR 检查通过
+2. `Deploy Dev` 成功
+3. dev 环境关键路径验证通过
+
+建议验证项：
+
+1. `/api/health`
+2. `/api/system`
+3. 前端可访问
+4. 关键任务提交、轮询、日志查看正常
+5. 若涉及 fuzz/workflow 逻辑，至少补一轮真实仓库验证
+
+### Step 8：仅允许 `dev -> main`
+
+1. 当 `dev` 验证通过后，再发起 `PR -> main`
+2. `main` 只接受来自 `dev` 的 PR
+3. 仓库已通过工作流强制校验该规则，其他来源分支即使创建 PR，也不能合并
+
+### Step 9：合并到 `main` 并发布 `prod`
 
 1. 合并方式遵循分支保护策略
-2. dev/prod 通过工作流发布
-3. 发布后执行健康检查：
+2. 合并到 `main` 后触发 `Deploy Prod`
+3. prod 发布后执行健康检查：
    - `/api/health`
    - `/api/system`
    - 前端任务提交与状态刷新
+4. 若发布失败，优先回滚发布，不要在 prod 上直接做未记录变更
 
-### Step 8：收口
+### Step 10：收口
 
 1. 更新 issue 为 Done
 2. 记录剩余风险与后续项
@@ -131,26 +167,185 @@ PR 描述建议模板：
 
 ---
 
-## 4. 发布流（当前推荐）
+## 4. 标准分支流
 
 ```mermaid
 flowchart LR
-  A["Feature Branch"] --> B["PR -> dev"]
-  B --> C["Dev Checks + Deploy Dev"]
-  C --> D["PR -> main"]
-  D --> E["Main Checks + Deploy Prod"]
-  E --> F["Post Deploy Verification"]
+  A["Personal Branch"] --> B["PR -> dev"]
+  B --> C["Dev Checks"]
+  C --> D["Deploy Dev"]
+  D --> E["Dev Verification"]
+  E --> F["PR: dev -> main"]
+  F --> G["Main Checks"]
+  G --> H["Deploy Prod"]
+  H --> I["Post Deploy Verification"]
 ```
 
 说明：
 
-1. dev 用于持续验证
-2. main 用于生产发布
-3. 所有发布都应可通过 commit SHA 回滚
+1. `dev` 用于持续验证，允许频繁发布
+2. `main` 用于生产发布，必须保持稳定
+3. 所有个人改动先进入 `dev`
+4. 所有生产发布只能来自 `dev -> main`
+5. 所有发布都应可通过 commit SHA 回滚
 
 ---
 
-## 5. 变更前自检清单
+## 5. PR 规范
+
+所有 PR 都必须写清楚最少信息，避免“看 diff 猜意图”。
+
+### 5.1 PR 标题规范
+
+推荐格式：
+
+1. `feat: <summary>`
+2. `fix: <summary>`
+3. `refactor: <summary>`
+4. `docs: <summary>`
+5. `infra: <summary>`
+6. `test: <summary>`
+
+要求：
+
+1. 标题直接说明改动结果，不写模糊标题
+2. 一个 PR 只表达一个主要目标
+
+示例：
+
+1. `fix: prefer runner-local kubeconfig on self-hosted deploy`
+2. `infra: reset dev namespace before redeploy`
+3. `docs: rewrite k8s deployment handbook`
+
+### 5.2 PR 描述规范
+
+PR 描述至少包含以下 6 段：
+
+1. `背景`
+   - 这次为什么改
+2. `目标`
+   - 这次要解决什么
+3. `变更范围`
+   - 改了哪些模块/文件
+4. `验证`
+   - 跑了什么命令、看了什么结果
+5. `风险`
+   - 可能影响什么
+6. `回滚`
+   - 出问题怎么退回
+
+推荐模板：
+
+```md
+## 背景
+
+## 目标
+
+## 变更范围
+1.
+2.
+
+## 验证
+1. 命令：
+2. 结果：
+
+## 风险
+1.
+
+## 回滚
+1.
+```
+
+### 5.3 `PR -> dev` 额外要求
+
+1. 必须写清楚 dev 需要重点验证什么
+2. 若涉及配置或 secret，必须标明是否需要先配环境
+3. 若涉及数据库或存储，必须说明是否会清空 dev 数据
+
+### 5.4 `dev -> main` 额外要求
+
+1. 必须引用 dev 验证结果
+2. 必须说明 `Deploy Dev` 已成功
+3. 必须说明是否已经过真实链路验证
+4. 不允许带入“只在本地验证、未在 dev 验证”的改动
+
+### 5.5 示例：个人分支 -> dev
+
+适用于功能开发、缺陷修复、文档更新等日常改动。
+
+```md
+标题：fix: stabilize opencode idle timeout retry
+
+## 背景
+当前 synthesize 阶段在长时间无输出时会卡住，导致任务停在 sy。
+
+## 目标
+让 opencode 长时间无进展时自动中止并在同阶段重试。
+
+## 变更范围
+1. 调整 OpenCodeHelper idle timeout 行为
+2. 补充阶段内重试逻辑
+3. 更新相关文档
+
+## 验证
+1. 本地验证：pytest tests/test_codex_helper_sentinel.py -q
+2. dev 验证：触发 dev 工作流并观察 sy 阶段可自动重试
+3. 工作流结果：Deploy Dev 成功
+
+## 环境流转
+- [x] 本 PR 的目标分支是 `dev`
+- [ ] 本次改动已经先在 `dev` 验证
+- [ ] 本 PR 是 `dev -> main`
+
+## 配置 / 数据影响
+- [x] 不涉及配置变更
+
+## 风险
+1. timeout 过短可能提前中断正常思考
+
+## 回滚
+1. 回退 OpenCodeHelper idle timeout 改动
+```
+
+### 5.6 示例：dev -> main
+
+适用于 dev 已验证通过、准备发布到 prod 的场景。
+
+```md
+标题：fix: promote opencode idle timeout recovery to prod
+
+## 背景
+dev 已验证 opencode idle timeout 修复有效，需要发布到 prod。
+
+## 目标
+将已在 dev 验证通过的修复发布到 main/prod。
+
+## 变更范围
+1. dev 当前稳定改动进入 main
+
+## 验证
+1. 本地验证：已在对应 feature PR 中完成
+2. dev 验证：Deploy Dev 成功
+3. 工作流结果：dev 环境任务执行正常，相关日志已确认
+
+## 环境流转
+- [ ] 本 PR 的目标分支是 `dev`
+- [x] 本次改动已经先在 `dev` 验证
+- [x] 本 PR 是 `dev -> main`
+
+## 配置 / 数据影响
+- [x] 不涉及额外配置变更
+
+## 风险
+1. prod 环境仍需观察 rollout 与健康检查
+
+## 回滚
+1. 回滚到上一个 main SHA
+```
+
+---
+
+## 6. 变更前自检清单
 
 1. 是否定义清楚目标与验收？
 2. 是否评估影响面（API/DB/K8s/前端）？
@@ -158,42 +353,53 @@ flowchart LR
 4. 是否准备回滚策略？
 5. 是否补充必要测试？
 6. 是否同步文档？
+7. 是否明确本次先发 `dev` 验证什么？
 
 ---
 
-## 6. 常见违规（禁止）
+## 7. 常见违规（禁止）
 
 1. 直接 push 到受保护分支
-2. 未验证即合并
-3. 在代码中硬编码密钥/域名/个人镜像源
-4. 只改代码不改文档
-5. 改动基础设施但没有回滚方案
+2. 个人分支直接提 PR 到 `main`
+3. 未经过 `dev` 验证就尝试发布到 `prod`
+4. 在 `dev`/`main` 上直接开发
+5. 未验证即合并
+6. 在代码中硬编码密钥/域名/个人镜像源
+7. 只改代码不改文档
+8. 改动基础设施但没有回滚方案
 
 ---
 
-## 7. 推荐最小命令集
+## 8. 推荐最小命令集
 
 ```bash
-# 1) 新分支
+# 1) 同步 dev 并从 dev 拉个人分支
+git checkout dev
+git pull --ff-only origin dev
 git checkout -b codex/<topic>
 
 # 2) 开发后自检（示例）
 pytest -q
 
-# 3) 提交
+# 3) 提交个人分支
 git add -A
 git commit -m "feat: <summary>"
-
-# 4) 推送并开 PR
 git push origin codex/<topic>
+
+# 4) 个人分支 -> dev
+# 5) dev 验证通过后，再发起 dev -> main
 ```
 
 ---
 
-## 8. 责任边界（建议）
+## 9. 责任边界（建议）
 
 1. 开发者：实现、测试、文档、PR 描述
 2. 评审者：正确性、风险、可维护性
 3. 发布人：合并、观察工作流、发布后验证
 
-该流程为 Sherpa 默认流程。若需例外（紧急修复），也必须在 PR 中记录原因与补偿动作。
+该流程为 Sherpa 默认流程。若需例外（如紧急线上修复），也必须：
+
+1. 在 PR 中写明原因
+2. 记录为什么跳过标准流
+3. 记录补偿动作（补测试、补文档、补 dev 回放验证）

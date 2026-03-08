@@ -12,7 +12,7 @@
 1. `/Users/zuens2020/Documents/Sherpa/docs/PROJECT_HANDOFF_STATUS.md`：当前进度与对接现状
 2. `/Users/zuens2020/Documents/Sherpa/docs/DOCKER_TO_K8S_HANDOFF.md`：Docker 背景团队迁移对接
 3. `/Users/zuens2020/Documents/Sherpa/docs/K8S_MIGRATION_CHECKLIST.md`：迁移里程碑与验收清单
-4. `/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md`：标准修改流程（SOP）
+4. `/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md`：标准修改流程（SOP，个人分支先入 dev，验证通过后再由 dev 进入 main）
 5. `/Users/zuens2020/Documents/Sherpa/docs/k8s/LOCAL_K8S_QUICKSTART.md`：本地最小启动
 6. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`：部署说明（简版）
 7. `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOYMENT_DETAILED.md`：部署说明（详细版，含故障树）
