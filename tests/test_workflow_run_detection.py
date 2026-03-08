@@ -25,11 +25,13 @@ class _FakeRunGenerator:
         self._bin.write_text("", encoding="utf-8")
         self._run_results = list(run_results)
         self.analysis_calls: list[tuple[str, Path]] = []
+        self.seed_calls: int = 0
 
     def _discover_fuzz_binaries(self) -> list[Path]:
         return [self._bin]
 
     def _pass_generate_seeds(self, _fuzzer_name: str) -> None:
+        self.seed_calls += 1
         return
 
     def _run_fuzzer(self, _bin_path: Path) -> FuzzerRunResult:
@@ -53,6 +55,7 @@ class _SlowSeedGenerator(_FakeRunGenerator):
         return list(self._bins)
 
     def _pass_generate_seeds(self, _fuzzer_name: str) -> None:
+        self.seed_calls += 1
         time.sleep(self._seed_sleep_sec)
 
 
@@ -172,7 +175,9 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_execs_per_sec"] == 777
 
 
-def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path):
+def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
+    # Enable legacy AI seed generation path for this budget-exhaustion test.
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -213,6 +218,39 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["failed"] is True
     assert "time budget exceeded" in out["last_error"]
     assert out["message"] == "workflow stopped (time budget exceeded)"
+
+
+def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
+    gen = _SlowSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+        seed_sleep_sec=1.5,
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out["failed"] is not True
+    assert gen.seed_calls == 0
 
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
