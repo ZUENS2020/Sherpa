@@ -2866,6 +2866,31 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     workspace_root = str(state.get("re_workspace_root") or "").strip() or str((repo_root / ".repro_crash" / "workdir"))
     artifact_path = Path(last_artifact) if last_artifact else None
 
+    def _guess_fuzzer_from_workspace(workdir: Path) -> str:
+        out_dir = workdir / "fuzz" / "out"
+        if not out_dir.is_dir():
+            return ""
+        candidates: list[Path] = []
+        for p in out_dir.iterdir():
+            if not p.is_file():
+                continue
+            name = p.name
+            if name.startswith("."):
+                continue
+            if name.startswith(("crash-", "timeout-", "slow-unit-")):
+                continue
+            if name.endswith((".md", ".json", ".txt", ".log", ".patch", ".py")):
+                continue
+            if os.access(p, os.X_OK):
+                candidates.append(p)
+        if len(candidates) == 1:
+            return candidates[0].name
+        # Prefer common fuzzer naming if multiple binaries are present.
+        named = [p for p in candidates if "fuzz" in p.name.lower()]
+        if len(named) == 1:
+            return named[0].name
+        return ""
+
     now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     payload: dict[str, Any] = {
         "timestamp": now_ts,
@@ -2879,13 +2904,17 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "stderr_tail": "",
     }
     try:
+        workdir = Path(workspace_root)
+        if not workdir.is_dir():
+            raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
+        if not last_fuzzer:
+            # Stage resume can occasionally lose last_fuzzer in state; recover from workspace.
+            last_fuzzer = _guess_fuzzer_from_workspace(workdir)
+            payload["fuzzer"] = last_fuzzer
         if not last_fuzzer:
             raise HarnessGeneratorError("missing last_fuzzer for re-run")
         if artifact_path is None or not artifact_path.is_file():
             raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
-        workdir = Path(workspace_root)
-        if not workdir.is_dir():
-            raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
         fuzzer_bin = workdir / "fuzz" / "out" / last_fuzzer
         if not fuzzer_bin.is_file():
             raise HarnessGeneratorError(f"re-run fuzzer binary not found: {fuzzer_bin}")

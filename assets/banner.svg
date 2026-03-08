@@ -125,7 +125,7 @@
   <text x="474" y="194" font-family="'Courier New', monospace" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">Java</text>
 
   <rect x="508" y="178" width="64"  height="24" rx="5" fill="white" stroke="#4caf50" stroke-width="1.5"/>
-  <text x="540" y="194" font-family="'Courier New', monospace" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">Docker</text>
+  <text x="540" y="194" font-family="'Courier New', monospace" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">K8s</text>
 
   <rect x="582" y="178" width="90"  height="24" rx="5" fill="white" stroke="#4caf50" stroke-width="1.5"/>
   <text x="627" y="194" font-family="'Courier New', monospace" font-size="11" font-weight="bold" fill="#2e7d32" text-anchor="middle">LangGraph</text>

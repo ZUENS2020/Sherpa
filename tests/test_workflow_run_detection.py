@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -534,3 +535,34 @@ def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monk
     assert second["run_error_kind"] == "run_timeout"
     assert second["same_timeout_repeats"] >= 1
     assert "same timeout/no-progress signature repeated" in second["last_error"]
+
+
+def test_node_re_run_guesses_fuzzer_when_last_fuzzer_missing(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = out_dir / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
