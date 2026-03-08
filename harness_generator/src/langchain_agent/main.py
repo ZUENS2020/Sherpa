@@ -1905,6 +1905,11 @@ def _run_fuzz_job(
                 current_repo_root = str(resume_repo_root or "").strip()
                 current_node_name = ""
                 last_result: object = {}
+                stage_ctx: dict[str, str] = {
+                    "last_fuzzer": "",
+                    "last_crash_artifact": "",
+                    "re_workspace_root": "",
+                }
 
                 for idx, stage in enumerate(stages, start=1):
                     if _is_cancel_requested(job_id):
@@ -1945,6 +1950,9 @@ def _run_fuzz_job(
                         "resume_from_step": stage,
                         "resume_repo_root": (current_repo_root or None),
                         "stop_after_step": stage,
+                        "last_fuzzer": (stage_ctx.get("last_fuzzer") or None),
+                        "last_crash_artifact": (stage_ctx.get("last_crash_artifact") or None),
+                        "re_workspace_root": (stage_ctx.get("re_workspace_root") or None),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -1975,12 +1983,17 @@ def _run_fuzz_job(
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
+                        for key in ("last_fuzzer", "last_crash_artifact", "re_workspace_root"):
+                            v = str(stage_result.get(key) or "").strip()
+                            if v:
+                                stage_ctx[key] = v
                         stage_results.append(
                             {
                                 "stage": stage,
                                 "job_name": job_name,
                                 "ok": True,
                                 "repo_root": current_repo_root,
+                                "stage_ctx": dict(stage_ctx),
                                 "result": stage_result,
                             }
                         )
