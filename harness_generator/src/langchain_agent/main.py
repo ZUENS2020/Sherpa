@@ -353,17 +353,62 @@ def _k8s_collect_job_logs(job_name: str, *, tail: int = 200) -> str:
     return (out + "\n" + err).strip()
 
 
-def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
+def _k8s_get_job_pod_phase(job_name: str) -> tuple[str, str]:
+    if not job_name:
+        return "Unknown", ""
+    rc, out, _ = _kubectl(["get", "pod", "-l", f"job-name={job_name}", "-o", "json"], timeout=15)
+    if rc != 0:
+        return "Unknown", ""
+    try:
+        doc = json.loads(out)
+    except Exception:
+        return "Unknown", ""
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, list) or not items:
+        return "Pending", "pod_not_created"
+    pod = items[0] if isinstance(items[0], dict) else {}
+    status = pod.get("status") if isinstance(pod, dict) else {}
+    if not isinstance(status, dict):
+        status = {}
+    phase = str(status.get("phase") or "Unknown")
+    detail = ""
+    cstats = status.get("containerStatuses")
+    if isinstance(cstats, list):
+        for cs in cstats:
+            if not isinstance(cs, dict):
+                continue
+            st = cs.get("state")
+            if not isinstance(st, dict):
+                continue
+            waiting = st.get("waiting")
+            if isinstance(waiting, dict):
+                reason = str(waiting.get("reason") or "").strip()
+                message = str(waiting.get("message") or "").strip()
+                if reason:
+                    detail = reason
+                    if message:
+                        detail = f"{reason}: {message}"
+                    break
+    return phase, detail
+
+
+def _k8s_wait_job(job_name: str, *, timeout_sec: int, on_progress=None) -> tuple[str, str]:
     deadline = time.time() + max(1, timeout_sec)
     last_phase = "Unknown"
+    last_progress = ""
+    last_progress_emit = 0.0
     while time.time() < deadline:
         rc, out, _ = _kubectl(["get", "job", job_name, "-o", "json"], timeout=15)
         if rc != 0:
+            if callable(on_progress):
+                on_progress("Unknown", "get_job_failed")
             time.sleep(2)
             continue
         try:
             doc = json.loads(out)
         except Exception:
+            if callable(on_progress):
+                on_progress("Unknown", "bad_job_json")
             time.sleep(2)
             continue
         status = doc.get("status") or {}
@@ -381,7 +426,34 @@ def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
                     if t in {"Complete", "Failed"}:
                         return ("Succeeded" if t == "Complete" else "Failed"), last_phase
         active = int(status.get("active") or 0)
-        last_phase = "Running" if active > 0 else "Pending"
+        if active > 0:
+            last_phase = "Running"
+        else:
+            pod_phase, pod_detail = _k8s_get_job_pod_phase(job_name)
+            if pod_phase in {"Running"}:
+                last_phase = "Running"
+            elif pod_phase in {"Pending", "Unknown"}:
+                last_phase = "Pending"
+            elif pod_phase in {"Succeeded"}:
+                last_phase = "Running"
+            else:
+                last_phase = pod_phase or "Pending"
+            if pod_detail:
+                progress = f"{last_phase}:{pod_detail}"
+            else:
+                progress = last_phase
+            now = time.time()
+            if callable(on_progress) and (progress != last_progress or (now - last_progress_emit) >= 15):
+                on_progress(last_phase, pod_detail)
+                last_progress = progress
+                last_progress_emit = now
+            time.sleep(2)
+            continue
+        now = time.time()
+        if callable(on_progress) and (last_phase != last_progress or (now - last_progress_emit) >= 15):
+            on_progress(last_phase, "")
+            last_progress = last_phase
+            last_progress_emit = now
         time.sleep(2)
     return "Timeout", last_phase
 
@@ -495,7 +567,15 @@ def _execute_k8s_job(
         raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
     _job_update(job_id, k8s_phase="Submitted")
 
-    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout)
+    def _progress_cb(phase: str, detail: str) -> None:
+        phase_txt = (phase or "Unknown").strip()
+        detail_txt = (detail or "").strip()
+        if detail_txt:
+            _job_update(job_id, k8s_phase=f"{phase_txt}: {detail_txt[:220]}")
+        else:
+            _job_update(job_id, k8s_phase=phase_txt)
+
+    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout, on_progress=_progress_cb)
     _job_update(job_id, k8s_phase=status)
     if status == "Timeout":
         _k8s_delete_job(job_name)
