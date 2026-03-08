@@ -446,8 +446,14 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
     if rc_top != 0:
         detail = (err_top or out_top).strip()
         if detail:
-            detail = re.sub(r"\s+", "_", detail)[:160]
-            return True, f"node_ready_no_metrics_warn:{detail}"
+            detail_norm = re.sub(r"\s+", " ", detail).strip()
+            # Canonicalize common metrics-server absence into a stable token.
+            if re.search(r"metrics api not available", detail_norm, re.IGNORECASE):
+                return True, "node_ready_no_metrics_warn:metrics_api_not_available"
+            # Avoid confusing "error:" prefixes in warning-only status messages.
+            detail_norm = re.sub(r"^\s*error:\s*", "", detail_norm, flags=re.IGNORECASE)
+            detail_token = re.sub(r"\s+", "_", detail_norm)[:160]
+            return True, f"node_ready_no_metrics_warn:{detail_token}"
         return True, "node_ready_no_metrics_warn"
     line = ""
     for raw in (out_top or "").splitlines():
