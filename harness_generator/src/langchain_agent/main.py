@@ -926,12 +926,24 @@ def _is_status_terminal(raw: str | None) -> bool:
     return s in {"success", "resumed", "error", "resume_failed"}
 
 
-_RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
-_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run", "repro_crash")
+_RESUMABLE_WORKFLOW_STEPS = {
+    "plan",
+    "synthesize",
+    "build",
+    "fix_build",
+    "run",
+    "re-build",
+    "re-run",
+    "repro_crash",
+    "fix_crash",
+}
+_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run", "re-build", "re-run")
 
 
 def _normalize_resume_step(raw: str | None) -> str:
     s = str(raw or "").strip().lower()
+    if s == "repro_crash":
+        return "re-build"
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
     return "plan"

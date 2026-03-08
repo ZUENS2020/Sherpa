@@ -249,7 +249,7 @@ def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
     )
     out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
     assert out["last_step"] == "run"
-    assert out["failed"] is not True
+    assert out.get("failed") is not True
     assert gen.seed_calls == 0
 
 
@@ -352,7 +352,7 @@ def test_route_after_run_routes_crash_to_repro_stage():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": True}
     )
-    assert route == "repro_crash"
+    assert route == "re-build"
 
 
 def test_route_after_run_routes_idle_timeout_to_stop():
@@ -362,11 +362,58 @@ def test_route_after_run_routes_idle_timeout_to_stop():
     assert route == "stop"
 
 
-def test_route_after_repro_crash_stops_when_not_reproduced():
-    route = workflow_graph._route_after_repro_crash_state(
-        {"failed": False, "crash_found": True, "crash_repro_done": True, "crash_repro_ok": False}
+def test_route_after_re_build_routes_to_re_run_on_success():
+    route = workflow_graph._route_after_re_build_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "re_build_done": True,
+            "re_build_ok": True,
+            "restart_to_plan": False,
+        }
     )
-    assert route == "stop"
+    assert route == "re-run"
+
+
+def test_route_after_re_build_routes_to_plan_on_failure():
+    route = workflow_graph._route_after_re_build_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "re_build_done": True,
+            "re_build_ok": False,
+            "restart_to_plan": True,
+            "restart_to_plan_count": 1,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_re_run_routes_to_fix_crash_on_success():
+    route = workflow_graph._route_after_re_run_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "crash_repro_done": True,
+            "crash_repro_ok": True,
+            "restart_to_plan": False,
+        }
+    )
+    assert route == "fix_crash"
+
+
+def test_route_after_re_run_routes_to_plan_on_failure():
+    route = workflow_graph._route_after_re_run_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "crash_repro_done": True,
+            "crash_repro_ok": False,
+            "restart_to_plan": True,
+            "restart_to_plan_count": 1,
+        }
+    )
+    assert route == "plan"
 
 
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):

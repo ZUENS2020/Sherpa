@@ -86,6 +86,23 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_repro_rc: int
     crash_repro_report_path: str
     crash_repro_json_path: str
+    re_build_done: bool
+    re_build_ok: bool
+    re_build_rc: int
+    re_build_report_path: str
+    re_build_json_path: str
+    re_run_done: bool
+    re_run_ok: bool
+    re_run_rc: int
+    re_run_report_path: str
+    re_run_json_path: str
+    re_workspace_root: str
+    restart_to_plan: bool
+    restart_to_plan_reason: str
+    restart_to_plan_stage: str
+    restart_to_plan_error_text: str
+    restart_to_plan_report_path: str
+    restart_to_plan_count: int
     next: str
     fix_patch_path: str
     fix_patch_files: list[str]
@@ -486,6 +503,23 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "crash_repro_rc": int(state.get("crash_repro_rc") or 0),
             "crash_repro_report_path": str(state.get("crash_repro_report_path") or ""),
             "crash_repro_json_path": str(state.get("crash_repro_json_path") or ""),
+            "re_build_done": bool(state.get("re_build_done") or False),
+            "re_build_ok": bool(state.get("re_build_ok") or False),
+            "re_build_rc": int(state.get("re_build_rc") or 0),
+            "re_build_report_path": str(state.get("re_build_report_path") or ""),
+            "re_build_json_path": str(state.get("re_build_json_path") or ""),
+            "re_run_done": bool(state.get("re_run_done") or False),
+            "re_run_ok": bool(state.get("re_run_ok") or False),
+            "re_run_rc": int(state.get("re_run_rc") or 0),
+            "re_run_report_path": str(state.get("re_run_report_path") or ""),
+            "re_run_json_path": str(state.get("re_run_json_path") or ""),
+            "re_workspace_root": str(state.get("re_workspace_root") or ""),
+            "restart_to_plan": bool(state.get("restart_to_plan") or False),
+            "restart_to_plan_reason": str(state.get("restart_to_plan_reason") or ""),
+            "restart_to_plan_stage": str(state.get("restart_to_plan_stage") or ""),
+            "restart_to_plan_error_text": str(state.get("restart_to_plan_error_text") or ""),
+            "restart_to_plan_report_path": str(state.get("restart_to_plan_report_path") or ""),
+            "restart_to_plan_count": int(state.get("restart_to_plan_count") or 0),
             "plan_fix_on_crash": True,
             "plan_max_fix_rounds": 1,
         },
@@ -494,7 +528,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     # Restore crash context from previous run stage when repro/fix is resumed
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
-    if resume_step in {"repro_crash", "fix_crash"}:
+    if resume_step in {"repro_crash", "re-build", "re-run", "fix_crash"}:
         try:
             summary_json = generator.repo_root / "run_summary.json"
             if summary_json.is_file():
@@ -509,6 +543,27 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                     if isinstance(plan_policy, dict):
                         out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
                         out["plan_max_fix_rounds"] = int(plan_policy.get("max_fix_rounds") or out["plan_max_fix_rounds"])
+                    re_stage = doc.get("re_stage")
+                    if isinstance(re_stage, dict):
+                        out["re_workspace_root"] = str(re_stage.get("workspace_root") or "")
+                        out["re_build_done"] = bool(re_stage.get("re_build_done") or False)
+                        out["re_build_ok"] = bool(re_stage.get("re_build_ok") or False)
+                        out["re_build_rc"] = int(re_stage.get("re_build_rc") or 0)
+                        out["re_build_report_path"] = str(re_stage.get("re_build_report_path") or "")
+                        out["re_build_json_path"] = str(re_stage.get("re_build_json_path") or "")
+                        out["re_run_done"] = bool(re_stage.get("re_run_done") or False)
+                        out["re_run_ok"] = bool(re_stage.get("re_run_ok") or False)
+                        out["re_run_rc"] = int(re_stage.get("re_run_rc") or 0)
+                        out["re_run_report_path"] = str(re_stage.get("re_run_report_path") or "")
+                        out["re_run_json_path"] = str(re_stage.get("re_run_json_path") or "")
+                    restart_ctx = doc.get("restart_to_plan")
+                    if isinstance(restart_ctx, dict):
+                        out["restart_to_plan"] = bool(restart_ctx.get("active") or False)
+                        out["restart_to_plan_reason"] = str(restart_ctx.get("reason") or "")
+                        out["restart_to_plan_stage"] = str(restart_ctx.get("stage") or "")
+                        out["restart_to_plan_error_text"] = str(restart_ctx.get("error_text") or "")
+                        out["restart_to_plan_report_path"] = str(restart_ctx.get("report_path") or "")
+                        out["restart_to_plan_count"] = int(restart_ctx.get("count") or 0)
         except Exception:
             pass
 
@@ -526,6 +581,32 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> plan")
     hint = (state.get("codex_hint") or "").strip()
+    restart_to_plan = bool(state.get("restart_to_plan") or False)
+    restart_reason = str(state.get("restart_to_plan_reason") or "").strip()
+    restart_stage = str(state.get("restart_to_plan_stage") or "").strip()
+    restart_error_text = str(state.get("restart_to_plan_error_text") or "").strip()
+    restart_report_path = str(state.get("restart_to_plan_report_path") or "").strip()
+    injected_ctx = ""
+    if restart_to_plan:
+        report_tail = ""
+        if restart_report_path:
+            try:
+                rp = Path(restart_report_path)
+                if rp.is_file():
+                    report_tail = "\n".join(
+                        rp.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+                    )
+            except Exception:
+                report_tail = ""
+        injected_ctx = (
+            "上轮 re 阶段失败，需要优先修复该根因后再规划：\n"
+            f"- stage: {restart_stage or 'unknown'}\n"
+            f"- reason: {restart_reason or 'unknown'}\n"
+            f"- error: {(restart_error_text or 'n/a')[:4096]}\n"
+        )
+        if report_tail:
+            injected_ctx += "\n=== re failure report tail ===\n" + report_tail + "\n"
+        hint = (hint + "\n\n" + injected_ctx).strip() if hint else injected_ctx
     if not _has_codex_key():
         out = {
             **state,
@@ -577,6 +658,11 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "codex_hint": _make_plan_hint(gen.repo_root),
             "plan_fix_on_crash": fix_on_crash,
             "plan_max_fix_rounds": max_fix_rounds,
+            "restart_to_plan": restart_to_plan,
+            "restart_to_plan_reason": restart_reason,
+            "restart_to_plan_stage": restart_stage,
+            "restart_to_plan_error_text": restart_error_text,
+            "restart_to_plan_report_path": restart_report_path,
             "message": "planned",
         }
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -686,7 +772,18 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
 
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
             raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
-        out = {**state, "last_step": "synthesize", "last_error": "", "codex_hint": "", "message": "synthesized"}
+        out = {
+            **state,
+            "last_step": "synthesize",
+            "last_error": "",
+            "codex_hint": "",
+            "restart_to_plan": False,
+            "restart_to_plan_reason": "",
+            "restart_to_plan_stage": "",
+            "restart_to_plan_error_text": "",
+            "restart_to_plan_report_path": "",
+            "message": "synthesized",
+        }
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -2554,52 +2651,45 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return out
 
 
-def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
         raise RuntimeError("workflow not initialized: missing generator")
-    state, stop_now = _enter_step(state, "repro_crash")
+    state, stop_now = _enter_step(state, "re-build")
     if stop_now:
         return state
 
     t0 = time.perf_counter()
-    _wf_log(cast(dict[str, Any], state), "-> repro_crash")
+    _wf_log(cast(dict[str, Any], state), "-> re-build")
     repo_root = gen.repo_root
-    report_md = repo_root / "crash_repro_report.md"
-    report_json = repo_root / "crash_repro_report.json"
+    report_md = repo_root / "re_build_report.md"
+    report_json = repo_root / "re_build_report.json"
 
     if not bool(state.get("crash_found")):
         out = {
             **state,
-            "last_step": "repro_crash",
+            "last_step": "re-build",
             "last_error": "",
-            "crash_repro_done": True,
-            "crash_repro_ok": False,
-            "crash_repro_rc": 0,
-            "message": "repro_crash skipped (no crash found)",
-            "crash_repro_report_path": str(report_md),
-            "crash_repro_json_path": str(report_json),
+            "re_build_done": True,
+            "re_build_ok": False,
+            "re_build_rc": 0,
+            "message": "re-build skipped (no crash found)",
+            "re_build_report_path": str(report_md),
+            "re_build_json_path": str(report_json),
         }
-        _wf_log(cast(dict[str, Any], out), f"<- repro_crash skip=no-crash dt={_fmt_dt(time.perf_counter()-t0)}")
+        _wf_log(cast(dict[str, Any], out), f"<- re-build skip=no-crash dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
-    last_fuzzer = str(state.get("last_fuzzer") or "").strip()
-    last_artifact = str(state.get("last_crash_artifact") or "").strip()
     repo_url = str(state.get("repo_url") or "").strip()
-    artifact_path = Path(last_artifact) if last_artifact else None
     now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     payload: dict[str, Any] = {
         "timestamp": now_ts,
         "repo_url": repo_url,
-        "fuzzer": last_fuzzer,
-        "artifact": last_artifact,
         "clone_repo_root": "",
         "clone_ok": False,
         "clone_rc": 1,
         "build_ok": False,
         "build_rc": 1,
-        "reproduce_ok": False,
-        "reproduce_rc": 1,
         "error": "",
         "stdout_tail": "",
         "stderr_tail": "",
@@ -2607,15 +2697,11 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
 
     try:
         if not repo_url:
-            raise HarnessGeneratorError("missing repo_url for crash reproduction")
-        if not last_fuzzer:
-            raise HarnessGeneratorError("missing last_fuzzer for crash reproduction")
-        if artifact_path is None or not artifact_path.is_file():
-            raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
+            raise HarnessGeneratorError("missing repo_url for re-build")
 
         repro_workspace = repo_root / ".repro_crash"
         repro_workspace.mkdir(parents=True, exist_ok=True)
-        clone_root = repro_workspace / f"clone-{int(time.time())}"
+        clone_root = repro_workspace / "workdir"
         if clone_root.exists():
             shutil.rmtree(clone_root, ignore_errors=True)
 
@@ -2632,7 +2718,15 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
         payload["clone_repo_root"] = str(clone_root)
         if clone.returncode != 0:
             payload["stderr_tail"] = (clone.stderr or "")[-4000:]
-            raise HarnessGeneratorError(f"crash repro clone failed (rc={clone.returncode})")
+            raise HarnessGeneratorError(f"re-build clone failed (rc={clone.returncode})")
+
+        source_fuzz = repo_root / "fuzz"
+        if not source_fuzz.is_dir():
+            raise HarnessGeneratorError(f"run fuzz directory missing: {source_fuzz}")
+        dest_fuzz = clone_root / "fuzz"
+        if dest_fuzz.exists():
+            shutil.rmtree(dest_fuzz, ignore_errors=True)
+        shutil.copytree(source_fuzz, dest_fuzz)
 
         python_runner = "python3"
         try:
@@ -2665,17 +2759,122 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
         if build.returncode != 0:
             payload["stdout_tail"] = (build.stdout or "")[-4000:]
             payload["stderr_tail"] = (build.stderr or "")[-4000:]
-            raise HarnessGeneratorError(f"crash repro build failed (rc={build.returncode})")
+            raise HarnessGeneratorError(f"re-build build failed (rc={build.returncode})")
+    except Exception as e:
+        payload["error"] = str(e)
 
-        fuzzer_bin = clone_root / "fuzz" / "out" / last_fuzzer
+    report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_lines = [
+        "# Re-Build Report",
+        "",
+        f"- timestamp: {payload['timestamp']}",
+        f"- repo_url: {payload['repo_url']}",
+        f"- clone_ok: {payload['clone_ok']} (rc={payload['clone_rc']})",
+        f"- build_ok: {payload['build_ok']} (rc={payload['build_rc']})",
+        "",
+    ]
+    if payload["error"]:
+        md_lines.extend(["## Error", "", str(payload["error"]), ""])
+    if payload["stdout_tail"]:
+        md_lines.extend(["## STDOUT (tail)", "", "```text", str(payload["stdout_tail"]), "```", ""])
+    if payload["stderr_tail"]:
+        md_lines.extend(["## STDERR (tail)", "", "```text", str(payload["stderr_tail"]), "```", ""])
+    report_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    re_build_ok = bool(payload["build_ok"])
+    restart_reason = ""
+    restart_error = ""
+    restart_report = ""
+    restart_stage = ""
+    restart_count = int(state.get("restart_to_plan_count") or 0)
+    if not re_build_ok:
+        restart_reason = "re_build_failed"
+        restart_stage = "re-build"
+        restart_error = str(payload.get("error") or payload.get("stderr_tail") or payload.get("stdout_tail") or "")[:4096]
+        restart_report = str(report_md)
+        restart_count += 1
+    restart_limit = _re_restart_limit()
+    restart_exceeded = (not re_build_ok) and restart_count > restart_limit
+
+    out = {
+        **state,
+        "last_step": "re-build",
+        "last_error": "" if re_build_ok else restart_error,
+        "re_build_done": True,
+        "re_build_ok": re_build_ok,
+        "re_build_rc": int(payload["build_rc"]),
+        "re_build_report_path": str(report_md),
+        "re_build_json_path": str(report_json),
+        "re_workspace_root": str(payload.get("clone_repo_root") or ""),
+        "restart_to_plan": not re_build_ok,
+        "restart_to_plan_reason": restart_reason,
+        "restart_to_plan_stage": restart_stage,
+        "restart_to_plan_error_text": restart_error,
+        "restart_to_plan_report_path": restart_report,
+        "restart_to_plan_count": restart_count,
+        "failed": bool(state.get("failed")) or restart_exceeded,
+        "run_terminal_reason": "re_restart_limit_exceeded" if restart_exceeded else str(state.get("run_terminal_reason") or ""),
+        "message": "re-build validated" if re_build_ok else "re-build failed",
+    }
+    if restart_exceeded:
+        out["last_error"] = f"re failed and restart-to-plan limit exceeded ({restart_limit})"
+    _wf_log(
+        cast(dict[str, Any], out),
+        (
+            "<- re-build "
+            f"ok={re_build_ok} clone_rc={payload['clone_rc']} build_rc={payload['build_rc']} "
+            f"dt={_fmt_dt(time.perf_counter()-t0)}"
+        ),
+    )
+    return out
+
+
+def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "re-run")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> re-run")
+
+    repo_root = gen.repo_root
+    report_md = repo_root / "re_run_report.md"
+    report_json = repo_root / "re_run_report.json"
+    last_fuzzer = str(state.get("last_fuzzer") or "").strip()
+    last_artifact = str(state.get("last_crash_artifact") or "").strip()
+    workspace_root = str(state.get("re_workspace_root") or "").strip() or str((repo_root / ".repro_crash" / "workdir"))
+    artifact_path = Path(last_artifact) if last_artifact else None
+
+    now_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    payload: dict[str, Any] = {
+        "timestamp": now_ts,
+        "fuzzer": last_fuzzer,
+        "artifact": last_artifact,
+        "workspace_root": workspace_root,
+        "reproduce_ok": False,
+        "reproduce_rc": 1,
+        "error": "",
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+    try:
+        if not last_fuzzer:
+            raise HarnessGeneratorError("missing last_fuzzer for re-run")
+        if artifact_path is None or not artifact_path.is_file():
+            raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
+        workdir = Path(workspace_root)
+        if not workdir.is_dir():
+            raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
+        fuzzer_bin = workdir / "fuzz" / "out" / last_fuzzer
         if not fuzzer_bin.is_file():
-            raise HarnessGeneratorError(f"repro fuzzer binary not found: {fuzzer_bin}")
-
+            raise HarnessGeneratorError(f"re-run fuzzer binary not found: {fuzzer_bin}")
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         repro_timeout = max(20, min(rem, 180))
         repro = subprocess.run(
             [str(fuzzer_bin), "-runs=1", str(artifact_path)],
-            cwd=clone_root,
+            cwd=workdir,
             capture_output=True,
             text=True,
             timeout=repro_timeout,
@@ -2689,14 +2888,12 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
 
     report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     md_lines = [
-        "# Crash Reproduction Report",
+        "# Re-Run Report",
         "",
         f"- timestamp: {payload['timestamp']}",
-        f"- repo_url: {payload['repo_url']}",
         f"- fuzzer: {payload['fuzzer']}",
         f"- artifact: {payload['artifact']}",
-        f"- clone_ok: {payload['clone_ok']} (rc={payload['clone_rc']})",
-        f"- build_ok: {payload['build_ok']} (rc={payload['build_rc']})",
+        f"- workspace_root: {payload['workspace_root']}",
         f"- reproduce_ok: {payload['reproduce_ok']} (rc={payload['reproduce_rc']})",
         "",
     ]
@@ -2708,27 +2905,61 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
         md_lines.extend(["## STDERR (tail)", "", "```text", str(payload["stderr_tail"]), "```", ""])
     report_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
+    re_run_ok = bool(payload["reproduce_ok"])
+    restart_reason = ""
+    restart_error = ""
+    restart_report = ""
+    restart_stage = ""
+    restart_count = int(state.get("restart_to_plan_count") or 0)
+    if not re_run_ok:
+        restart_reason = "re_run_failed"
+        restart_stage = "re-run"
+        restart_error = str(payload.get("error") or payload.get("stderr_tail") or payload.get("stdout_tail") or "")[:4096]
+        restart_report = str(report_md)
+        restart_count += 1
+    restart_limit = _re_restart_limit()
+    restart_exceeded = (not re_run_ok) and restart_count > restart_limit
+
     out = {
         **state,
-        "last_step": "repro_crash",
-        "last_error": "",
+        "last_step": "re-run",
+        "last_error": "" if re_run_ok else restart_error,
+        "re_run_done": True,
+        "re_run_ok": re_run_ok,
+        "re_run_rc": int(payload["reproduce_rc"]),
+        "re_run_report_path": str(report_md),
+        "re_run_json_path": str(report_json),
         "crash_repro_done": True,
-        "crash_repro_ok": bool(payload["reproduce_ok"]),
+        "crash_repro_ok": re_run_ok,
         "crash_repro_rc": int(payload["reproduce_rc"]),
         "crash_repro_report_path": str(report_md),
         "crash_repro_json_path": str(report_json),
-        "message": "crash reproduction validated" if payload["reproduce_ok"] else "crash reproduction not confirmed",
+        "restart_to_plan": not re_run_ok,
+        "restart_to_plan_reason": restart_reason,
+        "restart_to_plan_stage": restart_stage,
+        "restart_to_plan_error_text": restart_error,
+        "restart_to_plan_report_path": restart_report,
+        "restart_to_plan_count": restart_count,
+        "failed": bool(state.get("failed")) or restart_exceeded,
+        "run_terminal_reason": "re_restart_limit_exceeded" if restart_exceeded else str(state.get("run_terminal_reason") or ""),
+        "message": "re-run validated" if re_run_ok else "re-run failed",
     }
+    if restart_exceeded:
+        out["last_error"] = f"re failed and restart-to-plan limit exceeded ({restart_limit})"
     _wf_log(
         cast(dict[str, Any], out),
         (
-            "<- repro_crash "
-            f"ok={payload['reproduce_ok']} clone_rc={payload['clone_rc']} "
-            f"build_rc={payload['build_rc']} repro_rc={payload['reproduce_rc']} "
+            "<- re-run "
+            f"ok={re_run_ok} rc={payload['reproduce_rc']} "
             f"dt={_fmt_dt(time.perf_counter()-t0)}"
         ),
     )
     return out
+
+
+# Backward-compatible alias for legacy step name.
+def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    return _node_re_build(state)
 
 
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
@@ -2754,15 +2985,41 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
         return "stop"
     if bool(state.get("crash_found")):
-        return "repro_crash"
+        return "re-build"
     return "stop"
 
 
-def _route_after_repro_crash_state(state: FuzzWorkflowRuntimeState) -> str:
+def _re_restart_limit() -> int:
+    raw = (os.environ.get("SHERPA_RESTART_FROM_PLAN_MAX") or "1").strip()
+    try:
+        return max(0, min(int(raw), 10))
+    except Exception:
+        return 1
+
+
+def _route_after_re_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")):
         return "stop"
     if not bool(state.get("crash_found")):
         return "stop"
+    if bool(state.get("restart_to_plan")):
+        if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
+            return "stop"
+        return "plan"
+    if bool(state.get("re_build_done")) and bool(state.get("re_build_ok")):
+        return "re-run"
+    return "stop"
+
+
+def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if not bool(state.get("crash_found")):
+        return "stop"
+    if bool(state.get("restart_to_plan")):
+        if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
+            return "stop"
+        return "plan"
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
         return "stop"
     fix_on_crash = bool(state.get("plan_fix_on_crash", True))
@@ -2777,7 +3034,9 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")) or (state.get("last_error") or "").strip():
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
-    allowed = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
+    allowed = {"plan", "synthesize", "build", "fix_build", "run", "re-build", "re-run", "repro_crash", "fix_crash"}
+    if raw == "repro_crash":
+        raw = "re-build"
     if raw in allowed:
         return raw
     return "plan"
@@ -2796,6 +3055,8 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
     graph.add_node("fix_build", _node_fix_build)
+    graph.add_node("re-build", _node_re_build)
+    graph.add_node("re-run", _node_re_run)
     graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("fix_crash", _node_fix_crash)
     graph.add_node("run", _node_run)
@@ -2835,15 +3096,19 @@ def build_fuzz_workflow() -> StateGraph:
 
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_run_state(state)
-        # In staged k8s mode, stop after run when the next step is repro_crash,
-        # so repro executes in its own stage job with the same repo_root.
-        if _should_stage_stop(state, "run") and nxt in {"stop", "repro_crash"}:
+        if _should_stage_stop(state, "run") and nxt in {"stop", "re-build"}:
             return "stop"
         return nxt
 
-    def _route_after_repro_crash(state: FuzzWorkflowRuntimeState) -> str:
-        nxt = _route_after_repro_crash_state(state)
-        if _should_stage_stop(state, "repro_crash") and nxt == "stop":
+    def _route_after_re_build(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_re_build_state(state)
+        if _should_stage_stop(state, "re-build") and nxt in {"stop", "re-run"}:
+            return "stop"
+        return nxt
+
+    def _route_after_re_run(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_re_run_state(state)
+        if _should_stage_stop(state, "re-run") and nxt == "stop":
             return "stop"
         return nxt
 
@@ -2865,7 +3130,9 @@ def build_fuzz_workflow() -> StateGraph:
             "build": "build",
             "fix_build": "fix_build",
             "run": "run",
-            "repro_crash": "repro_crash",
+            "re-build": "re-build",
+            "re-run": "re-run",
+            "repro_crash": "re-build",
             "fix_crash": "fix_crash",
             "stop": END,
         },
@@ -2877,9 +3144,11 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "run",
         _route_after_run,
-        {"repro_crash": "repro_crash", "fix_crash": "fix_crash", "fix_build": "fix_build", "stop": END},
+        {"re-build": "re-build", "fix_crash": "fix_crash", "fix_build": "fix_build", "stop": END},
     )
-    graph.add_conditional_edges("repro_crash", _route_after_repro_crash, {"fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
+    graph.add_conditional_edges("re-run", _route_after_re_run, {"fix_crash": "fix_crash", "plan": "plan", "stop": END})
+    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
     graph.add_conditional_edges("fix_crash", _route_after_fix_crash, {"build": "build", "stop": END})
 
     return graph
@@ -2909,6 +3178,8 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     total_budget_log = "unlimited" if int(inp.time_budget) == 0 else f"{int(inp.time_budget)}s"
     run_budget_log = "unlimited" if int(inp.run_time_budget) == 0 else f"{int(inp.run_time_budget)}s"
     resume_step = (inp.resume_from_step or "").strip().lower()
+    if resume_step == "repro_crash":
+        resume_step = "re-build"
     resume_root = str(inp.resume_repo_root or "").strip()
     stop_after_step = (inp.stop_after_step or "").strip().lower()
     _wf_log(
@@ -2936,7 +3207,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "max_len": inp.max_len,
             "docker_image": inp.docker_image,
             "ai_key_path": str(inp.ai_key_path),
-            "resume_from_step": (inp.resume_from_step or "").strip().lower(),
+            "resume_from_step": resume_step,
             "resume_repo_root": str(inp.resume_repo_root or ""),
             "stop_after_step": stop_after_step,
             "max_steps": max_steps,
@@ -2981,6 +3252,23 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
         "crash_repro_report_path": str(out.get("crash_repro_report_path") or ""),
         "crash_repro_json_path": str(out.get("crash_repro_json_path") or ""),
+        "re_build_done": bool(out.get("re_build_done") or False),
+        "re_build_ok": bool(out.get("re_build_ok") or False),
+        "re_build_rc": int(out.get("re_build_rc") or 0),
+        "re_build_report_path": str(out.get("re_build_report_path") or ""),
+        "re_build_json_path": str(out.get("re_build_json_path") or ""),
+        "re_run_done": bool(out.get("re_run_done") or False),
+        "re_run_ok": bool(out.get("re_run_ok") or False),
+        "re_run_rc": int(out.get("re_run_rc") or 0),
+        "re_run_report_path": str(out.get("re_run_report_path") or ""),
+        "re_run_json_path": str(out.get("re_run_json_path") or ""),
+        "re_workspace_root": str(out.get("re_workspace_root") or ""),
+        "restart_to_plan": bool(out.get("restart_to_plan") or False),
+        "restart_to_plan_reason": str(out.get("restart_to_plan_reason") or ""),
+        "restart_to_plan_stage": str(out.get("restart_to_plan_stage") or ""),
+        "restart_to_plan_error_text": str(out.get("restart_to_plan_error_text") or ""),
+        "restart_to_plan_report_path": str(out.get("restart_to_plan_report_path") or ""),
+        "restart_to_plan_count": int(out.get("restart_to_plan_count") or 0),
         "build_error_kind": str(out.get("build_error_kind") or ""),
         "build_error_code": str(out.get("build_error_code") or ""),
     }
