@@ -921,7 +921,7 @@ def _is_status_terminal(raw: str | None) -> bool:
 
 
 _RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
-_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run")
+_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run", "repro_crash")
 
 
 def _normalize_resume_step(raw: str | None) -> str:
@@ -933,7 +933,7 @@ def _normalize_resume_step(raw: str | None) -> str:
 
 def _staged_sequence_from(raw_start: str | None) -> list[str]:
     start = _normalize_resume_step(raw_start)
-    if start in {"fix_build", "repro_crash", "fix_crash"}:
+    if start in {"fix_build", "fix_crash"}:
         start = "build"
     try:
         idx = _STAGED_WORKFLOW_STEPS.index(start)
