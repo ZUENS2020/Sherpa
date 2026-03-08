@@ -346,6 +346,13 @@ def _run_unlimited_round_budget_sec() -> int:
         return 7200
 
 
+def _verify_stage_no_ai() -> bool:
+    raw = (os.environ.get("SHERPA_VERIFY_STAGE_NO_AI") or "1").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _max_same_timeout_repeats() -> int:
     raw = (os.environ.get("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS") or "1").strip()
     try:
@@ -2020,22 +2027,25 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             return _sha256_text("\n".join(parts))
 
-        # Seed generation uses OpenCode and shared repo context; keep it serial.
-        prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
-        try:
-            for bin_path in bins:
-                remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
-                if remaining_for_seed <= 0:
-                    return _time_budget_exceeded_state(state, step_name="run")
-                setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
-                fuzzer_name = bin_path.name
-                try:
-                    gen._pass_generate_seeds(fuzzer_name)
-                except Exception as e:
-                    # Seed generation is best-effort; do not block fuzzing.
-                    print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
-        finally:
-            setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
+        if _verify_stage_no_ai():
+            _wf_log(cast(dict[str, Any], state), "run: verify-stage-no-ai enabled; skip AI seed generation")
+        else:
+            # Seed generation uses OpenCode and shared repo context; keep it serial.
+            prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+            try:
+                for bin_path in bins:
+                    remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
+                    if remaining_for_seed <= 0:
+                        return _time_budget_exceeded_state(state, step_name="run")
+                    setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
+                    fuzzer_name = bin_path.name
+                    try:
+                        gen._pass_generate_seeds(fuzzer_name)
+                    except Exception as e:
+                        # Seed generation is best-effort; do not block fuzzing.
+                        print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+            finally:
+                setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
 
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
