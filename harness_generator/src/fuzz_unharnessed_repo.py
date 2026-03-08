@@ -3006,7 +3006,10 @@ class NonOssFuzzHarnessGenerator:
             runner = ["bash", str(rp_sh)]
             make_executable(rp_sh)
         else:
-            raise HarnessGeneratorError("No reproducer script found after agent generation")
+            # Do not hard-fail crash analysis when agent skipped reproducer generation.
+            # Downstream packaging can still classify this run as unreproducible.
+            print("[warn] No reproducer script found after agent generation; mark as unreproducible")
+            return False
 
         failure_patterns = [
             re.compile(r"AddressSanitizer failed to allocate", re.IGNORECASE),
