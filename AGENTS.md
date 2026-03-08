@@ -92,6 +92,10 @@ Recommended issue body structure for major changes:
    - 禁止使用 `gh pr merge --admin` 或等效绕过保护规则的方式。
    - `main` 合并必须先满足 Review 要求与必需检查通过，再由人工执行合并。
    - 仅当用户在当前会话中明确授权“紧急绕过”时，才允许一次性管理员合并，并需在 PR 与 Linear 记录原因。
+5. fuzz 验证阶段默认禁止 AI 参与：
+   - `run` 与 `repro_crash` 阶段仅允许源码构建与命令执行验证，不允许 AI 改写代码或 AI 生成种子参与验证结果判定。
+   - 默认配置：`SHERPA_VERIFY_STAGE_NO_AI=1`。
+   - 如需临时回退旧行为，必须显式设置 `SHERPA_VERIFY_STAGE_NO_AI=0` 并在 PR/Linear 说明原因。
 
 ### 操作步骤（执行版）
 
