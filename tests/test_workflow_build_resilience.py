@@ -310,6 +310,43 @@ def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
     assert "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" in build_py.read_text(encoding="utf-8")
 
 
+def test_fix_build_hotfix_removes_conditional_libcpp_flag_without_breaking_python(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "\n".join(
+            [
+                "def build(cxx):",
+                "    flags = [",
+                '        "-g",',
+                '        ("-stdlib=libc++" if "clang" in cxx else ""),',
+                '        "-std=c++17",',
+                "    ]",
+                "    return flags",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    gen = SimpleNamespace(repo_root=tmp_path)
+    state = {
+        "generator": gen,
+        "last_error": "undefined reference to `std::__cxx11::basic_string`",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+    new_text = build_py.read_text(encoding="utf-8")
+
+    assert out["last_error"] == ""
+    assert "hotfix" in out["message"]
+    assert "-stdlib=libc++" not in new_text
+    compile(new_text, str(build_py), "exec")
+
+
 def test_fix_build_allows_opencode_edits_under_fuzz_only(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
