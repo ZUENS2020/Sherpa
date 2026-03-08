@@ -1452,9 +1452,28 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         changed = False
         # Avoid libc++/libstdc++ mismatch with clang/libFuzzer runtime in our base image.
         if has_libcpp_flag:
-            text2 = re.sub(r'^[ \t]*["\']-stdlib=libc\+\+["\'],?\s*\n?', "", text, flags=re.MULTILINE)
-            text2 = text2.replace('"-stdlib=libc++",', "").replace('"-stdlib=libc++"', "")
-            text2 = text2.replace("'-stdlib=libc++',", "").replace("'-stdlib=libc++'", "")
+            text2 = text
+            # Remove simple flag-list entries like:
+            #   "-stdlib=libc++",
+            #   '-stdlib=libc++',
+            text2 = re.sub(r'^[ \t]*["\']-stdlib=libc\+\+["\'],?[ \t]*\n?', "", text2, flags=re.MULTILINE)
+            # Remove conditional list entries like:
+            #   ("-stdlib=libc++" if "clang" in cxx else ""),
+            # without leaving broken syntax.
+            text2 = re.sub(
+                r'^[ \t]*\(\s*["\']-stdlib=libc\+\+["\']\s*if\s+.*?\s+else\s+["\']{0,1}["\']{0,1}\s*\)\s*,?[ \t]*\n?',
+                "",
+                text2,
+                flags=re.MULTILINE,
+            )
+            # Repair previously broken malformed artifact:
+            #   ( if "clang" in cxx else ""),
+            text2 = re.sub(
+                r'^[ \t]*\(\s*if\s+.*?\s+else\s+["\']{0,1}["\']{0,1}\s*\)\s*,?[ \t]*\n?',
+                "",
+                text2,
+                flags=re.MULTILINE,
+            )
             if text2 != text:
                 text = text2
                 changed = True
