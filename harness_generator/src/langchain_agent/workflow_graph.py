@@ -438,6 +438,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         codex_cli=codex_cli,
     )
 
+    resume_step = (state.get("resume_from_step") or "").strip().lower()
+
     out = cast(
         FuzzWorkflowRuntimeState,
         {
@@ -488,6 +490,28 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "plan_max_fix_rounds": 1,
         },
     )
+
+    # Restore crash context from previous run stage when repro/fix is resumed
+    # as a separate k8s stage job. Without this, init resets crash state and
+    # repro_crash would be incorrectly skipped.
+    if resume_step in {"repro_crash", "fix_crash"}:
+        try:
+            summary_json = generator.repo_root / "run_summary.json"
+            if summary_json.is_file():
+                doc = json.loads(summary_json.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(doc, dict):
+                    out["crash_found"] = bool(doc.get("crash_found") or False)
+                    out["last_fuzzer"] = str(doc.get("last_fuzzer") or "")
+                    out["last_crash_artifact"] = str(doc.get("last_crash_artifact") or "")
+                    out["crash_evidence"] = str(doc.get("crash_evidence") or "none")
+                    out["run_rc"] = int(doc.get("run_rc") or 0)
+                    plan_policy = doc.get("plan_policy")
+                    if isinstance(plan_policy, dict):
+                        out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
+                        out["plan_max_fix_rounds"] = int(plan_policy.get("max_fix_rounds") or out["plan_max_fix_rounds"])
+        except Exception:
+            pass
+
     _wf_log(cast(dict[str, Any], out), f"<- init ok repo_root={out.get('repo_root')} dt={_fmt_dt(time.perf_counter()-t0)}")
     return out
 
@@ -2811,7 +2835,9 @@ def build_fuzz_workflow() -> StateGraph:
 
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_run_state(state)
-        if _should_stage_stop(state, "run") and nxt == "stop":
+        # In staged k8s mode, stop after run when the next step is repro_crash,
+        # so repro executes in its own stage job with the same repo_root.
+        if _should_stage_stop(state, "run") and nxt in {"stop", "repro_crash"}:
             return "stop"
         return nxt
 
