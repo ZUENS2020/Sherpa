@@ -54,6 +54,9 @@ def main() -> int:
             resume_from_step=(str(payload.get("resume_from_step") or "").strip() or None),
             resume_repo_root=(str(payload.get("resume_repo_root") or "").strip() or None),
             stop_after_step=(str(payload.get("stop_after_step") or "").strip() or None),
+            last_fuzzer=(str(payload.get("last_fuzzer") or "").strip() or None),
+            last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
+            re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
         )
         out = {
             "ok": True,

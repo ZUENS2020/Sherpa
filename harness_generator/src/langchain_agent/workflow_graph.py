@@ -411,6 +411,9 @@ class FuzzWorkflowInput:
     resume_from_step: Optional[str] = None
     resume_repo_root: Optional[Path] = None
     stop_after_step: Optional[str] = None
+    last_fuzzer: Optional[str] = None
+    last_crash_artifact: Optional[str] = None
+    re_workspace_root: Optional[str] = None
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -493,8 +496,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "run_terminal_reason": "",
             "run_idle_seconds": 0,
             "run_children_exit_count": 0,
-            "last_crash_artifact": "",
-            "last_fuzzer": "",
+            "last_crash_artifact": str(state.get("last_crash_artifact") or ""),
+            "last_fuzzer": str(state.get("last_fuzzer") or ""),
             "crash_signature": "",
             "same_crash_repeats": 0,
             "crash_fix_attempts": int(state.get("crash_fix_attempts") or 0),
@@ -535,8 +538,10 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                 doc = json.loads(summary_json.read_text(encoding="utf-8", errors="replace"))
                 if isinstance(doc, dict):
                     out["crash_found"] = bool(doc.get("crash_found") or False)
-                    out["last_fuzzer"] = str(doc.get("last_fuzzer") or "")
-                    out["last_crash_artifact"] = str(doc.get("last_crash_artifact") or "")
+                    if not str(out.get("last_fuzzer") or "").strip():
+                        out["last_fuzzer"] = str(doc.get("last_fuzzer") or "")
+                    if not str(out.get("last_crash_artifact") or "").strip():
+                        out["last_crash_artifact"] = str(doc.get("last_crash_artifact") or "")
                     out["crash_evidence"] = str(doc.get("crash_evidence") or "none")
                     out["run_rc"] = int(doc.get("run_rc") or 0)
                     plan_policy = doc.get("plan_policy")
@@ -545,7 +550,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                         out["plan_max_fix_rounds"] = int(plan_policy.get("max_fix_rounds") or out["plan_max_fix_rounds"])
                     re_stage = doc.get("re_stage")
                     if isinstance(re_stage, dict):
-                        out["re_workspace_root"] = str(re_stage.get("workspace_root") or "")
+                        if not str(out.get("re_workspace_root") or "").strip():
+                            out["re_workspace_root"] = str(re_stage.get("workspace_root") or "")
                         out["re_build_done"] = bool(re_stage.get("re_build_done") or False)
                         out["re_build_ok"] = bool(re_stage.get("re_build_ok") or False)
                         out["re_build_rc"] = int(re_stage.get("re_build_rc") or 0)
@@ -2704,6 +2710,8 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     payload: dict[str, Any] = {
         "timestamp": now_ts,
         "repo_url": repo_url,
+        "fuzzer": str(state.get("last_fuzzer") or ""),
+        "artifact": str(state.get("last_crash_artifact") or ""),
         "clone_repo_root": "",
         "clone_ok": False,
         "clone_rc": 1,
@@ -2907,6 +2915,20 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         workdir = Path(workspace_root)
         if not workdir.is_dir():
             raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
+        if (not last_fuzzer or not last_artifact) and (repo_root / "re_build_report.json").is_file():
+            try:
+                re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
+                if isinstance(re_build_doc, dict):
+                    if not last_fuzzer:
+                        last_fuzzer = str(re_build_doc.get("fuzzer") or "").strip()
+                        payload["fuzzer"] = last_fuzzer
+                    if not last_artifact:
+                        last_artifact = str(re_build_doc.get("artifact") or "").strip()
+                        payload["artifact"] = last_artifact
+                        if last_artifact:
+                            artifact_path = Path(last_artifact)
+            except Exception:
+                pass
         if not last_fuzzer:
             # Stage resume can occasionally lose last_fuzzer in state; recover from workspace.
             last_fuzzer = _guess_fuzzer_from_workspace(workdir)
@@ -3258,6 +3280,9 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "resume_from_step": resume_step,
             "resume_repo_root": str(inp.resume_repo_root or ""),
             "stop_after_step": stop_after_step,
+            "last_fuzzer": str(inp.last_fuzzer or ""),
+            "last_crash_artifact": str(inp.last_crash_artifact or ""),
+            "re_workspace_root": str(inp.re_workspace_root or ""),
             "max_steps": max_steps,
         }
     )
@@ -3311,6 +3336,8 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "re_run_report_path": str(out.get("re_run_report_path") or ""),
         "re_run_json_path": str(out.get("re_run_json_path") or ""),
         "re_workspace_root": str(out.get("re_workspace_root") or ""),
+        "last_fuzzer": str(out.get("last_fuzzer") or ""),
+        "last_crash_artifact": str(out.get("last_crash_artifact") or ""),
         "restart_to_plan": bool(out.get("restart_to_plan") or False),
         "restart_to_plan_reason": str(out.get("restart_to_plan_reason") or ""),
         "restart_to_plan_stage": str(out.get("restart_to_plan_stage") or ""),
