@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,11 +26,13 @@ class _FakeRunGenerator:
         self._bin.write_text("", encoding="utf-8")
         self._run_results = list(run_results)
         self.analysis_calls: list[tuple[str, Path]] = []
+        self.seed_calls: int = 0
 
     def _discover_fuzz_binaries(self) -> list[Path]:
         return [self._bin]
 
     def _pass_generate_seeds(self, _fuzzer_name: str) -> None:
+        self.seed_calls += 1
         return
 
     def _run_fuzzer(self, _bin_path: Path) -> FuzzerRunResult:
@@ -53,6 +56,7 @@ class _SlowSeedGenerator(_FakeRunGenerator):
         return list(self._bins)
 
     def _pass_generate_seeds(self, _fuzzer_name: str) -> None:
+        self.seed_calls += 1
         time.sleep(self._seed_sleep_sec)
 
 
@@ -172,7 +176,9 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_execs_per_sec"] == 777
 
 
-def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path):
+def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
+    # Enable legacy AI seed generation path for this budget-exhaustion test.
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -213,6 +219,39 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["failed"] is True
     assert "time budget exceeded" in out["last_error"]
     assert out["message"] == "workflow stopped (time budget exceeded)"
+
+
+def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
+    gen = _SlowSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+        seed_sleep_sec=1.5,
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out.get("failed") is not True
+    assert gen.seed_calls == 0
 
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
@@ -314,7 +353,7 @@ def test_route_after_run_routes_crash_to_repro_stage():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": True}
     )
-    assert route == "repro_crash"
+    assert route == "re-build"
 
 
 def test_route_after_run_routes_idle_timeout_to_stop():
@@ -324,11 +363,65 @@ def test_route_after_run_routes_idle_timeout_to_stop():
     assert route == "stop"
 
 
-def test_route_after_repro_crash_stops_when_not_reproduced():
-    route = workflow_graph._route_after_repro_crash_state(
-        {"failed": False, "crash_found": True, "crash_repro_done": True, "crash_repro_ok": False}
+def test_route_after_re_build_routes_to_re_run_on_success():
+    route = workflow_graph._route_after_re_build_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "re_build_done": True,
+            "re_build_ok": True,
+            "restart_to_plan": False,
+        }
     )
-    assert route == "stop"
+    assert route == "re-run"
+
+
+def test_route_after_re_build_routes_to_plan_on_failure():
+    route = workflow_graph._route_after_re_build_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "re_build_done": True,
+            "re_build_ok": False,
+            "restart_to_plan": True,
+            "restart_to_plan_count": 1,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_re_run_routes_to_fix_crash_on_success():
+    route = workflow_graph._route_after_re_run_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "crash_repro_done": True,
+            "crash_repro_ok": True,
+            "restart_to_plan": False,
+        }
+    )
+    assert route == "fix_crash"
+
+
+def test_route_after_re_run_routes_to_plan_on_failure():
+    route = workflow_graph._route_after_re_run_state(
+        {
+            "failed": False,
+            "crash_found": True,
+            "crash_repro_done": True,
+            "crash_repro_ok": False,
+            "restart_to_plan": True,
+            "restart_to_plan_count": 1,
+        }
+    )
+    assert route == "plan"
+
+
+def test_apply_stage_stop_guard_always_stops_when_targeted():
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "run", "re-build") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-build"}, "re-build", "plan") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-run"}, "re-run", "fix_crash") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "re-run", "fix_crash") == "fix_crash"
 
 
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
@@ -412,6 +505,36 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert route == "stop"
 
 
+def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
+    oom_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "oom-deadbeef"
+    oom_artifact.parent.mkdir(parents=True, exist_ok=True)
+    oom_artifact.write_text("oom candidate", encoding="utf-8")
+
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=71,
+                new_artifacts=[oom_artifact],
+                crash_found=False,
+                crash_evidence="oom_artifact",
+                first_artifact=str(oom_artifact),
+                log_tail="ERROR: libFuzzer: out-of-memory",
+                error="fuzzer produced oom-like artifacts for demo_fuzz",
+                run_error_kind="run_resource_exhaustion",
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out["crash_found"] is False
+    assert out["run_error_kind"] == "run_resource_exhaustion"
+    assert gen.analysis_calls == []
+    route = workflow_graph._route_after_run_state(out)
+    assert route == "stop"
+
+
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
     timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
@@ -449,3 +572,70 @@ def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monk
     assert second["run_error_kind"] == "run_timeout"
     assert second["same_timeout_repeats"] >= 1
     assert "same timeout/no-progress signature repeated" in second["last_error"]
+
+
+def test_node_re_run_guesses_fuzzer_when_last_fuzzer_missing(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = out_dir / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+
+
+def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = out_dir / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    (tmp_path / "re_build_report.json").write_text(
+        '{"fuzzer":"fmt_format_string_fuzz","artifact":"' + str(artifact) + '"}\n',
+        encoding="utf-8",
+    )
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "",
+            "last_crash_artifact": "",
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True

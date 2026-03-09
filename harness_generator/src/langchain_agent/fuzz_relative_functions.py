@@ -53,6 +53,9 @@ def fuzz_logic(
     resume_from_step: str | None = None,
     resume_repo_root: str | Path | None = None,
     stop_after_step: str | None = None,
+    last_fuzzer: str | None = None,
+    last_crash_artifact: str | None = None,
+    re_workspace_root: str | None = None,
 ) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
@@ -85,6 +88,9 @@ def fuzz_logic(
                     else None
                 ),
                 stop_after_step=(stop_after_step or None),
+                last_fuzzer=(str(last_fuzzer or "").strip() or None),
+                last_crash_artifact=(str(last_crash_artifact or "").strip() or None),
+                re_workspace_root=(str(re_workspace_root or "").strip() or None),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")

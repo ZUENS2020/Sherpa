@@ -353,17 +353,62 @@ def _k8s_collect_job_logs(job_name: str, *, tail: int = 200) -> str:
     return (out + "\n" + err).strip()
 
 
-def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
+def _k8s_get_job_pod_phase(job_name: str) -> tuple[str, str]:
+    if not job_name:
+        return "Unknown", ""
+    rc, out, _ = _kubectl(["get", "pod", "-l", f"job-name={job_name}", "-o", "json"], timeout=15)
+    if rc != 0:
+        return "Unknown", ""
+    try:
+        doc = json.loads(out)
+    except Exception:
+        return "Unknown", ""
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, list) or not items:
+        return "Pending", "pod_not_created"
+    pod = items[0] if isinstance(items[0], dict) else {}
+    status = pod.get("status") if isinstance(pod, dict) else {}
+    if not isinstance(status, dict):
+        status = {}
+    phase = str(status.get("phase") or "Unknown")
+    detail = ""
+    cstats = status.get("containerStatuses")
+    if isinstance(cstats, list):
+        for cs in cstats:
+            if not isinstance(cs, dict):
+                continue
+            st = cs.get("state")
+            if not isinstance(st, dict):
+                continue
+            waiting = st.get("waiting")
+            if isinstance(waiting, dict):
+                reason = str(waiting.get("reason") or "").strip()
+                message = str(waiting.get("message") or "").strip()
+                if reason:
+                    detail = reason
+                    if message:
+                        detail = f"{reason}: {message}"
+                    break
+    return phase, detail
+
+
+def _k8s_wait_job(job_name: str, *, timeout_sec: int, on_progress=None) -> tuple[str, str]:
     deadline = time.time() + max(1, timeout_sec)
     last_phase = "Unknown"
+    last_progress = ""
+    last_progress_emit = 0.0
     while time.time() < deadline:
         rc, out, _ = _kubectl(["get", "job", job_name, "-o", "json"], timeout=15)
         if rc != 0:
+            if callable(on_progress):
+                on_progress("Unknown", "get_job_failed")
             time.sleep(2)
             continue
         try:
             doc = json.loads(out)
         except Exception:
+            if callable(on_progress):
+                on_progress("Unknown", "bad_job_json")
             time.sleep(2)
             continue
         status = doc.get("status") or {}
@@ -381,7 +426,34 @@ def _k8s_wait_job(job_name: str, *, timeout_sec: int) -> tuple[str, str]:
                     if t in {"Complete", "Failed"}:
                         return ("Succeeded" if t == "Complete" else "Failed"), last_phase
         active = int(status.get("active") or 0)
-        last_phase = "Running" if active > 0 else "Pending"
+        if active > 0:
+            last_phase = "Running"
+        else:
+            pod_phase, pod_detail = _k8s_get_job_pod_phase(job_name)
+            if pod_phase in {"Running"}:
+                last_phase = "Running"
+            elif pod_phase in {"Pending", "Unknown"}:
+                last_phase = "Pending"
+            elif pod_phase in {"Succeeded"}:
+                last_phase = "Running"
+            else:
+                last_phase = pod_phase or "Pending"
+            if pod_detail:
+                progress = f"{last_phase}:{pod_detail}"
+            else:
+                progress = last_phase
+            now = time.time()
+            if callable(on_progress) and (progress != last_progress or (now - last_progress_emit) >= 15):
+                on_progress(last_phase, pod_detail)
+                last_progress = progress
+                last_progress_emit = now
+            time.sleep(2)
+            continue
+        now = time.time()
+        if callable(on_progress) and (last_phase != last_progress or (now - last_progress_emit) >= 15):
+            on_progress(last_phase, "")
+            last_progress = last_phase
+            last_progress_emit = now
         time.sleep(2)
     return "Timeout", last_phase
 
@@ -446,8 +518,14 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
     if rc_top != 0:
         detail = (err_top or out_top).strip()
         if detail:
-            detail = re.sub(r"\s+", "_", detail)[:160]
-            return True, f"node_ready_no_metrics_warn:{detail}"
+            detail_norm = re.sub(r"\s+", " ", detail).strip()
+            # Canonicalize common metrics-server absence into a stable token.
+            if re.search(r"metrics api not available", detail_norm, re.IGNORECASE):
+                return True, "node_ready_no_metrics_warn:metrics_api_not_available"
+            # Avoid confusing "error:" prefixes in warning-only status messages.
+            detail_norm = re.sub(r"^\s*error:\s*", "", detail_norm, flags=re.IGNORECASE)
+            detail_token = re.sub(r"\s+", "_", detail_norm)[:160]
+            return True, f"node_ready_no_metrics_warn:{detail_token}"
         return True, "node_ready_no_metrics_warn"
     line = ""
     for raw in (out_top or "").splitlines():
@@ -489,7 +567,15 @@ def _execute_k8s_job(
         raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
     _job_update(job_id, k8s_phase="Submitted")
 
-    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout)
+    def _progress_cb(phase: str, detail: str) -> None:
+        phase_txt = (phase or "Unknown").strip()
+        detail_txt = (detail or "").strip()
+        if detail_txt:
+            _job_update(job_id, k8s_phase=f"{phase_txt}: {detail_txt[:220]}")
+        else:
+            _job_update(job_id, k8s_phase=phase_txt)
+
+    status, last_phase = _k8s_wait_job(job_name, timeout_sec=wait_timeout, on_progress=_progress_cb)
     _job_update(job_id, k8s_phase=status)
     if status == "Timeout":
         _k8s_delete_job(job_name)
@@ -920,12 +1006,24 @@ def _is_status_terminal(raw: str | None) -> bool:
     return s in {"success", "resumed", "error", "resume_failed"}
 
 
-_RESUMABLE_WORKFLOW_STEPS = {"plan", "synthesize", "build", "fix_build", "run", "repro_crash", "fix_crash"}
-_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run")
+_RESUMABLE_WORKFLOW_STEPS = {
+    "plan",
+    "synthesize",
+    "build",
+    "fix_build",
+    "run",
+    "re-build",
+    "re-run",
+    "repro_crash",
+    "fix_crash",
+}
+_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run", "re-build", "re-run")
 
 
 def _normalize_resume_step(raw: str | None) -> str:
     s = str(raw or "").strip().lower()
+    if s == "repro_crash":
+        return "re-build"
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
     return "plan"
@@ -933,7 +1031,7 @@ def _normalize_resume_step(raw: str | None) -> str:
 
 def _staged_sequence_from(raw_start: str | None) -> list[str]:
     start = _normalize_resume_step(raw_start)
-    if start in {"fix_build", "repro_crash", "fix_crash"}:
+    if start in {"fix_build", "fix_crash"}:
         start = "build"
     try:
         idx = _STAGED_WORKFLOW_STEPS.index(start)
@@ -1807,6 +1905,11 @@ def _run_fuzz_job(
                 current_repo_root = str(resume_repo_root or "").strip()
                 current_node_name = ""
                 last_result: object = {}
+                stage_ctx: dict[str, str] = {
+                    "last_fuzzer": "",
+                    "last_crash_artifact": "",
+                    "re_workspace_root": "",
+                }
 
                 for idx, stage in enumerate(stages, start=1):
                     if _is_cancel_requested(job_id):
@@ -1847,6 +1950,9 @@ def _run_fuzz_job(
                         "resume_from_step": stage,
                         "resume_repo_root": (current_repo_root or None),
                         "stop_after_step": stage,
+                        "last_fuzzer": (stage_ctx.get("last_fuzzer") or None),
+                        "last_crash_artifact": (stage_ctx.get("last_crash_artifact") or None),
+                        "re_workspace_root": (stage_ctx.get("re_workspace_root") or None),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -1877,12 +1983,17 @@ def _run_fuzz_job(
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
+                        for key in ("last_fuzzer", "last_crash_artifact", "re_workspace_root"):
+                            v = str(stage_result.get(key) or "").strip()
+                            if v:
+                                stage_ctx[key] = v
                         stage_results.append(
                             {
                                 "stage": stage,
                                 "job_name": job_name,
                                 "ok": True,
                                 "repo_root": current_repo_root,
+                                "stage_ctx": dict(stage_ctx),
                                 "result": stage_result,
                             }
                         )
@@ -2276,6 +2387,11 @@ async def task_api(request: task_model = Body(...)):
                             .lower()
                             in {"1", "true", "yes", "on"}
                         )
+                        # Native k8s staged runtime does not require oss-fuzz checkout.
+                        # Force-disable auto-init here to avoid unrelated git clone failures.
+                        if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
+                            auto_init_oss_fuzz = False
+                            print("[task] skip oss-fuzz auto-init in k8s native runtime")
                         if auto_init_oss_fuzz:
                             repo_url = (
                                 (request.oss_fuzz_repo_url or "").strip()

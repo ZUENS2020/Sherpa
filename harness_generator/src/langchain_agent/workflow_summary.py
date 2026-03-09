@@ -115,9 +115,11 @@ def write_run_summary(out: dict[str, Any]) -> None:
         return
 
     crash_found = bool(out.get("crash_found"))
+    crash_repro_done = bool(out.get("crash_repro_done"))
+    crash_repro_ok = bool(out.get("crash_repro_ok"))
     last_error = str(out.get("last_error") or "").strip()
     failed = bool(out.get("failed"))
-    status = "error" if (failed or last_error) else ("crash_found" if crash_found else "ok")
+    status = "error" if (failed or last_error or (crash_found and crash_repro_done and not crash_repro_ok)) else ("crash_found" if crash_found else "ok")
     harness_error = detect_harness_error(repo_root)
     run_details = out.get("run_details") or []
     fuzz_inventory = collect_fuzz_inventory(repo_root)
@@ -145,6 +147,9 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "crash_found": crash_found,
         "crash_evidence": out.get("crash_evidence") or "none",
         "run_error_kind": out.get("run_error_kind") or "",
+        "crash_repro_done": crash_repro_done,
+        "crash_repro_ok": crash_repro_ok,
+        "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
         "run_details": run_details,
         "last_fuzzer": out.get("last_fuzzer"),
         "last_crash_artifact": out.get("last_crash_artifact"),
@@ -161,6 +166,27 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "plan_policy": {
             "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
             "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
+        },
+        "re_stage": {
+            "workspace_root": str(out.get("re_workspace_root") or ""),
+            "re_build_done": bool(out.get("re_build_done") or False),
+            "re_build_ok": bool(out.get("re_build_ok") or False),
+            "re_build_rc": int(out.get("re_build_rc") or 0),
+            "re_build_report_path": str(out.get("re_build_report_path") or ""),
+            "re_build_json_path": str(out.get("re_build_json_path") or ""),
+            "re_run_done": bool(out.get("re_run_done") or False),
+            "re_run_ok": bool(out.get("re_run_ok") or False),
+            "re_run_rc": int(out.get("re_run_rc") or 0),
+            "re_run_report_path": str(out.get("re_run_report_path") or ""),
+            "re_run_json_path": str(out.get("re_run_json_path") or ""),
+        },
+        "restart_to_plan": {
+            "active": bool(out.get("restart_to_plan") or False),
+            "reason": str(out.get("restart_to_plan_reason") or ""),
+            "stage": str(out.get("restart_to_plan_stage") or ""),
+            "error_text": str(out.get("restart_to_plan_error_text") or ""),
+            "report_path": str(out.get("restart_to_plan_report_path") or ""),
+            "count": int(out.get("restart_to_plan_count") or 0),
         },
         "timestamp": time.time(),
     }
@@ -185,6 +211,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
         f"- Run rc: {data['run_rc']}",
         f"- Crash evidence: {data['crash_evidence']}",
         f"- Crash found: {crash_found}",
+        f"- Crash repro done/ok: {crash_repro_done}/{crash_repro_ok}",
         f"- Harness error: {harness_error}",
         f"- Fuzzer binaries: {fuzz_inventory['fuzzer_count']}",
         f"- Corpus files: {fuzz_inventory['corpus_total_files']}",
@@ -237,6 +264,17 @@ def write_run_summary(out: dict[str, Any]) -> None:
             md_lines.extend([f"- {p}" for p in data["fix_patch_files"]])
     if bundle_dirs:
         md_lines.extend(["", "## Bundles"] + [f"- {b}" for b in bundle_dirs])
+    if data["restart_to_plan"]["active"]:
+        md_lines.extend(
+            [
+                "",
+                "## Restart To Plan",
+                f"- reason: {data['restart_to_plan']['reason']}",
+                f"- stage: {data['restart_to_plan']['stage']}",
+                f"- count: {data['restart_to_plan']['count']}",
+                f"- report: {data['restart_to_plan']['report_path']}",
+            ]
+        )
 
     try:
         summary_md.write_text("\n".join(md_lines) + "\n", encoding="utf-8")

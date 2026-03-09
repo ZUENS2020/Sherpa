@@ -1965,8 +1965,13 @@ class NonOssFuzzHarnessGenerator:
             timeout_like_artifacts = [
                 p for p in sorted_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
             ]
+            oom_like_artifacts = [
+                p for p in sorted_artifacts if p.name.startswith(("oom-", "oom-alloc-"))
+            ]
             timeout_artifact_count = len(timeout_like_artifacts)
-            crash_like_artifacts = [p for p in sorted_artifacts if p not in timeout_like_artifacts]
+            crash_like_artifacts = [
+                p for p in sorted_artifacts if p not in timeout_like_artifacts and p not in oom_like_artifacts
+            ]
 
             if crash_like_artifacts:
                 crash_evidence = "artifact"
@@ -1975,9 +1980,15 @@ class NonOssFuzzHarnessGenerator:
                 # timeout-/slow-unit-* are performance/hang signals, not stable crash proof.
                 crash_evidence = "timeout_artifact"
                 first_artifact = str(timeout_like_artifacts[0])
+            elif oom_like_artifacts:
+                # oom-* indicates resource exhaustion, not a memory safety crash proof.
+                crash_evidence = "oom_artifact"
+                first_artifact = str(oom_like_artifacts[0])
 
         def _is_sanitizer_crash(text: str) -> bool:
             if not text:
+                return False
+            if re.search(r"ERROR:\s*libFuzzer:\s*out-of-memory", text, re.IGNORECASE):
                 return False
             if re.search(r"AddressSanitizer failed to allocate", text, re.IGNORECASE):
                 return False
@@ -2012,9 +2023,17 @@ class NonOssFuzzHarnessGenerator:
                 f"fuzzer produced timeout-like artifacts for {bin_path.name} "
                 f"(count={timeout_artifact_count})"
             )
+        if crash_evidence == "oom_artifact":
+            run_error_kind = "run_resource_exhaustion"
+            error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
         if rc != 0 and not crash_found:
             lowered = log.lower()
-            if "idle-timeout" in lowered:
+            if "error: libfuzzer: out-of-memory" in lowered:
+                if not run_error_kind:
+                    run_error_kind = "run_resource_exhaustion"
+                if not error:
+                    error = f"fuzzer hit resource exhaustion (out-of-memory) for {bin_path.name}"
+            elif "idle-timeout" in lowered:
                 run_error_kind = "run_idle_timeout"
                 error = (
                     f"fuzzer run idle-timeout for {bin_path.name}: "
@@ -3006,7 +3025,10 @@ class NonOssFuzzHarnessGenerator:
             runner = ["bash", str(rp_sh)]
             make_executable(rp_sh)
         else:
-            raise HarnessGeneratorError("No reproducer script found after agent generation")
+            # Do not hard-fail crash analysis when agent skipped reproducer generation.
+            # Downstream packaging can still classify this run as unreproducible.
+            print("[warn] No reproducer script found after agent generation; mark as unreproducible")
+            return False
 
         failure_patterns = [
             re.compile(r"AddressSanitizer failed to allocate", re.IGNORECASE),
