@@ -2732,20 +2732,22 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if clone_root.exists():
             shutil.rmtree(clone_root, ignore_errors=True)
 
-        rem = _remaining_time_budget_sec(state, min_timeout=15)
-        clone_timeout = max(30, min(rem, 300))
-        clone = subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, str(clone_root)],
-            capture_output=True,
-            text=True,
-            timeout=clone_timeout,
-        )
-        payload["clone_rc"] = int(clone.returncode)
-        payload["clone_ok"] = clone.returncode == 0
-        payload["clone_repo_root"] = str(clone_root)
-        if clone.returncode != 0:
-            payload["stderr_tail"] = (clone.stderr or "")[-4000:]
-            raise HarnessGeneratorError(f"re-build clone failed (rc={clone.returncode})")
+        # Reuse the same clone path as init so mirrors/proxy/retry behavior stays consistent.
+        rem = _remaining_time_budget_sec(state, min_timeout=0)
+        if rem <= 0:
+            raise HarnessGeneratorError("re-build clone skipped: no remaining workflow budget")
+        try:
+            cloned_root = gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        except Exception as clone_err:
+            payload["clone_rc"] = 1
+            payload["clone_ok"] = False
+            payload["clone_repo_root"] = str(clone_root)
+            payload["stderr_tail"] = str(clone_err)[-4000:]
+            raise HarnessGeneratorError(f"re-build clone failed via init clone logic: {clone_err}")
+
+        payload["clone_rc"] = 0
+        payload["clone_ok"] = True
+        payload["clone_repo_root"] = str(cloned_root)
 
         source_fuzz = repo_root / "fuzz"
         if not source_fuzz.is_dir():
