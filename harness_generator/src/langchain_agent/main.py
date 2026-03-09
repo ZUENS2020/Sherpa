@@ -1926,11 +1926,60 @@ def _run_fuzz_job(
                     "re_workspace_root": "",
                 }
 
-                for idx, stage in enumerate(stages, start=1):
+                stage_idx = 0
+                stage_seq = 0
+                loop_stages = ["plan", "synthesize", "build", "run", "coverage-analysis", "improve-harness"]
+                while stage_idx < len(stages):
+                    stage = stages[stage_idx]
+                    stage_idx += 1
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
-                    job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
-                    result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=idx)
+                    if stage == "re-build" and not (stage_ctx.get("last_crash_artifact") or "").strip():
+                        print(f"[job {job_id}] stage {stage} skipped (no crash artifact)")
+                        stage_results.append(
+                            {
+                                "stage": stage,
+                                "job_name": "",
+                                "ok": True,
+                                "skipped": True,
+                                "skip_reason": "no_crash_artifact",
+                                "repo_root": current_repo_root,
+                            }
+                        )
+                        _job_update(
+                            job_id,
+                            workflow_last_step=stage,
+                            workflow_active_step="",
+                            k8s_phase=f"{stage}:Skipped",
+                        )
+                        continue
+                    if (
+                        stage == "re-run"
+                        and not (stage_ctx.get("last_crash_artifact") or "").strip()
+                        and not (stage_ctx.get("re_workspace_root") or "").strip()
+                    ):
+                        print(f"[job {job_id}] stage {stage} skipped (no crash context)")
+                        stage_results.append(
+                            {
+                                "stage": stage,
+                                "job_name": "",
+                                "ok": True,
+                                "skipped": True,
+                                "skip_reason": "no_crash_context",
+                                "repo_root": current_repo_root,
+                            }
+                        )
+                        _job_update(
+                            job_id,
+                            workflow_last_step=stage,
+                            workflow_active_step="",
+                            k8s_phase=f"{stage}:Skipped",
+                        )
+                        continue
+
+                    stage_seq += 1
+                    job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=stage_seq)
+                    result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=stage_seq)
                     stage_job_names.append(job_name)
                     _job_update(
                         job_id,
@@ -2032,6 +2081,12 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    if stage == "improve-harness" and isinstance(stage_result, dict):
+                        if bool(stage_result.get("coverage_should_improve")):
+                            stages[stage_idx:stage_idx] = list(loop_stages)
+                            print(
+                                f"[job {job_id}] coverage loop requested; appended next loop stages (total={len(stages)})"
+                            )
 
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results

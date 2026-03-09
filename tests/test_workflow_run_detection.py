@@ -438,6 +438,15 @@ def test_route_after_re_run_routes_to_plan_on_failure():
     assert route == "plan"
 
 
+def test_node_re_run_skips_when_no_crash(tmp_path: Path):
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run({"generator": gen, "crash_found": False})
+    assert out["last_step"] == "re-run"
+    assert out["last_error"] == ""
+    assert out["re_run_done"] is False
+    assert out["message"] == "re-run skipped (no crash found)"
+
+
 def test_apply_stage_stop_guard_always_stops_when_targeted():
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "run", "re-build") == "stop"
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-build"}, "re-build", "plan") == "stop"
@@ -616,6 +625,7 @@ def test_node_re_run_guesses_fuzzer_when_last_fuzzer_missing(tmp_path: Path, mon
     out = workflow_graph._node_re_run(
         {
             "generator": gen,
+            "crash_found": True,
             "last_fuzzer": "",
             "last_crash_artifact": str(artifact),
             "re_workspace_root": str(workspace),
@@ -652,6 +662,7 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     out = workflow_graph._node_re_run(
         {
             "generator": gen,
+            "crash_found": True,
             "last_fuzzer": "",
             "last_crash_artifact": "",
             "re_workspace_root": str(workspace),

@@ -3014,6 +3014,19 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> re-run")
 
+    if not bool(state.get("crash_found")):
+        out = {
+            **state,
+            "last_step": "re-run",
+            "last_error": "",
+            "re_run_done": False,
+            "re_run_ok": False,
+            "re_run_rc": 0,
+            "message": "re-run skipped (no crash found)",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- re-run skip=no-crash dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
     repo_root = gen.repo_root
     report_md = repo_root / "re_run_report.md"
     report_json = repo_root / "re_run_report.json"
@@ -3061,6 +3074,17 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     }
     try:
         workdir = Path(workspace_root)
+        if not workdir.is_dir() and (repo_root / "re_build_report.json").is_file():
+            try:
+                re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
+                if isinstance(re_build_doc, dict):
+                    recovered_root = str(re_build_doc.get("clone_repo_root") or "").strip()
+                    if recovered_root:
+                        workspace_root = recovered_root
+                        payload["workspace_root"] = workspace_root
+                        workdir = Path(workspace_root)
+            except Exception:
+                pass
         if not workdir.is_dir():
             raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
         if (not last_fuzzer or not last_artifact) and (repo_root / "re_build_report.json").is_file():
