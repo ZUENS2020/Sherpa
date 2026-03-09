@@ -56,6 +56,7 @@ def fuzz_logic(
     last_fuzzer: str | None = None,
     last_crash_artifact: str | None = None,
     re_workspace_root: str | None = None,
+    coverage_loop_max_rounds: int = 3,
 ) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
@@ -91,6 +92,7 @@ def fuzz_logic(
                 last_fuzzer=(str(last_fuzzer or "").strip() or None),
                 last_crash_artifact=(str(last_crash_artifact or "").strip() or None),
                 re_workspace_root=(str(re_workspace_root or "").strip() or None),
+                coverage_loop_max_rounds=max(1, min(int(coverage_loop_max_rounds or 3), 5)),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")

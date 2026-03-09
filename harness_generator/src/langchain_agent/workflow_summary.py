@@ -180,6 +180,13 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "re_run_report_path": str(out.get("re_run_report_path") or ""),
             "re_run_json_path": str(out.get("re_run_json_path") or ""),
         },
+        "coverage_loop": {
+            "max_rounds": int(out.get("coverage_loop_max_rounds") or 3),
+            "round": int(out.get("coverage_loop_round") or 0),
+            "should_improve": bool(out.get("coverage_should_improve") or False),
+            "reason": str(out.get("coverage_improve_reason") or ""),
+            "history": list(out.get("coverage_history") or []),
+        },
         "restart_to_plan": {
             "active": bool(out.get("restart_to_plan") or False),
             "reason": str(out.get("restart_to_plan_reason") or ""),
