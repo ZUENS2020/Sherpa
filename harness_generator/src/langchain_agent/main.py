@@ -2387,6 +2387,11 @@ async def task_api(request: task_model = Body(...)):
                             .lower()
                             in {"1", "true", "yes", "on"}
                         )
+                        # Native k8s staged runtime does not require oss-fuzz checkout.
+                        # Force-disable auto-init here to avoid unrelated git clone failures.
+                        if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
+                            auto_init_oss_fuzz = False
+                            print("[task] skip oss-fuzz auto-init in k8s native runtime")
                         if auto_init_oss_fuzz:
                             repo_url = (
                                 (request.oss_fuzz_repo_url or "").strip()
