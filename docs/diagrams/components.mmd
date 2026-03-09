@@ -1,0 +1,10 @@
+flowchart LR
+  U["用户"] --> FE["frontend-next (Next.js)"]
+  U --> API["sherpa-web (FastAPI)"]
+  FE --> API
+
+  API --> DB["PostgresJobStore"]
+  API --> K8S["K8s Job Orchestrator"]
+  K8S --> W["k8s_job_worker"]
+  W --> WF["fuzz_logic / workflow_graph"]
+  W --> OUT["stage result + logs"]

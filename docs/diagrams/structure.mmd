@@ -1,0 +1,14 @@
+flowchart TD
+  R["Sherpa"] --> A["harness_generator/"]
+  A --> A1["langchain_agent/main.py (API+调度)"]
+  A --> A2["langchain_agent/workflow_graph.py (状态机)"]
+  A --> A3["langchain_agent/k8s_job_worker.py (执行器)"]
+
+  R --> B["frontend-next/"]
+  B --> B1["app/page.tsx (控制台)"]
+  B --> B2["lib/api/* (请求与轮询)"]
+  B --> B3["components/* (配置/进度/日志)"]
+
+  R --> C["k8s/ (base + overlays)"]
+  R --> D["docker/ (web/frontend/gateway 镜像)"]
+  R --> E["tests/ (稳定性与回归测试)"]

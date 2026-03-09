@@ -1,0 +1,17 @@
+flowchart LR
+  USER["Browser"] --> GW["sherpa-gateway (Nginx)"]
+  GW --> FE["sherpa-frontend"]
+  GW --> WEB["sherpa-web"]
+
+  WEB --> PG["Postgres"]
+  WEB --> KAPI["Kubernetes API"]
+
+  KAPI --> J1["Stage Job: plan"]
+  KAPI --> J2["Stage Job: synthesize"]
+  KAPI --> J3["Stage Job: build"]
+  KAPI --> J4["Stage Job: run"]
+
+  J1 --> PVC["共享存储 PVC"]
+  J2 --> PVC
+  J3 --> PVC
+  J4 --> PVC

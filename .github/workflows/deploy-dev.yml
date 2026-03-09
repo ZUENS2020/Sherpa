@@ -419,6 +419,8 @@ jobs:
           FORCE_REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild_all || 'false' }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
         run: |
           set -euo pipefail
           web_changed=false
@@ -449,6 +451,29 @@ jobs:
                   ;;
               esac
             done <<< "${changed_files}"
+          fi
+
+          # Dev reset reapplies manifests that default to :latest. If target sha-tag
+          # image is absent on node, force rebuild to avoid silently rolling back UI/API.
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            ctr_cmd=(sudo ctr -n k8s.io)
+            if sudo test -S /run/k3s/containerd/containerd.sock; then
+              ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+            fi
+
+            image_present() {
+              local image="$1"
+              "${ctr_cmd[@]}" images ls | awk '{print $1}' | grep -Fx "${image}" >/dev/null 2>&1
+            }
+
+            if [[ "${web_changed}" != "true" ]] && ! image_present "${WEB_IMAGE}"; then
+              web_changed=true
+              echo "::notice::forcing web rebuild because ${WEB_IMAGE} not present in containerd"
+            fi
+            if [[ "${frontend_changed}" != "true" ]] && ! image_present "${FRONTEND_IMAGE}"; then
+              frontend_changed=true
+              echo "::notice::forcing frontend rebuild because ${FRONTEND_IMAGE} not present in containerd"
+            fi
           fi
 
           echo "web_changed=${web_changed}" >> "$GITHUB_OUTPUT"
