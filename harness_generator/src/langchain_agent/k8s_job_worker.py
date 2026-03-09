@@ -30,6 +30,17 @@ def _write_error(path: Path, text: str) -> None:
     path.write_text((text or "").strip() + "\n", encoding="utf-8")
 
 
+def _parse_int_keep_zero(value: object, default: int) -> int:
+    if value is None:
+        return int(default)
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "":
+            return int(default)
+        return int(text)
+    return int(value)
+
+
 def main() -> int:
     payload = _decode_payload()
     job_id = str(payload.get("job_id") or "")
@@ -43,9 +54,9 @@ def main() -> int:
 
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),
-            max_len=int(payload.get("max_len") or 1024),
-            time_budget=int(payload.get("time_budget") or 900),
-            run_time_budget=int(payload.get("run_time_budget") or 900),
+            max_len=_parse_int_keep_zero(payload.get("max_len"), 1024),
+            time_budget=_parse_int_keep_zero(payload.get("time_budget"), 900),
+            run_time_budget=_parse_int_keep_zero(payload.get("run_time_budget"), 900),
             email=(str(payload.get("email") or "").strip() or None),
             docker_image=effective_docker_image,
             ai_key_path=(Path(str(payload.get("ai_key_path") or "")).expanduser() if payload.get("ai_key_path") else None),
@@ -57,6 +68,7 @@ def main() -> int:
             last_fuzzer=(str(payload.get("last_fuzzer") or "").strip() or None),
             last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
             re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
+            coverage_loop_max_rounds=_parse_int_keep_zero(payload.get("coverage_loop_max_rounds"), 3),
         )
         out = {
             "ok": True,

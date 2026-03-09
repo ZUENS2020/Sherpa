@@ -1,0 +1,12 @@
+flowchart LR
+  A["提交任务 /api/task"] --> B["创建 Task + Fuzz 子任务"]
+  B --> C["阶段执行: plan"]
+  C --> D["synthesize"]
+  D --> E["build"]
+  E --> F{"构建成功?"}
+  F -- "否" --> G["fix_build"] --> E
+  F -- "是" --> H["run"]
+  H --> I{"发现问题?"}
+  I -- "否" --> J["结束"]
+  I -- "是" --> K["coverage-analysis / improve-harness"]
+  K --> C

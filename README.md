@@ -4,259 +4,255 @@
 
 # Sherpa
 
-Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统：输入仓库 URL，自动执行 `plan -> synthesize -> build -> run`，输出可复现产物、日志与阶段结果。
+Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统。输入仓库 URL 后，系统会在 Kubernetes 上按阶段执行任务，产出 harness、构建产物、运行日志、崩溃样本与复现结果。
 
-当前项目基线：
+当前主线能力：
 
-- Kubernetes-only（执行器：`k8s_job`）
-- Postgres-only（任务状态持久化）
-- Native runtime（stage worker 在容器内原生执行，不再依赖 inner Docker）
-- 多阶段多 Job（每阶段单独 K8s Job，串行推进）
+- Kubernetes 分阶段执行（stage-per-job）
+- Postgres 状态持久化
+- 覆盖率分析与可选 harness 改进链路
+- 崩溃复现拆分为 `re-build` 与 `re-run`
+- Dev / Prod 双环境工作流部署
 
 ---
 
-## 1. 架构概览
+## 1. 系统架构
 
 ```mermaid
 flowchart LR
-  U["User/Client"] --> FE["sherpa-frontend"]
+  U["User"] --> FE["frontend-next"]
   U --> API["sherpa-web (FastAPI)"]
   FE --> API
 
   API --> DB[(Postgres)]
-  API --> P["Stage Job: plan"]
-  API --> S["Stage Job: synthesize"]
-  API --> B["Stage Job: build"]
-  API --> R["Stage Job: run"]
+  API --> S1["plan"]
+  API --> S2["synthesize"]
+  API --> S3["build"]
+  API --> S4["run"]
+  API --> S5["coverage-analysis"]
+  API --> S6["improve-harness"]
+  API --> S7["re-build"]
+  API --> S8["re-run"]
 
-  P --> OUT["shared output"]
-  S --> OUT
-  B --> OUT
-  R --> OUT
-
-  API --> LOG["job logs"]
+  S1 --> OUT["/shared/output"]
+  S2 --> OUT
+  S3 --> OUT
+  S4 --> OUT
+  S5 --> OUT
+  S6 --> OUT
+  S7 --> OUT
+  S8 --> OUT
 ```
 
-组件职责：
+核心组件：
 
 1. `sherpa-web`
-- API 入口、任务调度、阶段编排、状态聚合。
-- 创建并追踪阶段 Job，持久化结果到 Postgres。
+- 任务提交、阶段调度、状态聚合、恢复执行。
 
-2. `sherpa-frontend`
-- 配置与任务提交。
-- 任务状态轮询与日志展示。
+2. `frontend-next`
+- 参数配置、任务提交、日志和进度展示。
 
 3. `postgres`
-- 任务与子任务状态存储。
-- 支持恢复、统计与历史查询。
+- 任务与子任务状态持久化。
 
 4. `k8s stage jobs`
-- 每阶段独立 Pod，阶段完成即退出。
-- 通过共享目录 + 结构化 stage 结果在阶段间接力。
+- 每个阶段独立 Job，执行完成即退出。
 
 ---
 
-## 2. 执行模型
+## 2. 阶段模型
 
-每个子任务固定按以下阶段运行：
+默认阶段序列：
 
 1. `plan`
 2. `synthesize`
 3. `build`
 4. `run`
+5. `coverage-analysis`
+6. `improve-harness`
+7. `re-build`
+8. `re-run`
 
-阶段间传递关键上下文：
+说明：
 
-- `repo_root`
-- `resume_from_step`
-- `stop_after_step`
-- stage result JSON / error TXT
-
-阶段结果文件位置：
-
-- `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
-- `/shared/output/_k8s_jobs/<job_id>/stage-*.error.txt`
-
-任务聚合日志：
-
-- `/app/job-logs/jobs/<job_id>.log`
+1. `run` 如果发现 crash，会进入 `re-build/re-run` 复现链路。
+2. `coverage-analysis` 只在未发现 crash 且满足条件时标记 `coverage_should_improve=true`。
+3. `improve-harness` 负责准备下一轮改进提示，但当前 k8s 外层调度是固定阶段队列，不会在同一次 stage 列表中无限回环。
 
 ---
 
-## 3. 状态机与可观测字段
+## 3. 覆盖率循环参数
 
-子任务常见状态：
+前端/API 可配置：
 
-- `queued`
-- `running`
-- `success`
-- `error`
-- `recoverable`
-- `resuming`
-- `resume_failed`
+- `coverage_loop_max_rounds`（1~5）
 
-建议前端固定消费字段：
+含义：
 
-- `status`
-- `phase`
-- `runtime_mode`
-- `error_code`
-- `error_kind`
-- `error_signature`
-- `k8s_job_name`
-- `k8s_job_names`
-- `workflow_active_step`
-- `workflow_last_step`
+1. 控制最多允许的 coverage 改进轮次。
+2. 该值会传入工作流状态并参与 `coverage-analysis` 决策。
+3. 实际“多轮回跑”是否发生，取决于外层阶段调度策略与恢复逻辑，而不仅是该参数本身。
 
 ---
 
-## 4. API 一览
+## 4. 崩溃复现语义
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/system` | 系统信息 |
-| GET | `/api/metrics` | Prometheus 指标 |
-| GET | `/api/config` | 读取配置（脱敏） |
-| PUT | `/api/config` | 更新配置 |
-| POST | `/api/task` | 提交任务 |
-| GET | `/api/task/{job_id}` | 查询任务 |
-| GET | `/api/tasks` | 任务列表 |
-| POST | `/api/task/{job_id}/stop` | 停止任务 |
-| POST | `/api/task/{job_id}/resume` | 恢复任务 |
-| GET | `/docs` | Swagger |
-| GET | `/redoc` | ReDoc |
-| GET | `/openapi.json` | OpenAPI Schema |
+`re-build`：
+
+1. fresh clone 代码（走 init 的 clone 逻辑）。
+2. 复用 run 阶段上下文所需输入。
+3. 重新构建复现所需二进制。
+
+`re-run`：
+
+1. 使用 `re-build` 产物 + crash artifact 复现。
+2. 输出 `re_run_report` 与复现状态字段。
+
+失败回流：
+
+1. `re-build` 或 `re-run` 失败可触发回流到 `plan`（受重启上限约束）。
+2. 回流时会携带失败上下文，供下一轮规划使用。
 
 ---
 
-## 5. K8s 部署
+## 5. 目录结构
 
-### 5.1 最小前置条件
+- `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent`
+  - 编排、状态机、k8s job worker、API 主逻辑
+- `/Users/zuens2020/Documents/Sherpa/harness_generator/src/fuzz_unharnessed_repo.py`
+  - 仓库处理、构建与运行执行细节
+- `/Users/zuens2020/Documents/Sherpa/frontend-next`
+  - Next.js 前端
+- `/Users/zuens2020/Documents/Sherpa/k8s/base`
+  - 基础 K8s 清单
+- `/Users/zuens2020/Documents/Sherpa/k8s/overlays/dev`
+  - Dev 覆盖层
+- `/Users/zuens2020/Documents/Sherpa/k8s/overlays/prod`
+  - Prod 覆盖层
+- `/Users/zuens2020/Documents/Sherpa/.github/workflows`
+  - 部署与检查工作流
 
-1. 可用 Kubernetes 集群。
-2. `kubectl` 可连通目标集群。
-3. 已准备 API key 与数据库参数（通过 Secret 注入）。
+---
 
-### 5.2 部署基础清单
+## 6. 本地开发启动
+
+### 6.1 前置
+
+1. Python 3.10+
+2. Node.js 20+
+3. PostgreSQL（或容器）
+4. Kubernetes 集群与 `kubectl`（如需完整链路）
+
+### 6.2 后端
 
 ```bash
-kubectl apply -k k8s/base
-kubectl -n sherpa get pods
-kubectl -n sherpa get svc
-kubectl -n sherpa get ingress
+cd /Users/zuens2020/Documents/Sherpa
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r /Users/zuens2020/Documents/Sherpa/docker/requirements.web.txt
 ```
 
-### 5.3 环境 Overlay
+### 6.3 前端
 
-- 开发：`k8s/overlays/dev`
-- 生产：`k8s/overlays/prod`
-
-建议始终通过 CI workflow 进行部署，不手工漂移资源。
-
----
-
-## 6. CI/CD 流程（当前规范）
-
-分支职责：
-
-- 功能分支：`codex/*`（或个人分支）
-- 集成验证：`dev`
-- 发布基线：`main`
-
-强制流程：
-
-1. 功能分支 -> PR 到 `dev`。
-2. `Deploy Dev` 通过。
-3. `dev` -> PR 到 `main`。
-4. `Deploy Prod` 通过。
-
-约束：
-
-1. 禁止直推 `dev/main`。
-2. `main` 只接收来自 `dev` 的 PR。
-3. hotfix 允许临时直修时，必须回补到 `dev`。
+```bash
+cd /Users/zuens2020/Documents/Sherpa/frontend-next
+npm ci
+npm run dev
+```
 
 ---
 
-## 7. Cloudflare Tunnel 现状
+## 7. API 入口
 
-项目线上入口通过 cloudflared 对接域名。
+常用接口：
 
-默认策略：
-
-1. 应用流量走部署流程中的 tunnel 配置（按环境注入 Secret）。
-2. 域名由环境 Secret 管理，不写死在代码里。
-
-排障优先检查：
-
-1. `cloudflared` 是否在线。
-2. Tunnel token 对应的 hostname 路由是否正确。
-3. Ingress host 与 tunnel 目标是否一致。
+1. `GET /api/health`
+2. `GET /api/system`
+3. `POST /api/task`
+4. `GET /api/task/{job_id}`
+5. `POST /api/task/{job_id}/stop`
+6. `POST /api/task/{job_id}/resume`
+7. `GET /docs`
+8. `GET /openapi.json`
 
 ---
 
-## 8. 常见故障与处理
+## 8. 部署与环境策略
 
-### 8.1 `Failed to connect github.com:443`
+### 8.1 Dev
 
-现象：init 阶段 clone 失败。
+1. 用于验证变更。
+2. 可配置为部署前重置数据（按当前工作流实现）。
+3. 域名、Tunnel、Secret 与 Prod 隔离。
 
-处理：
+### 8.2 Prod
 
-1. 确认运行镜像已更新到包含 clone fallback 修复的版本。
-2. 配置 `SHERPA_GIT_MIRRORS`（可包含多个回退源）。
-3. 检查集群节点出网与 DNS。
+1. 以滚动更新为主，保留历史数据。
+2. 不执行 Dev 式重置。
+3. 强调稳定与可回滚。
 
-### 8.2 rollout 超时
+### 8.3 CI/CD 基线
 
-现象：`rollout status ... timed out waiting for condition`。
-
-处理：
-
-1. 查看部署描述与 events。
-2. 核对 PVC/PV 绑定与 storageClass。
-3. 查看容器启动日志与 readiness 探针路径。
-
-### 8.3 健康检查端口偶发失败
-
-现象：`curl 127.0.0.1:18001` 连接失败。
-
-处理：
-
-1. 使用“等待 port-forward ready 后再 health check”的新版 workflow。
-2. 失败时输出 `port-forward` 日志进行定位。
+1. 功能分支 -> PR 到 `dev`
+2. `dev` 验证通过后 -> PR 到 `main`
+3. `main` 合并后触发生产部署
 
 ---
 
-## 9. 目录速览
+## 9. 输出与日志
 
-- `harness_generator/src/langchain_agent/`
-  - API、编排、k8s job worker、状态机
-- `harness_generator/src/fuzz_unharnessed_repo.py`
-  - 仓库 clone、阶段执行、构建/运行细节
-- `k8s/base`
-  - 基础部署清单
-- `k8s/overlays/dev`
-  - 开发环境 overlay
-- `k8s/overlays/prod`
-  - 生产环境 overlay
-- `.github/workflows`
-  - `deploy-dev.yml`
-  - `deploy-prod.yml`
+关键产物目录：
+
+1. `/shared/output/<repo>-<id>`
+2. `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
+3. `/app/job-logs/jobs/<job_id>.log`
+
+定位问题建议顺序：
+
+1. 先看对应 stage 的 `stage-*.json` 和 `stage-*.error.txt`
+2. 再看任务聚合日志
+3. 最后看 Pod events 与容器日志
 
 ---
 
-## 10. 运维建议
+## 10. 常见问题
 
-1. 优先保证 `dev` 可重复部署与可观测，再推进 `prod`。
-2. 所有“手工修复集群”动作，随后都要回写到仓库工作流或清单。
-3. 任务问题先看 stage 结果文件，再看聚合日志，最后看 pod events。
-4. 任何跨环境变更（dev/prod）必须显式验证隔离性。
+### 10.1 `node_ready_no_metrics_warn:metrics_api_not_available`
+
+含义：
+
+1. Metrics API 不可用的告警。
+2. 通常不阻塞任务执行。
+3. 若要消除告警，需要补齐集群 Metrics Server 或调整节点探测策略。
+
+### 10.2 `git clone` 失败
+
+优先检查：
+
+1. 出网与 DNS
+2. 代理/镜像配置
+3. clone fallback 源可用性
+
+### 10.3 re-run 报 `workspace missing` / `missing last_fuzzer`
+
+说明：
+
+1. `re-build` 上下文未完整传递或产物未落盘。
+2. 需检查阶段间 `stage_ctx` 更新与读取。
 
 ---
 
-## 11. License
+## 11. 文档导航
 
-See project license file.
+更细文档见：
+
+- `/Users/zuens2020/Documents/Sherpa/docs/k8s/DEPLOY.md`
+- `/Users/zuens2020/Documents/Sherpa/docs/k8s/RUNBOOK.md`
+- `/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md`
+- `/Users/zuens2020/Documents/Sherpa/k8s/README.md`
+
+---
+
+## 12. License
+
+See `/Users/zuens2020/Documents/Sherpa/LICENSE`.

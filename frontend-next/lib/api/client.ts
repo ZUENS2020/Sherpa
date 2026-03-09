@@ -92,6 +92,7 @@ export interface SubmitTaskInput {
   totalTimeBudget: number;
   runTimeBudget: number;
   maxTokens: number;
+  coverageLoopMaxRounds?: number;
 }
 
 export async function submitTask(input: SubmitTaskInput): Promise<{ job_id: string; status: string }> {
@@ -108,6 +109,7 @@ export async function submitTask(input: SubmitTaskInput): Promise<{ job_id: stri
           time_budget: input.totalTimeBudget,
           total_time_budget: input.totalTimeBudget,
           run_time_budget: input.runTimeBudget,
+          coverage_loop_max_rounds: input.coverageLoopMaxRounds ?? 3,
         },
       ],
       auto_init: true,

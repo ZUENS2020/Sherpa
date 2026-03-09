@@ -42,6 +42,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     resume_from_step: str
     resume_repo_root: str
     stop_after_step: str
+    coverage_loop_max_rounds: int
+    coverage_loop_round: int
+    coverage_should_improve: bool
+    coverage_improve_reason: str
+    coverage_history: list[dict[str, Any]]
 
     step_count: int
     max_steps: int
@@ -414,6 +419,7 @@ class FuzzWorkflowInput:
     last_fuzzer: Optional[str] = None
     last_crash_artifact: Optional[str] = None
     re_workspace_root: Optional[str] = None
+    coverage_loop_max_rounds: int = 3
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -525,25 +531,48 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "restart_to_plan_count": int(state.get("restart_to_plan_count") or 0),
             "plan_fix_on_crash": True,
             "plan_max_fix_rounds": 1,
+            "coverage_loop_max_rounds": max(1, min(int(state.get("coverage_loop_max_rounds") or 3), 5)),
+            "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
+            "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
+            "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
+            "coverage_history": list(state.get("coverage_history") or []),
         },
     )
 
     # Restore crash context from previous run stage when repro/fix is resumed
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
-    if resume_step in {"repro_crash", "re-build", "re-run", "fix_crash"}:
+    if resume_step in {"coverage-analysis", "improve-harness", "repro_crash", "re-build", "re-run", "fix_crash"}:
         try:
             summary_json = generator.repo_root / "run_summary.json"
             if summary_json.is_file():
                 doc = json.loads(summary_json.read_text(encoding="utf-8", errors="replace"))
                 if isinstance(doc, dict):
                     out["crash_found"] = bool(doc.get("crash_found") or False)
+                    out["run_error_kind"] = str(doc.get("run_error_kind") or "")
+                    out["run_details"] = list(doc.get("run_details") or [])
                     if not str(out.get("last_fuzzer") or "").strip():
                         out["last_fuzzer"] = str(doc.get("last_fuzzer") or "")
                     if not str(out.get("last_crash_artifact") or "").strip():
                         out["last_crash_artifact"] = str(doc.get("last_crash_artifact") or "")
                     out["crash_evidence"] = str(doc.get("crash_evidence") or "none")
                     out["run_rc"] = int(doc.get("run_rc") or 0)
+                    coverage_loop = doc.get("coverage_loop")
+                    if isinstance(coverage_loop, dict):
+                        out["coverage_loop_max_rounds"] = max(
+                            1,
+                            min(int(coverage_loop.get("max_rounds") or out.get("coverage_loop_max_rounds") or 3), 5),
+                        )
+                        out["coverage_loop_round"] = int(coverage_loop.get("round") or out.get("coverage_loop_round") or 0)
+                        out["coverage_should_improve"] = bool(
+                            coverage_loop.get("should_improve") or out.get("coverage_should_improve") or False
+                        )
+                        out["coverage_improve_reason"] = str(
+                            coverage_loop.get("reason") or out.get("coverage_improve_reason") or ""
+                        )
+                        out["coverage_history"] = list(
+                            coverage_loop.get("history") or out.get("coverage_history") or []
+                        )
                     plan_policy = doc.get("plan_policy")
                     if isinstance(plan_policy, dict):
                         out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
@@ -2561,6 +2590,123 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         return out
 
 
+def _max_cov_from_run_details(run_details: list[dict[str, Any]]) -> int:
+    covs: list[int] = []
+    for detail in run_details or []:
+        try:
+            covs.append(int(detail.get("final_cov") or 0))
+        except Exception:
+            continue
+    return max(covs) if covs else 0
+
+
+def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    state, stop_now = _enter_step(state, "coverage-analysis")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> coverage-analysis")
+    try:
+        max_rounds = max(1, min(int(state.get("coverage_loop_max_rounds") or 3), 5))
+        current_round = max(0, int(state.get("coverage_loop_round") or 0))
+        run_details = list(state.get("run_details") or [])
+        history = list(state.get("coverage_history") or [])
+        current_cov = _max_cov_from_run_details(run_details)
+        prev_cov = 0
+        if history:
+            try:
+                prev_cov = int(history[-1].get("max_cov") or 0)
+            except Exception:
+                prev_cov = 0
+        should_improve = (
+            (not bool(state.get("crash_found")))
+            and (not bool(state.get("failed")))
+            and (not str(state.get("run_error_kind") or "").strip())
+            and (current_round < max_rounds)
+        )
+        next_round = current_round + (1 if should_improve else 0)
+        reason = (
+            f"round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}"
+            if should_improve
+            else "skip coverage loop"
+        )
+        history.append(
+            {
+                "index": len(history) + 1,
+                "round": next_round if should_improve else current_round,
+                "max_rounds": max_rounds,
+                "max_cov": current_cov,
+                "prev_cov": prev_cov,
+                "crash_found": bool(state.get("crash_found")),
+                "run_error_kind": str(state.get("run_error_kind") or ""),
+                "should_improve": should_improve,
+                "ts": int(time.time()),
+            }
+        )
+        out = {
+            **state,
+            "last_step": "coverage-analysis",
+            "last_error": "",
+            "coverage_loop_max_rounds": max_rounds,
+            "coverage_loop_round": next_round if should_improve else current_round,
+            "coverage_should_improve": should_improve,
+            "coverage_improve_reason": reason,
+            "coverage_history": history,
+            "message": "coverage analysis done",
+        }
+        _wf_log(
+            cast(dict[str, Any], out),
+            f"<- coverage-analysis improve={int(should_improve)} {reason} dt={_fmt_dt(time.perf_counter()-t0)}",
+        )
+        return out
+    except Exception as e:
+        out = {**state, "last_step": "coverage-analysis", "last_error": str(e), "message": "coverage analysis failed"}
+        _wf_log(cast(dict[str, Any], out), f"<- coverage-analysis err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+
+def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    state, stop_now = _enter_step(state, "improve-harness")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> improve-harness")
+    try:
+        if not bool(state.get("coverage_should_improve")):
+            out = {
+                **state,
+                "last_step": "improve-harness",
+                "last_error": "",
+                "message": "improve-harness skipped",
+            }
+            _wf_log(cast(dict[str, Any], out), f"<- improve-harness skip dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        # Reuse plan_with_hint path instead of editing directly in this stage.
+        # The next stage routes to plan, then synthesize/build/run with this hint.
+        cov_reason = str(state.get("coverage_improve_reason") or "").strip()
+        hint = (
+            "覆盖率闭环改进任务：\n"
+            "- 仅调整 fuzz harness（fuzz/ 下文件），不要改业务源码。\n"
+            "- 优先扩展输入建模、调用顺序、边界值与字典使用。\n"
+            "- 保持可构建与可运行。\n"
+            f"- 诊断: {cov_reason}"
+        )
+        out = {
+            **state,
+            "last_step": "improve-harness",
+            "last_error": "",
+            "codex_hint": hint,
+            "message": "improve-harness prepared plan hint",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- improve-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+    except Exception as e:
+        out = {**state, "last_step": "improve-harness", "last_error": str(e), "message": "improve-harness failed"}
+        _wf_log(cast(dict[str, Any], out), f"<- improve-harness err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+
 def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -3056,8 +3202,30 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "fix_build"
     if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
         return "stop"
+    if run_error_kind:
+        return "stop"
     if bool(state.get("crash_found")):
         return "re-build"
+    return "coverage-analysis"
+
+
+def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if (state.get("last_error") or "").strip():
+        return "stop"
+    if bool(state.get("coverage_should_improve")):
+        return "improve-harness"
+    return "stop"
+
+
+def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if (state.get("last_error") or "").strip():
+        return "stop"
+    if bool(state.get("coverage_should_improve")):
+        return "plan"
     return "stop"
 
 
@@ -3106,7 +3274,19 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")) or (state.get("last_error") or "").strip():
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
-    allowed = {"plan", "synthesize", "build", "fix_build", "run", "re-build", "re-run", "repro_crash", "fix_crash"}
+    allowed = {
+        "plan",
+        "synthesize",
+        "build",
+        "fix_build",
+        "run",
+        "coverage-analysis",
+        "improve-harness",
+        "re-build",
+        "re-run",
+        "repro_crash",
+        "fix_crash",
+    }
     if raw == "repro_crash":
         raw = "re-build"
     if raw in allowed:
@@ -3133,6 +3313,8 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
     graph.add_node("fix_build", _node_fix_build)
+    graph.add_node("coverage-analysis", _node_coverage_analysis)
+    graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
     graph.add_node("re-run", _node_re_run)
     graph.add_node("repro_crash", _node_repro_crash)
@@ -3176,6 +3358,14 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
 
+    def _route_after_coverage_analysis(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_coverage_analysis_state(state)
+        return _apply_stage_stop_guard(state, "coverage-analysis", nxt)
+
+    def _route_after_improve_harness(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_improve_harness_state(state)
+        return _apply_stage_stop_guard(state, "improve-harness", nxt)
+
     def _route_after_re_build(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_re_build_state(state)
         return _apply_stage_stop_guard(state, "re-build", nxt)
@@ -3202,6 +3392,8 @@ def build_fuzz_workflow() -> StateGraph:
             "build": "build",
             "fix_build": "fix_build",
             "run": "run",
+            "coverage-analysis": "coverage-analysis",
+            "improve-harness": "improve-harness",
             "re-build": "re-build",
             "re-run": "re-run",
             "repro_crash": "re-build",
@@ -3216,7 +3408,23 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "run",
         _route_after_run,
-        {"re-build": "re-build", "fix_crash": "fix_crash", "fix_build": "fix_build", "stop": END},
+        {
+            "coverage-analysis": "coverage-analysis",
+            "re-build": "re-build",
+            "fix_crash": "fix_crash",
+            "fix_build": "fix_build",
+            "stop": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "coverage-analysis",
+        _route_after_coverage_analysis,
+        {"improve-harness": "improve-harness", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "improve-harness",
+        _route_after_improve_harness,
+        {"plan": "plan", "stop": END},
     )
     graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
     graph.add_conditional_edges("re-run", _route_after_re_run, {"fix_crash": "fix_crash", "plan": "plan", "stop": END})
@@ -3282,6 +3490,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "resume_from_step": resume_step,
             "resume_repo_root": str(inp.resume_repo_root or ""),
             "stop_after_step": stop_after_step,
+            "coverage_loop_max_rounds": max(1, min(int(inp.coverage_loop_max_rounds or 3), 5)),
             "last_fuzzer": str(inp.last_fuzzer or ""),
             "last_crash_artifact": str(inp.last_crash_artifact or ""),
             "re_workspace_root": str(inp.re_workspace_root or ""),
@@ -3322,6 +3531,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "run_terminal_reason": str(out.get("run_terminal_reason") or ""),
         "run_idle_seconds": int(out.get("run_idle_seconds") or 0),
         "run_children_exit_count": int(out.get("run_children_exit_count") or 0),
+        "coverage_loop_max_rounds": int(out.get("coverage_loop_max_rounds") or 3),
+        "coverage_loop_round": int(out.get("coverage_loop_round") or 0),
+        "coverage_should_improve": bool(out.get("coverage_should_improve") or False),
+        "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
+        "coverage_history": list(out.get("coverage_history") or []),
         "crash_repro_done": bool(out.get("crash_repro_done") or False),
         "crash_repro_ok": bool(out.get("crash_repro_ok") or False),
         "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
