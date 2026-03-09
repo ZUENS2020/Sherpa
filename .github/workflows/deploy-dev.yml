@@ -446,7 +446,7 @@ jobs:
                   ;;
               esac
               case "$file" in
-                docker/Dockerfile.frontend|sherpa-frontend/*)
+                docker/Dockerfile.frontend|frontend-next/*|sherpa-frontend/*)
                   frontend_changed=true
                   ;;
               esac
