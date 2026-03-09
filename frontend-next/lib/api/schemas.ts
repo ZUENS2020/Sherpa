@@ -98,6 +98,8 @@ export const systemSchema = z.object({
     .default({ total: 0, queued: 0, running: 0, success: 0, error: 0 }),
   active_jobs: z.array(z.any()).optional().default([]),
   workers: z.object({ max: z.number().int().default(0) }).optional(),
+  build_branch: z.string().optional().default('unknown'),
+  build_commit: z.string().optional().default('unknown'),
 });
 
 export type WebConfig = z.infer<typeof configSchema>;

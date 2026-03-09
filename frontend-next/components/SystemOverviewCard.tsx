@@ -20,6 +20,8 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
   }
 
   const jobs = data?.jobs;
+  const branch = (data?.build_branch || 'unknown').trim() || 'unknown';
+  const commit = (data?.build_commit || 'unknown').trim() || 'unknown';
 
   return (
     <Card variant="outlined">
@@ -43,6 +45,9 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
           </Box>
           <Typography variant="caption" color="text.secondary">
             服务时间：{data?.server_time_iso || '--'} | Uptime：{fmtDuration(data?.uptime_sec)}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            构建来源：{branch} @ {commit}
           </Typography>
         </Stack>
       </CardContent>

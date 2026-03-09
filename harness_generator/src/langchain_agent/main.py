@@ -1173,6 +1173,19 @@ def _system_status() -> dict:
     ]
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
+    build_branch = (
+        (os.environ.get("SHERPA_BUILD_BRANCH") or "").strip()
+        or (os.environ.get("GIT_BRANCH") or "").strip()
+        or (os.environ.get("GITHUB_REF_NAME") or "").strip()
+        or "unknown"
+    )
+    build_commit = (
+        (os.environ.get("SHERPA_BUILD_COMMIT") or "").strip()
+        or (os.environ.get("GIT_COMMIT") or "").strip()
+        or (os.environ.get("GITHUB_SHA") or "").strip()
+        or "unknown"
+    )
+    build_commit_short = build_commit[:12] if build_commit and build_commit != "unknown" else build_commit
     return {
         "ok": True,
         "server_time": now,
@@ -1196,6 +1209,8 @@ def _system_status() -> dict:
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openrouter_model": cfg.openrouter_model,
         },
+        "build_branch": build_branch,
+        "build_commit": build_commit_short,
     }
 
 
