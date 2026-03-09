@@ -505,6 +505,36 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert route == "stop"
 
 
+def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
+    oom_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "oom-deadbeef"
+    oom_artifact.parent.mkdir(parents=True, exist_ok=True)
+    oom_artifact.write_text("oom candidate", encoding="utf-8")
+
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=71,
+                new_artifacts=[oom_artifact],
+                crash_found=False,
+                crash_evidence="oom_artifact",
+                first_artifact=str(oom_artifact),
+                log_tail="ERROR: libFuzzer: out-of-memory",
+                error="fuzzer produced oom-like artifacts for demo_fuzz",
+                run_error_kind="run_resource_exhaustion",
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out["crash_found"] is False
+    assert out["run_error_kind"] == "run_resource_exhaustion"
+    assert gen.analysis_calls == []
+    route = workflow_graph._route_after_run_state(out)
+    assert route == "stop"
+
+
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
     timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
