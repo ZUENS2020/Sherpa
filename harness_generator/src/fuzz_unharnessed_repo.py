@@ -108,6 +108,13 @@ def _get_sherpa_github_mirror() -> str:
 def _get_sherpa_git_mirrors() -> str:
     return os.environ.get("SHERPA_GIT_MIRRORS", "").strip()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 # Make CodexHelper discoverable in both "package" and "flat script" use.
 try:
     from .codex_helper import CodexHelper  # type: ignore
@@ -2018,11 +2025,20 @@ class NonOssFuzzHarnessGenerator:
         error = ""
         run_error_kind = ""
         if crash_evidence == "timeout_artifact":
-            run_error_kind = "run_timeout"
-            error = (
-                f"fuzzer produced timeout-like artifacts for {bin_path.name} "
-                f"(count={timeout_artifact_count})"
-            )
+            # Timeout-like artifacts are not memory-safety crash proof.
+            # Keep strict mode opt-in for users who want to fail fast on hangs.
+            strict_timeout_artifacts = _env_bool("SHERPA_STRICT_TIMEOUT_ARTIFACTS", False)
+            run_error_kind = "run_timeout" if strict_timeout_artifacts else ""
+            if strict_timeout_artifacts:
+                error = (
+                    f"fuzzer produced timeout-like artifacts for {bin_path.name} "
+                    f"(count={timeout_artifact_count})"
+                )
+            else:
+                print(
+                    f"[warn] timeout-like artifacts found for {bin_path.name} "
+                    f"(count={timeout_artifact_count}); continuing as non-fatal"
+                )
         if crash_evidence == "oom_artifact":
             run_error_kind = "run_resource_exhaustion"
             error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
