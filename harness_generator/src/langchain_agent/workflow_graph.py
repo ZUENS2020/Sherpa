@@ -3119,6 +3119,12 @@ def _should_stage_stop(state: FuzzWorkflowRuntimeState, step_name: str) -> bool:
     return bool(target) and target == step_name
 
 
+def _apply_stage_stop_guard(state: FuzzWorkflowRuntimeState, step_name: str, next_step: str) -> str:
+    if _should_stage_stop(state, step_name):
+        return "stop"
+    return next_step
+
+
 def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
@@ -3168,21 +3174,15 @@ def build_fuzz_workflow() -> StateGraph:
 
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_run_state(state)
-        if _should_stage_stop(state, "run") and nxt in {"stop", "re-build"}:
-            return "stop"
-        return nxt
+        return _apply_stage_stop_guard(state, "run", nxt)
 
     def _route_after_re_build(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_re_build_state(state)
-        if _should_stage_stop(state, "re-build") and nxt in {"stop", "re-run"}:
-            return "stop"
-        return nxt
+        return _apply_stage_stop_guard(state, "re-build", nxt)
 
     def _route_after_re_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_re_run_state(state)
-        if _should_stage_stop(state, "re-run") and nxt == "stop":
-            return "stop"
-        return nxt
+        return _apply_stage_stop_guard(state, "re-run", nxt)
 
     def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("failed")):
