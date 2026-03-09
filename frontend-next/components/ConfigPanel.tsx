@@ -33,6 +33,12 @@ function toNonNegativeInt(input: string, fallback: number): number {
   return Number.isFinite(num) && num >= 0 ? num : fallback;
 }
 
+function toRangeInt(input: string, fallback: number, min: number, max: number): number {
+  const num = Number.parseInt(input, 10);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
 export function ConfigPanel() {
   const cfgQuery = useConfigQuery();
   const saveCfg = useSaveConfigMutation();
@@ -45,6 +51,7 @@ export function ConfigPanel() {
   const [totalBudgetUnlimited, setTotalBudgetUnlimited] = useState(false);
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
   const [maxTokens, setMaxTokens] = useState('1000');
+  const [coverageLoopMaxRounds, setCoverageLoopMaxRounds] = useState('3');
   const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
 
   const [statusText, setStatusText] = useState('');
@@ -108,6 +115,7 @@ export function ConfigPanel() {
     const runFallback = total > 0 ? total : 900;
     const run = parseBudgetSeconds(runBudget, runFallback, runBudgetUnlimited);
     const tokens = toPositiveInt(maxTokens, 1000);
+    const loopRounds = toRangeInt(coverageLoopMaxRounds, 3, 1, 5);
 
     try {
       setStatusType('info');
@@ -117,6 +125,7 @@ export function ConfigPanel() {
         totalTimeBudget: total,
         runTimeBudget: run,
         maxTokens: tokens,
+        coverageLoopMaxRounds: loopRounds,
       });
       setActiveTaskId(res.job_id);
       setStatusType('success');
@@ -199,6 +208,16 @@ export function ConfigPanel() {
             size="small"
             type="number"
             fullWidth
+          />
+
+          <TextField
+            label="Coverage 闭环轮数"
+            value={coverageLoopMaxRounds}
+            onChange={(e) => setCoverageLoopMaxRounds(e.target.value)}
+            size="small"
+            type="number"
+            fullWidth
+            helperText="范围 1-5，默认 3"
           />
 
           <TextField

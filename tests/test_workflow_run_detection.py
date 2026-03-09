@@ -356,11 +356,32 @@ def test_route_after_run_routes_crash_to_repro_stage():
     assert route == "re-build"
 
 
+def test_route_after_run_routes_clean_result_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
 def test_route_after_run_routes_idle_timeout_to_stop():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
     assert route == "stop"
+
+
+def test_route_after_coverage_analysis_routes_to_improve_harness():
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": True}
+    )
+    assert route == "improve-harness"
+
+
+def test_route_after_improve_harness_routes_back_to_plan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": True}
+    )
+    assert route == "plan"
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():

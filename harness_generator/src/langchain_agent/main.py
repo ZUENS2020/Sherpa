@@ -1012,12 +1012,23 @@ _RESUMABLE_WORKFLOW_STEPS = {
     "build",
     "fix_build",
     "run",
+    "coverage-analysis",
+    "improve-harness",
     "re-build",
     "re-run",
     "repro_crash",
     "fix_crash",
 }
-_STAGED_WORKFLOW_STEPS = ("plan", "synthesize", "build", "run", "re-build", "re-run")
+_STAGED_WORKFLOW_STEPS = (
+    "plan",
+    "synthesize",
+    "build",
+    "run",
+    "coverage-analysis",
+    "improve-harness",
+    "re-build",
+    "re-run",
+)
 
 
 def _normalize_resume_step(raw: str | None) -> str:
@@ -1258,6 +1269,7 @@ class fuzz_model(BaseModel):
     time_budget: int | None = None
     total_time_budget: int | None = None
     run_time_budget: int | None = None
+    coverage_loop_max_rounds: int = 3
     docker: bool | None = None
     docker_image: str | None = None
 
@@ -1862,6 +1874,8 @@ def _run_fuzz_job(
                 raise RuntimeError("total_time_budget must be >= 0")
             if run_time_budget_value < 0:
                 raise RuntimeError("run_time_budget must be >= 0")
+            coverage_loop_max_rounds = int(getattr(request, "coverage_loop_max_rounds", 3) or 3)
+            coverage_loop_max_rounds = max(1, min(coverage_loop_max_rounds, 5))
             total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
             run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
             openai_key = (
@@ -1883,7 +1897,8 @@ def _run_fuzz_job(
             print(
                 f"[job {job_id}] params runtime={runtime_mode} "
                 f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
-                f"max_tokens={request.max_tokens} model={model_value}"
+                f"max_tokens={request.max_tokens} model={model_value} "
+                f"coverage_loop_max_rounds={coverage_loop_max_rounds}"
             )
             print(f"[job {job_id}] log_file={log_file}")
             mode = _executor_mode()
@@ -1942,6 +1957,7 @@ def _run_fuzz_job(
                         "max_len": int(request.max_tokens),
                         "time_budget": int(total_time_budget_value),
                         "run_time_budget": int(run_time_budget_value),
+                        "coverage_loop_max_rounds": int(coverage_loop_max_rounds),
                         "email": request.email,
                         "docker_image": docker_image,
                         "ai_key_path": str(opencode_env_path()),
