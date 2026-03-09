@@ -417,6 +417,13 @@ def test_route_after_re_run_routes_to_plan_on_failure():
     assert route == "plan"
 
 
+def test_apply_stage_stop_guard_always_stops_when_targeted():
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "run", "re-build") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-build"}, "re-build", "plan") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-run"}, "re-run", "fix_crash") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "re-run", "fix_crash") == "fix_crash"
+
+
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
     gen = _FakeRunGenerator(
         tmp_path,
