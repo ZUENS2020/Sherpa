@@ -1951,8 +1951,12 @@ def _run_fuzz_job(
                     "last_crash_artifact": "",
                     "re_workspace_root": "",
                 }
-
-                for idx, stage in enumerate(stages, start=1):
+                env_rebuild_retries = 0
+                max_env_rebuild_retries = 1
+                stage_index = 0
+                while stage_index < len(stages):
+                    stage = stages[stage_index]
+                    idx = stage_index + 1
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
@@ -2060,6 +2064,18 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    if isinstance(stage_result, dict):
+                        terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
+                        if stage == "build" and terminal_reason == "requires_env_rebuild":
+                            if env_rebuild_retries >= max_env_rebuild_retries:
+                                raise RuntimeError("fix_build_requires_env_rebuild_retry_exceeded")
+                            env_rebuild_retries += 1
+                            stages.insert(stage_index + 1, "build")
+                            print(
+                                f"[job {job_id}] stage {stage} requested env rebuild; "
+                                f"dispatching fresh build job (attempt {env_rebuild_retries}/{max_env_rebuild_retries})"
+                            )
+                    stage_index += 1
 
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results

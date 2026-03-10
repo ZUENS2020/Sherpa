@@ -518,6 +518,59 @@ def test_fix_build_rule_missing_llvmfuzzer_entrypoint(tmp_path: Path, monkeypatc
     assert "clang++" not in txt
 
 
+def test_fix_build_rule_missing_system_packages_requires_env_rebuild(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "./build/autogen.sh: 58: aclocal: not found",
+            "build_stdout_tail": "Warning: Missing tools: autoconf, automake, libtool",
+            "build_stderr_tail": "",
+        }
+    )
+
+    dep_file = fuzz_dir / "system_packages.txt"
+    assert dep_file.is_file()
+    assert out["last_error"] == ""
+    assert out["fix_effect"] == "requires_env_rebuild"
+    assert out["fix_build_terminal_reason"] == "requires_env_rebuild"
+    assert "requires env rebuild" in out["message"]
+
+
+def test_fix_build_opencode_system_packages_change_requires_env_rebuild(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('v1')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            build_py.write_text("print('v2')\n", encoding="utf-8")
+            (fuzz_dir / "system_packages.txt").write_text("automake\n", encoding="utf-8")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+
+    assert out["last_error"] == ""
+    assert out["fix_effect"] == "requires_env_rebuild"
+    assert out["fix_build_terminal_reason"] == "requires_env_rebuild"
+    assert out["message"] == "opencode fixed build (requires env rebuild)"
+
+
 def test_fix_build_rule_fuzz_out_path_mismatch(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
