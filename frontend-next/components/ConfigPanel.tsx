@@ -52,6 +52,8 @@ export function ConfigPanel() {
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
   const [maxTokens, setMaxTokens] = useState('1000');
   const [coverageLoopMaxRounds, setCoverageLoopMaxRounds] = useState('3');
+  const [maxFixRounds, setMaxFixRounds] = useState('3');
+  const [sameErrorMaxRetries, setSameErrorMaxRetries] = useState('1');
   const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
 
   const [statusText, setStatusText] = useState('');
@@ -74,20 +76,34 @@ export function ConfigPanel() {
         ? Math.floor(configuredUnlimitedRoundBudget)
         : 7200;
     setUnlimitedRoundBudget(String(normalizedUnlimitedRoundBudget));
+    const normalizedMaxFixRounds =
+      Number.isFinite(Number(cfgQuery.data.max_fix_rounds)) && Number(cfgQuery.data.max_fix_rounds) >= 0
+        ? Math.floor(Number(cfgQuery.data.max_fix_rounds))
+        : 3;
+    const normalizedSameErrorMaxRetries =
+      Number.isFinite(Number(cfgQuery.data.same_error_max_retries)) && Number(cfgQuery.data.same_error_max_retries) >= 0
+        ? Math.floor(Number(cfgQuery.data.same_error_max_retries))
+        : 1;
+    setMaxFixRounds(String(normalizedMaxFixRounds));
+    setSameErrorMaxRetries(String(normalizedSameErrorMaxRetries));
   }, [cfgQuery.data]);
 
   const mergedConfig = useMemo<WebConfig | null>(() => {
     if (!cfgQuery.data) return null;
     const total = parseBudgetSeconds(totalBudget, 900, totalBudgetUnlimited);
     const unlimitedRoundBudgetSec = toNonNegativeInt(unlimitedRoundBudget, 7200);
+    const mergedMaxFixRounds = toRangeInt(maxFixRounds, 3, 0, 20);
+    const mergedSameErrorMaxRetries = toRangeInt(sameErrorMaxRetries, 1, 0, 10);
     return {
       ...cfgQuery.data,
       fuzz_time_budget: total,
       sherpa_run_unlimited_round_budget_sec: unlimitedRoundBudgetSec,
+      max_fix_rounds: mergedMaxFixRounds,
+      same_error_max_retries: mergedSameErrorMaxRetries,
       fuzz_use_docker: true,
       fuzz_docker_image: cfgQuery.data.fuzz_docker_image || 'auto',
     };
-  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, unlimitedRoundBudget]);
+  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, unlimitedRoundBudget, maxFixRounds, sameErrorMaxRetries]);
 
   const handleSave = async () => {
     if (!mergedConfig) return;
@@ -116,6 +132,8 @@ export function ConfigPanel() {
     const run = parseBudgetSeconds(runBudget, runFallback, runBudgetUnlimited);
     const tokens = toPositiveInt(maxTokens, 1000);
     const loopRounds = toRangeInt(coverageLoopMaxRounds, 3, 1, 5);
+    const taskMaxFixRounds = toRangeInt(maxFixRounds, 3, 0, 20);
+    const taskSameErrorMaxRetries = toRangeInt(sameErrorMaxRetries, 1, 0, 10);
 
     try {
       setStatusType('info');
@@ -126,6 +144,8 @@ export function ConfigPanel() {
         runTimeBudget: run,
         maxTokens: tokens,
         coverageLoopMaxRounds: loopRounds,
+        maxFixRounds: taskMaxFixRounds,
+        sameErrorMaxRetries: taskSameErrorMaxRetries,
       });
       setActiveTaskId(res.job_id);
       setStatusType('success');
@@ -218,6 +238,26 @@ export function ConfigPanel() {
             type="number"
             fullWidth
             helperText="范围 1-5，默认 3"
+          />
+
+          <TextField
+            label="build/fix 最大轮数"
+            value={maxFixRounds}
+            onChange={(e) => setMaxFixRounds(e.target.value)}
+            size="small"
+            type="number"
+            fullWidth
+            helperText="max_fix_rounds，范围 0-20（0 表示禁用 fix_build 重试）"
+          />
+
+          <TextField
+            label="同错误重试次数"
+            value={sameErrorMaxRetries}
+            onChange={(e) => setSameErrorMaxRetries(e.target.value)}
+            size="small"
+            type="number"
+            fullWidth
+            helperText="same_error_max_retries，范围 0-10"
           />
 
           <TextField

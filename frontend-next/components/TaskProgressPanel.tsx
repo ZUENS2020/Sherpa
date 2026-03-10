@@ -24,6 +24,18 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
   const finished = (c?.success || 0) + (c?.error || 0);
   const percent = total > 0 ? Math.round((finished / total) * 100) : 0;
   const activeChild = detail?.children?.find((x) => x.status === 'running') || detail?.children?.[0];
+  const activeResult = activeChild?.result && typeof activeChild.result === 'object'
+    ? (activeChild.result as Record<string, unknown>)
+    : null;
+  const fixRounds = activeResult
+    ? `${Number(activeResult.fix_build_attempts || 0)}/${Number(activeResult.max_fix_rounds || 0)}`
+    : '';
+  const errorSig = activeResult
+    ? String(activeResult.build_error_signature_after || activeResult.build_error_signature_before || '')
+    : '';
+  const failFastReason = activeResult
+    ? String(activeResult.fix_build_terminal_reason || '')
+    : '';
 
   return (
     <Card variant="outlined">
@@ -54,9 +66,26 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
 
           <Typography variant="subtitle2">当前活跃子任务</Typography>
           {activeChild ? (
-            <Alert severity={activeChild.status === 'error' ? 'error' : 'info'}>
-              #{activeChild.job_id.slice(0, 8)} | {activeChild.status} | {activeChild.repo || 'unknown'}
-            </Alert>
+            <Stack spacing={1}>
+              <Alert severity={activeChild.status === 'error' ? 'error' : 'info'}>
+                #{activeChild.job_id.slice(0, 8)} | {activeChild.status} | {activeChild.repo || 'unknown'}
+              </Alert>
+              {fixRounds ? (
+                <Typography variant="caption" color="text.secondary">
+                  build/fix rounds: {fixRounds}
+                </Typography>
+              ) : null}
+              {errorSig ? (
+                <Typography variant="caption" color="text.secondary">
+                  error signature: {errorSig.slice(0, 16)}
+                </Typography>
+              ) : null}
+              {failFastReason ? (
+                <Alert severity="warning">
+                  已触发 fail-fast：{failFastReason}
+                </Alert>
+              ) : null}
+            </Stack>
           ) : (
             <Typography variant="body2" color="text.secondary">暂无子任务</Typography>
           )}
