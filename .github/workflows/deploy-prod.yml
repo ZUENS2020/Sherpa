@@ -378,10 +378,13 @@ jobs:
           FORCE_REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild_all || 'false' }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
         run: |
           set -euo pipefail
           web_changed=false
           frontend_changed=false
+          change_detection_uncertain=false
 
           if [[ "${FORCE_REBUILD_ALL}" == "true" ]]; then
             web_changed=true
@@ -389,10 +392,24 @@ jobs:
           else
             changed_files=""
             if [[ "${{ github.event_name }}" == "pull_request" && -n "${PR_BASE_SHA}" && -n "${PR_HEAD_SHA}" ]]; then
-              git fetch --no-tags --prune origin "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || true
-              changed_files="$(git diff --name-only "${PR_BASE_SHA}" "${PR_HEAD_SHA}" || true)"
+              if ! git fetch --no-tags --prune origin "${PR_BASE_SHA}" "${PR_HEAD_SHA}"; then
+                change_detection_uncertain=true
+                echo "::warning::git fetch failed when detecting changed files; falling back to safe rebuild."
+              fi
+              if ! changed_files="$(git diff --name-only "${PR_BASE_SHA}" "${PR_HEAD_SHA}")"; then
+                change_detection_uncertain=true
+                changed_files=""
+                echo "::warning::git diff failed when detecting changed files; falling back to safe rebuild."
+              fi
             elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-              changed_files="$(git diff --name-only HEAD~1 HEAD || true)"
+              if ! changed_files="$(git diff --name-only HEAD~1 HEAD)"; then
+                change_detection_uncertain=true
+                changed_files=""
+                echo "::warning::git diff HEAD~1..HEAD failed; falling back to safe rebuild."
+              fi
+            else
+              change_detection_uncertain=true
+              echo "::warning::No valid git baseline for change detection; falling back to safe rebuild."
             fi
 
             while IFS= read -r file; do
@@ -408,11 +425,37 @@ jobs:
                   ;;
               esac
             done <<< "${changed_files}"
+
+            if [[ "${change_detection_uncertain}" == "true" ]]; then
+              web_changed=true
+              frontend_changed=true
+            fi
+          fi
+
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            ctr_cmd=(sudo ctr -n k8s.io)
+            if sudo test -S /run/k3s/containerd/containerd.sock; then
+              ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+            fi
+
+            image_present() {
+              local image="$1"
+              "${ctr_cmd[@]}" images ls | awk '{print $1}' | grep -Fx "${image}" >/dev/null 2>&1
+            }
+
+            if [[ "${web_changed}" != "true" ]] && ! image_present "${WEB_IMAGE}"; then
+              web_changed=true
+              echo "::notice::forcing web rebuild because ${WEB_IMAGE} not present in containerd"
+            fi
+            if [[ "${frontend_changed}" != "true" ]] && ! image_present "${FRONTEND_IMAGE}"; then
+              frontend_changed=true
+              echo "::notice::forcing frontend rebuild because ${FRONTEND_IMAGE} not present in containerd"
+            fi
           fi
 
           echo "web_changed=${web_changed}" >> "$GITHUB_OUTPUT"
           echo "frontend_changed=${frontend_changed}" >> "$GITHUB_OUTPUT"
-          echo "::notice::force_rebuild_all=${FORCE_REBUILD_ALL}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
+          echo "::notice::force_rebuild_all=${FORCE_REBUILD_ALL}, uncertain=${change_detection_uncertain}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
 
       - name: Build and export web image
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
