@@ -47,6 +47,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_should_improve: bool
     coverage_improve_reason: str
     coverage_history: list[dict[str, Any]]
+    antlr_context_path: str
+    antlr_context_summary: str
 
     step_count: int
     max_steps: int
@@ -403,6 +405,174 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
+def _antlr_assist_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_ANTLR_ASSIST_ENABLED") or "1").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _antlr_assist_max_files() -> int:
+    raw = (os.environ.get("SHERPA_ANTLR_ASSIST_MAX_FILES") or "120").strip()
+    try:
+        return max(20, min(int(raw), 1000))
+    except Exception:
+        return 120
+
+
+def _collect_antlr_assist_context(repo_root: Path) -> dict[str, Any]:
+    source_exts = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".java"}
+    skip_prefixes = (
+        ".git/",
+        "fuzz/out/",
+        "fuzz/build/",
+        "fuzz/corpus/",
+        "node_modules/",
+        ".next/",
+        "dist/",
+    )
+    source_files: list[Path] = []
+    grammar_files: list[Path] = []
+    max_files = _antlr_assist_max_files()
+
+    for p in sorted(repo_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(repo_root)).replace("\\", "/")
+        if any(rel.startswith(pref) for pref in skip_prefixes):
+            continue
+        if p.suffix.lower() in source_exts:
+            source_files.append(p)
+        elif p.suffix.lower() == ".g4":
+            grammar_files.append(p)
+        if len(source_files) >= max_files and len(grammar_files) >= 40:
+            break
+
+    def _extract_function_candidates(path: Path, text: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        ext = path.suffix.lower()
+        if ext in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"}:
+            pat = re.compile(
+                r"(?m)^\s*(?:static\s+|inline\s+|extern\s+|virtual\s+|const\s+|constexpr\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|class\s+|template\s*<[^>]+>\s*)*"
+                r"[A-Za-z_][A-Za-z0-9_:<>\s\*&]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^;\n{}]*)\)\s*\{"
+            )
+            for m in pat.finditer(text):
+                name = str(m.group(1) or "").strip()
+                args = " ".join(str(m.group(2) or "").split())
+                if name in {"if", "for", "while", "switch", "catch"}:
+                    continue
+                if len(name) < 2:
+                    continue
+                out.append(
+                    {
+                        "name": name,
+                        "signature": f"{name}({args})"[:240],
+                        "file": str(path.relative_to(repo_root)).replace("\\", "/"),
+                    }
+                )
+                if len(out) >= 30:
+                    break
+        elif ext == ".java":
+            pat = re.compile(
+                r"(?m)^\s*(?:public|protected|private|static|final|native|synchronized|abstract|\s)+"
+                r"[A-Za-z_][A-Za-z0-9_<>\[\]]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*\{"
+            )
+            for m in pat.finditer(text):
+                name = str(m.group(1) or "").strip()
+                args = " ".join(str(m.group(2) or "").split())
+                out.append(
+                    {
+                        "name": name,
+                        "signature": f"{name}({args})"[:240],
+                        "file": str(path.relative_to(repo_root)).replace("\\", "/"),
+                    }
+                )
+                if len(out) >= 30:
+                    break
+        return out
+
+    function_candidates: list[dict[str, str]] = []
+    parser_rules: list[str] = []
+    lexer_rules: list[str] = []
+    grammar_start_rules: list[dict[str, str]] = []
+
+    for p in source_files[:max_files]:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        function_candidates.extend(_extract_function_candidates(p, text))
+        if len(function_candidates) >= 300:
+            break
+
+    for g4 in grammar_files[:40]:
+        try:
+            text = g4.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        prules = re.findall(r"(?m)^\s*([a-z][A-Za-z0-9_]*)\s*:", text)
+        lrules = re.findall(r"(?m)^\s*([A-Z][A-Z0-9_]*)\s*:", text)
+        if prules:
+            grammar_start_rules.append(
+                {
+                    "grammar": str(g4.relative_to(repo_root)).replace("\\", "/"),
+                    "start_rule": prules[0],
+                }
+            )
+        parser_rules.extend(prules[:50])
+        lexer_rules.extend(lrules[:80])
+
+    unique_funcs: list[dict[str, str]] = []
+    seen_func = set()
+    for item in function_candidates:
+        key = (item.get("name"), item.get("file"))
+        if key in seen_func:
+            continue
+        seen_func.add(key)
+        unique_funcs.append(item)
+    unique_funcs = unique_funcs[:120]
+
+    entrypoint_keywords = ("parse", "decode", "read", "load", "process", "handle", "consume")
+    entrypoint_candidates = [
+        item for item in unique_funcs if any(k in str(item.get("name") or "").lower() for k in entrypoint_keywords)
+    ][:30]
+
+    return {
+        "mode": "antlr-assisted-static-context",
+        "enabled": True,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "repo_root": str(repo_root),
+        "source_files_scanned": [str(p.relative_to(repo_root)).replace("\\", "/") for p in source_files[:max_files]],
+        "grammar_files": [str(p.relative_to(repo_root)).replace("\\", "/") for p in grammar_files[:40]],
+        "antlr_grammar_start_rules": grammar_start_rules,
+        "parser_rules": sorted(set(parser_rules))[:200],
+        "lexer_rules": sorted(set(lexer_rules))[:200],
+        "candidate_functions": unique_funcs,
+        "entrypoint_candidates": entrypoint_candidates,
+    }
+
+
+def _prepare_antlr_assist_context(repo_root: Path) -> tuple[str, str]:
+    if not _antlr_assist_enabled():
+        return "", ""
+    try:
+        doc = _collect_antlr_assist_context(repo_root)
+        fuzz_dir = repo_root / "fuzz"
+        fuzz_dir.mkdir(parents=True, exist_ok=True)
+        ctx_path = fuzz_dir / "antlr_plan_context.json"
+        ctx_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        top_funcs = [str(x.get("name") or "") for x in (doc.get("entrypoint_candidates") or [])[:8] if x.get("name")]
+        summary = (
+            f"antlr_context_file=fuzz/antlr_plan_context.json; "
+            f"grammar_files={len(doc.get('grammar_files') or [])}; "
+            f"candidate_functions={len(doc.get('candidate_functions') or [])}; "
+            f"entrypoints={', '.join(top_funcs) if top_funcs else 'n/a'}"
+        )
+        return str(ctx_path), summary
+    except Exception:
+        return "", ""
+
+
 @dataclass(frozen=True)
 class FuzzWorkflowInput:
     repo_url: str
@@ -536,6 +706,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
             "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
             "coverage_history": list(state.get("coverage_history") or []),
+            "antlr_context_path": str(state.get("antlr_context_path") or ""),
+            "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
         },
     )
 
@@ -621,6 +793,13 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     restart_stage = str(state.get("restart_to_plan_stage") or "").strip()
     restart_error_text = str(state.get("restart_to_plan_error_text") or "").strip()
     restart_report_path = str(state.get("restart_to_plan_report_path") or "").strip()
+    antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+    if antlr_context_summary:
+        antlr_note = (
+            "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
+            f"{antlr_context_summary}"
+        )
+        hint = (hint + "\n\n" + antlr_note).strip() if hint else antlr_note
     injected_ctx = ""
     if restart_to_plan:
         report_tail = ""
@@ -686,13 +865,23 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 return out
 
         fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
+        plan_hint = _make_plan_hint(gen.repo_root)
+        if antlr_context_summary:
+            plan_hint = (
+                (plan_hint.strip() + "\n\n") if plan_hint.strip() else ""
+            ) + (
+                "Use `fuzz/antlr_plan_context.json` as grammar-aware grounding for API/entrypoint selection.\n"
+                f"{antlr_context_summary}"
+            )
         out = {
             **state,
             "last_step": "plan",
             "last_error": "",
-            "codex_hint": _make_plan_hint(gen.repo_root),
+            "codex_hint": plan_hint,
             "plan_fix_on_crash": fix_on_crash,
             "plan_max_fix_rounds": max_fix_rounds,
+            "antlr_context_path": antlr_context_path,
+            "antlr_context_summary": antlr_context_summary,
             "restart_to_plan": restart_to_plan,
             "restart_to_plan_reason": restart_reason,
             "restart_to_plan_stage": restart_stage,
@@ -718,6 +907,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
+    antlr_context_path = str(state.get("antlr_context_path") or "").strip()
+    antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
+    if antlr_context_summary and "antlr_plan_context.json" not in hint:
+        hint = (
+            (hint.strip() + "\n\n") if hint.strip() else ""
+        ) + (
+            "Use grammar-aware context from `fuzz/antlr_plan_context.json` while generating harness/build glue.\n"
+            f"{antlr_context_summary}"
+        )
 
     def _has_min_synthesis_outputs() -> bool:
         fuzz_dir = gen.repo_root / "fuzz"
@@ -770,6 +968,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     ctx += "=== fuzz/PLAN.md ===\n" + plan.read_text(encoding="utf-8", errors="replace") + "\n\n"
                 if targets.is_file():
                     ctx += "=== fuzz/targets.json ===\n" + targets.read_text(encoding="utf-8", errors="replace") + "\n"
+                if antlr_context_path:
+                    antlr_path_obj = Path(antlr_context_path)
+                    if not antlr_path_obj.is_absolute():
+                        antlr_path_obj = gen.repo_root / antlr_path_obj
+                    if antlr_path_obj.is_file():
+                        ctx += "\n=== fuzz/antlr_plan_context.json ===\n" + antlr_path_obj.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
             except Exception:
                 pass
             gen.patcher.run_codex_command(
