@@ -13,6 +13,25 @@ MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/PLAN.md` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN.md` and schema-valid `fuzz/targets.json`, then write `fuzz/PLAN.md` into `./done`.
 
+`fuzz/targets.json` format is STRICT:
+- MUST be plain JSON, not Markdown and not fenced code blocks
+- MUST be a JSON array, not an object
+- MUST contain at least one target object
+- Each target object MUST include non-empty string fields: `name`, `api`, `lang`
+- `lang` MUST be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`
+- If unsure, overwrite the whole file with the smallest valid array instead of leaving partial/invalid JSON
+- Never emit an empty array
+- Never wrap the array inside another object such as `{ "targets": [...] }`
+
+Minimal valid example:
+[
+  {
+    "name": "yaml_parser_parse",
+    "api": "yaml_parser_parse",
+    "lang": "c-cpp"
+  }
+]
+
 Additional instruction from coordinator:
 {{hint}}
 <!-- END TEMPLATE -->
@@ -130,6 +149,7 @@ Constraints:
 - Keep edits minimal
 - Do NOT run any build, compile, or test commands
 - Only edit files
+- `fuzz/targets.json` must be plain JSON only; no Markdown fences, no wrapper object, no empty array
 - MANDATORY: create `./done` when finished, and write `fuzz/targets.json` into it.
 - Missing `./done` means this step fails.
 

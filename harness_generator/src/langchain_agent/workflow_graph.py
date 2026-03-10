@@ -49,6 +49,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_history: list[dict[str, Any]]
     antlr_context_path: str
     antlr_context_summary: str
+    plan_retry_reason: str
+    plan_targets_schema_valid_before_retry: bool
+    plan_targets_schema_valid_after_retry: bool
+    plan_used_fallback_targets: bool
 
     step_count: int
     max_steps: int
@@ -276,6 +280,88 @@ def _sha256_text(text: str) -> str:
 
 def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
     return _wf_common.validate_targets_json(repo_root)
+
+
+def _opencode_done_path(repo_root: Path) -> Path:
+    return repo_root / "done"
+
+
+def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
+    done_path = _opencode_done_path(repo_root)
+    if not done_path.exists():
+        return False
+    try:
+        done_path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _infer_target_lang_from_repo(repo_root: Path, *, file_hint: str = "") -> str:
+    hint = file_hint.lower()
+    if hint.endswith(".java"):
+        return "java"
+    try:
+        for p in repo_root.rglob("*"):
+            if not p.is_file():
+                continue
+            suffix = p.suffix.lower()
+            if suffix == ".java":
+                return "java"
+            if suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"}:
+                return "c-cpp"
+    except Exception:
+        pass
+    return "c-cpp"
+
+
+def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = "") -> list[dict[str, str]]:
+    ctx_doc: dict[str, Any] = {}
+    ctx_path = Path(antlr_context_path).expanduser().resolve() if antlr_context_path else None
+    if ctx_path and ctx_path.is_file():
+        try:
+            loaded = json.loads(ctx_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(loaded, dict):
+                ctx_doc = loaded
+        except Exception:
+            ctx_doc = {}
+
+    candidates: list[dict[str, str]] = []
+    raw_candidates = list(ctx_doc.get("entrypoint_candidates") or []) + list(ctx_doc.get("candidate_functions") or [])
+    seen: set[tuple[str, str]] = set()
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        file_hint = str(item.get("file") or "").strip()
+        lang = _infer_target_lang_from_repo(repo_root, file_hint=file_hint)
+        key = (name, lang)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append({"name": name, "api": name, "lang": lang})
+        if len(candidates) >= 3:
+            break
+
+    if candidates:
+        return candidates
+
+    return [{"name": "default_target", "api": "default_target", "lang": _infer_target_lang_from_repo(repo_root)}]
+
+
+def _write_fallback_targets_json(repo_root: Path, *, antlr_context_path: str = "") -> bool:
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    targets_path = fuzz_dir / "targets.json"
+    doc = _build_fallback_targets_doc(repo_root, antlr_context_path=antlr_context_path)
+    try:
+        targets_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        return False
+    ok, _err = _validate_targets_json(repo_root)
+    return ok
 
 
 def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) -> dict[str, str]:
@@ -715,6 +801,10 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "generator": generator,
             "crash_found": False,
             "message": "initialized",
+            "plan_retry_reason": str(state.get("plan_retry_reason") or ""),
+            "plan_targets_schema_valid_before_retry": bool(state.get("plan_targets_schema_valid_before_retry") or False),
+            "plan_targets_schema_valid_after_retry": bool(state.get("plan_targets_schema_valid_after_retry") or False),
+            "plan_used_fallback_targets": bool(state.get("plan_used_fallback_targets") or False),
             "step_count": int(state.get("step_count") or 0),
             "max_steps": int(state.get("max_steps") or 10),
             "last_step": "init",
@@ -946,9 +1036,18 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
 
         strict_targets = (os.environ.get("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1").strip().lower() in {"1", "true", "yes", "on"})
+        plan_retry_reason = ""
+        plan_targets_schema_valid_before_retry = True
+        plan_targets_schema_valid_after_retry = True
+        plan_used_fallback_targets = False
         ok_targets, targets_err = _validate_targets_json(gen.repo_root)
         if strict_targets and not ok_targets:
+            plan_retry_reason = "targets-schema"
+            plan_targets_schema_valid_before_retry = False
             _wf_log(cast(dict[str, Any], state), f"plan: targets.json schema invalid -> {targets_err}; retrying once")
+            cleared_done = _clear_opencode_done_sentinel(gen.repo_root)
+            if cleared_done:
+                _wf_log(cast(dict[str, Any], state), "plan: cleared stale done sentinel before schema-fix retry")
             prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
             gen.patcher.run_codex_command(
                 prompt,
@@ -957,15 +1056,32 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 max_cli_retries=_opencode_cli_retries(),
             )
             ok_targets, targets_err = _validate_targets_json(gen.repo_root)
+            plan_targets_schema_valid_after_retry = bool(ok_targets)
             if not ok_targets:
+                _wf_log(cast(dict[str, Any], state), f"plan: schema retry still invalid -> {targets_err}; applying deterministic fallback")
+                plan_used_fallback_targets = _write_fallback_targets_json(
+                    gen.repo_root,
+                    antlr_context_path=antlr_context_path,
+                )
+                ok_targets, targets_err = _validate_targets_json(gen.repo_root)
+                if ok_targets:
+                    plan_targets_schema_valid_after_retry = True
+                    _wf_log(cast(dict[str, Any], state), "plan: deterministic fallback produced schema-valid targets.json")
+                else:
+                    plan_targets_schema_valid_after_retry = False
                 out = {
                     **state,
                     "last_step": "plan",
+                    "plan_retry_reason": plan_retry_reason,
+                    "plan_targets_schema_valid_before_retry": plan_targets_schema_valid_before_retry,
+                    "plan_targets_schema_valid_after_retry": plan_targets_schema_valid_after_retry,
+                    "plan_used_fallback_targets": plan_used_fallback_targets,
                     "last_error": f"targets schema validation failed: {targets_err}",
                     "message": "plan failed",
                 }
-                _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
-                return out
+                if not ok_targets:
+                    _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
+                    return out
 
         fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
         plan_hint = _make_plan_hint(gen.repo_root)
@@ -983,6 +1099,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "codex_hint": plan_hint,
             "plan_fix_on_crash": fix_on_crash,
             "plan_max_fix_rounds": max_fix_rounds,
+            "plan_retry_reason": plan_retry_reason,
+            "plan_targets_schema_valid_before_retry": plan_targets_schema_valid_before_retry,
+            "plan_targets_schema_valid_after_retry": plan_targets_schema_valid_after_retry,
+            "plan_used_fallback_targets": plan_used_fallback_targets,
             "antlr_context_path": antlr_context_path,
             "antlr_context_summary": antlr_context_summary,
             "restart_to_plan": restart_to_plan,
@@ -4400,6 +4520,10 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_should_improve": bool(out.get("coverage_should_improve") or False),
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
         "coverage_history": list(out.get("coverage_history") or []),
+        "plan_retry_reason": str(out.get("plan_retry_reason") or ""),
+        "plan_targets_schema_valid_before_retry": bool(out.get("plan_targets_schema_valid_before_retry") or False),
+        "plan_targets_schema_valid_after_retry": bool(out.get("plan_targets_schema_valid_after_retry") or False),
+        "plan_used_fallback_targets": bool(out.get("plan_used_fallback_targets") or False),
         "max_fix_rounds": int(out.get("max_fix_rounds") or 3),
         "same_error_max_retries": int(out.get("same_error_max_retries") or 1),
         "fix_action_type": str(out.get("fix_action_type") or ""),

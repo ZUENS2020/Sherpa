@@ -167,6 +167,12 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
             "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
         },
+        "plan_schema_guard": {
+            "retry_reason": str(out.get("plan_retry_reason") or ""),
+            "schema_valid_before_retry": bool(out.get("plan_targets_schema_valid_before_retry") or False),
+            "schema_valid_after_retry": bool(out.get("plan_targets_schema_valid_after_retry") or False),
+            "used_fallback_targets": bool(out.get("plan_used_fallback_targets") or False),
+        },
         "build_fix_policy": {
             "max_fix_rounds": int(out.get("max_fix_rounds") or 3),
             "same_error_max_retries": int(out.get("same_error_max_retries") or 1),
@@ -233,6 +239,8 @@ def write_run_summary(out: dict[str, Any]) -> None:
         f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
         f"- Plan crash policy: {'fix' if data['plan_policy']['fix_on_crash'] else 'report-only'}",
         f"- Plan max fix rounds: {data['plan_policy']['max_fix_rounds']}",
+        f"- Plan retry reason: {data['plan_schema_guard']['retry_reason'] or 'none'}",
+        f"- Plan fallback targets: {data['plan_schema_guard']['used_fallback_targets']}",
         f"- Build/fix max rounds: {data['build_fix_policy']['max_fix_rounds']}",
         f"- Build same-error max retries: {data['build_fix_policy']['same_error_max_retries']}",
         f"- Key artifact hashes: {len(key_artifact_hashes)}",

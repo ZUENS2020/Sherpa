@@ -99,3 +99,84 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     )
     assert out["last_error"] == ""
     assert "fuzz/antlr_plan_context.json" in captured.get("additional_context", "")
+
+
+def test_node_plan_clears_stale_done_before_schema_retry(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "done").write_text("fuzz/PLAN.md\n", encoding="utf-8")
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "demo.c").write_text(
+        "int parse_yaml(const char* s) { return s ? 1 : 0; }\n",
+        encoding="utf-8",
+    )
+
+    sentinel_seen: list[bool] = []
+    call_count = {"n": 0}
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            call_count["n"] += 1
+            sentinel_seen.append((tmp_path / "done").exists())
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            if call_count["n"] == 1:
+                (fuzz_dir / "targets.json").write_text('{"targets":[]}\n', encoding="utf-8")
+            else:
+                (fuzz_dir / "targets.json").write_text(
+                    '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp"}]\n',
+                    encoding="utf-8",
+                )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1")
+
+    out = workflow_graph._node_plan({"generator": gen, "codex_hint": ""})
+
+    assert out["last_error"] == ""
+    assert call_count["n"] == 2
+    assert sentinel_seen == [True, False]
+    assert out["plan_retry_reason"] == "targets-schema"
+    assert out["plan_targets_schema_valid_before_retry"] is False
+    assert out["plan_targets_schema_valid_after_retry"] is True
+    assert out["plan_used_fallback_targets"] is False
+
+
+def test_node_plan_uses_deterministic_fallback_after_retry_failure(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "demo.c").write_text(
+        "int parse_yaml_stream(const char* s) { return s ? 1 : 0; }\n",
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def __init__(self):
+            self.calls = 0
+
+        def run_codex_command(self, _prompt: str, **kwargs):
+            self.calls += 1
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text("{}\n", encoding="utf-8")
+            return None
+
+    patcher = _Patcher()
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=patcher, _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1")
+
+    out = workflow_graph._node_plan({"generator": gen, "codex_hint": ""})
+
+    assert out["last_error"] == ""
+    assert patcher.calls == 2
+    assert out["plan_retry_reason"] == "targets-schema"
+    assert out["plan_targets_schema_valid_before_retry"] is False
+    assert out["plan_targets_schema_valid_after_retry"] is True
+    assert out["plan_used_fallback_targets"] is True
+    targets = (fuzz_dir / "targets.json").read_text(encoding="utf-8")
+    assert "parse_yaml_stream" in targets
