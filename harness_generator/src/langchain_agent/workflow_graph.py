@@ -448,6 +448,13 @@ def _max_same_timeout_repeats() -> int:
         return 1
 
 
+def _run_stop_on_first_crash() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_STOP_ON_FIRST_CRASH") or "1").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
     return cast(FuzzWorkflowRuntimeState, _wf_common.time_budget_exceeded_state(cast(dict[str, Any], state), step_name=step_name))
 
@@ -2824,12 +2831,24 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             max_parallel = max(1, min(int(max_parallel_raw), 16))
         except Exception:
             max_parallel = 2
+        stop_on_first_crash = _run_stop_on_first_crash()
+        if stop_on_first_crash and len(bins) > 1:
+            # Run sequentially so a proven crash can terminate the stage
+            # immediately instead of leaving sibling fuzzers consuming the full
+            # run budget before the stage result is written back.
+            max_parallel = 1
         if len(bins) <= 1:
             max_parallel = 1
         idle_timeout_sec = _run_idle_timeout_sec()
         finalize_timeout_sec = _run_finalize_timeout_sec()
 
-        _wf_log(cast(dict[str, Any], state), f"run: fuzzers={len(bins)} parallel={max_parallel}")
+        _wf_log(
+            cast(dict[str, Any], state),
+            (
+                f"run: fuzzers={len(bins)} parallel={max_parallel} "
+                f"stop_on_first_crash={int(stop_on_first_crash)}"
+            ),
+        )
 
         def _calc_crash_signature(fuzzer_name: str, artifact_path: str) -> str:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
@@ -2884,6 +2903,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
+        finalized_fuzzers: set[str] = set()
 
         def _run_one(bin_path: Path) -> tuple[str, FuzzerRunResult]:
             return bin_path.name, gen._run_fuzzer(bin_path)
@@ -2910,6 +2930,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         run_error_kind = "workflow_time_budget_exceeded"
                     for skipped in pending_bins:
                         run_exec_errors[skipped.name] = "skipped: workflow total time budget exhausted before execution"
+                        finalized_fuzzers.add(skipped.name)
                     pending_bins = []
                     break
 
@@ -2950,9 +2971,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         try:
                             name, run = _run_one(bin_path)
                             run_results[name] = run
+                            finalized_fuzzers.add(name)
                             run_children_exit_count += 1
+                            if stop_on_first_crash and run.crash_found:
+                                pending_bins = []
+                                break
                         except Exception as e:
                             run_exec_errors[bin_path.name] = str(e)
+                            finalized_fuzzers.add(bin_path.name)
                             run_children_exit_count += 1
                             detected_kind, detected_idle = _capture_timeout_from_error(str(e))
                             if detected_kind and not run_error_kind:
@@ -2968,9 +2994,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                             try:
                                 name, run = fut.result()
                                 run_results[name] = run
+                                finalized_fuzzers.add(name)
                                 run_children_exit_count += 1
                             except Exception as e:
                                 run_exec_errors[bin_path.name] = str(e)
+                                finalized_fuzzers.add(bin_path.name)
                                 run_children_exit_count += 1
                                 detected_kind, detected_idle = _capture_timeout_from_error(str(e))
                                 if detected_kind and not run_error_kind:
@@ -2978,6 +3006,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     run_terminal_reason = detected_kind
                                     if detected_idle > 0:
                                         run_idle_seconds = detected_idle
+                if stop_on_first_crash and any(run.crash_found for run in run_results.values()):
+                    pending_bins = []
+                    break
         finally:
             setattr(gen, "current_run_time_budget_sec", prev_run_budget)
             setattr(gen, "current_run_hard_timeout_sec", prev_run_hard_timeout)
@@ -3006,6 +3037,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if _finalize_timed_out("collecting run details"):
                 break
             fuzzer_name = bin_path.name
+            if fuzzer_name not in finalized_fuzzers:
+                continue
             exec_err = run_exec_errors.get(fuzzer_name, "")
             if exec_err:
                 detail_kind = "run_exception"
