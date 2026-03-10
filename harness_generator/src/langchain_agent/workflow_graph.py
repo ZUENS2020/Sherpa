@@ -3611,6 +3611,41 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     workspace_root = str(state.get("re_workspace_root") or "").strip() or str((repo_root / ".repro_crash" / "workdir"))
     artifact_path = Path(last_artifact) if last_artifact else None
 
+    def _recover_artifact_path() -> tuple[str, Path | None]:
+        recovered = last_artifact
+        if not recovered and (repo_root / "re_build_report.json").is_file():
+            try:
+                re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
+                if isinstance(re_build_doc, dict):
+                    recovered = str(re_build_doc.get("artifact") or "").strip()
+            except Exception:
+                pass
+        if not recovered and (repo_root / "run_summary.json").is_file():
+            try:
+                summary_doc = json.loads((repo_root / "run_summary.json").read_text(encoding="utf-8", errors="replace"))
+                if isinstance(summary_doc, dict):
+                    recovered = str(summary_doc.get("last_crash_artifact") or "").strip()
+            except Exception:
+                pass
+        if not recovered:
+            artifacts_dir = repo_root / "fuzz" / "out" / "artifacts"
+            if artifacts_dir.is_dir():
+                candidates: list[Path] = []
+                for p in artifacts_dir.iterdir():
+                    if not p.is_file():
+                        continue
+                    name = p.name.lower()
+                    if name.startswith("crash-") or "crash" in name:
+                        candidates.append(p)
+                if not candidates:
+                    for p in artifacts_dir.iterdir():
+                        if p.is_file():
+                            candidates.append(p)
+                if candidates:
+                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    recovered = str(candidates[0])
+        return recovered, (Path(recovered) if recovered else None)
+
     def _rebuild_workspace_from_init_clone() -> Path:
         repo_url = str(state.get("repo_url") or "").strip()
         if not repo_url:
@@ -3721,6 +3756,12 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                             artifact_path = Path(last_artifact)
             except Exception:
                 pass
+        if artifact_path is None or not artifact_path.is_file():
+            recovered_artifact, recovered_path = _recover_artifact_path()
+            if recovered_artifact:
+                last_artifact = recovered_artifact
+                artifact_path = recovered_path
+                payload["artifact"] = recovered_artifact
         if not last_fuzzer:
             # Stage resume can occasionally lose last_fuzzer in state; recover from workspace.
             last_fuzzer = _guess_fuzzer_from_workspace(workdir)
@@ -3734,6 +3775,12 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             payload["fuzzer"] = last_fuzzer
         if not last_fuzzer:
             raise HarnessGeneratorError("missing last_fuzzer for re-run after workspace rebuild")
+        if artifact_path is None or not artifact_path.is_file():
+            recovered_artifact, recovered_path = _recover_artifact_path()
+            if recovered_artifact:
+                last_artifact = recovered_artifact
+                artifact_path = recovered_path
+                payload["artifact"] = recovered_artifact
         if artifact_path is None or not artifact_path.is_file():
             raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
         fuzzer_bin = workdir / "fuzz" / "out" / last_fuzzer

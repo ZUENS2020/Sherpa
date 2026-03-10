@@ -662,6 +662,42 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     assert out["crash_repro_ok"] is True
 
 
+def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = (tmp_path / "fuzz" / "out" / "artifacts" / "crash-deadbeef")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    (tmp_path / "run_summary.json").write_text(
+        '{"last_crash_artifact":"' + str(artifact) + '"}\n',
+        encoding="utf-8",
+    )
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "fmt_format_string_fuzz",
+            "last_crash_artifact": "",
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+
+
 def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch):
     repo_work = tmp_path / "repo-clone"
     repo_work.mkdir(parents=True, exist_ok=True)
