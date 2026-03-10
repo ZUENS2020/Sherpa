@@ -675,7 +675,7 @@ def test_fix_build_rule_archive_entry_missing_include(tmp_path: Path, monkeypatc
         }
     )
     assert out["last_error"] == ""
-    assert "missing_symbol_include" in (out.get("fix_build_rule_hits") or [])
+    assert "archive_entry_missing_include" in (out.get("fix_build_rule_hits") or [])
     txt = harness.read_text(encoding="utf-8")
     assert "#include <archive_entry.h>" in txt
 

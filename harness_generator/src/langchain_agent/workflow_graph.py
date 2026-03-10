@@ -1946,7 +1946,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             return True
         except Exception:
             return False
-
     def _try_hotfix_fuzz_out_path_mismatch() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         build_py = gen.repo_root / "fuzz" / "build.py"
@@ -2036,7 +2035,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             out = _success_out(
                 "local hotfix for missing symbol include applied",
                 outcome="rule_fixed",
-                rule_hit="missing_symbol_include",
+                # Keep legacy rule name for compatibility with existing dashboards/tests.
+                rule_hit="archive_entry_missing_include",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
