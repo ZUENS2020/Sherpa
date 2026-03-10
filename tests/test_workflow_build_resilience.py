@@ -646,3 +646,35 @@ def test_fix_build_rule_cxx_for_c_source_mismatch(tmp_path: Path, monkeypatch):
     txt = build_py.read_text(encoding="utf-8")
     assert "clang++" not in txt
     assert "clang" in txt
+
+
+def test_fix_build_rule_archive_entry_missing_include(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('build script exists')\n", encoding="utf-8")
+    harness = fuzz_dir / "zip_format_fuzz.cc"
+    harness.write_text(
+        "#include <archive.h>\n"
+        "#include <stdint.h>\n"
+        "int f(struct archive_entry* entry) {\n"
+        "  return archive_entry_size(entry);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "",
+            "build_stdout_tail": "",
+            "build_stderr_tail": (
+                f"{harness}:4:10: error: use of undeclared identifier 'archive_entry_size'\n"
+            ),
+        }
+    )
+    assert out["last_error"] == ""
+    assert "archive_entry_missing_include" in (out.get("fix_build_rule_hits") or [])
+    txt = harness.read_text(encoding="utf-8")
+    assert "#include <archive_entry.h>" in txt
