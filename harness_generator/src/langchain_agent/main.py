@@ -1270,6 +1270,8 @@ class fuzz_model(BaseModel):
     total_time_budget: int | None = None
     run_time_budget: int | None = None
     coverage_loop_max_rounds: int = 3
+    max_fix_rounds: int | None = None
+    same_error_max_retries: int | None = None
     docker: bool | None = None
     docker_image: str | None = None
 
@@ -1366,6 +1368,16 @@ def put_config(request: WebPersistentConfig = Body(...)):
         raise HTTPException(
             status_code=400,
             detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
+        )
+    if int(request.max_fix_rounds) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="max_fix_rounds must be >= 0 (0 means disable fix_build retries).",
+        )
+    if int(request.same_error_max_retries) < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="same_error_max_retries must be >= 0.",
         )
 
     current = _cfg_get()
@@ -1876,6 +1888,18 @@ def _run_fuzz_job(
                 raise RuntimeError("run_time_budget must be >= 0")
             coverage_loop_max_rounds = int(getattr(request, "coverage_loop_max_rounds", 3) or 3)
             coverage_loop_max_rounds = max(1, min(coverage_loop_max_rounds, 5))
+            max_fix_rounds = (
+                int(request.max_fix_rounds)
+                if request.max_fix_rounds is not None
+                else int(getattr(cfg, "max_fix_rounds", 3))
+            )
+            same_error_max_retries = (
+                int(request.same_error_max_retries)
+                if request.same_error_max_retries is not None
+                else int(getattr(cfg, "same_error_max_retries", 1))
+            )
+            max_fix_rounds = max(0, min(max_fix_rounds, 20))
+            same_error_max_retries = max(0, min(same_error_max_retries, 10))
             total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
             run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
             openai_key = (
@@ -1898,7 +1922,9 @@ def _run_fuzz_job(
                 f"[job {job_id}] params runtime={runtime_mode} "
                 f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
                 f"max_tokens={request.max_tokens} model={model_value} "
-                f"coverage_loop_max_rounds={coverage_loop_max_rounds}"
+                f"coverage_loop_max_rounds={coverage_loop_max_rounds} "
+                f"max_fix_rounds={max_fix_rounds} "
+                f"same_error_max_retries={same_error_max_retries}"
             )
             print(f"[job {job_id}] log_file={log_file}")
             mode = _executor_mode()
@@ -1925,8 +1951,12 @@ def _run_fuzz_job(
                     "last_crash_artifact": "",
                     "re_workspace_root": "",
                 }
-
-                for idx, stage in enumerate(stages, start=1):
+                env_rebuild_retries = 0
+                max_env_rebuild_retries = 1
+                stage_index = 0
+                while stage_index < len(stages):
+                    stage = stages[stage_index]
+                    idx = stage_index + 1
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
@@ -1958,6 +1988,8 @@ def _run_fuzz_job(
                         "time_budget": int(total_time_budget_value),
                         "run_time_budget": int(run_time_budget_value),
                         "coverage_loop_max_rounds": int(coverage_loop_max_rounds),
+                        "max_fix_rounds": int(max_fix_rounds),
+                        "same_error_max_retries": int(same_error_max_retries),
                         "email": request.email,
                         "docker_image": docker_image,
                         "ai_key_path": str(opencode_env_path()),
@@ -2032,6 +2064,18 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    if isinstance(stage_result, dict):
+                        terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
+                        if stage == "build" and terminal_reason == "requires_env_rebuild":
+                            if env_rebuild_retries >= max_env_rebuild_retries:
+                                raise RuntimeError("fix_build_requires_env_rebuild_retry_exceeded")
+                            env_rebuild_retries += 1
+                            stages.insert(stage_index + 1, "build")
+                            print(
+                                f"[job {job_id}] stage {stage} requested env rebuild; "
+                                f"dispatching fresh build job (attempt {env_rebuild_retries}/{max_env_rebuild_retries})"
+                            )
+                    stage_index += 1
 
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results

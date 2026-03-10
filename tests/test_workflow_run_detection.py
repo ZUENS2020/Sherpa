@@ -133,6 +133,43 @@ def test_node_run_accepts_sanitizer_log_crash_without_native_artifact(tmp_path: 
     assert out["run_rc"] == 76
     assert out["crash_evidence"] == "sanitizer_log"
     assert out["last_crash_artifact"] == str(artifact)
+
+
+def test_node_run_writes_repro_context_on_crash(tmp_path: Path):
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-log-1.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("ERROR: AddressSanitizer: heap-use-after-free", encoding="utf-8")
+
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="sanitizer_log",
+                first_artifact=str(artifact),
+                log_tail="asan log",
+                error="",
+                run_error_kind="",
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run(
+        {
+            "generator": gen,
+            "repo_url": "https://github.com/fmtlib/fmt.git",
+            "crash_fix_attempts": 0,
+        }
+    )
+
+    ctx = workflow_graph._read_repro_context(tmp_path)
+    assert out["crash_found"] is True
+    assert ctx["repo_url"] == "https://github.com/fmtlib/fmt.git"
+    assert ctx["last_fuzzer"] == "demo_fuzz"
+    assert ctx["last_crash_artifact"] == str(artifact)
+    assert ctx["crash_signature"]
     assert gen.analysis_calls == [("demo_fuzz", artifact)]
 
 
@@ -256,6 +293,7 @@ def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "0")
     gen = _MultiRunGenerator(
         tmp_path,
         run_results=[
@@ -279,6 +317,37 @@ def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch
     assert plan[1]["batch_size"] == 1
     assert plan[1]["rounds_left"] == 1
     assert plan[1]["round_budget_sec"] >= plan[0]["round_budget_sec"]
+
+
+def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["crash_found"] is True
+    assert out["last_crash_artifact"] == str(artifact)
+    assert out["last_fuzzer"] == "demo_fuzz_1"
+    assert len(out.get("run_details") or []) == 1
+    assert gen.analysis_calls == [("demo_fuzz_1", artifact)]
+    assert len(gen._run_results) == 0
 
 
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
@@ -655,6 +724,134 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
             "last_fuzzer": "",
             "last_crash_artifact": "",
             "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+
+def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = (tmp_path / "fuzz" / "out" / "artifacts" / "crash-deadbeef")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    (tmp_path / "run_summary.json").write_text(
+        '{"last_crash_artifact":"' + str(artifact) + '"}\n',
+        encoding="utf-8",
+    )
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "fmt_format_string_fuzz",
+            "last_crash_artifact": "",
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+
+
+def test_node_re_run_recovers_context_from_repro_context(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = (tmp_path / "fuzz" / "out" / "artifacts" / "crash-deadbeef")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    (tmp_path / "repro_context.json").write_text(
+        (
+            "{"
+            f"\"last_fuzzer\":\"fmt_format_string_fuzz\","
+            f"\"last_crash_artifact\":\"{artifact}\","
+            f"\"re_workspace_root\":\"{workspace}\""
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    class _RunRes:
+        returncode = 1
+        stdout = "boom"
+        stderr = "asan"
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", lambda *a, **k: _RunRes())
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "",
+            "last_crash_artifact": "",
+            "re_workspace_root": "",
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+
+
+def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch):
+    repo_work = tmp_path / "repo-clone"
+    repo_work.mkdir(parents=True, exist_ok=True)
+    source_fuzz = tmp_path / "fuzz"
+    source_fuzz.mkdir(parents=True, exist_ok=True)
+    (source_fuzz / "build.py").write_text("print('ok')\n", encoding="utf-8")
+    artifact = source_fuzz / "out" / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    class _RunRes:
+        def __init__(self, rc: int, stdout: str = "", stderr: str = ""):
+            self.returncode = rc
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _clone_repo(spec):
+        return repo_work
+
+    def _python_runner():
+        return "python3"
+
+    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+        cmd_list = [str(x) for x in cmd]
+        if cmd_list[:2] == ["python3", "build.py"]:
+            out_dir = Path(cwd) / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fuzzer = out_dir / "fmt_format_string_fuzz"
+            fuzzer.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            return _RunRes(0, "build ok", "")
+        if "-runs=1" in cmd_list:
+            return _RunRes(1, "boom", "asan")
+        raise AssertionError(f"unexpected cmd: {cmd_list}")
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", _fake_subprocess_run)
+    gen = SimpleNamespace(repo_root=tmp_path, _clone_repo=_clone_repo, _python_runner=_python_runner)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "repo_url": "https://github.com/fmtlib/fmt.git",
+            "last_fuzzer": "",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(tmp_path / ".repro_crash" / "missing-workdir"),
         }
     )
     assert out["re_run_done"] is True

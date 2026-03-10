@@ -518,6 +518,59 @@ def test_fix_build_rule_missing_llvmfuzzer_entrypoint(tmp_path: Path, monkeypatc
     assert "clang++" not in txt
 
 
+def test_fix_build_rule_missing_system_packages_requires_env_rebuild(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "./build/autogen.sh: 58: aclocal: not found",
+            "build_stdout_tail": "Warning: Missing tools: autoconf, automake, libtool",
+            "build_stderr_tail": "",
+        }
+    )
+
+    dep_file = fuzz_dir / "system_packages.txt"
+    assert dep_file.is_file()
+    assert out["last_error"] == ""
+    assert out["fix_effect"] == "requires_env_rebuild"
+    assert out["fix_build_terminal_reason"] == "requires_env_rebuild"
+    assert "requires env rebuild" in out["message"]
+
+
+def test_fix_build_opencode_system_packages_change_requires_env_rebuild(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('v1')\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            build_py.write_text("print('v2')\n", encoding="utf-8")
+            (fuzz_dir / "system_packages.txt").write_text("automake\n", encoding="utf-8")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+    }
+
+    out = workflow_graph._node_fix_build(state)
+
+    assert out["last_error"] == ""
+    assert out["fix_effect"] == "requires_env_rebuild"
+    assert out["fix_build_terminal_reason"] == "requires_env_rebuild"
+    assert out["message"] == "opencode fixed build (requires env rebuild)"
+
+
 def test_fix_build_rule_fuzz_out_path_mismatch(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -646,3 +699,80 @@ def test_fix_build_rule_cxx_for_c_source_mismatch(tmp_path: Path, monkeypatch):
     txt = build_py.read_text(encoding="utf-8")
     assert "clang++" not in txt
     assert "clang" in txt
+
+
+def test_fix_build_rule_archive_entry_missing_include(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('build script exists')\n", encoding="utf-8")
+    harness = fuzz_dir / "zip_format_fuzz.cc"
+    harness.write_text(
+        "#include <archive.h>\n"
+        "#include <stdint.h>\n"
+        "int f(struct archive_entry* entry) {\n"
+        "  return archive_entry_size(entry);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "",
+            "build_stdout_tail": "",
+            "build_stderr_tail": (
+                f"{harness}:4:10: error: use of undeclared identifier 'archive_entry_size'\n"
+            ),
+        }
+    )
+    assert out["last_error"] == ""
+    assert "archive_entry_missing_include" in (out.get("fix_build_rule_hits") or [])
+    txt = harness.read_text(encoding="utf-8")
+    assert "#include <archive_entry.h>" in txt
+
+
+def test_fix_build_rule_missing_system_packages_declared(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('build script exists')\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "fatal error: bzlib.h: No such file or directory",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "missing_system_packages_declared" in (out.get("fix_build_rule_hits") or [])
+    dep_file = fuzz_dir / "system_packages.txt"
+    assert dep_file.is_file()
+    dep_text = dep_file.read_text(encoding="utf-8")
+    assert "zlib1g-dev" in dep_text
+    assert "libbz2-dev" in dep_text
+
+
+def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("cmd = ['clang', '-std=c++17', 'harness.cc', '-o', 'out/fz']\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "clang: error: invalid argument '-std=c++17' not allowed with 'C'",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "c_compiler_for_cpp_source_mismatch" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "clang++" in txt
