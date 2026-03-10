@@ -661,7 +661,6 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
 
-
 def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypatch):
     workspace = tmp_path / ".repro_crash" / "workdir"
     out_dir = workspace / "fuzz" / "out"
@@ -696,8 +695,6 @@ def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypa
     assert out["re_run_done"] is True
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
-
-
 def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch):
     repo_work = tmp_path / "repo-clone"
     repo_work.mkdir(parents=True, exist_ok=True)

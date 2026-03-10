@@ -3645,7 +3645,6 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                     recovered = str(candidates[0])
         return recovered, (Path(recovered) if recovered else None)
-
     def _rebuild_workspace_from_init_clone() -> Path:
         repo_url = str(state.get("repo_url") or "").strip()
         if not repo_url:
