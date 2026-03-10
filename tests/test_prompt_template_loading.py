@@ -33,3 +33,13 @@ def test_render_opencode_prompt_replaces_placeholders():
     out = workflow_common.render_opencode_prompt("plan_with_hint", hint="hello-hint")
     assert "hello-hint" in out
     assert "{{hint}}" not in out
+
+
+def test_plan_prompt_hardens_targets_schema_on_first_attempt():
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    out = workflow_common.render_opencode_prompt("plan_with_hint", hint="schema-check")
+
+    assert "MUST be plain JSON" in out
+    assert "MUST be a JSON array" in out
+    assert "Never wrap the array inside another object" in out
+    assert '"lang": "c-cpp"' in out
