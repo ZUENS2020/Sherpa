@@ -1633,6 +1633,14 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "timeout": timeout,
         }
 
+    def _requires_env_rebuild(changed_paths: list[str] | None = None) -> bool:
+        normalized = {
+            str(p or "").strip().replace("\\", "/")
+            for p in (changed_paths or [])
+            if str(p or "").strip()
+        }
+        return "fuzz/system_packages.txt" in normalized
+
     def _success_out(message: str, *, outcome: str, rule_hit: str = "", changed_paths_count: int = 1, last_diff_paths: list[str] | None = None) -> FuzzWorkflowRuntimeState:
         updated_history, updated_rule_hits = _append_attempt(
             outcome,
@@ -1656,6 +1664,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "fix_effect": "advanced",
             },
         )
+        if _requires_env_rebuild(last_diff_paths):
+            out["message"] = f"{message} (requires env rebuild)"
+            out["fix_effect"] = "requires_env_rebuild"
+            out["fix_build_terminal_reason"] = "requires_env_rebuild"
+            return out
         probe_ran, probe = _run_fix_build_quick_probe()
         if probe_ran:
             probe_rc = int(probe.get("rc") or 1)
@@ -2376,6 +2389,9 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             (["openssl/", "could not find openssl"], "libssl-dev"),
             (["expat.h", "could not find expat"], "libexpat1-dev"),
             (["libxml/parser.h", "could not find libxml2"], "libxml2-dev"),
+            (["aclocal: not found", "automake: not found", "missing tools: automake"], "automake"),
+            (["autoconf: not found", "missing tools: autoconf"], "autoconf"),
+            (["libtool: not found", "libtoolize: not found", "missing tools: libtool"], "libtool"),
         ]
         need_pkgs: list[str] = []
         for needles, pkg in pkg_signals:
@@ -2510,6 +2526,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for missing system package declarations applied",
                 outcome="rule_fixed",
                 rule_hit="missing_system_packages_declared",
+                last_diff_paths=["fuzz/system_packages.txt"],
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -2715,6 +2732,10 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fix_action_type": "opencode",
             "fix_effect": "advanced",
         }
+        if _requires_env_rebuild(changed_paths):
+            out["message"] = "opencode fixed build (requires env rebuild)"
+            out["fix_effect"] = "requires_env_rebuild"
+            out["fix_build_terminal_reason"] = "requires_env_rebuild"
         _wf_log(cast(dict[str, Any], out), f"<- fix_build ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
