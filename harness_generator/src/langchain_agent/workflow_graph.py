@@ -1807,6 +1807,61 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
+    def _try_hotfix_archive_entry_missing_include() -> bool:
+        diag_raw = last_error + "\n" + stdout_tail + "\n" + stderr_tail
+        diag = diag_raw.lower()
+        if "archive_entry_" not in diag or "undeclared identifier" not in diag:
+            return False
+
+        # Prefer concrete compiler-reported source file; fallback to common fuzz harness paths.
+        candidates: list[Path] = []
+        for m in re.finditer(
+            r"(?m)^(/[^:\n]+(?:\.cc|\.cpp|\.cxx|\.c)):\d+:\d+:\s+error:\s+use of undeclared identifier 'archive_entry_",
+            diag_raw,
+        ):
+            p = Path(m.group(1))
+            if p.is_file():
+                candidates.append(p)
+
+        fuzz_dir = gen.repo_root / "fuzz"
+        if fuzz_dir.is_dir():
+            for ext in ("*.cc", "*.cpp", "*.cxx", "*.c"):
+                for p in sorted(fuzz_dir.glob(ext)):
+                    if p not in candidates:
+                        candidates.append(p)
+
+        for src in candidates:
+            try:
+                text = src.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if "archive_entry_" not in text:
+                continue
+            if "#include <archive_entry.h>" in text:
+                continue
+
+            lines = text.splitlines()
+            insert_at = 0
+            for i, line in enumerate(lines):
+                if line.lstrip().startswith("#include"):
+                    insert_at = i + 1
+                    # Keep archive headers grouped.
+                    if "archive.h" in line:
+                        insert_at = i + 1
+                        break
+
+            lines.insert(insert_at, "#include <archive_entry.h>")
+            new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+            if new_text == text:
+                continue
+            try:
+                src.write_text(new_text, encoding="utf-8", errors="replace")
+                _wf_log(cast(dict[str, Any], state), f"fix_build: applied local hotfix for archive_entry include in {src}")
+                return True
+            except Exception:
+                continue
+        return False
+
     def _try_hotfix_fuzz_out_path_mismatch() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         build_py = gen.repo_root / "fuzz" / "build.py"
@@ -1879,6 +1934,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for fuzz_out_path_mismatch applied",
                 outcome="rule_fixed",
                 rule_hit="fuzz_out_path_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_archive_entry_missing_include():
+            out = _success_out(
+                "local hotfix for archive_entry missing include applied",
+                outcome="rule_fixed",
+                rule_hit="archive_entry_missing_include",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
