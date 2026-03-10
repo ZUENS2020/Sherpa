@@ -69,6 +69,8 @@ def main() -> int:
             last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
             re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
             coverage_loop_max_rounds=_parse_int_keep_zero(payload.get("coverage_loop_max_rounds"), 3),
+            max_fix_rounds=_parse_int_keep_zero(payload.get("max_fix_rounds"), 3),
+            same_error_max_retries=_parse_int_keep_zero(payload.get("same_error_max_retries"), 1),
         )
         out = {
             "ok": True,

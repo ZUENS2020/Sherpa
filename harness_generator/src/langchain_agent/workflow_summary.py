@@ -167,6 +167,14 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
             "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
         },
+        "build_fix_policy": {
+            "max_fix_rounds": int(out.get("max_fix_rounds") or 3),
+            "same_error_max_retries": int(out.get("same_error_max_retries") or 1),
+            "fix_action_type": str(out.get("fix_action_type") or ""),
+            "fix_effect": str(out.get("fix_effect") or ""),
+            "error_signature_before": str(out.get("build_error_signature_before") or ""),
+            "error_signature_after": str(out.get("build_error_signature_after") or ""),
+        },
         "re_stage": {
             "workspace_root": str(out.get("re_workspace_root") or ""),
             "re_build_done": bool(out.get("re_build_done") or False),
@@ -225,6 +233,8 @@ def write_run_summary(out: dict[str, Any]) -> None:
         f"- Corpus size: {fuzz_inventory['corpus_total_human']}",
         f"- Plan crash policy: {'fix' if data['plan_policy']['fix_on_crash'] else 'report-only'}",
         f"- Plan max fix rounds: {data['plan_policy']['max_fix_rounds']}",
+        f"- Build/fix max rounds: {data['build_fix_policy']['max_fix_rounds']}",
+        f"- Build same-error max retries: {data['build_fix_policy']['same_error_max_retries']}",
         f"- Key artifact hashes: {len(key_artifact_hashes)}",
     ]
     if key_artifact_hashes:

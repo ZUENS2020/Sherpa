@@ -93,6 +93,8 @@ def test_worker_preserves_zero_budgets_for_unlimited_mode(tmp_path: Path, monkey
         "time_budget": 0,
         "run_time_budget": 0,
         "coverage_loop_max_rounds": 5,
+        "max_fix_rounds": 4,
+        "same_error_max_retries": 2,
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -109,3 +111,5 @@ def test_worker_preserves_zero_budgets_for_unlimited_mode(tmp_path: Path, monkey
     assert captured["time_budget"] == 0
     assert captured["run_time_budget"] == 0
     assert captured["coverage_loop_max_rounds"] == 5
+    assert captured["max_fix_rounds"] == 4
+    assert captured["same_error_max_retries"] == 2
