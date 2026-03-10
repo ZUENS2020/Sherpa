@@ -293,6 +293,7 @@ def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "0")
     gen = _MultiRunGenerator(
         tmp_path,
         run_results=[
@@ -316,6 +317,37 @@ def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch
     assert plan[1]["batch_size"] == 1
     assert plan[1]["rounds_left"] == 1
     assert plan[1]["round_budget_sec"] >= plan[0]["round_budget_sec"]
+
+
+def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["crash_found"] is True
+    assert out["last_crash_artifact"] == str(artifact)
+    assert out["last_fuzzer"] == "demo_fuzz_1"
+    assert len(out.get("run_details") or []) == 1
+    assert gen.analysis_calls == [("demo_fuzz_1", artifact)]
+    assert len(gen._run_results) == 0
 
 
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
