@@ -660,3 +660,54 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     assert out["re_run_done"] is True
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
+
+
+def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch):
+    repo_work = tmp_path / "repo-clone"
+    repo_work.mkdir(parents=True, exist_ok=True)
+    source_fuzz = tmp_path / "fuzz"
+    source_fuzz.mkdir(parents=True, exist_ok=True)
+    (source_fuzz / "build.py").write_text("print('ok')\n", encoding="utf-8")
+    artifact = source_fuzz / "out" / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    class _RunRes:
+        def __init__(self, rc: int, stdout: str = "", stderr: str = ""):
+            self.returncode = rc
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _clone_repo(spec):
+        return repo_work
+
+    def _python_runner():
+        return "python3"
+
+    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+        cmd_list = [str(x) for x in cmd]
+        if cmd_list[:2] == ["python3", "build.py"]:
+            out_dir = Path(cwd) / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fuzzer = out_dir / "fmt_format_string_fuzz"
+            fuzzer.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            fuzzer.chmod(0o755)
+            return _RunRes(0, "build ok", "")
+        if "-runs=1" in cmd_list:
+            return _RunRes(1, "boom", "asan")
+        raise AssertionError(f"unexpected cmd: {cmd_list}")
+
+    monkeypatch.setattr(workflow_graph.subprocess, "run", _fake_subprocess_run)
+    gen = SimpleNamespace(repo_root=tmp_path, _clone_repo=_clone_repo, _python_runner=_python_runner)
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "repo_url": "https://github.com/fmtlib/fmt.git",
+            "last_fuzzer": "",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(tmp_path / ".repro_crash" / "missing-workdir"),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
