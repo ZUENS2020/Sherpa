@@ -675,6 +675,51 @@ def test_fix_build_rule_archive_entry_missing_include(tmp_path: Path, monkeypatc
         }
     )
     assert out["last_error"] == ""
-    assert "archive_entry_missing_include" in (out.get("fix_build_rule_hits") or [])
+    assert "missing_symbol_include" in (out.get("fix_build_rule_hits") or [])
     txt = harness.read_text(encoding="utf-8")
     assert "#include <archive_entry.h>" in txt
+
+
+def test_fix_build_rule_missing_system_packages_declared(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("print('build script exists')\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "fatal error: bzlib.h: No such file or directory",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "missing_system_packages_declared" in (out.get("fix_build_rule_hits") or [])
+    dep_file = fuzz_dir / "system_packages.txt"
+    assert dep_file.is_file()
+    dep_text = dep_file.read_text(encoding="utf-8")
+    assert "zlib1g-dev" in dep_text
+    assert "libbz2-dev" in dep_text
+
+
+def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text("cmd = ['clang', '-std=c++17', 'harness.cc', '-o', 'out/fz']\n", encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "clang: error: invalid argument '-std=c++17' not allowed with 'C'",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "c_compiler_for_cpp_source_mismatch" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "clang++" in txt

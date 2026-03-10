@@ -1807,60 +1807,145 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
-    def _try_hotfix_archive_entry_missing_include() -> bool:
-        diag_raw = last_error + "\n" + stdout_tail + "\n" + stderr_tail
-        diag = diag_raw.lower()
-        if "archive_entry_" not in diag or "undeclared identifier" not in diag:
+    def _try_hotfix_c_compiler_for_cpp_source_mismatch() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        if (
+            "invalid argument '-std=c++" not in diag
+            and "this file requires compiler and library support for the iso c++" not in diag
+            and "unknown type name 'namespace'" not in diag
+        ):
+            return False
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        has_cpp_signal = any(x in text for x in [".cc", ".cpp", ".cxx", "-std=c++"])
+        if not has_cpp_signal:
+            return False
+        text2 = re.sub(r"(['\"])clang\1", r"\1clang++\1", text)
+        text2 = re.sub(r"(['\"])gcc\1", r"\1g++\1", text2)
+        if text2 == text:
+            return False
+        try:
+            build_py.write_text(text2, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for c_compiler_for_cpp_source_mismatch")
+            return True
+        except Exception:
             return False
 
-        # Prefer concrete compiler-reported source file; fallback to common fuzz harness paths.
-        candidates: list[Path] = []
+    def _try_hotfix_missing_symbol_include() -> bool:
+        diag_raw = last_error + "\n" + stdout_tail + "\n" + stderr_tail
+        if "undeclared identifier" not in diag_raw.lower():
+            return False
+
+        symbol_rules: list[tuple[re.Pattern[str], str]] = [
+            (re.compile(r"^archive_entry_"), "#include <archive_entry.h>"),
+            (re.compile(r"^archive_(read|write|format|filter|error|version|match|util|string)_"), "#include <archive.h>"),
+        ]
+        include_edits: dict[Path, set[str]] = {}
         for m in re.finditer(
-            r"(?m)^(/[^:\n]+(?:\.cc|\.cpp|\.cxx|\.c)):\d+:\d+:\s+error:\s+use of undeclared identifier 'archive_entry_",
+            r"(?m)^(?P<file>[^:\n]+(?:\.cc|\.cpp|\.cxx|\.c)):\d+:\d+:\s+error:\s+use of undeclared identifier '(?P<sym>[A-Za-z_][A-Za-z0-9_]*)'",
             diag_raw,
         ):
-            p = Path(m.group(1))
-            if p.is_file():
-                candidates.append(p)
+            raw_file = str(m.group("file")).strip()
+            sym = str(m.group("sym")).strip()
+            if not raw_file or not sym:
+                continue
+            src = Path(raw_file)
+            if not src.is_absolute():
+                src = gen.repo_root / src
+            if not src.is_file():
+                continue
+            include_line = ""
+            for pat, inc in symbol_rules:
+                if pat.search(sym):
+                    include_line = inc
+                    break
+            if not include_line:
+                continue
+            include_edits.setdefault(src, set()).add(include_line)
 
-        fuzz_dir = gen.repo_root / "fuzz"
-        if fuzz_dir.is_dir():
-            for ext in ("*.cc", "*.cpp", "*.cxx", "*.c"):
-                for p in sorted(fuzz_dir.glob(ext)):
-                    if p not in candidates:
-                        candidates.append(p)
+        if not include_edits:
+            return False
 
-        for src in candidates:
+        for src, include_lines in include_edits.items():
             try:
                 text = src.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            if "archive_entry_" not in text:
-                continue
-            if "#include <archive_entry.h>" in text:
-                continue
-
             lines = text.splitlines()
             insert_at = 0
             for i, line in enumerate(lines):
                 if line.lstrip().startswith("#include"):
                     insert_at = i + 1
-                    # Keep archive headers grouped.
-                    if "archive.h" in line:
-                        insert_at = i + 1
-                        break
-
-            lines.insert(insert_at, "#include <archive_entry.h>")
+            to_insert = [inc for inc in sorted(include_lines) if inc not in text]
+            if not to_insert:
+                continue
+            for inc in to_insert:
+                lines.insert(insert_at, inc)
+                insert_at += 1
             new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
             if new_text == text:
                 continue
             try:
                 src.write_text(new_text, encoding="utf-8", errors="replace")
-                _wf_log(cast(dict[str, Any], state), f"fix_build: applied local hotfix for archive_entry include in {src}")
+                _wf_log(cast(dict[str, Any], state), f"fix_build: applied local hotfix for missing include(s) in {src}")
                 return True
             except Exception:
                 continue
         return False
+
+    def _try_hotfix_missing_system_packages() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        if "cannot find -lz" in diag or "undefined reference to `gz" in diag or "undefined reference to `inflate" in diag:
+            # Prefer dedicated link-fix rule for zlib linker failures.
+            return False
+        pkg_signals: list[tuple[list[str], str]] = [
+            (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib1g-dev"),
+            (["bzlib.h", "could not find bzip2"], "libbz2-dev"),
+            (["lzma.h", "could not find liblzma"], "liblzma-dev"),
+            (["zstd.h", "could not find zstd", "one of the modules 'libzstd'"], "libzstd-dev"),
+            (["lz4.h", "could not find lz4"], "liblz4-dev"),
+            (["openssl/", "could not find openssl"], "libssl-dev"),
+            (["expat.h", "could not find expat"], "libexpat1-dev"),
+            (["libxml/parser.h", "could not find libxml2"], "libxml2-dev"),
+        ]
+        need_pkgs: list[str] = []
+        for needles, pkg in pkg_signals:
+            if any(n in diag for n in needles):
+                need_pkgs.append(pkg)
+        if not need_pkgs:
+            return False
+        dep_file = gen.repo_root / "fuzz" / "system_packages.txt"
+        existing: list[str] = []
+        if dep_file.is_file():
+            try:
+                for line in dep_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    existing.append(line)
+            except Exception:
+                return False
+        merged = sorted(set(existing) | set(need_pkgs))
+        if merged == sorted(set(existing)):
+            return False
+        dep_file.parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            "# Auto-maintained by fix_build hotfix rules.\n"
+            "# Package names are Debian/Ubuntu apt identifiers.\n"
+            + "\n".join(merged)
+            + "\n"
+        )
+        try:
+            dep_file.write_text(body, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), f"fix_build: declared system packages in {dep_file}")
+            return True
+        except Exception:
+            return False
 
     def _try_hotfix_fuzz_out_path_mismatch() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
@@ -1938,11 +2023,29 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
 
-        if _try_hotfix_archive_entry_missing_include():
+        if _try_hotfix_c_compiler_for_cpp_source_mismatch():
             out = _success_out(
-                "local hotfix for archive_entry missing include applied",
+                "local hotfix for c_compiler_for_cpp_source_mismatch applied",
                 outcome="rule_fixed",
-                rule_hit="archive_entry_missing_include",
+                rule_hit="c_compiler_for_cpp_source_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_symbol_include():
+            out = _success_out(
+                "local hotfix for missing symbol include applied",
+                outcome="rule_fixed",
+                rule_hit="missing_symbol_include",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_system_packages():
+            out = _success_out(
+                "local hotfix for missing system package declarations applied",
+                outcome="rule_fixed",
+                rule_hit="missing_system_packages_declared",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -3086,6 +3189,58 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     workspace_root = str(state.get("re_workspace_root") or "").strip() or str((repo_root / ".repro_crash" / "workdir"))
     artifact_path = Path(last_artifact) if last_artifact else None
 
+    def _rebuild_workspace_from_init_clone() -> Path:
+        repo_url = str(state.get("repo_url") or "").strip()
+        if not repo_url:
+            raise HarnessGeneratorError("missing repo_url for re-run workspace rebuild")
+        repro_workspace = repo_root / ".repro_crash"
+        repro_workspace.mkdir(parents=True, exist_ok=True)
+        clone_root = repro_workspace / "workdir"
+        if clone_root.exists():
+            shutil.rmtree(clone_root, ignore_errors=True)
+
+        rem = _remaining_time_budget_sec(state, min_timeout=15)
+        if rem <= 0:
+            raise HarnessGeneratorError("re-run workspace rebuild skipped: no remaining workflow budget")
+        gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        source_fuzz = repo_root / "fuzz"
+        if not source_fuzz.is_dir():
+            raise HarnessGeneratorError(f"run fuzz directory missing: {source_fuzz}")
+        dest_fuzz = clone_root / "fuzz"
+        if dest_fuzz.exists():
+            shutil.rmtree(dest_fuzz, ignore_errors=True)
+        shutil.copytree(source_fuzz, dest_fuzz)
+
+        python_runner = "python3"
+        try:
+            python_runner = str(gen._python_runner() or "python3")
+        except Exception:
+            python_runner = "python3"
+
+        build_cmd: list[str]
+        build_cwd: Path
+        if (clone_root / "fuzz" / "build.py").is_file():
+            build_cmd = [python_runner, "build.py"]
+            build_cwd = clone_root / "fuzz"
+        elif (clone_root / "fuzz" / "build.sh").is_file():
+            build_cmd = ["bash", "build.sh"]
+            build_cwd = clone_root / "fuzz"
+        else:
+            raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in re-run workspace rebuild")
+
+        build_timeout = max(30, min(rem, 600))
+        build = subprocess.run(
+            build_cmd,
+            cwd=build_cwd,
+            capture_output=True,
+            text=True,
+            timeout=build_timeout,
+        )
+        if build.returncode != 0:
+            err_tail = ((build.stderr or "") + "\n" + (build.stdout or ""))[-1200:]
+            raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={build.returncode}): {err_tail}")
+        return clone_root
+
     def _guess_fuzzer_from_workspace(workdir: Path) -> str:
         out_dir = workdir / "fuzz" / "out"
         if not out_dir.is_dir():
@@ -3126,7 +3281,10 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     try:
         workdir = Path(workspace_root)
         if not workdir.is_dir():
-            raise HarnessGeneratorError(f"re-build workspace missing: {workdir}")
+            _wf_log(cast(dict[str, Any], state), f"re-run: workspace missing, attempting rebuild via init clone logic: {workdir}")
+            workdir = _rebuild_workspace_from_init_clone()
+            workspace_root = str(workdir)
+            payload["workspace_root"] = workspace_root
         if (not last_fuzzer or not last_artifact) and (repo_root / "re_build_report.json").is_file():
             try:
                 re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
@@ -3146,12 +3304,28 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             last_fuzzer = _guess_fuzzer_from_workspace(workdir)
             payload["fuzzer"] = last_fuzzer
         if not last_fuzzer:
-            raise HarnessGeneratorError("missing last_fuzzer for re-run")
+            _wf_log(cast(dict[str, Any], state), "re-run: last_fuzzer missing, attempting workspace rebuild before failing")
+            workdir = _rebuild_workspace_from_init_clone()
+            workspace_root = str(workdir)
+            payload["workspace_root"] = workspace_root
+            last_fuzzer = _guess_fuzzer_from_workspace(workdir)
+            payload["fuzzer"] = last_fuzzer
+        if not last_fuzzer:
+            raise HarnessGeneratorError("missing last_fuzzer for re-run after workspace rebuild")
         if artifact_path is None or not artifact_path.is_file():
             raise HarnessGeneratorError(f"crash artifact not found: {last_artifact}")
         fuzzer_bin = workdir / "fuzz" / "out" / last_fuzzer
         if not fuzzer_bin.is_file():
-            raise HarnessGeneratorError(f"re-run fuzzer binary not found: {fuzzer_bin}")
+            _wf_log(cast(dict[str, Any], state), f"re-run: fuzzer binary missing, attempting workspace rebuild: {fuzzer_bin}")
+            workdir = _rebuild_workspace_from_init_clone()
+            workspace_root = str(workdir)
+            payload["workspace_root"] = workspace_root
+            if not last_fuzzer:
+                last_fuzzer = _guess_fuzzer_from_workspace(workdir)
+                payload["fuzzer"] = last_fuzzer
+            fuzzer_bin = workdir / "fuzz" / "out" / last_fuzzer
+            if not fuzzer_bin.is_file():
+                raise HarnessGeneratorError(f"re-run fuzzer binary not found after workspace rebuild: {fuzzer_bin}")
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         repro_timeout = max(20, min(rem, 180))
         repro = subprocess.run(
