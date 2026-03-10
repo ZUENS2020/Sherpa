@@ -224,6 +224,48 @@ def _llm_or_none() -> ChatOpenAI | None:
     return ChatOpenAI(**params)
 
 
+def _repro_context_path(repo_root: Path) -> Path:
+    return repo_root / "repro_context.json"
+
+
+def _read_repro_context(repo_root: Path) -> dict[str, Any]:
+    path = _repro_context_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_repro_context(
+    repo_root: Path,
+    *,
+    repo_url: str = "",
+    last_fuzzer: str = "",
+    last_crash_artifact: str = "",
+    crash_signature: str = "",
+    re_workspace_root: str = "",
+) -> None:
+    previous = _read_repro_context(repo_root)
+    payload = {
+        "repo_url": repo_url or str(previous.get("repo_url") or ""),
+        "last_fuzzer": last_fuzzer or str(previous.get("last_fuzzer") or ""),
+        "last_crash_artifact": last_crash_artifact or str(previous.get("last_crash_artifact") or ""),
+        "crash_signature": crash_signature or str(previous.get("crash_signature") or ""),
+        "re_workspace_root": re_workspace_root or str(previous.get("re_workspace_root") or ""),
+        "updated_at": time.time(),
+    }
+    try:
+        _repro_context_path(repo_root).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     return _wf_common.extract_json_object(text)
 
@@ -745,6 +787,14 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     # repro_crash would be incorrectly skipped.
     if resume_step in {"coverage-analysis", "improve-harness", "repro_crash", "re-build", "re-run", "fix_crash"}:
         try:
+            repro_doc = _read_repro_context(generator.repo_root)
+            if isinstance(repro_doc, dict):
+                if not str(out.get("last_fuzzer") or "").strip():
+                    out["last_fuzzer"] = str(repro_doc.get("last_fuzzer") or "")
+                if not str(out.get("last_crash_artifact") or "").strip():
+                    out["last_crash_artifact"] = str(repro_doc.get("last_crash_artifact") or "")
+                if not str(out.get("re_workspace_root") or "").strip():
+                    out["re_workspace_root"] = str(repro_doc.get("re_workspace_root") or "")
             summary_json = generator.repo_root / "run_summary.json"
             if summary_json.is_file():
                 doc = json.loads(summary_json.read_text(encoding="utf-8", errors="replace"))
@@ -3164,6 +3214,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
             )
             out["message"] = "workflow stopped (same timeout/no-progress repeated)"
+        if crash_found and last_fuzzer and last_artifact:
+            _write_repro_context(
+                gen.repo_root,
+                repo_url=str(out.get("repo_url") or ""),
+                last_fuzzer=last_fuzzer,
+                last_crash_artifact=last_artifact,
+                crash_signature=crash_signature,
+                re_workspace_root=str(out.get("re_workspace_root") or ""),
+            )
         _wf_log(
             cast(dict[str, Any], out),
             (
@@ -3559,6 +3618,15 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         restart_count += 1
     restart_limit = _re_restart_limit()
     restart_exceeded = (not re_build_ok) and restart_count > restart_limit
+    if re_build_ok:
+        _write_repro_context(
+            repo_root,
+            repo_url=repo_url,
+            last_fuzzer=str(state.get("last_fuzzer") or ""),
+            last_crash_artifact=str(state.get("last_crash_artifact") or ""),
+            crash_signature=str(state.get("crash_signature") or ""),
+            re_workspace_root=str(payload.get("clone_repo_root") or ""),
+        )
 
     out = {
         **state,
@@ -3613,6 +3681,10 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
     def _recover_artifact_path() -> tuple[str, Path | None]:
         recovered = last_artifact
+        if not recovered:
+            repro_doc = _read_repro_context(repo_root)
+            if isinstance(repro_doc, dict):
+                recovered = str(repro_doc.get("last_crash_artifact") or "").strip()
         if not recovered and (repo_root / "re_build_report.json").is_file():
             try:
                 re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
@@ -3736,11 +3808,32 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     }
     try:
         workdir = Path(workspace_root)
+        if not last_fuzzer or not last_artifact or not str(state.get("re_workspace_root") or "").strip():
+            repro_doc = _read_repro_context(repo_root)
+            if isinstance(repro_doc, dict):
+                if not last_fuzzer:
+                    last_fuzzer = str(repro_doc.get("last_fuzzer") or "").strip()
+                    payload["fuzzer"] = last_fuzzer
+                if not last_artifact:
+                    last_artifact = str(repro_doc.get("last_crash_artifact") or "").strip()
+                    payload["artifact"] = last_artifact
+                    if last_artifact:
+                        artifact_path = Path(last_artifact)
+                restored_workspace = str(repro_doc.get("re_workspace_root") or "").strip()
+                if restored_workspace and not workdir.is_dir():
+                    workspace_root = restored_workspace
+                    payload["workspace_root"] = restored_workspace
+                    workdir = Path(restored_workspace)
         if not workdir.is_dir():
             _wf_log(cast(dict[str, Any], state), f"re-run: workspace missing, attempting rebuild via init clone logic: {workdir}")
             workdir = _rebuild_workspace_from_init_clone()
             workspace_root = str(workdir)
             payload["workspace_root"] = workspace_root
+            _write_repro_context(
+                repo_root,
+                repo_url=str(state.get("repo_url") or ""),
+                re_workspace_root=workspace_root,
+            )
         if (not last_fuzzer or not last_artifact) and (repo_root / "re_build_report.json").is_file():
             try:
                 re_build_doc = json.loads((repo_root / "re_build_report.json").read_text(encoding="utf-8", errors="replace"))
@@ -3807,6 +3900,14 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         payload["reproduce_ok"] = repro.returncode != 0
         payload["stdout_tail"] = (repro.stdout or "")[-4000:]
         payload["stderr_tail"] = (repro.stderr or "")[-4000:]
+        _write_repro_context(
+            repo_root,
+            repo_url=str(state.get("repo_url") or ""),
+            last_fuzzer=last_fuzzer,
+            last_crash_artifact=last_artifact,
+            crash_signature=str(state.get("crash_signature") or ""),
+            re_workspace_root=workspace_root,
+        )
     except Exception as e:
         payload["error"] = str(e)
 
