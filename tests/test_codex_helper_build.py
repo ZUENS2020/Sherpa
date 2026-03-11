@@ -260,3 +260,30 @@ def test_gitnexus_prepare_context_skips_when_disabled(monkeypatch: pytest.Monkey
     helper._maybe_prepare_gitnexus_context()
 
     assert called["run"] is False
+
+
+def test_opencode_k8s_job_forces_native_even_with_docker_image(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "k8s_job")
+    monkeypatch.setenv("SHERPA_OPENCODE_DOCKER_IMAGE", "sherpa-opencode:latest")
+
+    assert ch._opencode_container_mode_enabled() is False
+    assert ch._build_opencode_cmd("opencode", ["run", "prompt"], Path("/tmp/repo"), {}) == [
+        "opencode",
+        "run",
+        "prompt",
+    ]
+
+
+def test_opencode_non_k8s_keeps_container_mode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "docker")
+    monkeypatch.setenv("SHERPA_OPENCODE_DOCKER_IMAGE", "sherpa-opencode:latest")
+
+    env = {
+        "SHERPA_OUTPUT_DIR": "/shared/output",
+        "OPENCODE_CONFIG": "/app/config/opencode.generated.json",
+    }
+    cmd = ch._build_opencode_cmd("opencode", ["run", "prompt"], Path("/tmp/repo"), env)
+
+    assert ch._opencode_container_mode_enabled() is True
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert "sherpa-opencode:latest" in cmd

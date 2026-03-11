@@ -251,6 +251,12 @@ def _docker_opencode_image() -> str:
     return os.environ.get("SHERPA_OPENCODE_DOCKER_IMAGE", "").strip()
 
 
+def _opencode_container_mode_enabled() -> bool:
+    if (os.environ.get("SHERPA_EXECUTOR_MODE", "") or "").strip().lower() == "k8s_job":
+        return False
+    return bool(_docker_opencode_image())
+
+
 def _opencode_auto_build_enabled() -> bool:
     return _bool_env("SHERPA_OPENCODE_AUTO_BUILD", True)
 
@@ -566,7 +572,7 @@ def _build_opencode_cmd(
     working_dir: Path,
     env: dict,
 ) -> list[str]:
-    image = _docker_opencode_image()
+    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
     if not image:
         return [cli_exe] + argv
 
@@ -1070,7 +1076,7 @@ class CodexHelper:
             tasks = str(instructions)
 
         repo_root = str(self.working_dir.resolve())
-        if _docker_opencode_image():
+        if _opencode_container_mode_enabled():
             repo_path_hint = "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output)."
         else:
             repo_path_hint = (
@@ -1187,7 +1193,7 @@ class CodexHelper:
                                 break
 
                 # If we're using a dedicated opencode container, default to docker CLI.
-                if _docker_opencode_image():
+                if _opencode_container_mode_enabled():
                     cli_exe = "docker"
 
                 if cli_exe is None:
@@ -1207,7 +1213,7 @@ class CodexHelper:
                     ),
                 )
                 run_name = ""
-                if _docker_opencode_image():
+                if _opencode_container_mode_enabled():
                     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.working_dir.name or "repo").strip("-") or "repo"
                     run_name = f"sherpa-opencode-{slug}-{os.getpid()}-{int(time.time())}-{cli_try}-{attempt}".lower()
                     env["SHERPA_OPENCODE_RUN_NAME"] = run_name
@@ -1220,7 +1226,7 @@ class CodexHelper:
 
                 try:
                     _apply_opencode_exec_policy(env)
-                    image = _docker_opencode_image()
+                    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
                     if image:
                         _ensure_opencode_image(image, env)
                     full_cmd = _build_opencode_cmd(cli_exe, cmd, self.working_dir, env)
@@ -1230,7 +1236,7 @@ class CodexHelper:
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        env=None if _docker_opencode_image() else env,
+                        env=None if _opencode_container_mode_enabled() else env,
                         text=True,
                         errors="replace",
                     )

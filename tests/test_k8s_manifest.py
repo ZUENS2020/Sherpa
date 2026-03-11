@@ -43,3 +43,10 @@ def test_k8s_manifest_does_not_force_empty_opencode_docker_image():
     assert "SHERPA_K8S_WORKER_PAYLOAD_B64" in env_names
     assert "OPENCODE_MODEL" in env_names
     assert "SHERPA_OPENCODE_DOCKER_IMAGE" not in env_names
+
+
+def test_k8s_configmap_does_not_set_opencode_docker_image():
+    configmap = yaml.safe_load((ROOT / "k8s" / "base" / "configmap.yaml").read_text(encoding="utf-8"))
+    data = configmap["data"]
+
+    assert "SHERPA_OPENCODE_DOCKER_IMAGE" not in data
