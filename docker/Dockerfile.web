@@ -122,13 +122,16 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode/GitNexus CLI..."; \
             selected=""; \
             for r in $NPM_REGISTRY_CANDIDATES; do \
+              echo "[npm] probing registry: $r"; \
               if npm --fetch-timeout=12000 --loglevel=error --registry "$r" view lodash version >/dev/null 2>&1; then \
                 selected="$r"; \
+                echo "[npm] selected registry: $selected"; \
                 break; \
               fi; \
             done; \
             if [ -z "$selected" ]; then \
               selected="$NPM_CONFIG_REGISTRY"; \
+              echo "[npm] probe failed; fallback registry: $selected"; \
             fi; \
             npm config set registry "$selected"; \
             npm config set fetch-retries 5; \
@@ -136,7 +139,23 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             npm config set fetch-retry-mintimeout 2000; \
             npm config set fetch-retry-maxtimeout 30000; \
             npm config set fetch-timeout 180000; \
-            npm i -g opencode-ai gitnexus; \
+            for pkg in opencode-ai gitnexus; do \
+              ok=0; \
+              for attempt in 1 2 3; do \
+                echo "[npm] installing $pkg (attempt $attempt/3)"; \
+                if npm i -g --loglevel=info "$pkg"; then \
+                  ok=1; \
+                  echo "[npm] installed $pkg"; \
+                  break; \
+                fi; \
+                echo "[npm] failed to install $pkg on attempt $attempt/3"; \
+                sleep $((attempt * 2)); \
+              done; \
+              if [ "$ok" -ne 1 ]; then \
+                echo "[npm] failed to install $pkg after retries"; \
+                exit 1; \
+              fi; \
+            done; \
             opencode --version || true; \
             gitnexus --version || true; \
         else \
