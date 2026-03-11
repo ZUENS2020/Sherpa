@@ -14,6 +14,18 @@ from persistent_config import load_config
 
 _DEFAULT_TIME_BUDGET_SEC = 900
 _UNLIMITED_TIME_BUDGET_SENTINEL_SEC = 2_147_483_647
+ALLOWED_TARGET_TYPES = {
+    "parser",
+    "decoder",
+    "archive",
+    "image",
+    "document",
+    "network",
+    "database",
+    "serializer",
+    "interpreter",
+    "generic",
+}
 
 
 def parse_budget_value(raw: Any, *, default: int = _DEFAULT_TIME_BUDGET_SEC) -> int:
@@ -88,13 +100,16 @@ def validate_targets_json(repo_root: Path) -> tuple[bool, str]:
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             return False, f"targets[{i}] must be an object"
-        for key in ("name", "api", "lang"):
+        for key in ("name", "api", "lang", "target_type"):
             val = item.get(key)
             if not isinstance(val, str) or not val.strip():
                 return False, f"targets[{i}].{key} must be a non-empty string"
         lang = str(item.get("lang") or "").strip().lower()
         if lang not in allowed_lang:
             return False, f"targets[{i}].lang unsupported: {item.get('lang')}"
+        target_type = str(item.get("target_type") or "").strip().lower()
+        if target_type not in ALLOWED_TARGET_TYPES:
+            return False, f"targets[{i}].target_type unsupported: {item.get('target_type')}"
     return True, ""
 
 

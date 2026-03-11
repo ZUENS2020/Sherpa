@@ -61,7 +61,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -136,6 +136,18 @@ FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
+ALLOWED_TARGET_TYPES = {
+    "parser",
+    "decoder",
+    "archive",
+    "image",
+    "document",
+    "network",
+    "database",
+    "serializer",
+    "interpreter",
+    "generic",
+}
 
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
@@ -209,6 +221,22 @@ def _synthesize_activity_watch_paths() -> list[str]:
         "fuzz/**/*.cxx",
         "fuzz/**/*.java",
     ]
+
+
+def _run_plateau_pulses() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_PULSES") or "3").strip()
+    try:
+        return max(1, min(int(raw), 20))
+    except Exception:
+        return 3
+
+
+def _run_plateau_idle_growth_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "180").strip()
+    try:
+        return max(30, min(int(raw), 86_400))
+    except Exception:
+        return 180
 
 
 def _default_diff_excludes() -> set[str]:
@@ -591,6 +619,9 @@ class FuzzerRunResult:
     final_iteration: int = 0
     corpus_files: int = 0
     corpus_size_bytes: int = 0
+    terminal_reason: str = ""
+    plateau_detected: bool = False
+    plateau_idle_seconds: int = 0
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
@@ -649,6 +680,29 @@ def parse_libfuzzer_final_stats(text: str) -> Dict[str, int]:
         stats["execs_per_sec"] = int(m.group("execs") or 0)
         stats["rss_mb"] = int(m.group("rss") or 0)
     return stats
+
+
+def _infer_target_type(*parts: str) -> str:
+    text = " ".join(p for p in parts if p).lower()
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+        return "parser"
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
+        return "decoder"
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z")):
+        return "archive"
+    if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
+        return "image"
+    if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
+        return "document"
+    if any(tok in text for tok in ("socket", "packet", "http", "tls", "dns", "frame", "request", "response")):
+        return "network"
+    if any(tok in text for tok in ("sql", "query", "db", "database", "sqlite", "record")):
+        return "database"
+    if any(tok in text for tok in ("emit", "dump", "serialize", "serializer", "write")):
+        return "serializer"
+    if any(tok in text for tok in ("eval", "vm", "execute", "compile", "bytecode", "script", "interp")):
+        return "interpreter"
+    return "generic"
 
 
 class NonOssFuzzHarnessGenerator:
@@ -1390,6 +1444,7 @@ class NonOssFuzzHarnessGenerator:
                [{{"name": "...",
                   "api": "qualified::symbol_or_Class.method",
                   "lang": "c-cpp|java",
+                  "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
                   "proto": "const uint8_t*,size_t|byte[]|InputStream",
                   "build_target": "cmake target or path if known",
                   "reason": "...",
@@ -1400,6 +1455,14 @@ class NonOssFuzzHarnessGenerator:
 
             **Rules:**
             - Favor the highest-level API that ingests untrusted data (files/streams/packets).
+            - You MUST classify every chosen target into one `target_type` from this exact enum:
+              `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`,
+              `interpreter`, `generic`.
+            - Pick the most specific type available. For example:
+              - parse/scan/tokenize/read structured text or binary -> `parser`
+              - decode/decompress/inflate/unpack -> `decoder`
+              - tar/zip/archive extraction or listing -> `archive`
+              - emit/dump/serialize/write structured output -> `serializer`
             - Avoid low-level helpers (e.g., `_read_u32`) unless nothing higher validates input.
             - Prefer targets with small/clear init and good branch structure.
                         - Prefer the **lowest dependency footprint** target first: prioritize APIs that compile with
@@ -1878,17 +1941,134 @@ class NonOssFuzzHarnessGenerator:
     # Step D – Generate initial seeds
     # ────────────────────────────────────────────────────────────────────
 
+    def _resolve_seed_target_type(self, fuzzer_name: str, harness_text: str) -> str:
+        targets_path = self.fuzz_dir / "targets.json"
+        candidates: list[dict[str, object]] = []
+        try:
+            if targets_path.is_file():
+                raw = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(raw, list):
+                    candidates = [item for item in raw if isinstance(item, dict)]
+        except Exception:
+            candidates = []
+
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        for item in candidates:
+            name = str(item.get("name") or "").strip().lower()
+            api = str(item.get("api") or "").strip().lower()
+            target_type = str(item.get("target_type") or "").strip().lower()
+            if target_type not in ALLOWED_TARGET_TYPES:
+                continue
+            if name and (name in normalized_fuzzer or normalized_fuzzer in name):
+                return target_type
+            if api and (api in normalized_fuzzer or normalized_fuzzer in api):
+                return target_type
+
+        if len(candidates) == 1:
+            target_type = str(candidates[0].get("target_type") or "").strip().lower()
+            if target_type in ALLOWED_TARGET_TYPES:
+                return target_type
+
+        return _infer_target_type(fuzzer_name, harness_text)
+
+    def _seed_generation_guidance(self, target_type: str, fuzzer_name: str, harness_text: str) -> str:
+        common = (
+            "Seed goal: maximize early coverage, not readability. Mix valid, boundary, and malformed inputs. "
+            "Prefer small files that drive distinct parser or state-machine behaviors."
+        )
+        guidance = {
+            "parser": (
+                "Create seeds that exercise parser state transitions: empty/minimal input, valid structured input, "
+                "deep nesting, alternate syntactic forms, truncated/incomplete forms, invalid tokens, long scalars/strings, "
+                "duplicate keys or repeated sections, and if applicable directives/tags/anchors/aliases. "
+                "For YAML-like formats include flow and block styles."
+            ),
+            "decoder": (
+                "Create seeds that exercise decoder edges: shortest valid frame, maximal headers, truncated payloads, "
+                "bad checksums/lengths, repeated sections, nested containers, and malformed trailers."
+            ),
+            "archive": (
+                "Create seeds for valid and malformed archives: minimal single-entry archive, multiple entries, "
+                "nested paths, long names, metadata edge cases, truncated central directory or footer, and invalid sizes."
+            ),
+            "image": (
+                "Create seeds for valid and malformed images: tiny valid image, alternate chunk/segment ordering, "
+                "oversized dimensions, truncated headers, malformed metadata chunks, and repeated ancillary chunks."
+            ),
+            "document": (
+                "Create seeds for structured documents: minimal valid doc, nested sections, metadata blocks, "
+                "embedded markup, malformed closing markers, and truncated bodies."
+            ),
+            "network": (
+                "Create seeds for packet/message parsing: minimal valid message, alternate message types, "
+                "length mismatches, partial frames, repeated headers, malformed fields, and boundary numeric values."
+            ),
+            "database": (
+                "Create seeds for record/query/database parsing: minimal schema/record, nested records, invalid offsets, "
+                "truncated pages, malformed metadata, and boundary integer sizes."
+            ),
+            "serializer": (
+                "Create seeds that stress serializer round-trip input models: empty object, nested object, repeated fields, "
+                "large strings, invalid tags, alternate encodings, and partially malformed structures."
+            ),
+            "interpreter": (
+                "Create seeds for interpreter/compiler inputs: minimal program, nested control flow, malformed tokens, "
+                "unterminated constructs, repeated operators, deep expression trees, and boundary literals."
+            ),
+            "generic": (
+                "Create diverse seeds: empty input, smallest valid sample, largest small sample, malformed/truncated input, "
+                "repeated delimiters, and boundary numeric/text values."
+            ),
+        }
+        extra = guidance.get(target_type, guidance["generic"])
+        yaml_hint = ""
+        lowered = f"{fuzzer_name}\n{harness_text}".lower()
+        profile_hints: list[str] = []
+        if target_type == "parser":
+            if any(tok in lowered for tok in ("arg_id", "argument id", "positional", "named arg", "named argument")):
+                profile_hints.append(
+                    " This parser looks like a narrow token parser for argument identifiers. Include positional ids "
+                    "(`0`, `1`, `42`), named ids (`name`, `arg1`), leading zeros, extremely long numeric ids, mixed "
+                    "alpha-numeric boundaries, truncated ids, invalid starter characters, separator-boundary tokens "
+                    "such as `:`, `}`, `]`, `,`, `{`, `[`, and a few high-byte or non-ASCII cases."
+                )
+            if any(tok in lowered for tok in ("format", "replacement field", "compile.h", "fmt::", "brace")):
+                profile_hints.append(
+                    " This parser is format-string related. Include bare text, single replacement fields, nested or "
+                    "mismatched braces, width/precision markers, invalid specifier suffixes, mixed named/positional "
+                    "fields, and truncated format directives."
+                )
+            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan")):
+                profile_hints.append(
+                    " Prefer seeds that isolate token boundaries: single token, repeated tokens, delimiter-only "
+                    "inputs, whitespace-prefixed tokens, unterminated tokens, and malformed separator placement."
+                )
+        if any(tok in lowered for tok in ("yaml", "yml")):
+            yaml_hint = (
+                " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
+                "flow collections (`[]`/`{}`), tags, directives, malformed indentation, and truncated nested mappings."
+            )
+        return (
+            f"Target type for `{fuzzer_name}` is `{target_type}`. {common} {extra}"
+            + "".join(profile_hints)
+            + yaml_hint
+        )
+
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)
         harness_text = read_text_safely(harness_src) if harness_src else ""
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        target_type = self._resolve_seed_target_type(fuzzer_name, harness_text)
+        seed_guidance = self._seed_generation_guidance(target_type, fuzzer_name, harness_text)
 
         instructions = textwrap.dedent(
             f"""
             Create 1–5 **meaningful seed files** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            new harness `{fuzzer_name}`. Prefer small, realistic inputs that exercise typical paths. Use
-            appropriate file extensions if known. If binary, you may write contents via hex bytes.
+            new harness `{fuzzer_name}`. Use appropriate file extensions if known. If binary, you may write
+            contents via hex bytes.
+
+            {seed_guidance}
 
             Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
@@ -1942,6 +2122,39 @@ class NonOssFuzzHarnessGenerator:
             run_idle_timeout = max(0, min(int(str(run_idle_timeout_raw).strip()), 86400))
         except Exception:
             run_idle_timeout = 120
+        plateau_pulses = _run_plateau_pulses()
+        plateau_idle_growth_sec = _run_plateau_idle_growth_sec()
+        best_cov = 0
+        best_ft = 0
+        last_growth_at = time.monotonic()
+        plateau_pulse_hits = 0
+        callback_stop_reason = ""
+
+        def _line_callback(_kind: str, text: str) -> Optional[str]:
+            nonlocal best_cov, best_ft, last_growth_at, plateau_pulse_hits, callback_stop_reason
+            m = _LIBFUZZER_PROGRESS_RE.search(text or "")
+            if not m:
+                return None
+            cov = int(m.group("cov") or 0)
+            ft = int(m.group("ft") or 0)
+            kind = str(m.group("kind") or "").upper()
+            grew = cov > best_cov or ft > best_ft
+            if grew:
+                best_cov = max(best_cov, cov)
+                best_ft = max(best_ft, ft)
+                last_growth_at = time.monotonic()
+                plateau_pulse_hits = 0
+                return None
+            if kind == "PULSE":
+                if (time.monotonic() - last_growth_at) >= plateau_idle_growth_sec:
+                    plateau_pulse_hits += 1
+                    if plateau_pulse_hits >= plateau_pulses:
+                        callback_stop_reason = (
+                            "coverage_plateau "
+                            f"(idle_no_growth={plateau_idle_growth_sec}s pulse_hits={plateau_pulse_hits})"
+                        )
+                        return callback_stop_reason
+            return None
 
         cmd = [
             str(bin_path),
@@ -1960,6 +2173,7 @@ class NonOssFuzzHarnessGenerator:
             extra_inputs=[str(corpus_dir)],
             timeout=hard_timeout,
             idle_timeout=run_idle_timeout,
+            line_callback=_line_callback,
         )
 
         # Dump the tail for quick reading.
@@ -2057,7 +2271,9 @@ class NonOssFuzzHarnessGenerator:
             error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
         if rc != 0 and not crash_found:
             lowered = log.lower()
-            if "error: libfuzzer: out-of-memory" in lowered:
+            if "[callback-stop] coverage_plateau" in lowered:
+                rc = 0
+            elif "error: libfuzzer: out-of-memory" in lowered:
                 if not run_error_kind:
                     run_error_kind = "run_resource_exhaustion"
                 if not error:
@@ -2110,6 +2326,9 @@ class NonOssFuzzHarnessGenerator:
             final_iteration=int(libfuzzer_stats.get("iteration", 0)),
             corpus_files=corpus_files,
             corpus_size_bytes=corpus_size_bytes,
+            terminal_reason="coverage_plateau" if "[callback-stop] coverage_plateau" in log.lower() else "",
+            plateau_detected="[callback-stop] coverage_plateau" in log.lower(),
+            plateau_idle_seconds=plateau_idle_growth_sec if "[callback-stop] coverage_plateau" in log.lower() else 0,
         )
 
     # ────────────────────────────────────────────────────────────────────
@@ -2812,6 +3031,7 @@ class NonOssFuzzHarnessGenerator:
         extra_inputs: Optional[List[str]] = None,
         timeout: int = 7200,
         idle_timeout: int = 0,
+        line_callback: Optional[Callable[[str, str], Optional[str]]] = None,
     ) -> Tuple[int, str, str]:
         def _redact_cmd(argv: Sequence[str]) -> List[str]:
             """Redact sensitive values from commands before printing.
@@ -2930,6 +3150,7 @@ class NonOssFuzzHarnessGenerator:
         done_readers = 0
         timed_out = False
         idle_timed_out = False
+        callback_stop_reason = ""
         heartbeat_raw = (os.environ.get("SHERPA_CMD_KEEPALIVE_SEC") or "0").strip()
         try:
             heartbeat_sec = max(0.0, min(float(heartbeat_raw), 3600.0))
@@ -2963,6 +3184,14 @@ class NonOssFuzzHarnessGenerator:
                         # Keep stderr visible in real-time to avoid silent failures.
                         print(safe_text, end="", flush=True)
                     last_activity = time.monotonic()
+                    if line_callback is not None:
+                        try:
+                            callback_stop_reason = str(line_callback(kind, safe_text) or "").strip()
+                        except Exception:
+                            callback_stop_reason = ""
+                        if callback_stop_reason:
+                            timed_out = True
+                            break
 
                 if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
                     idle_timed_out = True
@@ -3014,7 +3243,9 @@ class NonOssFuzzHarnessGenerator:
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
-        if idle_timed_out:
+        if callback_stop_reason:
+            err = (err or "") + f"\n[callback-stop] {callback_stop_reason}"
+        elif idle_timed_out:
             err = (err or "") + f"\n[idle-timeout] no output for {idle_timeout}s; process was killed."
         elif timed_out:
             err = (err or "") + "\n[timeout] process exceeded limit and was killed."

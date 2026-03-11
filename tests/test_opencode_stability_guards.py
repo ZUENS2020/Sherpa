@@ -55,7 +55,7 @@ import workflow_graph
 def test_validate_targets_json_rejects_missing_required_fields(tmp_path: Path):
     fuzz = tmp_path / "fuzz"
     fuzz.mkdir(parents=True, exist_ok=True)
-    (fuzz / "targets.json").write_text(json.dumps([{"name": "f", "lang": "c-cpp"}]), encoding="utf-8")
+    (fuzz / "targets.json").write_text(json.dumps([{"name": "f", "lang": "c-cpp", "target_type": "parser"}]), encoding="utf-8")
 
     ok, err = workflow_graph._validate_targets_json(tmp_path)
 
@@ -67,7 +67,7 @@ def test_validate_targets_json_accepts_valid_minimal_schema(tmp_path: Path):
     fuzz = tmp_path / "fuzz"
     fuzz.mkdir(parents=True, exist_ok=True)
     (fuzz / "targets.json").write_text(
-        json.dumps([{"name": "f", "api": "LLVMFuzzerTestOneInput", "lang": "c-cpp"}]),
+        json.dumps([{"name": "f", "api": "LLVMFuzzerTestOneInput", "lang": "c-cpp", "target_type": "parser"}]),
         encoding="utf-8",
     )
 
