@@ -3001,25 +3001,23 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             return _sha256_text("\n".join(parts))
 
-        if _verify_stage_no_ai():
-            _wf_log(cast(dict[str, Any], state), "run: verify-stage-no-ai enabled; skip AI seed generation")
-        else:
-            # Seed generation uses OpenCode and shared repo context; keep it serial.
-            prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
-            try:
-                for bin_path in bins:
-                    remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
-                    if remaining_for_seed <= 0:
-                        return _time_budget_exceeded_state(state, step_name="run")
-                    setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
-                    fuzzer_name = bin_path.name
-                    try:
-                        gen._pass_generate_seeds(fuzzer_name)
-                    except Exception as e:
-                        # Seed generation is best-effort; do not block fuzzing.
-                        print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
-            finally:
-                setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
+        _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
+        # Seed generation uses OpenCode and shared repo context; keep it serial.
+        prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+        try:
+            for bin_path in bins:
+                remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_for_seed <= 0:
+                    return _time_budget_exceeded_state(state, step_name="run")
+                setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
+                fuzzer_name = bin_path.name
+                try:
+                    gen._pass_generate_seeds(fuzzer_name)
+                except Exception as e:
+                    # Seed generation is best-effort; do not block fuzzing.
+                    print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+        finally:
+            setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
 
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
@@ -3844,6 +3842,7 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> re-run")
+    _wf_log(cast(dict[str, Any], state), "re-run: reusing run-stage corpus from fuzz/corpus; no new seeds will be generated")
 
     repo_root = gen.repo_root
     report_md = repo_root / "re_run_report.md"

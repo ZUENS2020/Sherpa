@@ -214,8 +214,6 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
-    # Enable legacy AI seed generation path for this budget-exhaustion test.
-    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -258,7 +256,7 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["message"] == "workflow stopped (time budget exceeded)"
 
 
-def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
+def test_node_run_default_generates_ai_seeds(tmp_path: Path):
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -288,7 +286,7 @@ def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
     out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
     assert out["last_step"] == "run"
     assert out.get("failed") is not True
-    assert gen.seed_calls == 0
+    assert gen.seed_calls == 2
 
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
