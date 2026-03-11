@@ -818,20 +818,20 @@ class CodexHelper:
         snapshot under SHERPA_OUTPUT_DIR and analyze that snapshot instead.
         """
         if not _gitnexus_auto_analyze_enabled():
-            return
-
-        image = _docker_opencode_image()
-        if not image:
+            LOGGER.info("[OpenCodeHelper] GitNexus auto analyze skipped: disabled")
             return
 
         env = os.environ.copy()
-        _ensure_opencode_image(image, env)
 
         shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
         if not shared_out:
             LOGGER.warning(
                 "[OpenCodeHelper] GitNexus auto analyze skipped: SHERPA_OUTPUT_DIR is empty"
             )
+            return
+
+        if not shutil.which("gitnexus"):
+            LOGGER.warning("[OpenCodeHelper] GitNexus auto analyze skipped: gitnexus binary not found")
             return
 
         snapshot_root_raw = (
@@ -886,40 +886,26 @@ class CodexHelper:
         )
 
         home_dir = _resolve_opencode_home_dir(shared_out)
+        gitnexus_env = env.copy()
+        gitnexus_env["HOME"] = home_dir
+        LOGGER.info("[OpenCodeHelper] GitNexus pre-analysis starting (native): %s", snapshot_dir)
         clean_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{shared_out}:{shared_out}",
-            "-e",
-            f"HOME={home_dir}",
-            image,
             "gitnexus",
             "clean",
             "--all",
             "--force",
         ]
-        subprocess.run(
+        clean_proc = subprocess.run(
             clean_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
             text=True,
-            env=env,
+            env=gitnexus_env,
         )
+        LOGGER.info("[OpenCodeHelper] GitNexus clean rc=%s", clean_proc.returncode)
 
         analyze_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{shared_out}:{shared_out}",
-            "-w",
-            str(snapshot_dir),
-            "-e",
-            f"HOME={home_dir}",
-            image,
             "gitnexus",
             "analyze",
             str(snapshot_dir),
@@ -927,7 +913,7 @@ class CodexHelper:
         if not _gitnexus_skip_embeddings():
             analyze_cmd.append("--embeddings")
 
-        rc, _scan, tail = _run_streaming_combined(analyze_cmd, env=env)
+        rc, _scan, tail = _run_streaming_combined(analyze_cmd, env=gitnexus_env)
         if rc != 0:
             LOGGER.warning(
                 "[OpenCodeHelper] GitNexus analyze failed (non-fatal, rc=%s). Tail:\n%s",

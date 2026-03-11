@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,3 +142,121 @@ def test_run_streaming_combined_redacts_output(monkeypatch: pytest.MonkeyPatch):
     assert "sk-out-secret" not in scan
     assert "sk-out-secret" not in tail
     assert "OPENAI_API_KEY=***" in scan
+
+
+def test_gitnexus_prepare_context_runs_natively(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "sample.txt").write_text("hello\n", encoding="utf-8")
+    shared_out = tmp_path / "shared-output"
+    shared_out.mkdir()
+
+    monkeypatch.setattr(ch, "_ensure_git_repo", lambda path: object())
+    helper = ch.CodexHelper(repo_path=repo_dir, copy_repo=False)
+
+    run_calls: list[tuple[list[str], dict | None]] = []
+    analyze_calls: list[tuple[list[str], dict | None]] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        run_calls.append(([str(x) for x in cmd], kwargs.get("env")))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _fake_stream(cmd, *args, **kwargs):
+        analyze_calls.append(([str(x) for x in cmd], kwargs.get("env")))
+        return (0, "ok", "ok")
+
+    monkeypatch.setenv("SHERPA_GITNEXUS_AUTO_ANALYZE", "1")
+    monkeypatch.setenv("SHERPA_GITNEXUS_SKIP_EMBEDDINGS", "1")
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(shared_out))
+    monkeypatch.setattr(ch.shutil, "which", lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+    monkeypatch.setattr(ch.subprocess, "run", _fake_run)
+    monkeypatch.setattr(ch, "_run_streaming_combined", _fake_stream)
+
+    helper._maybe_prepare_gitnexus_context()
+
+    clean_cmds = [cmd for cmd, _env in run_calls if cmd[:4] == ["gitnexus", "clean", "--all", "--force"]]
+    assert clean_cmds, run_calls
+    assert analyze_calls
+    analyze_cmd, analyze_env = analyze_calls[0]
+    assert analyze_cmd[:2] == ["gitnexus", "analyze"]
+    assert "docker" not in analyze_cmd
+    assert analyze_env is not None
+    assert str(analyze_env.get("HOME", "")).startswith(str(shared_out / ".opencode-home"))
+
+
+def test_gitnexus_prepare_context_skips_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    shared_out = tmp_path / "shared-output"
+    shared_out.mkdir()
+
+    monkeypatch.setattr(ch, "_ensure_git_repo", lambda path: object())
+    helper = ch.CodexHelper(repo_path=repo_dir, copy_repo=False)
+
+    called = {"stream": False}
+
+    def _fake_stream(*args, **kwargs):
+        called["stream"] = True
+        return (0, "", "")
+
+    monkeypatch.setenv("SHERPA_GITNEXUS_AUTO_ANALYZE", "1")
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(shared_out))
+    monkeypatch.setattr(ch.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ch, "_run_streaming_combined", _fake_stream)
+
+    with caplog.at_level(logging.WARNING):
+        helper._maybe_prepare_gitnexus_context()
+
+    assert called["stream"] is False
+    assert "gitnexus binary not found" in caplog.text
+
+
+def test_gitnexus_prepare_context_honors_embeddings_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    shared_out = tmp_path / "shared-output"
+    shared_out.mkdir()
+
+    monkeypatch.setattr(ch, "_ensure_git_repo", lambda path: object())
+    helper = ch.CodexHelper(repo_path=repo_dir, copy_repo=False)
+
+    analyze_cmds: list[list[str]] = []
+
+    monkeypatch.setenv("SHERPA_GITNEXUS_AUTO_ANALYZE", "1")
+    monkeypatch.setenv("SHERPA_GITNEXUS_SKIP_EMBEDDINGS", "0")
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(shared_out))
+    monkeypatch.setattr(ch.shutil, "which", lambda name: "/usr/bin/gitnexus" if name == "gitnexus" else None)
+    monkeypatch.setattr(ch.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(
+        ch,
+        "_run_streaming_combined",
+        lambda cmd, *args, **kwargs: (analyze_cmds.append([str(x) for x in cmd]) or (0, "", "")),
+    )
+
+    helper._maybe_prepare_gitnexus_context()
+
+    assert analyze_cmds
+    assert "--embeddings" in analyze_cmds[0]
+
+
+def test_gitnexus_prepare_context_skips_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    monkeypatch.setattr(ch, "_ensure_git_repo", lambda path: object())
+    helper = ch.CodexHelper(repo_path=repo_dir, copy_repo=False)
+
+    called = {"run": False}
+
+    def _fake_run(*args, **kwargs):
+        called["run"] = True
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("SHERPA_GITNEXUS_AUTO_ANALYZE", "0")
+    monkeypatch.setattr(ch.subprocess, "run", _fake_run)
+
+    helper._maybe_prepare_gitnexus_context()
+
+    assert called["run"] is False
