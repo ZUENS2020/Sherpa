@@ -293,7 +293,6 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
-                                {"name": "SHERPA_OPENCODE_DOCKER_IMAGE", "value": ""},
                                 {"name": "OPENCODE_MODEL", "value": str(payload.get("model") or "")},
                                 {"name": "OPENAI_MODEL", "value": str(payload.get("model") or "")},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
