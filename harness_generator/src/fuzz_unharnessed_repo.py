@@ -1195,99 +1195,112 @@ class NonOssFuzzHarnessGenerator:
 
         # Default: translate all args for container.
         translated_for_exec = [_translate_arg(a) for a in cmd]
-        translated_cmd = list(translated_for_exec)
-
-        # Prepare optional shell prelude for two cases:
-        # 1) fuzzer run: ensure -artifact_prefix directory exists
-        # 2) build run: auto-install declared system deps before invoking build.py/build.sh
-        artifacts_path = ""
-        for a in translated_for_exec:
-            if a.startswith("-artifact_prefix="):
-                artifacts_path = a.split("=", 1)[1]
-                break
-
-        def _is_build_entry_arg(a: str) -> bool:
-            norm = (a or "").strip().replace("\\", "/")
-            if norm in {"build.py", "./build.py", "fuzz/build.py", "build.sh", "./build.sh", "fuzz/build.sh"}:
-                return True
-            return norm.endswith("/build.py") or norm.endswith("/build.sh")
-
-        should_autoinstall = any(_is_build_entry_arg(a) for a in translated_for_exec)
-        dep_setup = ""
-        if should_autoinstall and _is_truthy_env("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", True):
-            dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
-            dep_file = f"/work/{dep_rel}"
-            dep_setup = textwrap.dedent(
-                f"""
-                dep_file={shlex.quote(dep_file)}
-                if [ -f "$dep_file" ]; then
-                    pkgs=""
-                    while IFS= read -r line || [ -n "$line" ]; do
-                        line="${{line%%#*}}"
-                        line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-                        [ -n "$line" ] || continue
-                        if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
-                            pkgs="$pkgs $line"
-                        else
-                            echo "[warn] (docker/deps) skip invalid package token: $line"
-                        fi
-                    done < "$dep_file"
-
-                    if [ -n "$pkgs" ]; then
-                        missing_pkgs=""
-                        for p in $pkgs; do
-                            if command -v dpkg-query >/dev/null 2>&1; then
-                                if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-                                    continue
-                                fi
-                            fi
-                            missing_pkgs="$missing_pkgs $p"
-                        done
-
-                        if [ -z "$missing_pkgs" ]; then
-                            echo "[*] (docker/deps) all requested packages already installed; skipping"
-                        else
-                            echo "[*] (docker/deps) installing from $dep_file:$missing_pkgs"
-                            if command -v apt-get >/dev/null 2>&1; then
-                                if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
-                                    echo "[warn] (docker/deps) apt-get update failed; continuing without auto-install"
-                                elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
-                                    echo "[warn] (docker/deps) apt-get install failed; continuing without auto-install"
-                                fi
-                            elif command -v dnf >/dev/null 2>&1; then
-                                if ! dnf install -y $missing_pkgs; then
-                                    echo "[warn] (docker/deps) dnf install failed; continuing without auto-install"
-                                fi
-                            elif command -v yum >/dev/null 2>&1; then
-                                if ! yum install -y $missing_pkgs; then
-                                    echo "[warn] (docker/deps) yum install failed; continuing without auto-install"
-                                fi
-                            elif command -v apk >/dev/null 2>&1; then
-                                if ! apk add --no-cache $missing_pkgs; then
-                                    echo "[warn] (docker/deps) apk add failed; continuing without auto-install"
-                                fi
-                            else
-                                echo "[warn] (docker/deps) no supported package manager found; skipping auto-install"
-                            fi
-                        fi
-                    fi
-                fi
-                """
-            ).strip()
-
-        if artifacts_path or dep_setup:
-            exec_cmd = " ".join(shlex.quote(a) for a in translated_for_exec)
-            shell_parts: List[str] = ["set -u"]
-            if artifacts_path:
-                shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
-            if dep_setup:
-                shell_parts.append(dep_setup)
-            shell_parts.append(f"exec {exec_cmd}")
-            translated_cmd = ["sh", "-lc", "\n".join(shell_parts)]
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        translated_cmd = self._wrap_exec_with_runtime_prelude(
+            translated_for_exec,
+            dep_file=f"/work/{dep_rel}",
+            dep_log_prefix="docker/deps",
+        )
 
         docker_cmd.append(self.docker_image)
         docker_cmd += translated_cmd
         return docker_cmd
+
+    @staticmethod
+    def _is_build_entry_arg(a: str) -> bool:
+        norm = (a or "").strip().replace("\\", "/")
+        if norm in {"build.py", "./build.py", "fuzz/build.py", "build.sh", "./build.sh", "fuzz/build.sh"}:
+            return True
+        return norm.endswith("/build.py") or norm.endswith("/build.sh")
+
+    def _build_system_dep_setup(self, dep_file: str, *, log_prefix: str) -> str:
+        return textwrap.dedent(
+            f"""
+            dep_file={shlex.quote(dep_file)}
+            if [ -f "$dep_file" ]; then
+                pkgs=""
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line="${{line%%#*}}"
+                    line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                    [ -n "$line" ] || continue
+                    if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
+                        pkgs="$pkgs $line"
+                    else
+                        echo "[warn] ({log_prefix}) skip invalid package token: $line"
+                    fi
+                done < "$dep_file"
+
+                if [ -n "$pkgs" ]; then
+                    missing_pkgs=""
+                    for p in $pkgs; do
+                        if command -v dpkg-query >/dev/null 2>&1; then
+                            if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+                                continue
+                            fi
+                        fi
+                        missing_pkgs="$missing_pkgs $p"
+                    done
+
+                    if [ -z "$missing_pkgs" ]; then
+                        echo "[*] ({log_prefix}) all requested packages already installed; skipping"
+                    else
+                        echo "[*] ({log_prefix}) installing from $dep_file:$missing_pkgs"
+                        if command -v apt-get >/dev/null 2>&1; then
+                            if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
+                                echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
+                            elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
+                            fi
+                        elif command -v dnf >/dev/null 2>&1; then
+                            if ! dnf install -y $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
+                            fi
+                        elif command -v yum >/dev/null 2>&1; then
+                            if ! yum install -y $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
+                            fi
+                        elif command -v apk >/dev/null 2>&1; then
+                            if ! apk add --no-cache $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
+                            fi
+                        else
+                            echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
+                        fi
+                    fi
+                fi
+            fi
+            """
+        ).strip()
+
+    def _wrap_exec_with_runtime_prelude(
+        self,
+        exec_args: Sequence[str],
+        *,
+        dep_file: str,
+        dep_log_prefix: str,
+    ) -> List[str]:
+        artifacts_path = ""
+        for a in exec_args:
+            if str(a).startswith("-artifact_prefix="):
+                artifacts_path = str(a).split("=", 1)[1]
+                break
+
+        dep_setup = ""
+        should_autoinstall = any(self._is_build_entry_arg(str(a)) for a in exec_args)
+        if should_autoinstall and _is_truthy_env("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", True):
+            dep_setup = self._build_system_dep_setup(dep_file, log_prefix=dep_log_prefix)
+
+        if not artifacts_path and not dep_setup:
+            return list(exec_args)
+
+        exec_cmd = " ".join(shlex.quote(str(a)) for a in exec_args)
+        shell_parts: List[str] = ["set -u"]
+        if artifacts_path:
+            shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
+        if dep_setup:
+            shell_parts.append(dep_setup)
+        shell_parts.append(f"exec {exec_cmd}")
+        return ["sh", "-lc", "\n".join(shell_parts)]
 
     # ────────────────────────────────────────────────────────────────────
     # Public entry
@@ -2870,7 +2883,16 @@ class NonOssFuzzHarnessGenerator:
             cmd.extend(extra_inputs)
 
         effective_env = env or os.environ.copy()
-        actual_cmd = self._dockerize_cmd(cmd, cwd=cwd, env=effective_env if self.docker_image else effective_env)
+        exec_args = list(cmd)
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        if self.docker_image:
+            actual_cmd = self._dockerize_cmd(exec_args, cwd=cwd, env=effective_env)
+        else:
+            actual_cmd = self._wrap_exec_with_runtime_prelude(
+                exec_args,
+                dep_file=str((self.repo_root / dep_rel).resolve()),
+                dep_log_prefix="native/deps",
+            )
 
         start_ts = time.time()
         start_mono = time.monotonic()
