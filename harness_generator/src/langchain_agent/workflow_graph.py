@@ -4210,6 +4210,36 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     return "stop"
 
 
+def _route_after_plan_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+        return "stop"
+    return "synthesize"
+
+
+def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+        return "stop"
+    return "build"
+
+
+def _route_after_fix_build_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if (state.get("fix_build_terminal_reason") or "").strip():
+        return "stop"
+    if (state.get("last_error") or "").strip():
+        return "stop"
+    return "build"
+
+
+def _route_after_fix_crash_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if (state.get("last_error") or "").strip():
+        return "stop"
+    return "build"
+
+
 def _re_restart_limit() -> int:
     raw = (os.environ.get("SHERPA_RESTART_FROM_PLAN_MAX") or "1").strip()
     try:
@@ -4248,6 +4278,35 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
     attempts = int(state.get("crash_fix_attempts") or 0)
     if fix_on_crash and attempts < max_fix_rounds:
         return "fix_crash"
+    return "stop"
+
+
+def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
+    last_step = str(state.get("last_step") or "").strip().lower()
+    if not last_step:
+        return "stop"
+    if last_step == "init":
+        return _route_after_init_state(state)
+    if last_step == "plan":
+        return _route_after_plan_state(state)
+    if last_step == "synthesize":
+        return _route_after_synthesize_state(state)
+    if last_step == "build":
+        return _route_after_build_state(state)
+    if last_step == "fix_build":
+        return _route_after_fix_build_state(state)
+    if last_step == "run":
+        return _route_after_run_state(state)
+    if last_step == "coverage-analysis":
+        return _route_after_coverage_analysis_state(state)
+    if last_step == "improve-harness":
+        return _route_after_improve_harness_state(state)
+    if last_step in {"repro_crash", "re-build"}:
+        return _route_after_re_build_state(state)
+    if last_step == "re-run":
+        return _route_after_re_run_state(state)
+    if last_step == "fix_crash":
+        return _route_after_fix_crash_state(state)
     return "stop"
 
 
@@ -4501,11 +4560,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         raise RuntimeError(last_error)
 
     _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
+    recommended_next = _recommended_next_step(cast(FuzzWorkflowRuntimeState, out))
     return {
         "message": msg,
         "repo_root": str(out.get("repo_root") or ""),
         "workflow_last_step": str(out.get("last_step") or ""),
         "workflow_active_step": str(out.get("next") or ""),
+        "workflow_recommended_next": str(recommended_next or ""),
         "stop_after_step": stop_after_step,
         "fix_build_terminal_reason": str(out.get("fix_build_terminal_reason") or ""),
         "fix_build_attempts": int(out.get("fix_build_attempts") or 0),

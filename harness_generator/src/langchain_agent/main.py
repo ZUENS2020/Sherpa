@@ -1937,10 +1937,6 @@ def _run_fuzz_job(
                 raise RuntimeError(cancel_error)
             try:
                 start_step = _normalize_resume_step(resume_from_step) if resumed else "plan"
-                stages = _staged_sequence_from(start_step)
-                if not stages:
-                    stages = ["plan", "synthesize", "build", "run"]
-
                 stage_results: list[dict[str, object]] = []
                 stage_job_names: list[str] = []
                 current_repo_root = str(resume_repo_root or "").strip()
@@ -1953,10 +1949,19 @@ def _run_fuzz_job(
                 }
                 env_rebuild_retries = 0
                 max_env_rebuild_retries = 1
-                stage_index = 0
-                while stage_index < len(stages):
-                    stage = stages[stage_index]
-                    idx = stage_index + 1
+                current_stage = start_step
+                if current_stage in {"fix_build", "fix_crash"}:
+                    current_stage = "build"
+                if current_stage not in _STAGED_WORKFLOW_STEPS:
+                    current_stage = "plan"
+                max_stage_dispatches = 20
+                dispatch_count = 0
+                while current_stage:
+                    stage = current_stage
+                    dispatch_count += 1
+                    if dispatch_count > max_stage_dispatches:
+                        raise RuntimeError("staged_workflow_dispatch_limit_exceeded")
+                    idx = dispatch_count
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
@@ -2064,18 +2069,23 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    next_stage = ""
                     if isinstance(stage_result, dict):
                         terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
                         if stage == "build" and terminal_reason == "requires_env_rebuild":
                             if env_rebuild_retries >= max_env_rebuild_retries:
                                 raise RuntimeError("fix_build_requires_env_rebuild_retry_exceeded")
                             env_rebuild_retries += 1
-                            stages.insert(stage_index + 1, "build")
+                            next_stage = "build"
                             print(
                                 f"[job {job_id}] stage {stage} requested env rebuild; "
                                 f"dispatching fresh build job (attempt {env_rebuild_retries}/{max_env_rebuild_retries})"
                             )
-                    stage_index += 1
+                        else:
+                            next_stage = _normalize_resume_step(stage_result.get("workflow_recommended_next"))
+                    if next_stage in {"", "stop"}:
+                        break
+                    current_stage = next_stage
 
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results
