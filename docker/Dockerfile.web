@@ -119,7 +119,7 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             npm --version; node --version; \
         fi \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
-            echo "Installing OpenCode/GitNexus CLI..."; \
+            echo "Installing OpenCode CLI..."; \
             selected=""; \
             for r in $NPM_REGISTRY_CANDIDATES; do \
               echo "[npm] probing registry: $r"; \
@@ -139,28 +139,24 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             npm config set fetch-retry-mintimeout 2000; \
             npm config set fetch-retry-maxtimeout 30000; \
             npm config set fetch-timeout 180000; \
-            for pkg in opencode-ai gitnexus; do \
-              ok=0; \
-              for attempt in 1 2 3; do \
-                echo "[npm] installing $pkg (attempt $attempt/3)"; \
-                if npm i -g --loglevel=info "$pkg"; then \
-                  ok=1; \
-                  echo "[npm] installed $pkg"; \
-                  break; \
-                fi; \
-                echo "[npm] failed to install $pkg on attempt $attempt/3"; \
-                sleep $((attempt * 2)); \
-              done; \
-              if [ "$ok" -ne 1 ]; then \
-                echo "[npm] failed to install $pkg after retries"; \
-                exit 1; \
+            ok=0; \
+            for attempt in 1 2 3; do \
+              echo "[npm] installing opencode-ai (attempt $attempt/3)"; \
+              if npm i -g --loglevel=info opencode-ai; then \
+                ok=1; \
+                echo "[npm] installed opencode-ai"; \
+                break; \
               fi; \
+              echo "[npm] failed to install opencode-ai on attempt $attempt/3"; \
+              sleep $((attempt * 2)); \
             done; \
-
+            if [ "$ok" -ne 1 ]; then \
+              echo "[npm] failed to install opencode-ai after retries"; \
+              exit 1; \
+            fi; \
             opencode --version || true; \
-            gitnexus --version || true; \
         else \
-            echo "Skipping OpenCode/GitNexus CLI install"; \
+            echo "Skipping OpenCode CLI install"; \
         fi
 
 # Run the FastAPI API backend from its folder so relative imports work.

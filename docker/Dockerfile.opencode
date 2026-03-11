@@ -41,7 +41,7 @@ RUN set -eux; \
     npm config set fetch-retry-mintimeout "$NPM_CONFIG_FETCH_RETRY_MINTIMEOUT"; \
     npm config set fetch-retry-maxtimeout "$NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT"; \
     npm config set fetch-timeout "$NPM_CONFIG_FETCH_TIMEOUT"; \
-    for pkg in opencode-ai gitnexus; do \
+    for pkg in opencode-ai; do \
       ok=0; \
       for attempt in 1 2 3; do \
         echo "[npm] installing $pkg (attempt $attempt/3)"; \
@@ -57,9 +57,7 @@ RUN set -eux; \
       fi; \
     done; \
     command -v opencode; \
-    command -v gitnexus; \
-    opencode --version; \
-    gitnexus --version
+    opencode --version
 
 # Create opencode config with Qwen models (simplified format without $schema)
 RUN mkdir -p /root/.opencode && \
