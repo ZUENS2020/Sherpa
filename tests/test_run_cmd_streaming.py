@@ -9,6 +9,7 @@ SRC_DIR = ROOT / "harness_generator" / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import fuzz_unharnessed_repo as fur
 from fuzz_unharnessed_repo import NonOssFuzzHarnessGenerator
 
 
@@ -85,3 +86,120 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     log_text = log_path.read_text(encoding="utf-8")
     assert "update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true" in log_text
     assert "install -y --no-install-recommends cmake-data" in log_text
+
+
+def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser"}]\n',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("yaml_parser_parse_fuzz")
+
+    assert "Target type for `yaml_parser_parse_fuzz` is `parser`" in captured["instructions"]
+    assert "anchors and aliases" in captured["instructions"]
+    assert "flow and block styles" in captured["instructions"]
+
+
+def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "targets.json").write_text(
+        '[{"name":"parse_arg_id","api":"parse_arg_id","lang":"c-cpp","target_type":"parser"}]\n',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_arg_id_fuzz.cc"
+    harness.write_text(
+        "int parse_arg_id(const char*);\n"
+        "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_arg_id_fuzzer")
+
+    assert "argument identifiers" in captured["instructions"]
+    assert "leading zeros" in captured["instructions"]
+    assert "separator-boundary tokens" in captured["instructions"]
+    assert "non-ASCII cases" in captured["instructions"]
+
+
+def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.time_budget = 900
+    gen.max_len = 1024
+    gen.fuzz_out_dir = tmp_path / "fuzz" / "out"
+    gen.fuzz_corpus_dir = tmp_path / "fuzz" / "corpus"
+    gen.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    bin_path = gen.fuzz_out_dir / "demo_fuzz"
+    bin_path.write_text("", encoding="utf-8")
+    os.chmod(bin_path, 0o755)
+
+    timeline = iter([0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0])
+    monkeypatch.setattr(fur.time, "monotonic", lambda: next(timeline))
+
+    def _fake_run_cmd(_cmd, **kwargs):
+        cb = kwargs.get("line_callback")
+        lines = [
+            "#1 NEW cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#262144 pulse  cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#524288 pulse  cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#1048576 pulse  cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+        ]
+        for line in lines:
+            if cb is not None:
+                cb("stdout", line)
+        return 143, "".join(lines), "\n[callback-stop] coverage_plateau (idle_no_growth=30s pulse_hits=3)"
+
+    gen._run_cmd = _fake_run_cmd  # type: ignore[method-assign]
+    old_idle = os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC")
+    old_pulses = os.environ.get("SHERPA_RUN_PLATEAU_PULSES")
+    os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = "2"
+    os.environ["SHERPA_RUN_PLATEAU_PULSES"] = "3"
+    try:
+        result = gen._run_fuzzer(bin_path)
+    finally:
+        if old_idle is None:
+            os.environ.pop("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC", None)
+        else:
+            os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = old_idle
+        if old_pulses is None:
+            os.environ.pop("SHERPA_RUN_PLATEAU_PULSES", None)
+        else:
+            os.environ["SHERPA_RUN_PLATEAU_PULSES"] = old_pulses
+
+    assert result.rc == 0
+    assert result.crash_found is False
+    assert result.run_error_kind == ""
+    assert result.plateau_detected is True
+    assert result.terminal_reason == "coverage_plateau"

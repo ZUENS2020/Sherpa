@@ -43,3 +43,4 @@ def test_plan_prompt_hardens_targets_schema_on_first_attempt():
     assert "MUST be a JSON array" in out
     assert "Never wrap the array inside another object" in out
     assert '"lang": "c-cpp"' in out
+    assert '"target_type": "parser"' in out

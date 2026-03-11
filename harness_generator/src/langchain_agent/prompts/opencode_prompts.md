@@ -17,8 +17,10 @@ If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN
 - MUST be plain JSON, not Markdown and not fenced code blocks
 - MUST be a JSON array, not an object
 - MUST contain at least one target object
-- Each target object MUST include non-empty string fields: `name`, `api`, `lang`
+- Each target object MUST include non-empty string fields: `name`, `api`, `lang`, `target_type`
 - `lang` MUST be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`
+- `target_type` MUST be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`
+- Choose the most specific target type; do not invent new type names
 - If unsure, overwrite the whole file with the smallest valid array instead of leaving partial/invalid JSON
 - Never emit an empty array
 - Never wrap the array inside another object such as `{ "targets": [...] }`
@@ -28,7 +30,8 @@ Minimal valid example:
   {
     "name": "yaml_parser_parse",
     "api": "yaml_parser_parse",
-    "lang": "c-cpp"
+    "lang": "c-cpp",
+    "target_type": "parser"
   }
 ]
 
@@ -142,8 +145,9 @@ Repair `fuzz/targets.json` so it passes strict schema checks.
 
 Required schema:
 - JSON array with at least one object
-- each object must include non-empty string keys: `name`, `api`, `lang`
+- each object must include non-empty string keys: `name`, `api`, `lang`, `target_type`
 - `lang` must be one of: c-cpp, cpp, c, c++, java
+- `target_type` must be one of: parser, decoder, archive, image, document, network, database, serializer, interpreter, generic
 
 Constraints:
 - Keep edits minimal

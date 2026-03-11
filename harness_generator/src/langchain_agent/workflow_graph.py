@@ -282,6 +282,29 @@ def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
     return _wf_common.validate_targets_json(repo_root)
 
 
+def _infer_target_type(*parts: str) -> str:
+    text = " ".join(p for p in parts if p).lower()
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+        return "parser"
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
+        return "decoder"
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z")):
+        return "archive"
+    if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
+        return "image"
+    if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
+        return "document"
+    if any(tok in text for tok in ("socket", "packet", "http", "tls", "dns", "frame", "request", "response")):
+        return "network"
+    if any(tok in text for tok in ("sql", "query", "db", "database", "sqlite", "record")):
+        return "database"
+    if any(tok in text for tok in ("emit", "dump", "serialize", "serializer", "write")):
+        return "serializer"
+    if any(tok in text for tok in ("eval", "vm", "execute", "compile", "bytecode", "script", "interp")):
+        return "interpreter"
+    return "generic"
+
+
 def _opencode_done_path(repo_root: Path) -> Path:
     return repo_root / "done"
 
@@ -341,14 +364,28 @@ def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = ""
         if key in seen:
             continue
         seen.add(key)
-        candidates.append({"name": name, "api": name, "lang": lang})
+        candidates.append(
+            {
+                "name": name,
+                "api": name,
+                "lang": lang,
+                "target_type": _infer_target_type(name, file_hint),
+            }
+        )
         if len(candidates) >= 3:
             break
 
     if candidates:
         return candidates
 
-    return [{"name": "default_target", "api": "default_target", "lang": _infer_target_lang_from_repo(repo_root)}]
+    return [
+        {
+            "name": "default_target",
+            "api": "default_target",
+            "lang": _infer_target_lang_from_repo(repo_root),
+            "target_type": "generic",
+        }
+    ]
 
 
 def _write_fallback_targets_json(repo_root: Path, *, antlr_context_path: str = "") -> bool:
@@ -3242,6 +3279,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 run_terminal_reason = run.run_error_kind
                 if run.run_error_kind == "run_idle_timeout":
                     run_idle_seconds = idle_timeout_sec
+            if not run_terminal_reason and str(run.terminal_reason or "").strip():
+                run_terminal_reason = str(run.terminal_reason).strip()
+                if run.terminal_reason == "coverage_plateau":
+                    run_idle_seconds = int(run.plateau_idle_seconds or 0)
 
             run_details.append(
                 {
@@ -3265,6 +3306,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "final_corpus_size_bytes": int(run.final_corpus_size_bytes),
                     "corpus_files": int(run.corpus_files),
                     "corpus_size_bytes": int(run.corpus_size_bytes),
+                    "terminal_reason": str(run.terminal_reason or ""),
+                    "plateau_detected": bool(run.plateau_detected),
+                    "plateau_idle_seconds": int(run.plateau_idle_seconds or 0),
                 }
             )
             if run.error and not run_last_error:
@@ -3432,6 +3476,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         run_details = list(state.get("run_details") or [])
         history = list(state.get("coverage_history") or [])
         current_cov = _max_cov_from_run_details(run_details)
+        plateau_detected = any(bool(detail.get("plateau_detected")) for detail in run_details)
+        plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
         prev_cov = 0
         if history:
             try:
@@ -3445,11 +3491,15 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             and (current_round < max_rounds)
         )
         next_round = current_round + (1 if should_improve else 0)
-        reason = (
-            f"round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}"
-            if should_improve
-            else "skip coverage loop"
-        )
+        reason = "skip coverage loop"
+        if should_improve:
+            if plateau_detected:
+                reason = (
+                    f"coverage plateau detected; round={next_round}/{max_rounds}, "
+                    f"max_cov={current_cov}, prev_cov={prev_cov}, idle_no_growth={plateau_idle_seconds}s"
+                )
+            else:
+                reason = f"round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}"
         history.append(
             {
                 "index": len(history) + 1,
@@ -3457,6 +3507,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "max_rounds": max_rounds,
                 "max_cov": current_cov,
                 "prev_cov": prev_cov,
+                "plateau_detected": plateau_detected,
+                "plateau_idle_seconds": plateau_idle_seconds,
                 "crash_found": bool(state.get("crash_found")),
                 "run_error_kind": str(state.get("run_error_kind") or ""),
                 "should_improve": should_improve,

@@ -52,7 +52,7 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
         fuzz_dir = tmp_path / "fuzz"
         fuzz_dir.mkdir(parents=True, exist_ok=True)
         (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-        (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp"}]\n', encoding="utf-8")
+        (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser"}]\n', encoding="utf-8")
 
     gen = SimpleNamespace(repo_root=tmp_path, _pass_plan_targets=_pass_plan_targets, patcher=_Patcher())
     monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
@@ -71,7 +71,7 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-    (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp"}]\n', encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser"}]\n', encoding="utf-8")
     antlr_ctx = fuzz_dir / "antlr_plan_context.json"
     antlr_ctx.write_text('{"entrypoint_candidates":[{"name":"parse_zip"}]}\n', encoding="utf-8")
 
@@ -123,7 +123,7 @@ def test_node_plan_clears_stale_done_before_schema_retry(tmp_path: Path, monkeyp
                 (fuzz_dir / "targets.json").write_text('{"targets":[]}\n', encoding="utf-8")
             else:
                 (fuzz_dir / "targets.json").write_text(
-                    '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp"}]\n',
+                    '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp","target_type":"parser"}]\n',
                     encoding="utf-8",
                 )
             return None
