@@ -1563,6 +1563,25 @@ class NonOssFuzzHarnessGenerator:
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
         if stdout is None:
+            partial_outputs = False
+            try:
+                for p in self.fuzz_dir.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    rel = p.relative_to(self.fuzz_dir).as_posix()
+                    if rel.startswith("out/") or rel.startswith("corpus/"):
+                        continue
+                    if (
+                        p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}
+                        or rel in {"build.py", "build.sh", "README.md", "system_packages.txt"}
+                    ):
+                        partial_outputs = True
+                        break
+            except Exception:
+                partial_outputs = False
+            if partial_outputs:
+                print("[warn] Codex exited without done sentinel, but partial synth outputs exist; deferring completeness check")
+                return
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
 
         print(f"[*] Codex synthesis done (truncated):\n{stdout[:900]}")

@@ -1177,8 +1177,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             f"{antlr_context_summary}"
         )
 
-    def _has_min_synthesis_outputs() -> bool:
+    def _synthesis_output_status() -> dict[str, Any]:
         fuzz_dir = gen.repo_root / "fuzz"
+        harnesses: list[str] = []
+        has_build_script = False
+        has_readme = False
         try:
             for p in fuzz_dir.rglob("*"):
                 if not p.is_file():
@@ -1188,10 +1191,45 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 if rel_posix.startswith("out/") or rel_posix.startswith("corpus/"):
                     continue
                 if p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}:
-                    return True
+                    harnesses.append(rel_posix)
+                if rel_posix in {"build.py", "build.sh"}:
+                    has_build_script = True
+                if rel_posix == "README.md":
+                    has_readme = True
         except Exception:
-            return False
-        return False
+            return {
+                "harnesses": [],
+                "has_harness": False,
+                "has_build_script": False,
+                "has_readme": False,
+                "has_required": False,
+                "has_partial": False,
+            }
+        return {
+            "harnesses": harnesses,
+            "has_harness": bool(harnesses),
+            "has_build_script": has_build_script,
+            "has_readme": has_readme,
+            "has_required": bool(harnesses) and has_build_script,
+            "has_partial": bool(harnesses) or has_build_script or has_readme,
+        }
+
+    def _has_min_synthesis_outputs() -> bool:
+        return bool(_synthesis_output_status().get("has_harness"))
+
+    def _has_required_synthesis_outputs() -> bool:
+        return bool(_synthesis_output_status().get("has_required"))
+
+    def _missing_synthesis_items() -> list[str]:
+        status = _synthesis_output_status()
+        missing: list[str] = []
+        if not status.get("has_harness"):
+            missing.append("one harness source file under fuzz/ (`*_fuzz.cc`, `*.c`, `*.cpp`, or `*.java`)")
+        if not status.get("has_build_script"):
+            missing.append("`fuzz/build.py` or `fuzz/build.sh`")
+        if not status.get("has_readme"):
+            missing.append("`fuzz/README.md`")
+        return missing
 
     def _synthesis_grace_wait(max_sec: int) -> bool:
         if max_sec <= 0:
@@ -1202,6 +1240,53 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 return True
             time.sleep(1)
         return _has_min_synthesis_outputs()
+
+    def _completion_context() -> str:
+        plan = gen.repo_root / "fuzz" / "PLAN.md"
+        targets = gen.repo_root / "fuzz" / "targets.json"
+        parts: list[str] = []
+        try:
+            if plan.is_file():
+                parts.append("=== fuzz/PLAN.md ===\n" + plan.read_text(encoding="utf-8", errors="replace"))
+            if targets.is_file():
+                parts.append("=== fuzz/targets.json ===\n" + targets.read_text(encoding="utf-8", errors="replace"))
+            if antlr_context_path:
+                antlr_path_obj = Path(antlr_context_path)
+                if not antlr_path_obj.is_absolute():
+                    antlr_path_obj = gen.repo_root / antlr_path_obj
+                if antlr_path_obj.is_file():
+                    parts.append(
+                        "=== fuzz/antlr_plan_context.json ===\n"
+                        + antlr_path_obj.read_text(encoding="utf-8", errors="replace")
+                    )
+            status = _synthesis_output_status()
+            if status.get("harnesses"):
+                parts.append("=== existing harness files ===\n" + "\n".join(str(x) for x in status.get("harnesses") or []))
+            build_py = gen.repo_root / "fuzz" / "build.py"
+            if build_py.is_file():
+                parts.append("=== existing fuzz/build.py ===\n" + build_py.read_text(encoding="utf-8", errors="replace"))
+            build_sh = gen.repo_root / "fuzz" / "build.sh"
+            if build_sh.is_file():
+                parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
+            readme = gen.repo_root / "fuzz" / "README.md"
+            if readme.is_file():
+                parts.append("=== existing fuzz/README.md ===\n" + readme.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            pass
+        return "\n\n".join(parts)
+
+    def _run_synthesize_completion(timeout: int) -> None:
+        missing_items = "\n".join(f"- {item}" for item in _missing_synthesis_items()) or "- no missing items detected"
+        prompt = _render_opencode_prompt("synthesize_complete_scaffold", missing_items=missing_items)
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=_completion_context() or None,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
+        )
 
     if not _has_codex_key():
         out = {
@@ -1252,8 +1337,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 grace_sec = max(0, min(int(grace_raw), 60))
             except Exception:
                 grace_sec = 15
-            # Guardrail: if hint-mode synthesis produced nothing useful, retry once
-            # with the canonical full synthesis prompt.
             if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(grace_sec):
                 remaining_after_hint = _remaining_time_budget_sec(state, min_timeout=0)
                 if remaining_after_hint <= 0:
@@ -1265,14 +1348,37 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     "synthesize: missing harness after hint-mode; retrying full synthesize",
                 )
                 gen._pass_synthesize_harness(timeout=remaining_after_hint)
+            elif not _has_required_synthesis_outputs():
+                remaining_after_hint = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_after_hint <= 0:
+                    raise HarnessGeneratorError(
+                        "synthesize incomplete after hint-mode and no remaining workflow time budget"
+                    )
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: partial scaffold detected after hint-mode; completing missing build scaffold",
+                )
+                _run_synthesize_completion(remaining_after_hint)
         else:
             remaining_direct = _remaining_time_budget_sec(state, min_timeout=0)
             if remaining_direct <= 0:
                 return _time_budget_exceeded_state(state, step_name="synthesize")
             gen._pass_synthesize_harness(timeout=_remaining_time_budget_sec(state))
+            if _has_min_synthesis_outputs() and not _has_required_synthesis_outputs():
+                remaining_after_direct = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_after_direct <= 0:
+                    raise HarnessGeneratorError("synthesize incomplete after direct synthesize and no remaining workflow time budget")
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: partial scaffold detected; completing missing build scaffold",
+                )
+                _run_synthesize_completion(remaining_after_direct)
 
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
             raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
+        if not _has_required_synthesis_outputs():
+            missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
+            raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
         out = {
             **state,
             "last_step": "synthesize",

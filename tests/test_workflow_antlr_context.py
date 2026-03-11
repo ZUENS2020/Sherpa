@@ -101,6 +101,49 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     assert "fuzz/antlr_plan_context.json" in captured.get("additional_context", "")
 
 
+def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_output(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser"}]\n',
+        encoding="utf-8",
+    )
+
+    calls: list[str] = []
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            calls.append(prompt)
+            if len(calls) == 1:
+                (fuzz_dir / "yaml_parser_parse_fuzz.cc").write_text(
+                    "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n",
+                    encoding="utf-8",
+                )
+                return None
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+
+    out = workflow_graph._node_synthesize(
+        {
+            "generator": gen,
+            "codex_hint": "use target hints",
+            "antlr_context_path": "",
+            "antlr_context_summary": "",
+        }
+    )
+
+    assert out["last_error"] == ""
+    assert len(calls) == 2
+    assert "partial scaffold under `fuzz/`" in calls[1]
+    assert (fuzz_dir / "build.py").is_file()
+
+
 def test_node_plan_clears_stale_done_before_schema_retry(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
