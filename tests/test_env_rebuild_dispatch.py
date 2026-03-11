@@ -66,6 +66,7 @@ def test_run_fuzz_job_redispatches_build_after_env_rebuild_request(monkeypatch, 
 
     cycle = _first_cycle(captured_stages)
     assert cycle[:4] == ["plan", "synthesize", "build", "build"]
+    assert cycle.count("build") == 2
 
 
 def test_run_fuzz_job_stops_after_recommended_stop_without_dispatching_repro(monkeypatch, tmp_path: Path):
