@@ -61,6 +61,25 @@ Additional instruction from coordinator:
 {{hint}}
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: synthesize_complete_scaffold -->
+You are coordinating a fuzz harness generation workflow.
+There is already a partial scaffold under `fuzz/`. Do NOT restart from scratch.
+
+Task: complete the missing scaffold items only:
+{{missing_items}}
+
+Rules:
+- Preserve existing harness/build files unless a minimal fix is required.
+- If a harness source file already exists, keep it and add/fix the missing build glue around it.
+- Prioritize creating `fuzz/build.py` first if it is missing.
+- `README.md` and `.options` files should be added after the harness and build script are in place.
+- Do NOT run any build, compile, or test commands. Only create/edit files.
+- If progress stalls, still create the missing required files immediately, then write `fuzz/out/` into `./done`.
+
+MANDATORY: you MUST create `./done` before finishing this step.
+Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: fix_build_execute -->
 You are OpenCode operating inside a Git repository.
 Task: fix the fuzz harness/build source code so the build will pass when run later.

@@ -18,9 +18,11 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
 
     assert "plan_with_hint" in templates
     assert "synthesize_with_hint" in templates
+    assert "synthesize_complete_scaffold" in templates
     assert "fix_build_execute" in templates
     assert "./done" in templates["plan_with_hint"]
     assert "./done" in templates["synthesize_with_hint"]
+    assert "./done" in templates["synthesize_complete_scaffold"]
     assert "./done" in templates["fix_build_execute"]
     assert "./done" in templates["fix_crash_harness_error"]
     assert "./done" in templates["fix_crash_upstream_bug"]
