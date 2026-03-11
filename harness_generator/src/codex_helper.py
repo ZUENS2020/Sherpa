@@ -358,14 +358,6 @@ def _run_streaming_combined(
     return rc, output_for_scan, output_tail
 
 
-def _gitnexus_auto_analyze_enabled() -> bool:
-    return _bool_env("SHERPA_GITNEXUS_AUTO_ANALYZE", True)
-
-
-def _gitnexus_skip_embeddings() -> bool:
-    return _bool_env("SHERPA_GITNEXUS_SKIP_EMBEDDINGS", True)
-
-
 def _opencode_repo_slug(working_dir: Path) -> str:
     # Keep the path readable while ensuring uniqueness across concurrent jobs.
     stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", working_dir.name or "repo").strip("-") or "repo"
@@ -816,119 +808,6 @@ class CodexHelper:
             return f"{diff_text}\n\n=== status ===\n{status_text}"
         return diff_text or status_text
 
-    def _maybe_prepare_gitnexus_context(self) -> None:
-        """Best-effort: build GitNexus index snapshot for OpenCode MCP usage.
-
-        To avoid polluting the mutable working repository (which affects diff-based
-        success detection), we copy the current working tree into a persistent
-        snapshot under SHERPA_OUTPUT_DIR and analyze that snapshot instead.
-        """
-        if not _gitnexus_auto_analyze_enabled():
-            LOGGER.info("[OpenCodeHelper] GitNexus auto analyze skipped: disabled")
-            return
-
-        env = os.environ.copy()
-
-        shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
-        if not shared_out:
-            LOGGER.warning(
-                "[OpenCodeHelper] GitNexus auto analyze skipped: SHERPA_OUTPUT_DIR is empty"
-            )
-            return
-
-        if not shutil.which("gitnexus"):
-            LOGGER.warning("[OpenCodeHelper] GitNexus auto analyze skipped: gitnexus binary not found")
-            return
-
-        snapshot_root_raw = (
-            env.get("SHERPA_GITNEXUS_SNAPSHOT_ROOT", "").strip()
-            or f"{shared_out.rstrip('/')}/.gitnexus-snapshots"
-        )
-        snapshot_root = Path(snapshot_root_raw)
-        snapshot_root.mkdir(parents=True, exist_ok=True)
-
-        repo_key = hashlib.sha1(
-            str(self.working_dir.resolve()).encode("utf-8", errors="replace")
-        ).hexdigest()[:16]
-        snapshot_dir = snapshot_root / f"repo-{repo_key}"
-
-        if snapshot_dir.exists():
-            shutil.rmtree(snapshot_dir, ignore_errors=True)
-        shutil.copytree(
-            self.working_dir,
-            snapshot_dir,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".gitnexus"),
-        )
-
-        # Preserve uncommitted state in snapshot by creating a local commit.
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "config", "user.email", "sherpa@example.com"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "config", "user.name", "sherpa"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "add", "-A"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "commit", "--allow-empty", "-m", "sherpa gitnexus snapshot"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-
-        home_dir = _resolve_opencode_home_dir(shared_out)
-        gitnexus_env = env.copy()
-        gitnexus_env["HOME"] = home_dir
-        LOGGER.info("[OpenCodeHelper] GitNexus pre-analysis starting (native): %s", snapshot_dir)
-        clean_cmd = [
-            "gitnexus",
-            "clean",
-            "--all",
-            "--force",
-        ]
-        clean_proc = subprocess.run(
-            clean_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-            env=gitnexus_env,
-        )
-        LOGGER.info("[OpenCodeHelper] GitNexus clean rc=%s", clean_proc.returncode)
-
-        analyze_cmd = [
-            "gitnexus",
-            "analyze",
-            str(snapshot_dir),
-        ]
-        if not _gitnexus_skip_embeddings():
-            analyze_cmd.append("--embeddings")
-
-        rc, _scan, tail = _run_streaming_combined(analyze_cmd, env=gitnexus_env)
-        if rc != 0:
-            LOGGER.warning(
-                "[OpenCodeHelper] GitNexus analyze failed (non-fatal, rc=%s). Tail:\n%s",
-                rc,
-                tail,
-            )
-        else:
-            LOGGER.info("[OpenCodeHelper] GitNexus snapshot analyzed: %s", snapshot_dir)
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1087,7 +966,6 @@ class CodexHelper:
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
             repo_path_hint,
-            "GitNexus MCP tooling is available for codebase dependency/call-flow analysis; use it before guessing architecture details.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "
             "not this OpenCode execution environment. Do not infer runtime availability from this environment.",
@@ -1128,11 +1006,6 @@ class CodexHelper:
         # ----------------------------------------------------------------
         # Outer loop – retry full patch attempt if no diff produced.
         # ----------------------------------------------------------------
-        try:
-            self._maybe_prepare_gitnexus_context()
-        except Exception as e:
-            LOGGER.warning("[OpenCodeHelper] GitNexus pre-analysis skipped (non-fatal): %s", e)
-
         for attempt in range(1, max_attempts + 1):
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 

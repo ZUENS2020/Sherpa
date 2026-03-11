@@ -59,7 +59,6 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, helper: ch.CodexHelper) -> No
     monkeypatch.setattr(ch, "_resolve_opencode_model", lambda env: "")
     monkeypatch.setattr(ch, "_apply_opencode_exec_policy", lambda env: None)
     monkeypatch.setattr(ch, "_append_opencode_metadata", lambda repo_root, payload: None)
-    monkeypatch.setattr(helper, "_maybe_prepare_gitnexus_context", lambda: None)
 
 
 def test_run_codex_command_requires_done_even_when_diff_exists(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

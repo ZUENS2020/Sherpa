@@ -410,12 +410,6 @@ def build_opencode_runtime_config(cfg: WebPersistentConfig) -> dict[str, Any]:
     return {
         "$schema": _OPENCODE_SCHEMA_URL,
         "provider": providers,
-        "mcp": {
-            "gitnexus": {
-                "type": "local",
-                "command": ["gitnexus", "mcp"],
-            }
-        },
     }
 
 
