@@ -156,6 +156,7 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
                 exit 1; \
               fi; \
             done; \
+
             opencode --version || true; \
             gitnexus --version || true; \
         else \
