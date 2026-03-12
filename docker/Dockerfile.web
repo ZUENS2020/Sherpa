@@ -63,6 +63,7 @@ RUN set -e; \
       -o "${workdir}/radamsa.tar.gz"; \
     tar -xzf "${workdir}/radamsa.tar.gz" -C "${workdir}"; \
     cd "${workdir}/radamsa-v${RADAMSA_VERSION}"; \
+
     make; \
     install -m 0755 bin/radamsa /usr/local/bin/radamsa; \
     cd /; \
