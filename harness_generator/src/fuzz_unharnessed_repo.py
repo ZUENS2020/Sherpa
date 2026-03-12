@@ -173,6 +173,17 @@ YAML_SEED_FAMILIES = {
     "malformed_separators",
 }
 
+FMT_SEED_FAMILIES = {
+    "replacement_fields",
+    "escaped_braces",
+    "positional_arguments",
+    "format_specifiers",
+    "width_precision",
+    "fill_align",
+    "type_conversions",
+    "malformed_replacement_fields",
+}
+
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
 
@@ -785,7 +796,7 @@ def _seed_quality_from_run(
         quality_flags.append("high_homogeneity")
     if missing_families:
         quality_flags.append("missing_required_families")
-    if repo_examples_count == 0 and any(f in YAML_SEED_FAMILIES for f in required_families):
+    if repo_examples_count == 0 and any(f in (YAML_SEED_FAMILIES | FMT_SEED_FAMILIES) for f in required_families):
         quality_flags.append("repo_examples_missing")
     return {
         "initial_corpus_files": initial_corpus_files,
@@ -828,11 +839,55 @@ def _infer_target_type(*parts: str) -> str:
     return "generic"
 
 
+def _is_fmt_format_target(*parts: str) -> bool:
+    text = " ".join(p for p in parts if p).lower()
+    return bool(
+        "fmt" in text
+        and any(tok in text for tok in ("format", "format_to", "vformat", "println", "print", "replacement field", "specifier"))
+    )
+
+
+def _looks_textual_seed(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return False
+    if not data:
+        return True
+    printable = 0
+    for b in data[:2048]:
+        if b in (9, 10, 13) or 32 <= b <= 126:
+            printable += 1
+    return (float(printable) / float(max(1, min(len(data), 2048)))) >= 0.8
+
+
+def _normalized_format_shape(text: str) -> str:
+    lowered = text.lower()
+    lowered = re.sub(r"\d+", "#", lowered)
+    lowered = re.sub(r"[a-z]+", "a", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip()
+
+
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
     profile = str(seed_profile or "").strip().lower()
     text = " ".join(p for p in parts if p).lower()
     required: list[str] = []
     optional: list[str] = []
+    if profile == "parser-format" and _is_fmt_format_target(text):
+        required.extend(
+            [
+                "replacement_fields",
+                "escaped_braces",
+                "positional_arguments",
+                "format_specifiers",
+                "width_precision",
+                "fill_align",
+                "type_conversions",
+                "malformed_replacement_fields",
+            ]
+        )
+        return required, optional
     if profile == "parser-structure":
         required.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
         optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
@@ -863,6 +918,23 @@ def _classify_seed_family(path: Path) -> set[str]:
     name = path.name.lower()
     text = read_text_safely(path)[:2048].lower()
     families: set[str] = set()
+    if "{}" in text or re.search(r"\{[^{}]*\}", text):
+        families.add("replacement_fields")
+    if "{{" in text or "}}" in text:
+        families.add("escaped_braces")
+    if re.search(r"\{[0-9]+\}", text):
+        families.add("positional_arguments")
+    if re.search(r"\{[^{}:]+:[^{}]+\}|\{:[^{}]+\}", text):
+        families.add("format_specifiers")
+    if re.search(r"\{[^{}]*(:[^{}]*[0-9]+\.[0-9]*|:[^{}]*\.[0-9]+)\}", text) or any(tok in text for tok in (".0f", ".1f", ".2f", ":.3", ":#.")):
+        families.add("width_precision")
+    if re.search(r"\{:[<>=^][^{}]*\}", text) or any(tok in text for tok in (":<", ":>", ":^", "{:*", "{:_", "{:0")):
+        families.add("fill_align")
+    if re.search(r"\{[^{}]*:[^{}]*[bcdeEfFgGosxXpn?]\}", text):
+        families.add("type_conversions")
+    if text.count("{") != text.count("}") or any(tok in text for tok in ("{", "}", "{{{", "}}}", "{:", "{0:", "{name")):
+        if not {"replacement_fields", "escaped_braces"} <= families:
+            families.add("malformed_replacement_fields")
     if any(tok in name for tok in ("delimiter-", "leading-colon", "trailing-space", "indicator-question")):
         families.add("delimiter_fragments")
     if any(tok in name for tok in ("unterminated-",)):
@@ -2299,6 +2371,13 @@ class NonOssFuzzHarnessGenerator:
         extra = guidance.get(seed_profile, guidance["generic"])
         yaml_hint = ""
         lowered = f"{fuzzer_name}\n{harness_text}".lower()
+        if seed_profile == "parser-format" and _is_fmt_format_target(fuzzer_name, harness_text):
+            extra = (
+                "Create fmt-style format-string seeds by family bucket: replacement fields (`{}`), escaped braces (`{{`/`}}`), "
+                "positional arguments (`{0}`), format specifiers (`{:x}`/`{:s}`), width/precision (`{:10.3f}`), fill/alignment (`{:_>8}`), "
+                "type conversions, and malformed replacement fields (mismatched braces, truncated specs, mixed bad fields). "
+                "Prefer textual UTF-8 seeds. Do not flood the corpus with random binary noise."
+            )
         if any(tok in lowered for tok in ("yaml", "yml")):
             yaml_hint = (
                 " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
@@ -2376,6 +2455,8 @@ class NonOssFuzzHarnessGenerator:
                 if suffix and suffix not in structured_text_suffixes and suffix not in {".fmt", ".in", ".tmpl"}:
                     rejected += 1
                     return False
+                if _is_fmt_format_target(fuzzer_name, path.name, " ".join(path.parts)):
+                    return True
                 if not any(tok in haystack for tok in ("fmt", "format", "printf", "arg", "spec", "brace", "replacement")):
                     rejected += 1
                     return False
@@ -2502,10 +2583,17 @@ class NonOssFuzzHarnessGenerator:
                 "missing separator-boundary and non-ASCII cases",
             ])
         elif seed_profile == "parser-format":
-            gaps.extend([
-                "missing mismatched brace and truncated directive cases",
-                "missing mixed named/positional field cases",
-            ])
+            if any(tok in names for tok in ("fmt", "format", "print", "println")):
+                gaps.extend([
+                    "missing replacement field / escaped brace coverage",
+                    "missing width/precision, fill/align, and type conversion cases",
+                    "missing malformed replacement field cases",
+                ])
+            else:
+                gaps.extend([
+                    "missing mismatched brace and truncated directive cases",
+                    "missing mixed named/positional field cases",
+                ])
         elif seed_profile == "parser-token":
             gaps.extend([
                 "missing delimiter-only and unterminated token cases",
@@ -2544,9 +2632,88 @@ class NonOssFuzzHarnessGenerator:
                 created += 1
         return created
 
+    def _filter_seed_corpus(
+        self,
+        corpus_dir: Path,
+        *,
+        seed_profile: str,
+        required_families: list[str],
+        target_markers: list[str] | None = None,
+    ) -> dict[str, object]:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": len(files)}
+        for path in files:
+            if path.name.startswith("repo_"):
+                raw_counts["repo_examples"] += 1
+            elif path.name.startswith("radamsa_"):
+                raw_counts["radamsa"] += 1
+            else:
+                raw_counts["ai"] += 1
+        filtered_counts = dict(raw_counts)
+        noise_rejected = 0
+        family_caps: dict[str, int] = {}
+        content_hashes: set[str] = set()
+        shape_hashes: set[str] = set()
+        textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        kept: list[Path] = []
+        for path in files:
+            reject = False
+            try:
+                data = path.read_bytes()
+            except Exception:
+                data = b""
+            if textual_mode and not _looks_textual_seed(path):
+                reject = True
+                noise_rejected += 1
+            digest = hashlib.sha256(data).hexdigest()
+            if not reject and digest in content_hashes:
+                reject = True
+            if not reject:
+                content_hashes.add(digest)
+            if textual_mode and not reject:
+                shape = _normalized_format_shape(data.decode("utf-8", errors="replace")[:512])
+                if shape and shape in shape_hashes:
+                    reject = True
+                if shape:
+                    shape_hashes.add(shape)
+            families = _classify_seed_family(path)
+            if not reject and families:
+                cap_hit = False
+                for family in sorted(families):
+                    current = family_caps.get(family, 0)
+                    cap = 3 if family in set(required_families) else 2
+                    if current >= cap:
+                        cap_hit = True
+                        break
+                if cap_hit:
+                    reject = True
+            if reject:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                if path.name.startswith("repo_"):
+                    filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
+                elif path.name.startswith("radamsa_"):
+                    filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                else:
+                    filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
+                filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
+                continue
+            kept.append(path)
+            for family in families:
+                family_caps[family] = family_caps.get(family, 0) + 1
+        return {
+            "seed_counts_raw": raw_counts,
+            "seed_counts_filtered": filtered_counts,
+            "seed_noise_rejected_count": noise_rejected,
+            "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
+        }
+
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)
         harness_text = read_text_safely(harness_src) if harness_src else ""
+        readme_text = read_text_safely(self.fuzz_dir / "README.md")
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
@@ -2557,6 +2724,7 @@ class NonOssFuzzHarnessGenerator:
             seed_profile,
             fuzzer_name,
             harness_text,
+            readme_text,
             str(selected_target.get("target_name") or ""),
             str(selected_target.get("api") or ""),
         )
@@ -2615,6 +2783,7 @@ class NonOssFuzzHarnessGenerator:
             "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
             "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
+            "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
         ]
         stdout = self.patcher.run_codex_command(
@@ -2632,6 +2801,18 @@ class NonOssFuzzHarnessGenerator:
             sources.append("radamsa")
         if ai_seed_count > 0:
             sources.append("ai")
+        filtered_meta = self._filter_seed_corpus(
+            corpus_dir,
+            seed_profile=seed_profile,
+            required_families=required_families,
+            target_markers=[
+                fuzzer_name,
+                harness_text,
+                readme_text,
+                str(selected_target.get("target_name") or ""),
+                str(selected_target.get("api") or ""),
+            ],
+        )
         self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = {
             "counts": {
                 "repo_examples": len(repo_seed_files),
@@ -2645,7 +2826,10 @@ class NonOssFuzzHarnessGenerator:
             "selected_target": dict(selected_target),
             "seed_families_required": required_families,
             "seed_families_optional": optional_families,
-            "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),

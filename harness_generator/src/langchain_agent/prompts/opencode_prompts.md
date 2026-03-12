@@ -80,7 +80,11 @@ Rules:
 - `README.md` and `.options` files should be added after the harness and build script are in place.
 - Treat `fuzz/selected_targets.json` as a preferred plan, not an unconditional hard stop.
 - Prefer the selected target when it is runtime-executable.
-- If you switch to another target, prefer the nearest runtime-executable replacement target and record the selected target, final target, and technical reason in `fuzz/README.md`.
+- If you switch to another target, prefer the nearest runtime-executable replacement target and record these exact fields in `fuzz/README.md`:
+  - `Selected target: ...`
+  - `Final target: ...`
+  - `Technical reason: ...`
+  - `Relation: ...`
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, still create the missing required files immediately, then write `fuzz/out/` into `./done`.
 

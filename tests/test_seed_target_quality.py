@@ -9,7 +9,12 @@ SRC_DIR = ROOT / "harness_generator" / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from fuzz_unharnessed_repo import NonOssFuzzHarnessGenerator, _seed_quality_from_run
+from fuzz_unharnessed_repo import (
+    NonOssFuzzHarnessGenerator,
+    _classify_seed_family,
+    _seed_families_for_target,
+    _seed_quality_from_run,
+)
 
 
 def _make_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
@@ -81,3 +86,38 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     assert "low_retention" in flags
     assert "missing_required_families" in flags
     assert "repo_examples_missing" in flags
+
+
+def test_fmt_seed_families_replace_generic_parser_format():
+    required, optional = _seed_families_for_target(
+        "parser-format",
+        "fmt::println",
+        "fmt::format_to",
+        "replacement field",
+    )
+    assert "replacement_fields" in required
+    assert "width_precision" in required
+    assert "malformed_replacement_fields" in required
+    assert optional == []
+
+
+def test_filter_seed_corpus_rejects_noisy_fmt_binary_variants(tmp_path: Path):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "println_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    (corpus_dir / "repo_01.txt").write_text("{}\n", encoding="utf-8")
+    (corpus_dir / "seed_a.txt").write_text("{:08x}\n", encoding="utf-8")
+    (corpus_dir / "seed_b.txt").write_bytes(b"\x00\xff\x10\x00\xfe")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="parser-format",
+        required_families=["replacement_fields", "format_specifiers"],
+        target_markers=["fmt::println", "fmt::format_to"],
+    )
+
+    assert filtered["seed_noise_rejected_count"] >= 1
+    kept_files = {p.name for p in corpus_dir.iterdir() if p.is_file()}
+    assert "seed_b.txt" not in kept_files
+    covered = _classify_seed_family(corpus_dir / "seed_a.txt")
+    assert "format_specifiers" in covered
