@@ -2088,13 +2088,95 @@ class NonOssFuzzHarnessGenerator:
             + yaml_hint
         )
 
-    def _collect_repo_seed_examples(self, seed_profile: str, fuzzer_name: str, corpus_dir: Path) -> tuple[list[Path], list[str]]:
+    def _collect_repo_seed_examples(self, seed_profile: str, fuzzer_name: str, corpus_dir: Path) -> tuple[list[Path], dict[str, Any]]:
         search_roots = ["tests", "examples", "regression-inputs", "testdata", "samples", "docs"]
-        text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml", ".md"}
+        structured_text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml"}
         binary_suffixes = {".bin", ".dat", ".arc", ".zip", ".tar", ".gz", ".xz", ".png", ".jpg", ".jpeg", ".gif"}
+        source_blacklist = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".html", ".md", ".rst", ".cmake", ".py", ".js", ".ts"}
+        sample_dir_tokens = ("testdata", "tests", "examples", "regression", "samples", "corpus", "data", "inputs")
         selected: list[Path] = []
         seen_hashes: set[str] = set()
+        accepted = 0
+        rejected = 0
         lowered_name = fuzzer_name.lower()
+
+        def _under_sample_dir(path: Path) -> bool:
+            parts = [part.lower() for part in path.parts]
+            return any(tok in sample_dir_tokens for tok in parts)
+
+        def _allow_path(path: Path, size: int) -> bool:
+            nonlocal rejected
+            suffix = path.suffix.lower()
+            if suffix in source_blacklist:
+                rejected += 1
+                return False
+            under_sample = _under_sample_dir(path)
+            name_hint = path.name.lower()
+            haystack = f"{name_hint} {lowered_name} {' '.join(part.lower() for part in path.parts)}"
+            if seed_profile in {"parser-structure", "document-text", "serializer-structured"}:
+                if suffix not in structured_text_suffixes:
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile in {"decoder-binary", "archive-container"}:
+                if suffix and suffix in binary_suffixes:
+                    return True
+                rejected += 1
+                return False
+            if seed_profile == "parser-format":
+                if not under_sample or size > 4096:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".fmt", ".in", ".tmpl"}:
+                    rejected += 1
+                    return False
+                if not any(tok in haystack for tok in ("fmt", "format", "printf", "arg", "spec", "brace", "replacement")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "parser-numeric":
+                if not under_sample or size > 2048:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".dat", ".in", ".txt"}:
+                    rejected += 1
+                    return False
+                if not any(tok in haystack for tok in ("id", "arg", "number", "numeric", "token", "name", "index", "field")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "parser-token":
+                if not under_sample or size > 4096:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".dat", ".in", ".txt"}:
+                    rejected += 1
+                    return False
+                if not any(tok in haystack for tok in ("token", "scan", "lex", "arg", "field", "name", "spec")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "network-message":
+                if suffix and suffix not in {".bin", ".dat", ".msg", ".pkt", ".txt", ".json", ".xml"}:
+                    rejected += 1
+                    return False
+                return under_sample
+            if seed_profile == "generic":
+                if not under_sample:
+                    rejected += 1
+                    return False
+                if size > 8192:
+                    rejected += 1
+                    return False
+                if suffix and suffix in source_blacklist:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in binary_suffixes and suffix not in {".dat", ".in", ".raw"}:
+                    rejected += 1
+                    return False
+                return True
+            return False
+
         for rel_root in search_roots:
             root = self.repo_root / rel_root
             if not root.is_dir():
@@ -2102,39 +2184,44 @@ class NonOssFuzzHarnessGenerator:
             for path in root.rglob("*"):
                 if not path.is_file():
                     continue
-                if path.stat().st_size <= 0 or path.stat().st_size > 131072:
+                try:
+                    size = path.stat().st_size
+                except Exception:
+                    rejected += 1
                     continue
-                suffix = path.suffix.lower()
-                if seed_profile in {"parser-structure", "document-text", "serializer-structured"} and suffix not in text_suffixes:
+                if size <= 0 or size > 131072:
+                    rejected += 1
                     continue
-                if seed_profile in {"decoder-binary", "archive-container"} and suffix and suffix not in binary_suffixes:
+                if not _allow_path(path, size):
                     continue
-                if seed_profile in {"parser-token", "parser-format", "parser-numeric"} and path.stat().st_size > 4096:
-                    continue
-                name_hint = path.name.lower()
-                if seed_profile == "parser-format" and not any(tok in name_hint for tok in ("fmt", "format", "printf", "arg", "spec", "brace")):
-                    pass
-                elif seed_profile == "parser-numeric" and not any(tok in f"{name_hint} {lowered_name}" for tok in ("id", "arg", "number", "numeric", "token", "name")):
-                    pass
                 try:
                     data = path.read_bytes()
                 except Exception:
+                    rejected += 1
                     continue
                 digest = hashlib.sha256(data).hexdigest()
                 if digest in seen_hashes:
+                    rejected += 1
                     continue
                 seen_hashes.add(digest)
                 dest = corpus_dir / f"repo_{len(selected)+1:02d}{path.suffix.lower()}"
                 try:
                     dest.write_bytes(data)
                 except Exception:
+                    rejected += 1
                     continue
                 selected.append(dest)
+                accepted += 1
                 if len(selected) >= 12:
                     break
             if len(selected) >= 12:
                 break
-        return selected, (["repo_examples"] if selected else [])
+        return selected, {
+            "sources": ["repo_examples"] if selected else [],
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "filtered": True,
+        }
 
     def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
@@ -2213,7 +2300,8 @@ class NonOssFuzzHarnessGenerator:
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
-        repo_seed_files, sources = self._collect_repo_seed_examples(seed_profile, fuzzer_name, corpus_dir)
+        repo_seed_files, repo_meta = self._collect_repo_seed_examples(seed_profile, fuzzer_name, corpus_dir)
+        sources = list(repo_meta.get("sources") or [])
 
         instructions = textwrap.dedent(
             f"""
@@ -2262,6 +2350,9 @@ class NonOssFuzzHarnessGenerator:
             "sources": sorted(set(sources)),
             "seed_profile": seed_profile,
             "target_type": target_type,
+            "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
+            "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
+            "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
         }
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
