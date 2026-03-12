@@ -1,45 +1,33 @@
-# K8s 部署说明
+# K8s 部署说明（简版）
 
-## 1. 部署对象
+## 常用覆盖层
 
-1. `sherpa-web`（API + 编排器）
-2. `sherpa-frontend`（Web UI）
-3. `postgres`（状态存储）
-4. 可选 `cloudflared`（内网域名映射）
+- 开发环境：`k8s/overlays/dev`
+- 生产环境：`k8s/overlays/prod`
 
-## 2. 部署命令
+## 核心组件
 
-```bash
-kubectl apply -k k8s/base
-```
+- `sherpa-web`
+- `frontend-next`
+- `postgres`
 
-## 3. 配置要求
+## 部署步骤
 
-1. `DATABASE_URL` 必填
-2. `SHERPA_EXECUTOR_MODE=k8s_job`
-3. MiniMax Key 通过 Secret 注入
+1. 构建并导入 `sherpa-web` 镜像
+2. 构建并导入 `frontend-next` 镜像
+3. `kubectl apply -k` 对应 overlay
+4. 等待 rollout 完成
+5. 用真实仓库任务做 smoke test
 
-## 4. 架构图
+## smoke test 推荐仓库
 
-```mermaid
-flowchart TB
-  subgraph NS["namespace sherpa"]
-    IN["Ingress"]
-    WEB["Deployment sherpa-web"]
-    FE["Deployment sherpa-frontend"]
-    PG["StatefulSet postgres"]
-    JOB["Job sherpa-fuzz-* (stage jobs)"]
-  end
-  IN --> WEB
-  IN --> FE
-  WEB --> PG
-  WEB --> JOB
-```
+- `https://github.com/yaml/libyaml.git`
+- `https://github.com/fmtlib/fmt.git`
+- `https://github.com/madler/zlib.git`
 
-## 5. 验证
+## 成功标准
 
-```bash
-kubectl -n sherpa get pods
-kubectl -n sherpa get svc
-kubectl -n sherpa get ingress
-```
+- `plan` 不再依赖 Docker CLI
+- `run` 能生成 seed 并写入 `run_summary.json`
+- plateau 任务在预算内正常收口
+- crash 任务能进入 `re-build/re-run`

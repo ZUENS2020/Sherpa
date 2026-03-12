@@ -1,47 +1,33 @@
-# zlib E2E 报告（模板）
+# Zlib E2E 验证模板
 
-- 日期：YYYY-MM-DD
-- 环境：k8s/base
-- 仓库：`https://github.com/madler/zlib.git`
+## 目标
+验证以下问题是否已被当前代码主线修复：
 
-## 1. 验收目标
+- target 不再优先落到浅层 `adler32` 类 utility target
+- `repo_examples` 不再把 `.c/.h/.html` 当 seed
+- `build/fix_build` 对 `LLVMFuzzerTestOneInput` 与 `-lz` 问题分类更准确
 
-1. 阶段 Job 按 `plan -> synthesize -> build -> run` 顺序执行。
-2. 任务详情返回统一可观测字段。
-3. 失败场景可追溯到阶段日志与结构化错误码。
+## 建议记录项
 
-## 2. 执行命令
+- 任务 ID
+- `fuzz/targets.json`
+- 实际落成的 harness
+- `run_summary.json`
+- `coverage_loop.target_depth_class`
+- `coverage_loop.repo_examples_*`
+- 最终 `build_error_code` / `final_build_error_code`
 
-```bash
-curl -sS -X POST http://127.0.0.1:8001/api/task \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jobs": [{
-      "code_url": "https://github.com/madler/zlib.git",
-      "total_time_budget": 900,
-      "run_time_budget": 900,
-      "max_tokens": 1000
-    }]
-  }'
+## 结果记录模板
 
-curl -sS http://127.0.0.1:8001/api/task/<job_id>
-curl -sS http://127.0.0.1:8001/api/tasks?limit=20
-```
-
-## 3. 关键观测字段
-
-1. `phase`
-2. `error_code`
-3. `error_kind`
-4. `error_signature`
-5. `k8s_job_names`
-
-## 4. 结果图（示意）
-
-```mermaid
-flowchart LR
-  P["plan ok"] --> S["synthesize ok"]
-  S --> B["build ok"]
-  B --> R["run ok"]
-  R --> D["done"]
+```text
+job_id:
+selected_target:
+selected_depth_class:
+seed_profile:
+repo_examples_accepted_count:
+repo_examples_rejected_count:
+terminal_reason:
+coverage_stop_reason:
+final_build_error_code:
+notes:
 ```
