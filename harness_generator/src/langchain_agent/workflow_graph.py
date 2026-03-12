@@ -529,10 +529,42 @@ def _load_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
-def _detect_harness_target_consistency(repo_root: Path) -> tuple[bool, str]:
+def _infer_harness_primary_api(text: str) -> str:
+    keywords = {
+        "if",
+        "for",
+        "while",
+        "switch",
+        "return",
+        "sizeof",
+        "catch",
+        "static_cast",
+        "reinterpret_cast",
+        "const_cast",
+        "dynamic_cast",
+    }
+    for match in re.finditer(r"\b([a-z_][a-z0-9_]*)\s*\(", text):
+        name = str(match.group(1) or "").strip().lower()
+        if not name or name in keywords:
+            continue
+        if name == "llvmfuzzertestoneinput":
+            continue
+        return name
+    return ""
+
+
+def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
     selected_doc = _load_selected_targets_doc(repo_root)
     if not selected_doc:
-        return True, ""
+        return {
+            "matched": True,
+            "drifted": False,
+            "expected_target_name": "",
+            "expected_api": "",
+            "observed_api": "",
+            "observed_harness": "",
+            "reason": "",
+        }
     primary = selected_doc[0]
     target_name = str(primary.get("target_name") or primary.get("name") or "").strip()
     api = str(primary.get("api") or "").strip()
@@ -543,25 +575,65 @@ def _detect_harness_target_consistency(repo_root: Path) -> tuple[bool, str]:
         and not str(p.relative_to(fuzz_dir)).startswith(("out/", "corpus/"))
     ]
     if not harnesses:
-        return True, ""
+        return {
+            "matched": True,
+            "drifted": False,
+            "expected_target_name": target_name,
+            "expected_api": api,
+            "observed_api": "",
+            "observed_harness": "",
+            "reason": "",
+        }
     normalized_target = re.sub(r"_fuzz(?:er)?$", "", target_name.lower())
     for harness in harnesses:
         rel = str(harness.relative_to(fuzz_dir)).replace("\\", "/")
         text = harness.read_text(encoding="utf-8", errors="replace").lower()
         name = harness.stem.lower()
         if api and api.lower() in text:
-            return True, ""
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": api.lower(),
+                "observed_harness": rel,
+                "reason": "",
+            }
         if normalized_target and (normalized_target in name or name in normalized_target):
-            return True, ""
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": _infer_harness_primary_api(text),
+                "observed_harness": rel,
+                "reason": "",
+            }
         if target_name and target_name.lower() in text:
-            return True, ""
-        if api:
-            m = re.search(r"([a-z_][a-z0-9_]*)\s*\(", text)
-            if m and m.group(1) and m.group(1) != api.lower():
-                continue
-        if "llvmfuzzertestoneinput" in text and api and api.lower() not in text:
-            continue
-    return False, f"selected target drift: expected api `{api or target_name}` to appear in generated harness"
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": _infer_harness_primary_api(text),
+                "observed_harness": rel,
+                "reason": "",
+            }
+    first_harness = harnesses[0]
+    first_rel = str(first_harness.relative_to(fuzz_dir)).replace("\\", "/")
+    first_text = first_harness.read_text(encoding="utf-8", errors="replace").lower()
+    observed_api = _infer_harness_primary_api(first_text)
+    expected = api or target_name
+    reason = f"selected target drift: expected api `{expected}` but observed `{observed_api or 'unknown'}`"
+    return {
+        "matched": False,
+        "drifted": True,
+        "expected_target_name": target_name,
+        "expected_api": api,
+        "observed_api": observed_api,
+        "observed_harness": first_rel,
+        "reason": reason,
+    }
 
 
 def _build_fallback_targets_doc(
@@ -1901,6 +1973,12 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     target_analysis_path = str(state.get("target_analysis_path") or "").strip()
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
     selected_targets_path = str(state.get("selected_targets_path") or "").strip()
+    selected_target_api = str(state.get("selected_target_api") or "").strip()
+    selected_target_doc = _load_selected_targets_doc(gen.repo_root)
+    selected_target_name = ""
+    if selected_target_doc:
+        selected_primary = selected_target_doc[0]
+        selected_target_name = str(selected_primary.get("target_name") or selected_primary.get("name") or "").strip()
     if antlr_context_summary and "antlr_plan_context.json" not in hint:
         hint = (
             (hint.strip() + "\n\n") if hint.strip() else ""
@@ -1915,6 +1993,21 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "Use `fuzz/target_analysis.json` to preserve the selected target's seed_profile and risk signals while generating harness/build glue.\n"
             f"{target_analysis_summary}"
         )
+    if selected_targets_path:
+        selected_target_soft_hint = (
+            "Use `fuzz/selected_targets.json` as a preferred target plan, not a hard stop.\n"
+            f"Prefer the selected target `{selected_target_api or selected_target_name or 'unknown'}` if it is runtime-executable.\n"
+            "If the selected target is compile-time-only, detail-only, constexpr-only, or otherwise not a viable runtime fuzz entrypoint,\n"
+            "you may choose a nearby runtime-executable replacement target.\n"
+            "When you do that, you MUST record in `fuzz/README.md`:\n"
+            "- the originally selected target\n"
+            "- the final target you chose\n"
+            "- the technical reason for switching\n"
+            "- how the final target relates to the original target\n"
+            "Prefer public/runtime parser APIs over generic wrappers when a direct runtime target exists."
+        )
+        if "selected_targets.json" not in hint:
+            hint = ((hint.strip() + "\n\n") if hint.strip() else "") + selected_target_soft_hint
 
     def _synthesis_output_status() -> dict[str, Any]:
         fuzz_dir = gen.repo_root / "fuzz"
@@ -2152,32 +2245,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         if not _has_required_synthesis_outputs():
             missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
             raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
-        consistent, drift_reason = _detect_harness_target_consistency(gen.repo_root)
-        if not consistent:
-            remaining_after_check = _remaining_time_budget_sec(state, min_timeout=0)
-            if remaining_after_check <= 0:
-                raise HarnessGeneratorError(drift_reason)
-            _wf_log(cast(dict[str, Any], state), f"synthesize: {drift_reason}; retrying targeted completion")
-            prompt = _render_opencode_prompt(
-                "synthesize_complete_scaffold",
-                missing_items=(
-                    "- keep the selected target from fuzz/selected_targets.json\n"
-                    "- do not switch to another api or generic wrapper target\n"
-                    "- update harness/build glue so the selected api remains the primary call path"
-                ),
+        target_alignment = _analyze_harness_target_alignment(gen.repo_root)
+        if target_alignment.get("drifted"):
+            _wf_log(
+                cast(dict[str, Any], state),
+                "synthesize: soft target drift accepted: "
+                + str(target_alignment.get("reason") or "selected target drift detected"),
             )
-            gen.patcher.run_codex_command(
-                prompt,
-                additional_context=_completion_context() or None,
-                timeout=remaining_after_check,
-                max_attempts=1,
-                max_cli_retries=_opencode_cli_retries(),
-                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
-                activity_watch_paths=_synthesize_activity_watch_paths(),
-            )
-            consistent, drift_reason = _detect_harness_target_consistency(gen.repo_root)
-            if not consistent:
-                raise HarnessGeneratorError(drift_reason or "selected_target_drift")
         out = {
             **state,
             "last_step": "synthesize",
@@ -2188,6 +2262,12 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "restart_to_plan_stage": "",
             "restart_to_plan_error_text": "",
             "restart_to_plan_report_path": "",
+            "synthesize_selected_target_name": str(target_alignment.get("expected_target_name") or selected_target_name),
+            "synthesize_selected_target_api": str(target_alignment.get("expected_api") or selected_target_api),
+            "synthesize_observed_target_api": str(target_alignment.get("observed_api") or ""),
+            "synthesize_observed_harness": str(target_alignment.get("observed_harness") or ""),
+            "synthesize_target_drifted": bool(target_alignment.get("drifted") or False),
+            "synthesize_target_drift_reason": str(target_alignment.get("reason") or ""),
             "message": "synthesized",
         }
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")

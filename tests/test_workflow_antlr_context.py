@@ -121,7 +121,7 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     assert "fuzz/selected_targets.json" in captured.get("additional_context", "")
 
 
-def test_node_synthesize_retries_when_selected_target_drifts(tmp_path: Path, monkeypatch):
+def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
@@ -136,22 +136,18 @@ def test_node_synthesize_retries_when_selected_target_drifts(tmp_path: Path, mon
     )
 
     calls = {"n": 0}
+    captured: dict[str, str] = {}
 
     class _Patcher:
         def run_codex_command(self, _prompt: str, **kwargs):
             calls["n"] += 1
-            if calls["n"] == 1:
-                (fuzz_dir / "yaml_parser_fuzz.cc").write_text(
-                    "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return yaml_parser_load_document(0, 0); }\n",
-                    encoding="utf-8",
-                )
-                (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
-                (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
-                return None
+            captured["prompt"] = _prompt
             (fuzz_dir / "yaml_parser_fuzz.cc").write_text(
-                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return yaml_parser_parse(0, 0); }\n",
+                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return yaml_parser_load_document(0, 0); }\n",
                 encoding="utf-8",
             )
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
             return None
 
     gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
@@ -162,10 +158,15 @@ def test_node_synthesize_retries_when_selected_target_drifts(tmp_path: Path, mon
             "generator": gen,
             "codex_hint": "keep target",
             "selected_targets_path": str(selected_targets),
+            "selected_target_api": "yaml_parser_parse",
         }
     )
     assert out["last_error"] == ""
-    assert calls["n"] == 2
+    assert calls["n"] == 1
+    assert out["synthesize_target_drifted"] is True
+    assert out["synthesize_selected_target_api"] == "yaml_parser_parse"
+    assert out["synthesize_observed_target_api"] == "yaml_parser_load_document"
+    assert "runtime-executable replacement target" in captured["prompt"]
 
 
 def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_output(tmp_path: Path, monkeypatch):
