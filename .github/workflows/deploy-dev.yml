@@ -54,9 +54,6 @@ jobs:
         with:
           driver-opts: |
             network=host
-            env.http_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
 
 
       - name: Setup kubectl (self-hosted fast path)

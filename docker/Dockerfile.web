@@ -49,6 +49,7 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
 
 ARG RADAMSA_VERSION="0.7"
 ARG RADAMSA_OL_URL="https://gitlab.com/owl-lisp/owl/uploads/0d0730b500976348d1e66b4a1756cdc3/ol-0.1.19.c.gz"
+ARG OWL_VERSION="v0.2.1"
 RUN set -e; \
     if apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
        && apt-get install -y --no-install-recommends radamsa; then \
@@ -65,6 +66,13 @@ RUN set -e; \
     tar -xzf "${workdir}/radamsa.tar.gz" -C "${workdir}"; \
     cd "${workdir}/radamsa-v${RADAMSA_VERSION}"; \
     sed -i "s#^OWLURL=.*#OWLURL=${RADAMSA_OL_URL}#" Makefile; \
+    git clone --depth=1 --branch "${OWL_VERSION}" https://gitlab.com/owl-lisp/owl.git owl-src; \
+    mkdir -p bin; \
+    cp owl-src/bin/fasl-build.scm bin/fasl-build.scm; \
+    cp owl-src/bin/make_c.sh bin/make_c.sh; \
+    cp -R owl-src/owl ./owl; \
+    cp -R owl-src/scheme ./scheme; \
+    cp -R owl-src/fasl ./fasl; \
     make; \
     install -m 0755 bin/radamsa /usr/local/bin/radamsa; \
     cd /; \
