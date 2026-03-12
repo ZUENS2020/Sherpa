@@ -59,10 +59,11 @@ RUN set -e; \
     rm -rf /var/lib/apt/lists/*; \
     workdir="$(mktemp -d)"; \
     curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
-      -fsSL "https://github.com/aoh/radamsa/archive/refs/tags/v${RADAMSA_VERSION}.tar.gz" \
+      -fsSL "https://gitlab.com/akihe/radamsa/-/archive/v${RADAMSA_VERSION}/radamsa-v${RADAMSA_VERSION}.tar.gz" \
       -o "${workdir}/radamsa.tar.gz"; \
     tar -xzf "${workdir}/radamsa.tar.gz" -C "${workdir}"; \
-    cd "${workdir}/radamsa-${RADAMSA_VERSION}"; \
+    cd "${workdir}/radamsa-v${RADAMSA_VERSION}"; \
+
     make; \
     install -m 0755 bin/radamsa /usr/local/bin/radamsa; \
     cd /; \
