@@ -662,8 +662,6 @@ def _readme_drift_status(repo_root: Path, alignment: dict[str, Any]) -> dict[str
         "relation": relation,
         "reason": reason,
     }
-
-
 def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
     selected_doc = _load_selected_targets_doc(repo_root)
     if not selected_doc:
