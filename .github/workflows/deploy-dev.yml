@@ -499,6 +499,33 @@ jobs:
 
       - name: Build and export web image
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
+        id: web_base
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="python:3.10-slim"
+          ok=0
+          for attempt in 1 2 3; do
+            echo "[pull] pulling ${image} (attempt ${attempt}/3)"
+            if docker pull "${image}"; then
+              ok=1
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          if [[ "${ok}" != "1" ]]; then
+            echo "::error::failed to pull ${image} after retries"
+            exit 1
+          fi
+          digest="$(docker image inspect --format='{{index .RepoDigests 0}}' "${image}" 2>/dev/null || true)"
+          if [[ -z "${digest}" ]]; then
+            echo "::error::failed to resolve repo digest for ${image}"
+            exit 1
+          fi
+          echo "web_python_base_image=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and export web image
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
         timeout-minutes: 75
         uses: docker/build-push-action@v6
         with:
@@ -506,6 +533,8 @@ jobs:
           file: docker/Dockerfile.web
           tags: ${{ steps.prep.outputs.web_image }}
           outputs: type=docker,dest=${{ steps.prep.outputs.web_tar }}
+          build-args: |
+            WEB_PYTHON_BASE_IMAGE=${{ steps.web_base.outputs.web_python_base_image }}
           cache-from: type=gha,scope=sherpa-web
           cache-to: type=gha,mode=max,scope=sherpa-web,ignore-error=true
 
