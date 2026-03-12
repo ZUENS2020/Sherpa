@@ -52,7 +52,10 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
         fuzz_dir = tmp_path / "fuzz"
         fuzz_dir.mkdir(parents=True, exist_ok=True)
         (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-        (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser"}]\n', encoding="utf-8")
+        (fuzz_dir / "targets.json").write_text(
+            '[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+            encoding="utf-8",
+        )
 
     gen = SimpleNamespace(repo_root=tmp_path, _pass_plan_targets=_pass_plan_targets, patcher=_Patcher())
     monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
@@ -71,9 +74,14 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-    (fuzz_dir / "targets.json").write_text('[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser"}]\n', encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"a","api":"b","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
     antlr_ctx = fuzz_dir / "antlr_plan_context.json"
     antlr_ctx.write_text('{"entrypoint_candidates":[{"name":"parse_zip"}]}\n', encoding="utf-8")
+    target_ctx = fuzz_dir / "target_analysis.json"
+    target_ctx.write_text('{"recommended_targets":[{"name":"a","seed_profile":"parser-structure"}]}\n', encoding="utf-8")
 
     captured: dict[str, str] = {}
 
@@ -95,10 +103,13 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
             "codex_hint": "use target hints",
             "antlr_context_path": str(antlr_ctx),
             "antlr_context_summary": "antlr_context_file=fuzz/antlr_plan_context.json",
+            "target_analysis_path": str(target_ctx),
+            "target_analysis_summary": "target_analysis_file=fuzz/target_analysis.json",
         }
     )
     assert out["last_error"] == ""
     assert "fuzz/antlr_plan_context.json" in captured.get("additional_context", "")
+    assert "fuzz/target_analysis.json" in captured.get("additional_context", "")
 
 
 def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_output(tmp_path: Path, monkeypatch):
@@ -106,7 +117,7 @@ def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_outp
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
     (fuzz_dir / "targets.json").write_text(
-        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser"}]\n',
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
         encoding="utf-8",
     )
 
@@ -166,7 +177,7 @@ def test_node_plan_clears_stale_done_before_schema_retry(tmp_path: Path, monkeyp
                 (fuzz_dir / "targets.json").write_text('{"targets":[]}\n', encoding="utf-8")
             else:
                 (fuzz_dir / "targets.json").write_text(
-                    '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp","target_type":"parser"}]\n',
+                    '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
                     encoding="utf-8",
                 )
             return None
@@ -223,3 +234,4 @@ def test_node_plan_uses_deterministic_fallback_after_retry_failure(tmp_path: Pat
     assert out["plan_used_fallback_targets"] is True
     targets = (fuzz_dir / "targets.json").read_text(encoding="utf-8")
     assert "parse_yaml_stream" in targets
+    assert '"seed_profile": "parser-structure"' in targets

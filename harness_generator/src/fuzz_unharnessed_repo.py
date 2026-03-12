@@ -149,6 +149,19 @@ ALLOWED_TARGET_TYPES = {
     "generic",
 }
 
+ALLOWED_SEED_PROFILES = {
+    "parser-structure",
+    "parser-token",
+    "parser-format",
+    "parser-numeric",
+    "decoder-binary",
+    "archive-container",
+    "serializer-structured",
+    "document-text",
+    "network-message",
+    "generic",
+}
+
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
 
@@ -739,6 +752,8 @@ class NonOssFuzzHarnessGenerator:
         self.seed_generation_timeout_sec: Optional[int] = None
         self.current_run_time_budget_sec: Optional[int] = None
         self.current_run_hard_timeout_sec: Optional[int] = None
+        self.last_seed_profile_by_fuzzer: Dict[str, str] = {}
+        self.last_seed_bootstrap_by_fuzzer: Dict[str, Dict[str, object]] = {}
         self.rss_limit_mb = rss_limit_mb
         self.max_len = max_len
         self.max_build_retries = max_build_retries
@@ -1960,7 +1975,7 @@ class NonOssFuzzHarnessGenerator:
     # Step D – Generate initial seeds
     # ────────────────────────────────────────────────────────────────────
 
-    def _resolve_seed_target_type(self, fuzzer_name: str, harness_text: str) -> str:
+    def _resolve_seed_target_metadata(self, fuzzer_name: str, harness_text: str) -> tuple[str, str]:
         targets_path = self.fuzz_dir / "targets.json"
         candidates: list[dict[str, object]] = []
         try:
@@ -1976,118 +1991,243 @@ class NonOssFuzzHarnessGenerator:
             name = str(item.get("name") or "").strip().lower()
             api = str(item.get("api") or "").strip().lower()
             target_type = str(item.get("target_type") or "").strip().lower()
+            seed_profile = str(item.get("seed_profile") or "").strip().lower()
             if target_type not in ALLOWED_TARGET_TYPES:
                 continue
             if name and (name in normalized_fuzzer or normalized_fuzzer in name):
-                return target_type
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
             if api and (api in normalized_fuzzer or normalized_fuzzer in api):
-                return target_type
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
 
         if len(candidates) == 1:
             target_type = str(candidates[0].get("target_type") or "").strip().lower()
             if target_type in ALLOWED_TARGET_TYPES:
-                return target_type
+                seed_profile = str(candidates[0].get("seed_profile") or "").strip().lower()
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
 
-        return _infer_target_type(fuzzer_name, harness_text)
+        target_type = _infer_target_type(fuzzer_name, harness_text)
+        return target_type, self._infer_seed_profile(fuzzer_name, harness_text, target_type)
 
-    def _seed_generation_guidance(self, target_type: str, fuzzer_name: str, harness_text: str) -> str:
+    def _infer_seed_profile(self, fuzzer_name: str, harness_text: str, target_type: str) -> str:
+        lowered = f"{fuzzer_name}\n{harness_text}".lower()
+        if target_type == "parser":
+            if any(tok in lowered for tok in ("arg_id", "argument id", "positional", "named arg", "named argument", "numeric", "number")):
+                return "parser-numeric"
+            if any(tok in lowered for tok in ("format", "replacement field", "specifier", "fmt::", "brace", "printf")):
+                return "parser-format"
+            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner")):
+                return "parser-token"
+            return "parser-structure"
+        mapping = {
+            "decoder": "decoder-binary",
+            "archive": "archive-container",
+            "serializer": "serializer-structured",
+            "document": "document-text",
+            "network": "network-message",
+        }
+        return mapping.get(target_type, "generic")
+
+    def _seed_generation_guidance(self, target_type: str, seed_profile: str, fuzzer_name: str, harness_text: str) -> str:
         common = (
             "Seed goal: maximize early coverage, not readability. Mix valid, boundary, and malformed inputs. "
             "Prefer small files that drive distinct parser or state-machine behaviors."
         )
         guidance = {
-            "parser": (
+            "parser-structure": (
                 "Create seeds that exercise parser state transitions: empty/minimal input, valid structured input, "
                 "deep nesting, alternate syntactic forms, truncated/incomplete forms, invalid tokens, long scalars/strings, "
-                "duplicate keys or repeated sections, and if applicable directives/tags/anchors/aliases. "
-                "For YAML-like formats include flow and block styles."
+                "duplicate keys or repeated sections, and if applicable directives/tags/anchors/aliases."
             ),
-            "decoder": (
-                "Create seeds that exercise decoder edges: shortest valid frame, maximal headers, truncated payloads, "
-                "bad checksums/lengths, repeated sections, nested containers, and malformed trailers."
+            "parser-token": (
+                "Create token-oriented parser seeds: single token, repeated tokens, delimiter-only inputs, "
+                "whitespace-prefixed tokens, unterminated tokens, malformed separator placement, and short malformed fragments."
             ),
-            "archive": (
-                "Create seeds for valid and malformed archives: minimal single-entry archive, multiple entries, "
-                "nested paths, long names, metadata edge cases, truncated central directory or footer, and invalid sizes."
+            "parser-format": (
+                "Create format-string parser seeds: bare text, single replacement fields, nested or mismatched braces, "
+                "width/precision markers, invalid specifier suffixes, mixed named/positional fields, and truncated directives."
             ),
-            "image": (
-                "Create seeds for valid and malformed images: tiny valid image, alternate chunk/segment ordering, "
-                "oversized dimensions, truncated headers, malformed metadata chunks, and repeated ancillary chunks."
+            "parser-numeric": (
+                "Create numeric/token parser seeds: `0`, `1`, `42`, leading zeros, extremely long numeric ids, mixed alpha-numeric boundaries, "
+                "truncated ids, invalid starter characters, separator-boundary tokens such as `:`, `}`, `]`, `,`, `{`, `[`, and high-byte cases."
             ),
-            "document": (
-                "Create seeds for structured documents: minimal valid doc, nested sections, metadata blocks, "
-                "embedded markup, malformed closing markers, and truncated bodies."
+            "decoder-binary": (
+                "Create binary decoder seeds: shortest valid frame, maximal headers, truncated payloads, bad checksums/lengths, "
+                "nested containers, malformed trailers, and magic-byte variations."
             ),
-            "network": (
-                "Create seeds for packet/message parsing: minimal valid message, alternate message types, "
-                "length mismatches, partial frames, repeated headers, malformed fields, and boundary numeric values."
+            "archive-container": (
+                "Create valid and malformed archive/container seeds: minimal single-entry container, multiple entries, nested paths, "
+                "long names, metadata edge cases, truncated directory/footer, invalid sizes, and corrupted magic headers."
             ),
-            "database": (
-                "Create seeds for record/query/database parsing: minimal schema/record, nested records, invalid offsets, "
-                "truncated pages, malformed metadata, and boundary integer sizes."
+            "serializer-structured": (
+                "Create structured serializer seeds: empty object, nested object, repeated fields, large strings, invalid tags, "
+                "alternate encodings, and partially malformed structures."
             ),
-            "serializer": (
-                "Create seeds that stress serializer round-trip input models: empty object, nested object, repeated fields, "
-                "large strings, invalid tags, alternate encodings, and partially malformed structures."
+            "document-text": (
+                "Create text document seeds: minimal valid document, nested sections, metadata blocks, embedded markup, "
+                "malformed closing markers, and truncated bodies."
             ),
-            "interpreter": (
-                "Create seeds for interpreter/compiler inputs: minimal program, nested control flow, malformed tokens, "
-                "unterminated constructs, repeated operators, deep expression trees, and boundary literals."
+            "network-message": (
+                "Create packet/message seeds: minimal valid message, alternate message types, length mismatches, partial frames, "
+                "repeated headers, malformed fields, and boundary numeric values."
             ),
             "generic": (
                 "Create diverse seeds: empty input, smallest valid sample, largest small sample, malformed/truncated input, "
                 "repeated delimiters, and boundary numeric/text values."
             ),
         }
-        extra = guidance.get(target_type, guidance["generic"])
+        extra = guidance.get(seed_profile, guidance["generic"])
         yaml_hint = ""
         lowered = f"{fuzzer_name}\n{harness_text}".lower()
-        profile_hints: list[str] = []
-        if target_type == "parser":
-            if any(tok in lowered for tok in ("arg_id", "argument id", "positional", "named arg", "named argument")):
-                profile_hints.append(
-                    " This parser looks like a narrow token parser for argument identifiers. Include positional ids "
-                    "(`0`, `1`, `42`), named ids (`name`, `arg1`), leading zeros, extremely long numeric ids, mixed "
-                    "alpha-numeric boundaries, truncated ids, invalid starter characters, separator-boundary tokens "
-                    "such as `:`, `}`, `]`, `,`, `{`, `[`, and a few high-byte or non-ASCII cases."
-                )
-            if any(tok in lowered for tok in ("format", "replacement field", "compile.h", "fmt::", "brace")):
-                profile_hints.append(
-                    " This parser is format-string related. Include bare text, single replacement fields, nested or "
-                    "mismatched braces, width/precision markers, invalid specifier suffixes, mixed named/positional "
-                    "fields, and truncated format directives."
-                )
-            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan")):
-                profile_hints.append(
-                    " Prefer seeds that isolate token boundaries: single token, repeated tokens, delimiter-only "
-                    "inputs, whitespace-prefixed tokens, unterminated tokens, and malformed separator placement."
-                )
         if any(tok in lowered for tok in ("yaml", "yml")):
             yaml_hint = (
                 " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
                 "flow collections (`[]`/`{}`), tags, directives, malformed indentation, and truncated nested mappings."
             )
         return (
-            f"Target type for `{fuzzer_name}` is `{target_type}`. {common} {extra}"
-            + "".join(profile_hints)
+            f"Target type for `{fuzzer_name}` is `{target_type}` and seed_profile is `{seed_profile}`. {common} {extra}"
             + yaml_hint
         )
+
+    def _collect_repo_seed_examples(self, seed_profile: str, fuzzer_name: str, corpus_dir: Path) -> tuple[list[Path], list[str]]:
+        search_roots = ["tests", "examples", "regression-inputs", "testdata", "samples", "docs"]
+        text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml", ".md"}
+        binary_suffixes = {".bin", ".dat", ".arc", ".zip", ".tar", ".gz", ".xz", ".png", ".jpg", ".jpeg", ".gif"}
+        selected: list[Path] = []
+        seen_hashes: set[str] = set()
+        lowered_name = fuzzer_name.lower()
+        for rel_root in search_roots:
+            root = self.repo_root / rel_root
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.stat().st_size <= 0 or path.stat().st_size > 131072:
+                    continue
+                suffix = path.suffix.lower()
+                if seed_profile in {"parser-structure", "document-text", "serializer-structured"} and suffix not in text_suffixes:
+                    continue
+                if seed_profile in {"decoder-binary", "archive-container"} and suffix and suffix not in binary_suffixes:
+                    continue
+                if seed_profile in {"parser-token", "parser-format", "parser-numeric"} and path.stat().st_size > 4096:
+                    continue
+                name_hint = path.name.lower()
+                if seed_profile == "parser-format" and not any(tok in name_hint for tok in ("fmt", "format", "printf", "arg", "spec", "brace")):
+                    pass
+                elif seed_profile == "parser-numeric" and not any(tok in f"{name_hint} {lowered_name}" for tok in ("id", "arg", "number", "numeric", "token", "name")):
+                    pass
+                try:
+                    data = path.read_bytes()
+                except Exception:
+                    continue
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in seen_hashes:
+                    continue
+                seen_hashes.add(digest)
+                dest = corpus_dir / f"repo_{len(selected)+1:02d}{path.suffix.lower()}"
+                try:
+                    dest.write_bytes(data)
+                except Exception:
+                    continue
+                selected.append(dest)
+                if len(selected) >= 12:
+                    break
+            if len(selected) >= 12:
+                break
+        return selected, (["repo_examples"] if selected else [])
+
+    def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        if not files:
+            return "No existing corpus files."
+        parts: list[str] = []
+        for path in files[:12]:
+            try:
+                size = path.stat().st_size
+            except Exception:
+                size = 0
+            parts.append(f"- {path.name} ({size} bytes)")
+        return "Existing corpus files:\n" + "\n".join(parts)
+
+    def _infer_seed_gaps(self, seed_profile: str, corpus_dir: Path) -> str:
+        names = " ".join(p.name.lower() for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else ""
+        gaps: list[str] = []
+        if seed_profile == "parser-structure":
+            if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
+                gaps.append("missing malformed/truncated parser cases")
+            if not any(tok in names for tok in ("deep", "nested", "alias", "anchor", "flow")):
+                gaps.append("missing deep nesting / alternate syntax forms")
+        elif seed_profile == "parser-numeric":
+            gaps.extend([
+                "missing long numeric ids and leading-zero cases",
+                "missing separator-boundary and non-ASCII cases",
+            ])
+        elif seed_profile == "parser-format":
+            gaps.extend([
+                "missing mismatched brace and truncated directive cases",
+                "missing mixed named/positional field cases",
+            ])
+        elif seed_profile == "parser-token":
+            gaps.extend([
+                "missing delimiter-only and unterminated token cases",
+                "missing malformed separator placement cases",
+            ])
+        elif seed_profile == "decoder-binary":
+            gaps.append("missing malformed length/checksum and truncated binary frames")
+        elif seed_profile == "archive-container":
+            gaps.append("missing truncated footer/directory and corrupted magic cases")
+        return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
+
+    def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
+        radamsa = which("radamsa")
+        if not radamsa:
+            print("[warn] radamsa not found; skipping corpus mutation")
+            return 0
+        base_files = [p for p in sorted(corpus_dir.iterdir()) if p.is_file()][:12]
+        if not base_files:
+            return 0
+        created = 0
+        total_bytes = sum((p.stat().st_size for p in corpus_dir.iterdir() if p.is_file()), 0)
+        max_total = 512 * 1024
+        for path in base_files:
+            for variant in range(2):
+                if created >= 24 or total_bytes >= max_total:
+                    return created
+                dest = corpus_dir / f"radamsa_{created+1:02d}{path.suffix.lower()}"
+                proc = subprocess.run([radamsa, str(path)], capture_output=True)
+                if proc.returncode != 0 or not proc.stdout:
+                    continue
+                data = proc.stdout[: min(len(proc.stdout), 32768)]
+                if total_bytes + len(data) > max_total:
+                    return created
+                dest.write_bytes(data)
+                total_bytes += len(data)
+                created += 1
+        return created
 
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)
         harness_text = read_text_safely(harness_src) if harness_src else ""
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
-        target_type = self._resolve_seed_target_type(fuzzer_name, harness_text)
-        seed_guidance = self._seed_generation_guidance(target_type, fuzzer_name, harness_text)
+        target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+        seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
+        repo_seed_files, sources = self._collect_repo_seed_examples(seed_profile, fuzzer_name, corpus_dir)
 
         instructions = textwrap.dedent(
             f"""
-            Create 1–5 **meaningful seed files** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            new harness `{fuzzer_name}`. Use appropriate file extensions if known. If binary, you may write
-            contents via hex bytes.
+            Add 1–5 **high-value warm-up seed files** inside `{corpus_dir.relative_to(self.repo_root)}` for the
+            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and add only missing cases.
+            Use appropriate file extensions if known. If binary, you may write contents via hex bytes.
 
             {seed_guidance}
+
+            Current corpus summary:
+            {self._summarize_seed_corpus(corpus_dir)}
+
+            Coverage-oriented gap hints:
+            {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
             Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
@@ -2104,6 +2244,25 @@ class NonOssFuzzHarnessGenerator:
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not generate any seed files.")
+        ai_seed_count = len([p for p in corpus_dir.iterdir() if p.is_file()]) - len(repo_seed_files)
+        if ai_seed_count < 0:
+            ai_seed_count = 0
+        radamsa_count = self._run_radamsa_bootstrap(corpus_dir)
+        if radamsa_count > 0:
+            sources.append("radamsa")
+        if ai_seed_count > 0:
+            sources.append("ai")
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = {
+            "counts": {
+                "repo_examples": len(repo_seed_files),
+                "ai": ai_seed_count,
+                "radamsa": radamsa_count,
+                "total": len([p for p in corpus_dir.iterdir() if p.is_file()]),
+            },
+            "sources": sorted(set(sources)),
+            "seed_profile": seed_profile,
+            "target_type": target_type,
+        }
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────

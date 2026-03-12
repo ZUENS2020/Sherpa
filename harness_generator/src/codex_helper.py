@@ -159,6 +159,7 @@ def _append_opencode_metadata(repo_root: Path, payload: dict) -> None:
 
 def _build_blocklist() -> list[str]:
     # Default: block build/test/fuzz/run commands but allow read-only tools.
+    always_allow = {"grep", "egrep", "fgrep", "rg", "ripgrep"}
     default = [
         "make",
         "cmake",
@@ -203,7 +204,7 @@ def _build_blocklist() -> list[str]:
     }
     merged = []
     for c in default + extra:
-        if c and c not in allow and c not in merged:
+        if c and c not in allow and c not in always_allow and c not in merged:
             merged.append(c)
     return merged
 
@@ -972,7 +973,7 @@ class CodexHelper:
             "Typical runtime images are sherpa-fuzz-cpp:latest or sherpa-fuzz-java:latest; "
             "OpenCode must only edit source files and must not attempt runtime verification.",
             "CRITICAL RULE: You MUST NOT execute build/test/fuzz commands or run binaries. "
-            "Read-only commands (rg, ls, cat, find, sed) are allowed for inspection. "
+            "Read-only commands (grep, egrep, fgrep, rg, ripgrep, ls, cat, find, sed) are allowed for inspection. "
             "Your ONLY job is to create and edit source files. "
             "Do NOT run cmake, make, gcc, clang, python, cargo, javac, mvn, gradle, npm, or similar build/run tools. "
             "The build and test steps are handled by a separate automated system. "

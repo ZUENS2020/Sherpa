@@ -12,3 +12,6 @@ langchain-openai>=0.1
 langgraph>=0.2
 openai>=1.0
 psycopg[binary]>=3.2
+tree_sitter>=0.22
+tree_sitter_language_pack>=0.6
+semgrep>=1.118

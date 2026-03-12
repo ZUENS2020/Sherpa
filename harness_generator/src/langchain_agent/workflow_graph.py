@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -47,8 +49,19 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_should_improve: bool
     coverage_improve_reason: str
     coverage_history: list[dict[str, Any]]
+    coverage_target_name: str
+    coverage_seed_profile: str
+    coverage_plateau_streak: int
+    coverage_last_max_cov: int
+    coverage_last_ft: int
+    coverage_replan_required: bool
+    coverage_improve_mode: str
+    coverage_corpus_sources: list[str]
+    coverage_seed_counts: dict[str, int]
     antlr_context_path: str
     antlr_context_summary: str
+    target_analysis_path: str
+    target_analysis_summary: str
     plan_retry_reason: str
     plan_targets_schema_valid_before_retry: bool
     plan_targets_schema_valid_after_retry: bool
@@ -338,7 +351,32 @@ def _infer_target_lang_from_repo(repo_root: Path, *, file_hint: str = "") -> str
     return "c-cpp"
 
 
-def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = "") -> list[dict[str, str]]:
+def _infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
+    text = f"{name}\n{context}".lower()
+    if target_type == "parser":
+        if any(tok in text for tok in ("arg_id", "argument id", "positional", "named argument", "named arg", "number", "numeric")):
+            return "parser-numeric"
+        if any(tok in text for tok in ("format", "replacement field", "specifier", "brace", "printf", "fmt")):
+            return "parser-format"
+        if any(tok in text for tok in ("token", "lexer", "lex", "scan", "scanner")):
+            return "parser-token"
+        return "parser-structure"
+    mapping = {
+        "decoder": "decoder-binary",
+        "archive": "archive-container",
+        "serializer": "serializer-structured",
+        "document": "document-text",
+        "network": "network-message",
+    }
+    return mapping.get(target_type, "generic")
+
+
+def _build_fallback_targets_doc(
+    repo_root: Path,
+    *,
+    antlr_context_path: str = "",
+    target_analysis_path: str = "",
+) -> list[dict[str, str]]:
     ctx_doc: dict[str, Any] = {}
     ctx_path = Path(antlr_context_path).expanduser().resolve() if antlr_context_path else None
     if ctx_path and ctx_path.is_file():
@@ -348,9 +386,22 @@ def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = ""
                 ctx_doc = loaded
         except Exception:
             ctx_doc = {}
+    analysis_doc: dict[str, Any] = {}
+    analysis_path = Path(target_analysis_path).expanduser().resolve() if target_analysis_path else None
+    if analysis_path and analysis_path.is_file():
+        try:
+            loaded = json.loads(analysis_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(loaded, dict):
+                analysis_doc = loaded
+        except Exception:
+            analysis_doc = {}
 
     candidates: list[dict[str, str]] = []
-    raw_candidates = list(ctx_doc.get("entrypoint_candidates") or []) + list(ctx_doc.get("candidate_functions") or [])
+    raw_candidates = (
+        list(analysis_doc.get("recommended_targets") or [])
+        + list(ctx_doc.get("entrypoint_candidates") or [])
+        + list(ctx_doc.get("candidate_functions") or [])
+    )
     seen: set[tuple[str, str]] = set()
     for item in raw_candidates:
         if not isinstance(item, dict):
@@ -370,6 +421,7 @@ def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = ""
                 "api": name,
                 "lang": lang,
                 "target_type": _infer_target_type(name, file_hint),
+                "seed_profile": _infer_seed_profile(name, file_hint, target_type=_infer_target_type(name, file_hint)),
             }
         )
         if len(candidates) >= 3:
@@ -384,15 +436,25 @@ def _build_fallback_targets_doc(repo_root: Path, *, antlr_context_path: str = ""
             "api": "default_target",
             "lang": _infer_target_lang_from_repo(repo_root),
             "target_type": "generic",
+            "seed_profile": "generic",
         }
     ]
 
 
-def _write_fallback_targets_json(repo_root: Path, *, antlr_context_path: str = "") -> bool:
+def _write_fallback_targets_json(
+    repo_root: Path,
+    *,
+    antlr_context_path: str = "",
+    target_analysis_path: str = "",
+) -> bool:
     fuzz_dir = repo_root / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     targets_path = fuzz_dir / "targets.json"
-    doc = _build_fallback_targets_doc(repo_root, antlr_context_path=antlr_context_path)
+    doc = _build_fallback_targets_doc(
+        repo_root,
+        antlr_context_path=antlr_context_path,
+        target_analysis_path=target_analysis_path,
+    )
     try:
         targets_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except Exception:
@@ -766,6 +828,267 @@ def _prepare_antlr_assist_context(repo_root: Path) -> tuple[str, str]:
         return "", ""
 
 
+def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
+    def _ext_to_ts_language(ext: str) -> str:
+        ext = ext.lower()
+        if ext in {".c", ".h"}:
+            return "c"
+        if ext in {".cc", ".cpp", ".cxx", ".hh", ".hpp"}:
+            return "cpp"
+        if ext == ".java":
+            return "java"
+        return ""
+
+    def _extract_tree_sitter_functions(path: Path, rel: str) -> list[dict[str, Any]]:
+        try:
+            tslp = importlib.import_module("tree_sitter_language_pack")
+            get_parser = getattr(tslp, "get_parser", None)
+            if not callable(get_parser):
+                return []
+            language = _ext_to_ts_language(path.suffix)
+            if not language:
+                return []
+            parser = get_parser(language)
+            data = path.read_bytes()
+            tree = parser.parse(data)
+            out: list[dict[str, Any]] = []
+
+            def _node_text(node: Any) -> str:
+                try:
+                    return data[int(node.start_byte) : int(node.end_byte)].decode("utf-8", errors="replace")
+                except Exception:
+                    return ""
+
+            def _walk(node: Any) -> None:
+                if len(out) >= 80:
+                    return
+                node_type = str(getattr(node, "type", "") or "")
+                if node_type in {"function_definition", "method_declaration"}:
+                    snippet = _node_text(node)
+                    m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", snippet)
+                    name = str(m.group(1) or "").strip() if m else ""
+                    if name and name not in {"if", "for", "while", "switch", "catch"}:
+                        target_type = _infer_target_type(name, rel)
+                        out.append(
+                            {
+                                "name": name,
+                                "signature": " ".join(snippet.split())[:240],
+                                "file": rel,
+                                "line": int(getattr(node, "start_point", (0, 0))[0]) + 1,
+                                "target_type": target_type,
+                                "seed_profile": _infer_seed_profile(name, snippet, target_type=target_type),
+                                "risk_signals": [],
+                                "analysis_source": "tree-sitter",
+                            }
+                        )
+                for child in getattr(node, "children", []) or []:
+                    _walk(child)
+
+            _walk(tree.root_node)
+            return out
+        except Exception:
+            return []
+
+    def _run_semgrep_rules(root: Path) -> tuple[bool, dict[str, list[str]]]:
+        semgrep_bin = shutil.which("semgrep")
+        if not semgrep_bin:
+            return False, {}
+        tmp_path = ""
+        rules_doc = {
+            "rules": [
+                {
+                    "id": "parser-like",
+                    "languages": ["c", "cpp", "java"],
+                    "message": "parser-like",
+                    "severity": "INFO",
+                    "pattern-regex": r"(parse|scan|lexer|token|load|decode|emit|dump|serialize|format|arg_id)",
+                },
+                {
+                    "id": "bounds",
+                    "languages": ["c", "cpp", "java"],
+                    "message": "bounds",
+                    "severity": "INFO",
+                    "pattern-regex": r"(memcpy|memmove|strncpy|size_t|length|len|offset|index)",
+                },
+                {
+                    "id": "state-machine",
+                    "languages": ["c", "cpp", "java"],
+                    "message": "state-machine",
+                    "severity": "INFO",
+                    "pattern-regex": r"(state|transition|consume|next|advance|dispatch|handler)",
+                },
+            ]
+        }
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yml", encoding="utf-8", delete=False) as fh:
+                json.dump(rules_doc, fh)
+                tmp_path = fh.name
+            proc = subprocess.run(
+                [semgrep_bin, "scan", "--json", "--config", tmp_path, str(root)],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            if proc.returncode not in {0, 1}:
+                return True, {}
+            doc = json.loads(proc.stdout or "{}")
+            result_map: dict[str, list[str]] = {}
+            for item in doc.get("results") or []:
+                path = str(((item.get("path") or "") if isinstance(item, dict) else "")).strip()
+                rule_id = str(((item.get("check_id") or "") if isinstance(item, dict) else "")).strip()
+                if not path or not rule_id:
+                    continue
+                rel = str(Path(path).resolve().relative_to(root.resolve())).replace("\\", "/") if Path(path).is_absolute() else path.replace("\\", "/")
+                result_map.setdefault(rel, [])
+                if rule_id not in result_map[rel]:
+                    result_map[rel].append(rule_id)
+            return True, result_map
+        except Exception:
+            return True, {}
+        finally:
+            try:
+                if tmp_path:
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    tree_sitter_enabled = importlib.util.find_spec("tree_sitter_language_pack") is not None
+    semgrep_enabled, semgrep_hits = _run_semgrep_rules(repo_root)
+
+    source_exts = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".java"}
+    skip_prefixes = (
+        ".git/",
+        "fuzz/out/",
+        "fuzz/build/",
+        "fuzz/corpus/",
+        "node_modules/",
+        ".next/",
+        "dist/",
+    )
+    source_files: list[Path] = []
+    for p in sorted(repo_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(repo_root)).replace("\\", "/")
+        if any(rel.startswith(pref) for pref in skip_prefixes):
+            continue
+        if p.suffix.lower() in source_exts:
+            source_files.append(p)
+        if len(source_files) >= 120:
+            break
+
+    semgrep_rules = [
+        {"id": "parser-like", "pattern": r"(parse|scan|lexer|token|load|decode|emit|dump|serialize|format|arg_id)"},
+        {"id": "bounds", "pattern": r"(memcpy|memmove|strncpy|size_t|length|len|offset|index)"},
+        {"id": "state-machine", "pattern": r"(state|transition|consume|next|advance|dispatch|handler)"},
+    ]
+    candidate_functions: list[dict[str, Any]] = []
+    for p in source_files:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        rel = str(p.relative_to(repo_root)).replace("\\", "/")
+        ts_candidates = _extract_tree_sitter_functions(p, rel) if tree_sitter_enabled else []
+        if ts_candidates:
+            candidate_functions.extend(ts_candidates[:40])
+            if len(candidate_functions) >= 240:
+                break
+
+        matches = re.finditer(
+            r"(?m)^\s*(?:static\s+|inline\s+|extern\s+|virtual\s+|const\s+|constexpr\s+|unsigned\s+|signed\s+|long\s+|short\s+|struct\s+|class\s+|template\s*<[^>]+>\s*)*"
+            r"[A-Za-z_][A-Za-z0-9_:<>\s\*&]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^;\n{}]*)\)\s*\{",
+            text,
+        )
+        for m in matches:
+            name = str(m.group(1) or "").strip()
+            if name in {"if", "for", "while", "switch", "catch"} or len(name) < 2:
+                continue
+            signature = f"{name}({' '.join(str(m.group(2) or '').split())})"[:240]
+            line_no = text[: m.start()].count("\n") + 1
+            target_type = _infer_target_type(name, rel)
+            risk_signals = [rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)]
+            for rule_id in semgrep_hits.get(rel, []):
+                if rule_id not in risk_signals:
+                    risk_signals.append(rule_id)
+            candidate_functions.append(
+                {
+                    "name": name,
+                    "signature": signature,
+                    "file": rel,
+                    "line": line_no,
+                    "target_type": target_type,
+                    "seed_profile": _infer_seed_profile(name, signature, target_type=target_type),
+                    "risk_signals": risk_signals,
+                    "analysis_source": "regex",
+                }
+            )
+            if len(candidate_functions) >= 240:
+                break
+        if len(candidate_functions) >= 240:
+            break
+
+    recommended_targets = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidate_functions:
+        risk = list(item.get("risk_signals") or [])
+        if not risk and str(item.get("target_type") or "") == "generic":
+            continue
+        key = (str(item.get("name") or ""), str(item.get("file") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        recommended_targets.append(
+            {
+                "name": str(item.get("name") or ""),
+                "api": str(item.get("name") or ""),
+                "lang": _infer_target_lang_from_repo(repo_root, file_hint=str(item.get("file") or "")),
+                "target_type": str(item.get("target_type") or "generic"),
+                "seed_profile": str(item.get("seed_profile") or "generic"),
+                "risk_signals": risk,
+                "file": str(item.get("file") or ""),
+            }
+        )
+        if len(recommended_targets) >= 24:
+            break
+
+    return {
+        "mode": "tool-assisted-target-analysis",
+        "enabled": True,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "repo_root": str(repo_root),
+        "source_files_scanned": [str(p.relative_to(repo_root)).replace("\\", "/") for p in source_files],
+        "candidate_functions": candidate_functions,
+        "recommended_targets": recommended_targets,
+        "rules": semgrep_rules,
+        "tree_sitter_enabled": tree_sitter_enabled,
+        "semgrep_enabled": semgrep_enabled,
+        "analysis_backend": "regex-fallback",
+    }
+
+
+def _prepare_target_analysis_context(repo_root: Path) -> tuple[str, str]:
+    try:
+        doc = _collect_target_analysis_context(repo_root)
+        fuzz_dir = repo_root / "fuzz"
+        fuzz_dir.mkdir(parents=True, exist_ok=True)
+        ctx_path = fuzz_dir / "target_analysis.json"
+        ctx_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        top_targets = [
+            f"{str(x.get('name') or '')}:{str(x.get('seed_profile') or '')}"
+            for x in (doc.get("recommended_targets") or [])[:8]
+            if x.get("name")
+        ]
+        summary = (
+            f"target_analysis_file=fuzz/target_analysis.json; "
+            f"candidates={len(doc.get('candidate_functions') or [])}; "
+            f"recommended={', '.join(top_targets) if top_targets else 'n/a'}"
+        )
+        return str(ctx_path), summary
+    except Exception:
+        return "", ""
+
+
 @dataclass(frozen=True)
 class FuzzWorkflowInput:
     repo_url: str
@@ -911,15 +1234,26 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
             "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
             "coverage_history": list(state.get("coverage_history") or []),
+            "coverage_target_name": str(state.get("coverage_target_name") or ""),
+            "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
+            "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
+            "coverage_last_max_cov": int(state.get("coverage_last_max_cov") or 0),
+            "coverage_last_ft": int(state.get("coverage_last_ft") or 0),
+            "coverage_replan_required": bool(state.get("coverage_replan_required") or False),
+            "coverage_improve_mode": str(state.get("coverage_improve_mode") or ""),
+            "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
+            "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
             "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
+            "target_analysis_path": str(state.get("target_analysis_path") or ""),
+            "target_analysis_summary": str(state.get("target_analysis_summary") or ""),
         },
     )
 
     # Restore crash context from previous run stage when repro/fix is resumed
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
-    if resume_step in {"coverage-analysis", "improve-harness", "repro_crash", "re-build", "re-run", "fix_crash"}:
+    if resume_step in {"plan", "synthesize", "build", "run", "coverage-analysis", "improve-harness", "repro_crash", "re-build", "re-run", "fix_crash"}:
         try:
             repro_doc = _read_repro_context(generator.repo_root)
             if isinstance(repro_doc, dict):
@@ -958,6 +1292,15 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                         out["coverage_history"] = list(
                             coverage_loop.get("history") or out.get("coverage_history") or []
                         )
+                        out["coverage_target_name"] = str(coverage_loop.get("target_name") or out.get("coverage_target_name") or "")
+                        out["coverage_seed_profile"] = str(coverage_loop.get("seed_profile") or out.get("coverage_seed_profile") or "")
+                        out["coverage_plateau_streak"] = int(coverage_loop.get("plateau_streak") or out.get("coverage_plateau_streak") or 0)
+                        out["coverage_last_max_cov"] = int(coverage_loop.get("last_max_cov") or out.get("coverage_last_max_cov") or 0)
+                        out["coverage_last_ft"] = int(coverage_loop.get("last_ft") or out.get("coverage_last_ft") or 0)
+                        out["coverage_replan_required"] = bool(coverage_loop.get("replan_required") or out.get("coverage_replan_required") or False)
+                        out["coverage_improve_mode"] = str(coverage_loop.get("improve_mode") or out.get("coverage_improve_mode") or "")
+                        out["coverage_corpus_sources"] = list(coverage_loop.get("corpus_sources") or out.get("coverage_corpus_sources") or [])
+                        out["coverage_seed_counts"] = dict(coverage_loop.get("seed_counts") or out.get("coverage_seed_counts") or {})
                     plan_policy = doc.get("plan_policy")
                     if isinstance(plan_policy, dict):
                         out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
@@ -1024,12 +1367,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     restart_error_text = str(state.get("restart_to_plan_error_text") or "").strip()
     restart_report_path = str(state.get("restart_to_plan_report_path") or "").strip()
     antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+    target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
     if antlr_context_summary:
         antlr_note = (
             "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
             f"{antlr_context_summary}"
         )
         hint = (hint + "\n\n" + antlr_note).strip() if hint else antlr_note
+    if target_analysis_summary:
+        target_note = (
+            "Tool-assisted target analysis is available. Use `fuzz/target_analysis.json` when selecting targets and seed profiles.\n"
+            f"{target_analysis_summary}"
+        )
+        hint = (hint + "\n\n" + target_note).strip() if hint else target_note
     injected_ctx = ""
     if restart_to_plan:
         report_tail = ""
@@ -1099,6 +1449,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 plan_used_fallback_targets = _write_fallback_targets_json(
                     gen.repo_root,
                     antlr_context_path=antlr_context_path,
+                    target_analysis_path=target_analysis_path,
                 )
                 ok_targets, targets_err = _validate_targets_json(gen.repo_root)
                 if ok_targets:
@@ -1142,6 +1493,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "plan_used_fallback_targets": plan_used_fallback_targets,
             "antlr_context_path": antlr_context_path,
             "antlr_context_summary": antlr_context_summary,
+            "target_analysis_path": target_analysis_path,
+            "target_analysis_summary": target_analysis_summary,
             "restart_to_plan": restart_to_plan,
             "restart_to_plan_reason": restart_reason,
             "restart_to_plan_stage": restart_stage,
@@ -1169,12 +1522,21 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     hint = (state.get("codex_hint") or "").strip()
     antlr_context_path = str(state.get("antlr_context_path") or "").strip()
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
+    target_analysis_path = str(state.get("target_analysis_path") or "").strip()
+    target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
     if antlr_context_summary and "antlr_plan_context.json" not in hint:
         hint = (
             (hint.strip() + "\n\n") if hint.strip() else ""
         ) + (
             "Use grammar-aware context from `fuzz/antlr_plan_context.json` while generating harness/build glue.\n"
             f"{antlr_context_summary}"
+        )
+    if target_analysis_summary and "target_analysis.json" not in hint:
+        hint = (
+            (hint.strip() + "\n\n") if hint.strip() else ""
+        ) + (
+            "Use `fuzz/target_analysis.json` to preserve the selected target's seed_profile and risk signals while generating harness/build glue.\n"
+            f"{target_analysis_summary}"
         )
 
     def _synthesis_output_status() -> dict[str, Any]:
@@ -1259,6 +1621,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         "=== fuzz/antlr_plan_context.json ===\n"
                         + antlr_path_obj.read_text(encoding="utf-8", errors="replace")
                     )
+            if target_analysis_path:
+                analysis_path_obj = Path(target_analysis_path)
+                if not analysis_path_obj.is_absolute():
+                    analysis_path_obj = gen.repo_root / analysis_path_obj
+                if analysis_path_obj.is_file():
+                    parts.append(
+                        "=== fuzz/target_analysis.json ===\n"
+                        + analysis_path_obj.read_text(encoding="utf-8", errors="replace")
+                    )
             status = _synthesis_output_status()
             if status.get("harnesses"):
                 parts.append("=== existing harness files ===\n" + "\n".join(str(x) for x in status.get("harnesses") or []))
@@ -1319,6 +1690,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         antlr_path_obj = gen.repo_root / antlr_path_obj
                     if antlr_path_obj.is_file():
                         ctx += "\n=== fuzz/antlr_plan_context.json ===\n" + antlr_path_obj.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                if target_analysis_path:
+                    analysis_path_obj = Path(target_analysis_path)
+                    if not analysis_path_obj.is_absolute():
+                        analysis_path_obj = gen.repo_root / analysis_path_obj
+                    if analysis_path_obj.is_file():
+                        ctx += "\n=== fuzz/target_analysis.json ===\n" + analysis_path_obj.read_text(
                             encoding="utf-8", errors="replace"
                         )
             except Exception:
@@ -3147,6 +3526,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
         # Seed generation uses OpenCode and shared repo context; keep it serial.
         prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+        last_seed_profile = str(state.get("coverage_seed_profile") or "")
+        seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+        seed_sources: set[str] = set()
         try:
             for bin_path in bins:
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
@@ -3156,6 +3538,25 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 fuzzer_name = bin_path.name
                 try:
                     gen._pass_generate_seeds(fuzzer_name)
+                    profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
+                    if not last_seed_profile:
+                        last_seed_profile = str(profile_map.get(fuzzer_name) or "")
+                    bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
+                    meta = bootstrap_map.get(fuzzer_name) or {}
+                    if isinstance(meta, dict):
+                        counts = meta.get("counts") or {}
+                        if isinstance(counts, dict):
+                            for key in ("repo_examples", "ai", "radamsa", "total"):
+                                try:
+                                    seed_count_total[key] = int(seed_count_total.get(key, 0)) + int(counts.get(key) or 0)
+                                except Exception:
+                                    continue
+                        sources = meta.get("sources") or []
+                        if isinstance(sources, list):
+                            for src in sources:
+                                src_text = str(src or "").strip()
+                                if src_text:
+                                    seed_sources.add(src_text)
                 except Exception as e:
                     # Seed generation is best-effort; do not block fuzzing.
                     print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
@@ -3503,6 +3904,20 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_batch_plan": run_batch_plan,
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
+            "coverage_target_name": (
+                last_fuzzer
+                or next(
+                    (
+                        str(detail.get("fuzzer") or "").strip()
+                        for detail in run_details
+                        if str(detail.get("fuzzer") or "").strip()
+                    ),
+                    str(state.get("coverage_target_name") or ""),
+                )
+            ),
+            "coverage_seed_profile": last_seed_profile,
+            "coverage_corpus_sources": sorted(seed_sources),
+            "coverage_seed_counts": seed_count_total,
             "crash_signature": crash_signature,
             "same_crash_repeats": same_crash_repeats,
             "timeout_signature": timeout_signature,
@@ -3582,14 +3997,34 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         run_details = list(state.get("run_details") or [])
         history = list(state.get("coverage_history") or [])
         current_cov = _max_cov_from_run_details(run_details)
+        current_ft = 0
+        current_target_name = ""
+        if run_details:
+            try:
+                current_ft = max(int(detail.get("final_ft") or 0) for detail in run_details)
+            except Exception:
+                current_ft = 0
+            current_target_name = str(run_details[0].get("fuzzer") or "")
         plateau_detected = any(bool(detail.get("plateau_detected")) for detail in run_details)
         plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
-        prev_cov = 0
-        if history:
-            try:
-                prev_cov = int(history[-1].get("max_cov") or 0)
-            except Exception:
-                prev_cov = 0
+        prev_cov = max(0, int(state.get("coverage_last_max_cov") or 0))
+        prev_ft = max(0, int(state.get("coverage_last_ft") or 0))
+        prev_plateau_streak = max(0, int(state.get("coverage_plateau_streak") or 0))
+        current_seed_profile = str(state.get("coverage_seed_profile") or "")
+        if not current_seed_profile:
+            for detail in run_details:
+                profile = str(detail.get("seed_profile") or "")
+                if profile:
+                    current_seed_profile = profile
+                    break
+        plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
+        plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
+        replan_required = bool(
+            plateau_no_gain
+            and plateau_streak >= 2
+            and bool(current_seed_profile)
+        )
+        improve_mode = ""
         should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
@@ -3599,22 +4034,36 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         next_round = current_round + (1 if should_improve else 0)
         reason = "skip coverage loop"
         if should_improve:
+            improve_mode = "replan" if replan_required else "in_place"
             if plateau_detected:
                 reason = (
-                    f"coverage plateau detected; round={next_round}/{max_rounds}, "
-                    f"max_cov={current_cov}, prev_cov={prev_cov}, idle_no_growth={plateau_idle_seconds}s"
+                    f"coverage plateau detected; mode={improve_mode}; round={next_round}/{max_rounds}, "
+                    f"max_cov={current_cov}, prev_cov={prev_cov}, max_ft={current_ft}, prev_ft={prev_ft}, "
+                    f"plateau_streak={plateau_streak}, idle_no_growth={plateau_idle_seconds}s"
                 )
             else:
-                reason = f"round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}"
+                reason = (
+                    f"mode=in_place; round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}, "
+                    f"max_ft={current_ft}, prev_ft={prev_ft}"
+                )
         history.append(
             {
                 "index": len(history) + 1,
                 "round": next_round if should_improve else current_round,
                 "max_rounds": max_rounds,
                 "max_cov": current_cov,
+                "max_ft": current_ft,
                 "prev_cov": prev_cov,
+                "prev_ft": prev_ft,
                 "plateau_detected": plateau_detected,
                 "plateau_idle_seconds": plateau_idle_seconds,
+                "plateau_streak": plateau_streak,
+                "seed_profile": current_seed_profile,
+                "target_name": current_target_name,
+                "replan_required": replan_required,
+                "improve_mode": improve_mode,
+                "corpus_sources": list(state.get("coverage_corpus_sources") or []),
+                "seed_counts": dict(state.get("coverage_seed_counts") or {}),
                 "crash_found": bool(state.get("crash_found")),
                 "run_error_kind": str(state.get("run_error_kind") or ""),
                 "should_improve": should_improve,
@@ -3630,6 +4079,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_should_improve": should_improve,
             "coverage_improve_reason": reason,
             "coverage_history": history,
+            "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
+            "coverage_seed_profile": current_seed_profile,
+            "coverage_plateau_streak": plateau_streak,
+            "coverage_last_max_cov": current_cov,
+            "coverage_last_ft": current_ft,
+            "coverage_replan_required": replan_required,
+            "coverage_improve_mode": improve_mode,
             "message": "coverage analysis done",
         }
         _wf_log(
@@ -3660,21 +4116,38 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             _wf_log(cast(dict[str, Any], out), f"<- improve-harness skip dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
 
-        # Reuse plan_with_hint path instead of editing directly in this stage.
-        # The next stage routes to plan, then synthesize/build/run with this hint.
         cov_reason = str(state.get("coverage_improve_reason") or "").strip()
-        hint = (
-            "覆盖率闭环改进任务：\n"
-            "- 仅调整 fuzz harness（fuzz/ 下文件），不要改业务源码。\n"
-            "- 优先扩展输入建模、调用顺序、边界值与字典使用。\n"
-            "- 保持可构建与可运行。\n"
-            f"- 诊断: {cov_reason}"
-        )
+        target_name = str(state.get("coverage_target_name") or "").strip()
+        seed_profile = str(state.get("coverage_seed_profile") or "").strip()
+        replan_required = bool(state.get("coverage_replan_required"))
+        improve_mode = "replan" if replan_required else "in_place"
+        if replan_required:
+            hint = (
+                "覆盖率闭环改进任务（重新选 target）：\n"
+                "- 当前 target 已连续多轮进入平台期，且 coverage/features 未继续提升。\n"
+                "- 允许重新评估 targets.json，并重新选择更可能提高覆盖率或发现漏洞的 target。\n"
+                "- 结合 fuzz/target_analysis.json 与 fuzz/antlr_plan_context.json 重新规划。\n"
+                f"- 当前 target: {target_name or 'unknown'}\n"
+                f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
+                f"- 诊断: {cov_reason}"
+            )
+        else:
+            hint = (
+                "覆盖率闭环改进任务（当前 target 原地改进）：\n"
+                "- 只允许修改当前 fuzzer 相关的 fuzz/ 下文件，不要改业务源码。\n"
+                "- 不要修改 targets.json，不要新增第二个 target。\n"
+                "- 优先补 seed 生成、dictionary、输入建模、调用顺序、边界值与 corpus bootstrap。\n"
+                "- 保持可构建与可运行。\n"
+                f"- 当前 target: {target_name or 'unknown'}\n"
+                f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
+                f"- 诊断: {cov_reason}"
+            )
         out = {
             **state,
             "last_step": "improve-harness",
             "last_error": "",
             "codex_hint": hint,
+            "coverage_improve_mode": improve_mode,
             "message": "improve-harness prepared plan hint",
         }
         _wf_log(cast(dict[str, Any], out), f"<- improve-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -4363,6 +4836,8 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     if (state.get("last_error") or "").strip():
         return "stop"
     if bool(state.get("coverage_should_improve")):
+        if str(state.get("coverage_improve_mode") or "").strip() == "in_place":
+            return "build"
         return "plan"
     return "stop"
 
