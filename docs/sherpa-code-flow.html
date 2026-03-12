@@ -1,0 +1,1493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sherpa Code Flow</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --bg-soft: #0d1b2a;
+      --panel: rgba(11, 28, 43, 0.88);
+      --panel-2: rgba(15, 35, 53, 0.92);
+      --text: #eef6ff;
+      --muted: #91a9c3;
+      --line: rgba(145, 169, 195, 0.2);
+      --accent: #6ee7c8;
+      --accent-2: #7cc8ff;
+      --accent-3: #ffd166;
+      --danger: #ff8c7a;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+      --mono: "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
+      --sans: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(110, 231, 200, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(124, 200, 255, 0.16), transparent 30%),
+        linear-gradient(180deg, #06101b 0%, #07111f 35%, #091422 100%);
+      min-height: 100vh;
+    }
+
+    .background-grid {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+      background-size: 26px 26px;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.75), transparent 92%);
+      opacity: 0.5;
+    }
+
+    .shell {
+      width: min(1400px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 80px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero,
+    .panel,
+    .flow-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      backdrop-filter: blur(14px);
+    }
+
+    .hero {
+      overflow: hidden;
+      position: relative;
+      padding: 30px;
+      display: grid;
+      grid-template-columns: 1.3fr 0.9fr;
+      gap: 24px;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 280px;
+      height: 280px;
+      background: radial-gradient(circle, rgba(110, 231, 200, 0.35), transparent 68%);
+      filter: blur(14px);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(32px, 5vw, 56px);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+      margin-bottom: 14px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .lead {
+      max-width: 760px;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 16px;
+    }
+
+    .hero-tags,
+    .stats,
+    .stage-tabs,
+    .legend,
+    .component-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .hero-tags {
+      margin-top: 18px;
+    }
+
+    .tag,
+    .stat,
+    .legend span,
+    .stage-tab {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .stat {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.025));
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 22px;
+      margin-top: 4px;
+    }
+
+    .source-list {
+      margin-top: 16px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .source-line {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #b8d0ea;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 22px;
+      margin-top: 22px;
+    }
+
+    .panel,
+    .flow-panel {
+      padding: 24px;
+    }
+
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .panel-title p {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+      max-width: 720px;
+    }
+
+    .architecture {
+      display: grid;
+      gap: 16px;
+    }
+
+    .lane {
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .lane::after {
+      content: "";
+      position: absolute;
+      inset: auto -20% -40px auto;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(124, 200, 255, 0.14), transparent 65%);
+      transform: rotate(12deg);
+    }
+
+    .lane header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 12px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .lane header h3 {
+      font-size: 20px;
+    }
+
+    .lane header span {
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .lane p {
+      color: var(--muted);
+      line-height: 1.7;
+      position: relative;
+      z-index: 1;
+    }
+
+    .flow-panel {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .flow-panel::before {
+      content: "";
+      position: absolute;
+      inset: -60px auto auto -40px;
+      width: 220px;
+      height: 220px;
+      background: radial-gradient(circle, rgba(255, 209, 102, 0.18), transparent 68%);
+    }
+
+    .stage-tabs {
+      margin-bottom: 18px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .stage-tab {
+      cursor: pointer;
+      color: var(--muted);
+      transition: 180ms ease;
+      user-select: none;
+    }
+
+    .stage-tab.active,
+    .stage-tab:hover {
+      color: var(--text);
+      border-color: rgba(110, 231, 200, 0.45);
+      background: rgba(110, 231, 200, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .flow-rail {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 14px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .stage-node {
+      padding: 14px 14px 16px;
+      border-radius: 18px;
+      min-height: 118px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      position: relative;
+      transition: 220ms ease;
+    }
+
+    .stage-node.active {
+      border-color: rgba(110, 231, 200, 0.55);
+      transform: translateY(-3px);
+      box-shadow: 0 16px 40px rgba(110, 231, 200, 0.08);
+    }
+
+    .stage-node .num {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      font-family: var(--mono);
+    }
+
+    .stage-node strong {
+      display: block;
+      font-size: 17px;
+      margin-bottom: 8px;
+    }
+
+    .stage-node small {
+      color: var(--muted);
+      line-height: 1.5;
+      display: block;
+    }
+
+    .flow-links {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+      position: relative;
+      z-index: 1;
+    }
+
+    .flow-links span {
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #d8e6f5;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .detail-card {
+      margin-top: 16px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      position: relative;
+      z-index: 1;
+    }
+
+    .detail-card h3 {
+      margin-bottom: 10px;
+      font-size: 22px;
+    }
+
+    .detail-card p {
+      color: var(--muted);
+      line-height: 1.75;
+      margin-bottom: 12px;
+    }
+
+    .detail-card ul {
+      padding-left: 18px;
+      margin: 0;
+      color: #dbe8f7;
+      line-height: 1.7;
+    }
+
+    .detail-card li + li {
+      margin-top: 6px;
+    }
+
+    .simulator {
+      margin-top: 16px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      position: relative;
+      z-index: 1;
+    }
+
+    .simulator h3 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .simulator p {
+      color: var(--muted);
+      line-height: 1.7;
+      margin-bottom: 14px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .control {
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .control label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 8px;
+      color: #dfeeff;
+    }
+
+    .control select,
+    .control input[type="number"] {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(5, 14, 24, 0.86);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    .control input[type="checkbox"] {
+      transform: scale(1.15);
+      accent-color: var(--accent);
+      margin-right: 8px;
+    }
+
+    .control .checkbox-row {
+      display: flex;
+      align-items: center;
+      color: var(--muted);
+      min-height: 44px;
+    }
+
+    .sim-result {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .next-badge {
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(110, 231, 200, 0.26);
+      background: rgba(110, 231, 200, 0.1);
+      font-family: var(--mono);
+      font-size: 20px;
+      text-align: center;
+    }
+
+    .next-badge.stop {
+      border-color: rgba(255, 140, 122, 0.28);
+      background: rgba(255, 140, 122, 0.1);
+    }
+
+    .sim-explanation {
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .component-list {
+      margin-top: 12px;
+    }
+
+    .component-pill {
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      cursor: pointer;
+      min-width: 150px;
+      transition: 180ms ease;
+    }
+
+    .component-pill.active,
+    .component-pill:hover {
+      transform: translateY(-2px);
+      border-color: rgba(124, 200, 255, 0.45);
+      background: rgba(124, 200, 255, 0.1);
+    }
+
+    .component-pill strong {
+      display: block;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+
+    .component-pill span {
+      font-size: 12px;
+      color: var(--muted);
+      display: block;
+    }
+
+    .component-detail {
+      margin-top: 18px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .component-detail h3 {
+      margin-bottom: 8px;
+      font-size: 22px;
+    }
+
+    .component-detail p {
+      color: var(--muted);
+      line-height: 1.75;
+      margin-bottom: 14px;
+    }
+
+    .component-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .meta-box {
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    .meta-box h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+
+    .meta-box p,
+    .meta-box li {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .meta-box ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .data-strip {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .data-box {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .data-box h3 {
+      font-size: 16px;
+      margin-bottom: 10px;
+    }
+
+    .data-box p,
+    .data-box li {
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 13px;
+    }
+
+    .data-box ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .callout {
+      margin-top: 22px;
+      padding: 20px 22px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, rgba(110, 231, 200, 0.12), rgba(124, 200, 255, 0.08));
+      border: 1px solid rgba(110, 231, 200, 0.22);
+    }
+
+    .callout p {
+      color: #d7ebff;
+      line-height: 1.8;
+    }
+
+    .mono {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: #bfe2ff;
+    }
+
+    @media (max-width: 1120px) {
+      .hero,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-rail {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .data-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: min(100vw - 18px, 1400px);
+        padding-top: 10px;
+      }
+
+      .hero,
+      .panel,
+      .flow-panel,
+      .data-box {
+        border-radius: 18px;
+      }
+
+      .hero,
+      .panel,
+      .flow-panel {
+        padding: 18px;
+      }
+
+      .flow-rail,
+      .data-strip,
+      .component-meta,
+      .controls,
+      .sim-result {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="background-grid"></div>
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Built From Code, Not README</div>
+        <h1>Sherpa 的真实结构是一个<br />阶段式 fuzz orchestration runtime</h1>
+        <p class="lead">
+          这个页面直接按源码组织项目理解，而不是复述文档。核心结论来自
+          <span class="mono">harness_generator/src/langchain_agent/main.py</span>、
+          <span class="mono">workflow_graph.py</span>、
+          <span class="mono">fuzz_unharnessed_repo.py</span>、
+          <span class="mono">frontend-next/app/page.tsx</span>
+          和前端 API hooks。Sherpa 不是“一个生成 harness 的脚本”，而是一个会创建任务、拆阶段、派发 k8s worker、回收结果并决定下一跳的系统。
+        </p>
+        <div class="hero-tags">
+          <span class="tag">FastAPI API</span>
+          <span class="tag">LangGraph StateGraph</span>
+          <span class="tag">Postgres Job Store</span>
+          <span class="tag">Next.js Console</span>
+          <span class="tag">Kubernetes Stage Jobs</span>
+          <span class="tag">OpenCode-backed Harness Generation</span>
+        </div>
+        <div class="source-list">
+          <div class="source-line">harness_generator/src/langchain_agent/main.py</div>
+          <div class="source-line">harness_generator/src/langchain_agent/workflow_graph.py</div>
+          <div class="source-line">harness_generator/src/fuzz_unharnessed_repo.py</div>
+          <div class="source-line">frontend-next/app/page.tsx</div>
+          <div class="source-line">frontend-next/lib/api/client.ts</div>
+          <div class="source-line">frontend-next/components/TaskProgressPanel.tsx</div>
+        </div>
+      </div>
+      <aside class="hero-side">
+        <div class="stat">
+          任务入口
+          <strong>/api/task</strong>
+          <span class="mono">main.py:2414</span>
+        </div>
+        <div class="stat">
+          工作流节点
+          <strong>11 个注册节点</strong>
+          <span class="mono">workflow_graph.py:5356-5480</span>
+        </div>
+        <div class="stat">
+          前端主页面
+          <strong>控制台拼装页</strong>
+          <span class="mono">page.tsx + hooks.ts</span>
+        </div>
+        <div class="stat">
+          持久化
+          <strong>PostgresJobStore</strong>
+          <span class="mono">job_store.py</span>
+        </div>
+      </aside>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>代码层级结构</h2>
+            <p>下面这四层直接对应代码职责，而不是概念化的“平台架构图”。</p>
+          </div>
+        </div>
+        <div class="architecture">
+          <article class="lane">
+            <header>
+              <h3>1. 前端控制台</h3>
+              <span>frontend-next/app/page.tsx</span>
+            </header>
+            <p>
+              页面本身只做装配。它拉起 <span class="mono">SystemOverviewCard</span>、
+              <span class="mono">ConfigPanel</span>、
+              <span class="mono">SessionPanel</span>、
+              <span class="mono">TaskProgressPanel</span>、
+              <span class="mono">LogPanel</span>，
+              再通过 <span class="mono">useSystemQuery</span>、<span class="mono">useTasksQuery</span>、
+              <span class="mono">useTaskDetailQuery</span> 周期轮询后端。
+            </p>
+          </article>
+          <article class="lane">
+            <header>
+              <h3>2. API 编排层</h3>
+              <span>main.py</span>
+            </header>
+            <p>
+              FastAPI 负责配置读写、任务提交、任务查询、恢复和停止。真正关键的是
+              <span class="mono">_submit_fuzz_job</span>、
+              <span class="mono">_run_fuzz_job</span>、
+              <span class="mono">_execute_k8s_job</span>：
+              它们把一个 fuzz 请求拆成多个阶段 job，逐段执行并根据返回结果决定下一段。
+            </p>
+          </article>
+          <article class="lane">
+            <header>
+              <h3>3. 工作流状态机</h3>
+              <span>workflow_graph.py</span>
+            </header>
+            <p>
+              使用 <span class="mono">LangGraph StateGraph</span> 注册节点和条件跳转。这里不是固定线性流水线，
+              而是根据 <span class="mono">build_error_kind</span>、<span class="mono">run_error_kind</span>、
+              crash 状态和 coverage 结果来路由到 <span class="mono">fix_build</span>、
+              <span class="mono">coverage-analysis</span>、<span class="mono">re-build</span>、
+              <span class="mono">fix_crash</span> 等分支。
+            </p>
+          </article>
+          <article class="lane">
+            <header>
+              <h3>4. 底层执行器</h3>
+              <span>fuzz_unharnessed_repo.py</span>
+            </header>
+            <p>
+              真正做 clone、脚手架生成、build、run、seed bootstrap、plateau 检测和 crash 产物整理的代码在这里。
+              它体现的是“如何跑 fuzz”，而 <span class="mono">main.py</span> 和
+              <span class="mono">workflow_graph.py</span> 体现的是“何时跑哪个阶段”。
+            </p>
+          </article>
+        </div>
+      </div>
+
+      <div class="flow-panel">
+        <div class="panel-title">
+          <div>
+            <h2>阶段状态机</h2>
+            <p>点击阶段查看该节点在源码中的职责与下一跳。</p>
+          </div>
+        </div>
+        <div class="stage-tabs" id="stage-tabs"></div>
+        <div class="flow-rail" id="flow-rail"></div>
+        <div class="flow-links" id="flow-links"></div>
+        <div class="detail-card" id="stage-detail"></div>
+        <div class="simulator">
+          <h3>路由模拟器</h3>
+          <p>这里直接按 <span class="mono">workflow_graph.py</span> 的条件判断推导下一跳。切换状态后，当前节点会给出真实 next。</p>
+          <div class="controls" id="sim-controls"></div>
+          <div class="sim-result">
+            <div class="next-badge" id="sim-next"></div>
+            <div class="sim-explanation" id="sim-explanation"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:22px;">
+      <div class="panel-title">
+        <div>
+          <h2>组件与代码入口</h2>
+          <p>这些不是抽象模块名，而是仓库里真实存在、你能直接打开的代码文件。</p>
+        </div>
+        <div class="legend">
+          <span>蓝色偏前端</span>
+          <span>绿色偏编排</span>
+          <span>黄色偏执行</span>
+        </div>
+      </div>
+      <div class="component-list" id="component-list"></div>
+      <div class="component-detail" id="component-detail"></div>
+    </section>
+
+    <section class="data-strip">
+      <article class="data-box">
+        <h3>前端如何提交任务</h3>
+        <p>
+          <span class="mono">frontend-next/lib/api/client.ts</span> 里的
+          <span class="mono">submitTask()</span> 会调用 <span class="mono">POST /api/task</span>，
+          body 中实际发送的是 <span class="mono">jobs[]</span>，每个 job 包含
+          <span class="mono">code_url</span>、budget、max tokens、coverage loop 参数和 build retry 参数。
+        </p>
+      </article>
+      <article class="data-box">
+        <h3>后端如何切阶段</h3>
+        <p>
+          <span class="mono">_run_fuzz_job()</span> 在 while 循环里维护
+          <span class="mono">current_stage</span>。每执行完一个 stage，
+          就从结果中的 <span class="mono">workflow_recommended_next</span> 推导下一段，
+          直到返回 <span class="mono">stop</span> 或空值为止。
+        </p>
+      </article>
+      <article class="data-box">
+        <h3>k8s worker 怎么落地</h3>
+        <p>
+          <span class="mono">_execute_k8s_job()</span> 会生成 manifest，调用
+          <span class="mono">kubectl apply -f -</span> 提交 job，等待完成后从
+          <span class="mono">result_path</span> 读取 JSON，失败则读 error/log tail，并更新 job 状态。
+        </p>
+      </article>
+      <article class="data-box">
+        <h3>状态存在哪</h3>
+        <p>
+          <span class="mono">job_store.py</span> 定义了统一接口，当前主用
+          <span class="mono">PostgresJobStore</span>。每个 job 会被序列化到
+          <span class="mono">payload_json</span>，这样服务重启后仍可恢复任务视图。
+        </p>
+      </article>
+    </section>
+
+    <section class="callout">
+      <p>
+        如果要一句话向别人解释这个项目，可以这样说：
+        Sherpa 通过前端收集 fuzz 任务参数，FastAPI 把请求存成 job，然后逐阶段派发 k8s worker；
+        每个阶段真正执行的逻辑由工作流状态机和底层执行器共同决定，最后把任务状态、子任务状态和日志再反馈回前端控制台。
+      </p>
+    </section>
+  </main>
+
+  <script>
+    const stages = [
+      {
+        id: "plan",
+        order: "01",
+        title: "plan",
+        summary: "分析仓库，生成 target 定义和规划上下文。",
+        next: ["synthesize", "stop"],
+        bullets: [
+          "由 workflow_graph.py 注册为显式节点，入口阶段由 init 路由到 plan。",
+          "main.py 在 staged workflow 中把 stage 名写入 payload.resume_from_step，并让 worker 只跑当前阶段。",
+          "此阶段的产物会影响后续 synthesize 是否有足够 target 元数据继续执行。"
+        ]
+      },
+      {
+        id: "synthesize",
+        order: "02",
+        title: "synthesize",
+        summary: "把 target 收敛成单个 fuzz scaffold 和 build glue。",
+        next: ["build", "stop"],
+        bullets: [
+          "对应 workflow_graph.py 中的 _node_synthesize。",
+          "底层实现落到 fuzz_unharnessed_repo.py 的 harness 生成链路。",
+          "如果 stop guard 命中，状态机会直接结束，而不是强制继续 build。"
+        ]
+      },
+      {
+        id: "build",
+        order: "03",
+        title: "build",
+        summary: "执行 build，并根据错误类型决定是 run 还是 fix_build。",
+        next: ["run", "fix_build", "stop"],
+        bullets: [
+          "route_after_build_state 会查看 failed、last_error 和 build_error_kind。",
+          "如果 build 错误归类为 infra，还有单独的环境重建逻辑。",
+          "main.py 中遇到 requires_env_rebuild 时会再次派发 fresh build job。"
+        ]
+      },
+      {
+        id: "fix_build",
+        order: "04",
+        title: "fix_build",
+        summary: "针对构建失败做自动修复，再回到 build。",
+        next: ["build", "stop"],
+        bullets: [
+          "只有在 build 未成功且错误不是直接终止条件时才进入。",
+          "fix_build_terminal_reason 一旦出现，状态机终止，不会无限重试。",
+          "TaskProgressPanel 会展示 fix_build_attempts / max_fix_rounds 和 error signature。"
+        ]
+      },
+      {
+        id: "run",
+        order: "05",
+        title: "run",
+        summary: "真正执行 fuzzer，并根据 crash、timeout、no progress 决定后续路径。",
+        next: ["coverage-analysis", "re-build", "fix_build", "fix_crash", "stop"],
+        bullets: [
+          "route_after_run_state 直接由 run_error_kind 进行分支路由。",
+          "出现 run_no_progress、run_exception 会回 fix_build；出现 crash 或复现路径则进入 re-build。",
+          "没有 crash 时，默认走 coverage-analysis，而不是简单结束。"
+        ]
+      },
+      {
+        id: "coverage-analysis",
+        order: "06",
+        title: "coverage-analysis",
+        summary: "判断平台期与覆盖率收益，再决定是否继续改 harness。",
+        next: ["improve-harness", "stop"],
+        bullets: [
+          "这是 run 后的闭环入口，不是可有可无的附加步骤。",
+          "状态机把它看作独立节点，有自己的 stage stop guard。",
+          "其输出会影响 improve-harness 后是回 plan 还是停止。"
+        ]
+      },
+      {
+        id: "improve-harness",
+        order: "07",
+        title: "improve-harness",
+        summary: "根据 coverage 反馈修改当前 harness 或触发重新规划。",
+        next: ["plan", "stop"],
+        bullets: [
+          "该节点在代码里固定回到 plan 或 stop，没有直接回 run。",
+          "这样设计意味着改进后要重新经过 build 链路验证。",
+          "它是让项目形成闭环优化，而不是一次性 fuzz。"
+        ]
+      },
+      {
+        id: "re-build",
+        order: "08",
+        title: "re-build",
+        summary: "为 crash 复现准备独立重建环境。",
+        next: ["re-run", "plan", "stop"],
+        bullets: [
+          "repro_crash 在图中被映射到 re-build 路径处理。",
+          "如果 restart_to_plan 被触发，状态机会直接回 plan。",
+          "这是 crash 分支，不属于普通 coverage 优化链。"
+        ]
+      },
+      {
+        id: "re-run",
+        order: "09",
+        title: "re-run",
+        summary: "在复现环境里验证 crash 是否稳定可复现。",
+        next: ["fix_crash", "plan", "stop"],
+        bullets: [
+          "复现成功后可能继续 fix_crash，也可能因为策略回 plan。",
+          "如果 restart_to_plan_count 超限，状态机会停止。",
+          "这一段的结果会写回 crash 相关字段和 report 路径。"
+        ]
+      },
+      {
+        id: "fix_crash",
+        order: "10",
+        title: "fix_crash",
+        summary: "对已复现 crash 做自动修复，再回 build 验证。",
+        next: ["build", "stop"],
+        bullets: [
+          "这是 crash 驱动的修复闭环，与 fix_build 的职责不同。",
+          "fix_crash 后必须重新 build，不能直接宣称修复完成。",
+          "节点也受 stage stop guard 约束。"
+        ]
+      }
+    ];
+
+    const components = [
+      {
+        id: "frontend-page",
+        name: "HomePage",
+        kind: "前端装配页",
+        file: "frontend-next/app/page.tsx",
+        summary: "把系统状态、配置、任务列表、任务进度和日志面板装配到一个控制台页面里。",
+        responsibilities: [
+          "调用 useSystemQuery / useTasksQuery / useTaskDetailQuery 轮询后端",
+          "自动选择 activeTaskId",
+          "把 stop 行为交给 useStopTaskMutation"
+        ],
+        why: "这个文件说明前端不是业务编排层，而是围绕任务状态构建的可视化控制台。"
+      },
+      {
+        id: "config-panel",
+        name: "ConfigPanel",
+        kind: "提交入口",
+        file: "frontend-next/components/ConfigPanel.tsx",
+        summary: "收集 repo URL、预算、coverage loop、fix rounds 等参数，并通过 submitTask 提交。",
+        responsibilities: [
+          "保存系统配置",
+          "提交 fuzz 任务",
+          "把 job_id 写回 UI store 作为当前活动任务"
+        ],
+        why: "它体现了用户实际能控制的运行参数边界。"
+      },
+      {
+        id: "api-client",
+        name: "API Client",
+        kind: "接口边界",
+        file: "frontend-next/lib/api/client.ts",
+        summary: "定义了前端真实调用的 API 路径和请求体结构。",
+        responsibilities: [
+          "GET /api/system",
+          "GET /api/tasks",
+          "GET /api/task/{id}",
+          "POST /api/task",
+          "POST /api/task/{id}/stop"
+        ],
+        why: "如果别人想理解前后端协议，这个文件比文档更可信。"
+      },
+      {
+        id: "main-api",
+        name: "FastAPI main.py",
+        kind: "编排入口",
+        file: "harness_generator/src/langchain_agent/main.py",
+        summary: "创建任务、持久化状态、分阶段派发 k8s job、恢复和停止任务。",
+        responsibilities: [
+          "定义 /api/config /api/system /api/task /api/tasks",
+          "_submit_fuzz_job 创建 job 并把执行交给线程池",
+          "_run_fuzz_job 维护 staged workflow 循环",
+          "_execute_k8s_job 提交和回收单个阶段的 k8s job"
+        ],
+        why: "这是系统的调度中枢。"
+      },
+      {
+        id: "workflow-graph",
+        name: "workflow_graph.py",
+        kind: "状态机",
+        file: "harness_generator/src/langchain_agent/workflow_graph.py",
+        summary: "通过 StateGraph 注册节点和条件边，把 fuzz 过程变成可恢复的状态机。",
+        responsibilities: [
+          "注册 init / plan / synthesize / build / fix_build / run 等节点",
+          "根据 build_error_kind、run_error_kind、restart_to_plan 等字段路由",
+          "输出 workflow_recommended_next"
+        ],
+        why: "这是 Sherpa 真正区别于单脚本 fuzz 工具的核心。"
+      },
+      {
+        id: "executor",
+        name: "fuzz_unharnessed_repo.py",
+        kind: "底层执行器",
+        file: "harness_generator/src/fuzz_unharnessed_repo.py",
+        summary: "封装 clone、OpenCode scaffold、build、run、seed bootstrap、plateau 检测等底层动作。",
+        responsibilities: [
+          "识别 target_type / seed_profile 相关边界",
+          "管理 fuzz 目录和执行产物",
+          "承载真正的 build/run 执行逻辑"
+        ],
+        why: "它定义的是系统如何接触真实仓库并产生 fuzz 工件。"
+      },
+      {
+        id: "job-store",
+        name: "PostgresJobStore",
+        kind: "状态持久化",
+        file: "harness_generator/src/langchain_agent/job_store.py",
+        summary: "保存 job 快照，使任务在服务重启后仍可恢复和展示。",
+        responsibilities: [
+          "init_schema 初始化 jobs 表",
+          "upsert_job 写入 payload_json",
+          "load_jobs 恢复所有任务"
+        ],
+        why: "没有它，前端控制台只能看内存态，无法做恢复。"
+      }
+    ];
+
+    const stageTabs = document.getElementById("stage-tabs");
+    const flowRail = document.getElementById("flow-rail");
+    const flowLinks = document.getElementById("flow-links");
+    const stageDetail = document.getElementById("stage-detail");
+    const componentList = document.getElementById("component-list");
+    const componentDetail = document.getElementById("component-detail");
+
+    let activeStage = stages[0].id;
+    let activeComponent = components[0].id;
+
+    const restartLimit = 1;
+    const simState = {
+      init: { failed: false, last_error: false, resume_from_step: "plan" },
+      plan: { failed: false, last_error: false, stop_after_step: false },
+      synthesize: { failed: false, last_error: false, stop_after_step: false },
+      build: { failed: false, last_error: false, build_error_kind: "generic", stop_after_step: false },
+      fix_build: { failed: false, last_error: false, fix_build_terminal_reason: false, stop_after_step: false },
+      run: { failed: false, run_error_kind: "", crash_found: false, stop_after_step: false },
+      "coverage-analysis": { failed: false, last_error: false, coverage_should_improve: true, stop_after_step: false },
+      "improve-harness": {
+        failed: false,
+        last_error: false,
+        coverage_improve_mode: "in_place",
+        coverage_replan_effective: true,
+        coverage_round_budget_exhausted: false,
+        coverage_should_improve: true,
+        stop_after_step: false
+      },
+      "re-build": {
+        failed: false,
+        crash_found: true,
+        restart_to_plan: false,
+        restart_to_plan_count: 0,
+        re_build_done: true,
+        re_build_ok: true,
+        stop_after_step: false
+      },
+      "re-run": {
+        failed: false,
+        crash_found: true,
+        restart_to_plan: false,
+        restart_to_plan_count: 0,
+        crash_repro_done: true,
+        crash_repro_ok: true,
+        plan_fix_on_crash: true,
+        plan_max_fix_rounds: 1,
+        crash_fix_attempts: 0,
+        stop_after_step: false
+      },
+      fix_crash: { failed: false, last_error: false, stop_after_step: false }
+    };
+
+    const simulatorSchema = {
+      init: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        {
+          key: "resume_from_step",
+          type: "select",
+          label: "resume_from_step",
+          options: ["plan", "synthesize", "build", "fix_build", "run", "coverage-analysis", "improve-harness", "re-build", "re-run", "repro_crash", "fix_crash"]
+        }
+      ],
+      plan: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      synthesize: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      build: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        {
+          key: "build_error_kind",
+          type: "select",
+          label: "build_error_kind",
+          options: ["generic", "infra"]
+        },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      fix_build: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        { key: "fix_build_terminal_reason", type: "checkbox", label: "fix_build_terminal_reason 非空" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      run: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        {
+          key: "run_error_kind",
+          type: "select",
+          label: "run_error_kind",
+          options: ["", "run_no_progress", "nonzero_exit_without_crash", "run_exception", "run_idle_timeout", "run_timeout", "run_finalize_timeout", "other_error"]
+        },
+        { key: "crash_found", type: "checkbox", label: "crash_found" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      "coverage-analysis": [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        { key: "coverage_should_improve", type: "checkbox", label: "coverage_should_improve" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      "improve-harness": [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        {
+          key: "coverage_improve_mode",
+          type: "select",
+          label: "coverage_improve_mode",
+          options: ["in_place", "replan"]
+        },
+        { key: "coverage_replan_effective", type: "checkbox", label: "coverage_replan_effective" },
+        { key: "coverage_round_budget_exhausted", type: "checkbox", label: "coverage_round_budget_exhausted" },
+        { key: "coverage_should_improve", type: "checkbox", label: "coverage_should_improve" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      "re-build": [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "crash_found", type: "checkbox", label: "crash_found" },
+        { key: "restart_to_plan", type: "checkbox", label: "restart_to_plan" },
+        { key: "restart_to_plan_count", type: "number", label: "restart_to_plan_count" },
+        { key: "re_build_done", type: "checkbox", label: "re_build_done" },
+        { key: "re_build_ok", type: "checkbox", label: "re_build_ok" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      "re-run": [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "crash_found", type: "checkbox", label: "crash_found" },
+        { key: "restart_to_plan", type: "checkbox", label: "restart_to_plan" },
+        { key: "restart_to_plan_count", type: "number", label: "restart_to_plan_count" },
+        { key: "crash_repro_done", type: "checkbox", label: "crash_repro_done" },
+        { key: "crash_repro_ok", type: "checkbox", label: "crash_repro_ok" },
+        { key: "plan_fix_on_crash", type: "checkbox", label: "plan_fix_on_crash" },
+        { key: "plan_max_fix_rounds", type: "number", label: "plan_max_fix_rounds" },
+        { key: "crash_fix_attempts", type: "number", label: "crash_fix_attempts" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ],
+      fix_crash: [
+        { key: "failed", type: "checkbox", label: "failed" },
+        { key: "last_error", type: "checkbox", label: "last_error 非空" },
+        { key: "stop_after_step", type: "checkbox", label: "命中 stage stop guard" }
+      ]
+    };
+
+    function withStopGuard(stageId, next, state) {
+      if (state.stop_after_step) {
+        return { next: "stop", reason: `${stageId} 命中 _should_stage_stop，_apply_stage_stop_guard 强制结束。` };
+      }
+      return { next, reason: "" };
+    }
+
+    function evaluateStage(stageId) {
+      const state = simState[stageId] || {};
+      if (stageId === "init") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "init 遇到 failed 或 last_error，直接 stop。" };
+        const resume = state.resume_from_step === "repro_crash" ? "re-build" : state.resume_from_step;
+        return { next: resume || "plan", reason: "init 根据 resume_from_step 决定恢复入口；若为空才回 plan。" };
+      }
+      if (stageId === "plan") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "plan 只要 failed 或 last_error 非空就结束。" };
+        return withStopGuard(stageId, "synthesize", state);
+      }
+      if (stageId === "synthesize") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "synthesize 只要 failed 或 last_error 非空就结束。" };
+        return withStopGuard(stageId, "build", state);
+      }
+      if (stageId === "build") {
+        if (!state.failed && !state.last_error && state.stop_after_step) {
+          return { next: "stop", reason: "build 成功但 stop_after_step 命中，状态机在 build 后停止。" };
+        }
+        if (state.failed) return { next: "stop", reason: "build 的 route_after_build_state 先判断 failed，命中就 stop。" };
+        if (!state.last_error) return { next: "run", reason: "build 没有 last_error，直接进入 run。" };
+        if (String(state.build_error_kind).toLowerCase() === "infra") {
+          return { next: "stop", reason: "build_error_kind=infra 时，不进入 fix_build，直接 stop。" };
+        }
+        return { next: "fix_build", reason: "build 有错误且不是 infra，进入 fix_build。" };
+      }
+      if (stageId === "fix_build") {
+        if (state.failed) return { next: "stop", reason: "fix_build failed，直接 stop。" };
+        if (state.fix_build_terminal_reason) return { next: "stop", reason: "fix_build_terminal_reason 非空，表示触发终止条件。" };
+        if (state.last_error) return { next: "stop", reason: "fix_build 后仍有 last_error，停止而不是继续 build。" };
+        return withStopGuard(stageId, "build", state);
+      }
+      if (stageId === "run") {
+        if (state.failed) return { next: "stop", reason: "run failed，直接 stop。" };
+        if (state.stop_after_step) return { next: "stop", reason: "run 的 next 会经过 _apply_stage_stop_guard，因此可被 stop_after_step 截断。" };
+        const kind = String(state.run_error_kind || "").trim().toLowerCase();
+        if (["run_no_progress", "nonzero_exit_without_crash", "run_exception"].includes(kind)) {
+          return { next: "fix_build", reason: `run_error_kind=${kind}，源码会回 fix_build。` };
+        }
+        if (["run_idle_timeout", "run_timeout", "run_finalize_timeout"].includes(kind)) {
+          return { next: "stop", reason: `run_error_kind=${kind}，源码直接 stop。` };
+        }
+        if (kind) return { next: "stop", reason: "run_error_kind 非空但不在可恢复集合里，直接 stop。" };
+        if (state.crash_found) return { next: "re-build", reason: "run 无 error_kind 且发现 crash，进入 re-build。" };
+        return { next: "coverage-analysis", reason: "run 没有错误也没 crash，进入 coverage-analysis。" };
+      }
+      if (stageId === "coverage-analysis") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "coverage-analysis 有 failed 或 last_error 就停止。" };
+        if (state.stop_after_step) return { next: "stop", reason: "coverage-analysis 的 next 会经过 stage stop guard。" };
+        if (state.coverage_should_improve) return { next: "improve-harness", reason: "coverage_should_improve=true，进入 improve-harness。" };
+        return { next: "stop", reason: "没有继续改进的必要，coverage-analysis 停止。" };
+      }
+      if (stageId === "improve-harness") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "improve-harness 有 failed 或 last_error 就停止。" };
+        if (state.stop_after_step) return { next: "stop", reason: "improve-harness 的 next 会经过 stage stop guard。" };
+        if (state.coverage_improve_mode === "replan" && !state.coverage_replan_effective) {
+          return { next: "stop", reason: "replan 但 coverage_replan_effective=false，源码直接 stop。" };
+        }
+        if (state.coverage_round_budget_exhausted) {
+          return { next: "stop", reason: "coverage_round_budget_exhausted=true，预算耗尽，停止。" };
+        }
+        if (state.coverage_should_improve) {
+          if (state.coverage_improve_mode === "in_place") {
+            return { next: "build", reason: "in_place 改 harness 后要重新 build。" };
+          }
+          return { next: "plan", reason: "replan 模式且有效，回 plan 重新规划。" };
+        }
+        return { next: "stop", reason: "没有需要继续改进的信号，停止。" };
+      }
+      if (stageId === "re-build") {
+        if (state.failed) return { next: "stop", reason: "re-build failed，直接 stop。" };
+        if (state.stop_after_step) return { next: "stop", reason: "re-build 的 next 会经过 stage stop guard。" };
+        if (!state.crash_found) return { next: "stop", reason: "没有 crash_found，复现分支没有继续意义。" };
+        if (state.restart_to_plan) {
+          if (Number(state.restart_to_plan_count) > restartLimit) {
+            return { next: "stop", reason: `restart_to_plan_count>${restartLimit}，超过 _re_restart_limit，停止。` };
+          }
+          return { next: "plan", reason: "re-build 要求 restart_to_plan，返回 plan。" };
+        }
+        if (state.re_build_done && state.re_build_ok) {
+          return { next: "re-run", reason: "re-build 完成且成功，进入 re-run。" };
+        }
+        return { next: "stop", reason: "re-build 未完成或失败，不继续 re-run。" };
+      }
+      if (stageId === "re-run") {
+        if (state.failed) return { next: "stop", reason: "re-run failed，直接 stop。" };
+        if (state.stop_after_step) return { next: "stop", reason: "re-run 的 next 会经过 stage stop guard。" };
+        if (!state.crash_found) return { next: "stop", reason: "没有 crash_found，复现链结束。" };
+        if (state.restart_to_plan) {
+          if (Number(state.restart_to_plan_count) > restartLimit) {
+            return { next: "stop", reason: `restart_to_plan_count>${restartLimit}，超过默认 restart limit。` };
+          }
+          return { next: "plan", reason: "re-run 要求 restart_to_plan，返回 plan。" };
+        }
+        if (state.crash_repro_done && !state.crash_repro_ok) {
+          return { next: "stop", reason: "crash_repro_done=true 且 crash_repro_ok=false，停止。" };
+        }
+        if (state.plan_fix_on_crash && Number(state.crash_fix_attempts) < Number(state.plan_max_fix_rounds)) {
+          return { next: "fix_crash", reason: "允许 fix_on_crash，且 crash_fix_attempts 还没超过上限，进入 fix_crash。" };
+        }
+        return { next: "stop", reason: "复现链已完成，或修复预算用尽，停止。" };
+      }
+      if (stageId === "fix_crash") {
+        if (state.failed || state.last_error) return { next: "stop", reason: "fix_crash 有 failed 或 last_error，停止。" };
+        return withStopGuard(stageId, "build", state);
+      }
+      return { next: "stop", reason: "未识别的 stage，默认 stop。" };
+    }
+
+    function renderSimulator() {
+      const controls = document.getElementById("sim-controls");
+      const nextBox = document.getElementById("sim-next");
+      const explanation = document.getElementById("sim-explanation");
+      const schema = simulatorSchema[activeStage] || [];
+      const state = simState[activeStage] || {};
+      controls.innerHTML = "";
+
+      schema.forEach((field) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "control";
+        if (field.type === "checkbox") {
+          wrapper.innerHTML = `
+            <label>${field.label}</label>
+            <div class="checkbox-row">
+              <label>
+                <input type="checkbox" ${state[field.key] ? "checked" : ""} />
+                ${state[field.key] ? "true" : "false"}
+              </label>
+            </div>
+          `;
+          const input = wrapper.querySelector("input");
+          input.addEventListener("change", (event) => {
+            state[field.key] = event.target.checked;
+            renderStages();
+          });
+        } else if (field.type === "select") {
+          wrapper.innerHTML = `
+            <label>${field.label}</label>
+            <select>${field.options.map((item) => `<option value="${item}" ${String(state[field.key]) === item ? "selected" : ""}>${item || "(empty)"}</option>`).join("")}</select>
+          `;
+          const select = wrapper.querySelector("select");
+          select.addEventListener("change", (event) => {
+            state[field.key] = event.target.value;
+            renderStages();
+          });
+        } else if (field.type === "number") {
+          wrapper.innerHTML = `
+            <label>${field.label}</label>
+            <input type="number" value="${Number(state[field.key] || 0)}" />
+          `;
+          const input = wrapper.querySelector("input");
+          input.addEventListener("input", (event) => {
+            state[field.key] = Number(event.target.value || 0);
+            renderStages();
+          });
+        }
+        controls.appendChild(wrapper);
+      });
+
+      const result = evaluateStage(activeStage);
+      nextBox.textContent = result.next;
+      nextBox.className = "next-badge" + (result.next === "stop" ? " stop" : "");
+      explanation.textContent = result.reason;
+      return result.next;
+    }
+
+    function renderStages() {
+      stageTabs.innerHTML = "";
+      flowRail.innerHTML = "";
+      flowLinks.innerHTML = "";
+      const current = stages.find((stage) => stage.id === activeStage) || stages[0];
+      const simulatedNext = evaluateStage(activeStage).next;
+
+      stages.forEach((stage) => {
+        const tab = document.createElement("button");
+        tab.className = "stage-tab" + (stage.id === activeStage ? " active" : "");
+        tab.textContent = stage.title;
+        tab.addEventListener("click", () => {
+          activeStage = stage.id;
+          renderStages();
+        });
+        stageTabs.appendChild(tab);
+
+        const node = document.createElement("article");
+        node.className = "stage-node" + (stage.id === activeStage ? " active" : "") + (stage.id === simulatedNext ? " active" : "");
+        node.innerHTML = `
+          <div class="num">${stage.order}</div>
+          <strong>${stage.title}</strong>
+          <small>${stage.summary}</small>
+        `;
+        node.addEventListener("click", () => {
+          activeStage = stage.id;
+          renderStages();
+        });
+        flowRail.appendChild(node);
+      });
+
+      current.next.forEach((item) => {
+        const pill = document.createElement("span");
+        pill.textContent = (item === simulatedNext ? "selected -> " : "next -> ") + item;
+        flowLinks.appendChild(pill);
+      });
+
+      stageDetail.innerHTML = `
+        <h3>${current.title}</h3>
+        <p>${current.summary}</p>
+        <ul>${current.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+      `;
+      renderSimulator();
+    }
+
+    function renderComponents() {
+      componentList.innerHTML = "";
+      const current = components.find((item) => item.id === activeComponent) || components[0];
+
+      components.forEach((item) => {
+        const pill = document.createElement("button");
+        pill.className = "component-pill" + (item.id === activeComponent ? " active" : "");
+        pill.innerHTML = `<strong>${item.name}</strong><span>${item.kind}</span>`;
+        pill.addEventListener("click", () => {
+          activeComponent = item.id;
+          renderComponents();
+        });
+        componentList.appendChild(pill);
+      });
+
+      componentDetail.innerHTML = `
+        <h3>${current.name}</h3>
+        <p>${current.summary}</p>
+        <div class="component-meta">
+          <div class="meta-box">
+            <h4>源码位置</h4>
+            <p class="mono">${current.file}</p>
+          </div>
+          <div class="meta-box">
+            <h4>为什么重要</h4>
+            <p>${current.why}</p>
+          </div>
+          <div class="meta-box" style="grid-column: 1 / -1;">
+            <h4>代码里能直接看到的职责</h4>
+            <ul>${current.responsibilities.map((line) => `<li>${line}</li>`).join("")}</ul>
+          </div>
+        </div>
+      `;
+    }
+
+    renderStages();
+    renderComponents();
+  </script>
+</body>
+</html>
