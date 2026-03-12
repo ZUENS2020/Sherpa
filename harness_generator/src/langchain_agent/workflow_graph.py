@@ -4337,10 +4337,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         can_replan = (current_round + 1) < max_rounds
         round_budget_exhausted = False
         stop_reason = ""
+        run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
-            and (not str(state.get("run_error_kind") or "").strip())
+            and (not run_error_kind or run_error_kind in {"run_resource_exhaustion"})
         )
         should_improve = False
         replan_required = False
@@ -5183,6 +5184,8 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "fix_build"
     if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
         return "stop"
+    if run_error_kind in {"run_resource_exhaustion"}:
+        return "coverage-analysis"
     if run_error_kind:
         return "stop"
     if bool(state.get("crash_found")):
@@ -5553,6 +5556,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     except Exception:
         pass
     msg = str(out.get("message") or "Fuzzing completed.").strip()
+    recommended_next = _recommended_next_step(cast(FuzzWorkflowRuntimeState, out))
     if bool(out.get("failed")):
         _wf_log(out, f"workflow end status=failed dt={_fmt_dt(time.perf_counter()-t0)}")
         terminal_reason = str(out.get("run_terminal_reason") or "").strip() or str(
@@ -5564,11 +5568,20 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     # If we stopped due to an error but didn't mark failed, still surface it.
     last_error = str(out.get("last_error") or "").strip()
     if last_error and not bool(out.get("crash_found")):
-        _wf_log(out, f"workflow end status=error dt={_fmt_dt(time.perf_counter()-t0)}")
-        raise RuntimeError(last_error)
+        if stop_after_step and recommended_next != "stop":
+            _wf_log(
+                out,
+                (
+                    "workflow end status=stage_recoverable "
+                    f"next={recommended_next} dt={_fmt_dt(time.perf_counter()-t0)}"
+                ),
+            )
+        else:
+            _wf_log(out, f"workflow end status=error dt={_fmt_dt(time.perf_counter()-t0)}")
+            raise RuntimeError(last_error)
 
-    _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
-    recommended_next = _recommended_next_step(cast(FuzzWorkflowRuntimeState, out))
+    if not (last_error and not bool(out.get("crash_found")) and stop_after_step and recommended_next != "stop"):
+        _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
         "repo_root": str(out.get("repo_root") or ""),

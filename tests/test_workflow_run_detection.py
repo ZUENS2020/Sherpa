@@ -437,6 +437,13 @@ def test_route_after_run_routes_idle_timeout_to_stop():
     assert route == "stop"
 
 
+def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
 def test_route_after_coverage_analysis_routes_to_improve_harness():
     route = workflow_graph._route_after_coverage_analysis_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
@@ -582,6 +589,33 @@ def test_node_coverage_analysis_stops_when_replan_budget_exhausted():
     assert out["coverage_round_budget_exhausted"] is True
     assert out["coverage_stop_reason"] == "coverage_loop_budget_exhausted"
     assert "budget exhausted" in out["coverage_improve_reason"]
+
+
+def test_node_coverage_analysis_allows_resource_exhaustion_to_improve():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "run_resource_exhaustion",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():
@@ -753,7 +787,50 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "stop"
+    assert route == "coverage-analysis"
+
+
+def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
+    fake_out = {
+        "repo_root": str(tmp_path),
+        "last_step": "run",
+        "message": "Fuzzing run failed.",
+        "last_error": "fuzzer produced oom-like artifacts for demo_fuzz",
+        "run_error_kind": "run_resource_exhaustion",
+        "crash_found": False,
+    }
+
+    class _FakeCompiledWorkflow:
+        def invoke(self, _state):
+            return dict(fake_out)
+
+    class _FakeWorkflow:
+        def compile(self):
+            return _FakeCompiledWorkflow()
+
+    monkeypatch.setattr(workflow_graph, "build_fuzz_workflow", lambda: _FakeWorkflow())
+    monkeypatch.setattr(workflow_graph, "_write_run_summary", lambda _out: None)
+
+    result = workflow_graph.run_fuzz_workflow(
+        workflow_graph.FuzzWorkflowInput(
+            repo_url="https://github.com/example/repo.git",
+            email=None,
+            time_budget=0,
+            run_time_budget=0,
+            max_len=1000,
+            docker_image=None,
+            ai_key_path=tmp_path / ".env",
+            resume_from_step="run",
+            resume_repo_root=tmp_path,
+            stop_after_step="run",
+            coverage_loop_max_rounds=3,
+            max_fix_rounds=3,
+            same_error_max_retries=3,
+        )
+    )
+
+    assert result["workflow_last_step"] == "run"
+    assert result["workflow_recommended_next"] == "coverage-analysis"
 
 
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
