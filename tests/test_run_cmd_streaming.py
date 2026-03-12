@@ -243,6 +243,43 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
     assert meta["counts"]["repo_examples"] == 1
     assert meta["counts"]["ai"] >= 1
     assert "repo_examples" in meta["sources"]
+    assert meta["repo_examples_filtered"] is True
+    assert meta["repo_examples_accepted_count"] == 1
+    assert meta["repo_examples_rejected_count"] >= 0
+
+
+def test_collect_repo_seed_examples_filters_source_files_for_generic_targets(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "generic_fuzz"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "sample.dat").write_bytes(b"\x00\x01sample")
+    (tests_dir / "helper.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+    (tests_dir / "page.html").write_text("<html></html>\n", encoding="utf-8")
+
+    selected, meta = gen._collect_repo_seed_examples("generic", "generic_fuzz", corpus_dir)
+
+    assert [p.name for p in selected] == ["repo_01.dat"]
+    assert meta["accepted_count"] == 1
+    assert meta["rejected_count"] >= 2
+    assert meta["filtered"] is True
+
+
+def test_collect_repo_seed_examples_ignores_repo_source_for_parser_numeric(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "parse_arg_id_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "arg_tokens.txt").write_text("0\n1\n42\n", encoding="utf-8")
+    (tests_dir / "arg_helper.c").write_text("int parse_arg_id(void);\n", encoding="utf-8")
+
+    selected, meta = gen._collect_repo_seed_examples("parser-numeric", "parse_arg_id_fuzzer", corpus_dir)
+
+    assert [p.name for p in selected] == ["repo_01.txt"]
+    assert meta["accepted_count"] == 1
+    assert meta["rejected_count"] >= 1
 
 
 def test_pass_generate_seeds_radamsa_missing_is_non_fatal(tmp_path: Path, monkeypatch):

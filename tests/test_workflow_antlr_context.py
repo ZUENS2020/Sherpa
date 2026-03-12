@@ -235,3 +235,66 @@ def test_node_plan_uses_deterministic_fallback_after_retry_failure(tmp_path: Pat
     targets = (fuzz_dir / "targets.json").read_text(encoding="utf-8")
     assert "parse_yaml_stream" in targets
     assert '"seed_profile": "parser-structure"' in targets
+
+
+def test_collect_target_analysis_prefers_deeper_targets_over_shallow_utilities(tmp_path: Path):
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "z.c").write_text(
+        "unsigned long adler32(unsigned long adler, const unsigned char* buf, unsigned int len) { return adler + len; }\n"
+        "int decode_stream(const unsigned char* data, unsigned long size) { return (data && size) ? 1 : 0; }\n",
+        encoding="utf-8",
+    )
+
+    doc = workflow_graph._collect_target_analysis_context(tmp_path)
+    recommended = doc.get("recommended_targets") or []
+    assert recommended
+    names = [str(item.get("name") or "") for item in recommended]
+    assert "decode_stream" in names
+    assert "adler32" not in names
+    decode_entry = next(item for item in recommended if item.get("name") == "decode_stream")
+    assert decode_entry.get("depth_class") in {"medium", "deep"}
+    assert int(decode_entry.get("depth_score") or 0) > 0
+
+
+def test_node_plan_marks_replan_ineffective_when_outputs_do_not_materially_change(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\nsame\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            (fuzz_dir / "PLAN.md").write_text("# plan\nsame\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1")
+
+    out = workflow_graph._node_plan(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+            "coverage_target_name": "yaml_parser_parse",
+            "coverage_target_depth_score": 10,
+            "coverage_target_depth_class": "medium",
+        }
+    )
+
+    assert out["last_error"] == ""
+    assert out["replan_effective"] is False
+    assert out["replan_stop_reason"] == "no_material_change"
+    assert out["coverage_replan_effective"] is False
+    assert out["coverage_round_budget_exhausted"] is True
+    assert out["coverage_stop_reason"] == "no_material_change"

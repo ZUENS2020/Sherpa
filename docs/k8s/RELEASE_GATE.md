@@ -1,26 +1,29 @@
 # 发布门禁
 
-## 1. 上线前必检
+## 必过项
 
-1. 核心 Pod 全部 Ready
-2. `/api/health` 200
-3. `/api/system` 返回 runtime 基线
-4. 提交任务后阶段 Job 可按顺序生成
-5. 任务详情可返回关键字段（phase/error_code/error_kind/signature）
+### 后端
+- `python -m py_compile` 覆盖改动模块
+- 关键 pytest 子集通过
 
-## 2. 发布检查图
+### 前端
+- `npm test`
+- `npm run build`
 
-```mermaid
-flowchart LR
-  A["健康检查"] --> B["提交样例任务"]
-  B --> C["阶段 Job 顺序执行"]
-  C --> D["任务终态与日志可追溯"]
-  D --> E["允许发布"]
-```
+### 部署前核对
+- k8s worker 不依赖 Docker CLI
+- `run_summary.json` 字段与当前实现一致
+- 文档已同步更新
 
-## 3. 回滚
+## 建议 smoke test
 
-```bash
-kubectl -n sherpa rollout undo deploy/sherpa-web
-kubectl -n sherpa rollout undo deploy/sherpa-frontend
-```
+至少验证：
+- 一条 parser 类仓库：`libyaml` 或 `fmt`
+- 一条 build/fix_build 易出问题仓库：`zlib` 或 `libarchive`
+
+## 拒绝发布条件
+
+- `run` 仍然无限空转到 dispatch limit
+- `replan` 无实质变化仍被视为成功
+- `repo_examples` 继续大量吸收源码文件
+- k8s worker 回退到 inner Docker 执行

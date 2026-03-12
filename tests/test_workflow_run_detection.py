@@ -451,6 +451,19 @@ def test_route_after_improve_harness_routes_back_to_plan():
     assert route == "plan"
 
 
+def test_route_after_improve_harness_stops_on_ineffective_replan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_effective": False,
+        }
+    )
+    assert route == "stop"
+
+
 def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
     route = workflow_graph._route_after_improve_harness_state(
         {
