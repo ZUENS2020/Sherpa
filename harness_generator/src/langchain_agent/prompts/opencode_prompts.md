@@ -13,14 +13,18 @@ MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/PLAN.md` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN.md` and schema-valid `fuzz/targets.json`, then write `fuzz/PLAN.md` into `./done`.
 
+Use both `fuzz/antlr_plan_context.json` and `fuzz/target_analysis.json` as grounding when available.
+
 `fuzz/targets.json` format is STRICT:
 - MUST be plain JSON, not Markdown and not fenced code blocks
 - MUST be a JSON array, not an object
 - MUST contain at least one target object
-- Each target object MUST include non-empty string fields: `name`, `api`, `lang`, `target_type`
+- Each target object MUST include non-empty string fields: `name`, `api`, `lang`, `target_type`, `seed_profile`
 - `lang` MUST be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`
 - `target_type` MUST be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`
+- `seed_profile` MUST be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`
 - Choose the most specific target type; do not invent new type names
+- Choose the most specific seed profile from the fixed enum; do not invent new profile names
 - If unsure, overwrite the whole file with the smallest valid array instead of leaving partial/invalid JSON
 - Never emit an empty array
 - Never wrap the array inside another object such as `{ "targets": [...] }`
@@ -31,7 +35,8 @@ Minimal valid example:
     "name": "yaml_parser_parse",
     "api": "yaml_parser_parse",
     "lang": "c-cpp",
-    "target_type": "parser"
+    "target_type": "parser",
+    "seed_profile": "parser-structure"
   }
 ]
 
@@ -164,9 +169,10 @@ Repair `fuzz/targets.json` so it passes strict schema checks.
 
 Required schema:
 - JSON array with at least one object
-- each object must include non-empty string keys: `name`, `api`, `lang`, `target_type`
+- each object must include non-empty string keys: `name`, `api`, `lang`, `target_type`, `seed_profile`
 - `lang` must be one of: c-cpp, cpp, c, c++, java
 - `target_type` must be one of: parser, decoder, archive, image, document, network, database, serializer, interpreter, generic
+- `seed_profile` must be one of: parser-structure, parser-token, parser-format, parser-numeric, decoder-binary, archive-container, serializer-structured, document-text, network-message, generic
 
 Constraints:
 - Keep edits minimal

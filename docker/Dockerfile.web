@@ -47,6 +47,28 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+ARG RADAMSA_VERSION="0.7"
+RUN set -e; \
+    if apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+       && apt-get install -y --no-install-recommends radamsa; then \
+      command -v radamsa >/dev/null; \
+      rm -rf /var/lib/apt/lists/*; \
+      exit 0; \
+    fi; \
+    echo "[warn] apt radamsa install failed, building from source"; \
+    rm -rf /var/lib/apt/lists/*; \
+    workdir="$(mktemp -d)"; \
+    curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
+      -fsSL "https://github.com/aoh/radamsa/archive/refs/tags/v${RADAMSA_VERSION}.tar.gz" \
+      -o "${workdir}/radamsa.tar.gz"; \
+    tar -xzf "${workdir}/radamsa.tar.gz" -C "${workdir}"; \
+    cd "${workdir}/radamsa-${RADAMSA_VERSION}"; \
+    make; \
+    install -m 0755 bin/radamsa /usr/local/bin/radamsa; \
+    cd /; \
+    rm -rf "${workdir}"; \
+    command -v radamsa >/dev/null
+
 # Toolchain smoke check: fail image build early if fuzz sanitizer runtime is incomplete.
 RUN set -e; \
     command -v clang++ >/dev/null; \

@@ -451,6 +451,79 @@ def test_route_after_improve_harness_routes_back_to_plan():
     assert route == "plan"
 
 
+def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "in_place",
+        }
+    )
+    assert route == "build"
+
+
+def test_node_coverage_analysis_keeps_first_plateau_in_place():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert out["coverage_replan_required"] is False
+    assert out["coverage_plateau_streak"] == 1
+
+
+def test_node_coverage_analysis_replans_after_second_plateau_without_gain():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "replan"
+    assert out["coverage_replan_required"] is True
+    assert out["coverage_plateau_streak"] == 2
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {

@@ -26,6 +26,18 @@ ALLOWED_TARGET_TYPES = {
     "interpreter",
     "generic",
 }
+ALLOWED_SEED_PROFILES = {
+    "parser-structure",
+    "parser-token",
+    "parser-format",
+    "parser-numeric",
+    "decoder-binary",
+    "archive-container",
+    "serializer-structured",
+    "document-text",
+    "network-message",
+    "generic",
+}
 
 
 def parse_budget_value(raw: Any, *, default: int = _DEFAULT_TIME_BUDGET_SEC) -> int:
@@ -100,7 +112,7 @@ def validate_targets_json(repo_root: Path) -> tuple[bool, str]:
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             return False, f"targets[{i}] must be an object"
-        for key in ("name", "api", "lang", "target_type"):
+        for key in ("name", "api", "lang", "target_type", "seed_profile"):
             val = item.get(key)
             if not isinstance(val, str) or not val.strip():
                 return False, f"targets[{i}].{key} must be a non-empty string"
@@ -110,6 +122,9 @@ def validate_targets_json(repo_root: Path) -> tuple[bool, str]:
         target_type = str(item.get("target_type") or "").strip().lower()
         if target_type not in ALLOWED_TARGET_TYPES:
             return False, f"targets[{i}].target_type unsupported: {item.get('target_type')}"
+        seed_profile = str(item.get("seed_profile") or "").strip().lower()
+        if seed_profile not in ALLOWED_SEED_PROFILES:
+            return False, f"targets[{i}].seed_profile unsupported: {item.get('seed_profile')}"
     return True, ""
 
 

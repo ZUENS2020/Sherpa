@@ -17,6 +17,8 @@ def _fake_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     gen = NonOssFuzzHarnessGenerator.__new__(NonOssFuzzHarnessGenerator)
     gen.repo_root = repo_root
     gen.docker_image = None
+    gen.last_seed_profile_by_fuzzer = {}
+    gen.last_seed_bootstrap_by_fuzzer = {}
     return gen
 
 
@@ -95,7 +97,7 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
     gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
     (gen.fuzz_dir / "targets.json").write_text(
-        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser"}]\n',
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
         encoding="utf-8",
     )
     harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
@@ -114,8 +116,9 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     gen._pass_generate_seeds("yaml_parser_parse_fuzz")
 
     assert "Target type for `yaml_parser_parse_fuzz` is `parser`" in captured["instructions"]
+    assert "seed_profile is `parser-structure`" in captured["instructions"]
     assert "anchors and aliases" in captured["instructions"]
-    assert "flow and block styles" in captured["instructions"]
+    assert "Current corpus summary:" in captured["instructions"]
 
 
 def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
@@ -125,7 +128,7 @@ def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
     gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
     gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
     (gen.fuzz_dir / "targets.json").write_text(
-        '[{"name":"parse_arg_id","api":"parse_arg_id","lang":"c-cpp","target_type":"parser"}]\n',
+        '[{"name":"parse_arg_id","api":"parse_arg_id","lang":"c-cpp","target_type":"parser","seed_profile":"parser-numeric"}]\n',
         encoding="utf-8",
     )
     harness = gen.fuzz_dir / "parse_arg_id_fuzz.cc"
@@ -147,10 +150,10 @@ def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
 
     gen._pass_generate_seeds("parse_arg_id_fuzzer")
 
-    assert "argument identifiers" in captured["instructions"]
+    assert "seed_profile is `parser-numeric`" in captured["instructions"]
     assert "leading zeros" in captured["instructions"]
     assert "separator-boundary tokens" in captured["instructions"]
-    assert "non-ASCII cases" in captured["instructions"]
+    assert "Coverage-oriented gap hints" in captured["instructions"]
 
 
 def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
@@ -203,3 +206,70 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     assert result.run_error_kind == ""
     assert result.plateau_detected is True
     assert result.terminal_reason == "coverage_plateau"
+
+
+def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "sample.yaml").write_text("---\na: 1\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, _instructions: str, **_kwargs):
+            corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
+            (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
+            return "seed-ok"
+
+    orig_which = fur.which
+    monkeypatch.setattr(fur, "which", lambda cmd: None if cmd == "radamsa" else orig_which(cmd))
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("yaml_parser_parse_fuzz")
+
+    corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
+    assert (corpus_dir / "repo_01.yaml").is_file()
+    assert (corpus_dir / "ai_extra.yaml").is_file()
+    meta = gen.last_seed_bootstrap_by_fuzzer["yaml_parser_parse_fuzz"]
+    assert meta["counts"]["repo_examples"] == 1
+    assert meta["counts"]["ai"] >= 1
+    assert "repo_examples" in meta["sources"]
+
+
+def test_pass_generate_seeds_radamsa_missing_is_non_fatal(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "targets.json").write_text(
+        '[{"name":"parse_arg_id","api":"parse_arg_id","lang":"c-cpp","target_type":"parser","seed_profile":"parser-numeric"}]\n',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_arg_id_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, _instructions: str, **_kwargs):
+            corpus_dir = gen.fuzz_corpus_dir / "parse_arg_id_fuzzer"
+            (corpus_dir / "seed_num").write_text("42", encoding="utf-8")
+            return "seed-ok"
+
+    orig_which = fur.which
+    monkeypatch.setattr(fur, "which", lambda cmd: None if cmd == "radamsa" else orig_which(cmd))
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_arg_id_fuzzer")
+
+    meta = gen.last_seed_bootstrap_by_fuzzer["parse_arg_id_fuzzer"]
+    assert meta["counts"]["radamsa"] == 0
+    assert meta["seed_profile"] == "parser-numeric"
