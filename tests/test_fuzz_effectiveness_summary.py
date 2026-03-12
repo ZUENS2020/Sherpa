@@ -108,6 +108,19 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
             "coverage_seed_families_required": ["document_markers", "flow_structures"],
             "coverage_seed_families_covered": ["document_markers"],
             "coverage_seed_families_missing": ["flow_structures"],
+            "coverage_target_api": "fmt::println",
+            "coverage_seed_counts_raw": {"repo_examples": 2, "ai": 3, "radamsa": 4, "total": 9},
+            "coverage_seed_counts_filtered": {"repo_examples": 1, "ai": 2, "radamsa": 1, "total": 4},
+            "coverage_seed_noise_rejected_count": 5,
+            "coverage_seed_family_coverage": {"covered": ["replacement_fields"], "missing": ["width_precision"]},
+            "synthesize_selected_target_name": "parse_replacement_field_then_tail",
+            "synthesize_selected_target_api": "parse_replacement_field_then_tail",
+            "synthesize_observed_target_api": "fmt::println",
+            "synthesize_observed_harness": "println_fuzz.cc",
+            "synthesize_target_drifted": True,
+            "synthesize_target_drift_reason": "selected target is not a runtime entrypoint",
+            "synthesize_target_relation": "runtime wrapper for same formatting path",
+            "synthesize_target_runtime_viability": "low",
         }
     )
 
@@ -126,6 +139,9 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["fuzz_inventory"]["artifact_count"] == 1
     assert summary["seed_quality"]["initial_corpus_files"] == 2
     assert summary["seed_family_coverage"]["missing"] == ["flow_structures"]
+    assert summary["seed_bootstrap"]["noise_rejected_count"] == 5
+    assert summary["synthesize_target"]["relation"] == "runtime wrapper for same formatting path"
+    assert summary["coverage_loop"]["target_api"] == "fmt::println"
     assert summary["build_error_kind"] == ""
     assert summary["build_error_code"] == ""
     assert len(summary["run_details"]) == 1

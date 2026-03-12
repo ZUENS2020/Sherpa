@@ -625,9 +625,10 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
             "coverage_loop_round": 1,
             "coverage_history": [],
             "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_target_api": "fmt::println",
             "coverage_seed_profile": "parser-structure",
-            "coverage_seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing"]},
-            "coverage_quality_flags": ["missing_required_families", "repo_examples_missing"],
+            "coverage_seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"]},
+            "coverage_quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"],
             "coverage_seed_families_required": ["flow_structures", "anchors_aliases"],
             "coverage_seed_families_covered": ["anchors_aliases"],
             "coverage_seed_families_missing": ["flow_structures"],
@@ -652,6 +653,7 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert out["coverage_should_improve"] is True
     assert out["coverage_improve_mode"] == "in_place"
     assert "seed_quality_flags" in out["coverage_improve_reason"]
+    assert out["coverage_target_api"] == "fmt::println"
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():

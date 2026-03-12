@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
+import textwrap
 import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,6 +52,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_improve_reason: str
     coverage_history: list[dict[str, Any]]
     coverage_target_name: str
+    coverage_target_api: str
     coverage_seed_profile: str
     coverage_target_depth_score: int
     coverage_target_depth_class: str
@@ -66,12 +68,17 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_stop_reason: str
     coverage_corpus_sources: list[str]
     coverage_seed_counts: dict[str, int]
+    coverage_seed_counts_raw: dict[str, int]
+    coverage_seed_counts_filtered: dict[str, int]
+    coverage_seed_noise_rejected_count: int
+    coverage_seed_family_coverage: dict[str, Any]
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
     selected_target_api: str
+    selected_target_runtime_viability: str
     coverage_seed_quality: dict[str, Any]
     coverage_seed_families_required: list[str]
     coverage_seed_families_covered: list[str]
@@ -118,6 +125,14 @@ class FuzzWorkflowState(TypedDict, total=False):
     run_error_kind: str
     run_terminal_reason: str
     run_idle_seconds: int
+    synthesize_selected_target_name: str
+    synthesize_selected_target_api: str
+    synthesize_observed_target_api: str
+    synthesize_observed_harness: str
+    synthesize_target_drifted: bool
+    synthesize_target_drift_reason: str
+    synthesize_target_relation: str
+    synthesize_target_runtime_viability: str
     run_children_exit_count: int
     run_details: list[dict[str, Any]]
     run_batch_plan: list[dict[str, Any]]
@@ -459,6 +474,48 @@ def _score_target_depth(
     return score, depth_class, ", ".join(reasons[:5]) or "neutral"
 
 
+def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") -> tuple[str, str, list[str]]:
+    text = f"{name}\n{context}\n{file_hint}".lower()
+    reasons: list[str] = []
+    replacements: list[str] = []
+    score = 0
+    if any(tok in text for tok in ("test/fuzzing", "/fuzz", "fuzzing", "oss-fuzz")):
+        score += 4
+        reasons.append("existing-fuzz-infra")
+    if any(tok in text for tok in ("println", "print(", "format_to", "vformat", "fmt::format", "fmt::print", "fmt::println")):
+        score += 5
+        reasons.append("public-runtime-api")
+    if any(tok in text for tok in ("fmt/compile.h", "fmt::compile::", " constexpr", "consteval")):
+        score -= 8
+        reasons.append("compile-time-only")
+        replacements.extend(["fmt::println", "fmt::print", "fmt::format_to", "fmt::vformat", "fmt::format"])
+    if any(tok in text for tok in ("fmt::detail::", "/detail/", " detail::")):
+        score -= 5
+        reasons.append("detail-helper")
+        replacements.extend(["fmt::println", "fmt::print", "fmt::format_to", "fmt::vformat"])
+    if any(tok in text for tok in ("helper", "setter", "set_", "value(", " arg_mapper", " container", " map_")):
+        score -= 3
+        reasons.append("helper-like")
+    if any(tok in text for tok in ("parse_", "parser", "replacement_field", "arg_id")) and "fmt" in text:
+        score -= 2
+        reasons.append("fmt-parser-helper")
+        replacements.extend(["fmt::format_to", "fmt::vformat", "fmt::println"])
+    if score >= 4:
+        viability = "high"
+    elif score >= 0:
+        viability = "medium"
+    else:
+        viability = "low"
+    seen: set[str] = set()
+    deduped = []
+    for item in replacements:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    rationale = ", ".join(reasons[:5]) or "neutral-runtime-signal"
+    return viability, rationale, deduped
+
+
 def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     targets_path = repo_root / "fuzz" / "targets.json"
     if not targets_path.is_file():
@@ -489,6 +546,17 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
         target_type = str(item.get("target_type") or "generic").strip().lower()
         seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
         required, optional = _seed_families_for_target(seed_profile, target_name, api)
+        runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
+        selection_rationale = str(item.get("selection_rationale") or "").strip()
+        runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
+        if not runtime_viability:
+            runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
+                target_name,
+                api,
+                file_hint=str(item.get("file") or ""),
+            )
+            selection_rationale = selection_rationale or auto_rationale
+            runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
         out.append(
             {
                 "target_name": target_name,
@@ -500,6 +568,9 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "depth_score": int(item.get("depth_score") or 0),
                 "depth_class": str(item.get("depth_class") or ""),
                 "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+                "runtime_viability": runtime_viability,
+                "selection_rationale": selection_rationale,
+                "runtime_replacement_candidates": runtime_replacement_candidates,
                 "seed_families_required": required,
                 "seed_families_optional": optional,
                 "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
@@ -543,14 +614,54 @@ def _infer_harness_primary_api(text: str) -> str:
         "const_cast",
         "dynamic_cast",
     }
-    for match in re.finditer(r"\b([a-z_][a-z0-9_]*)\s*\(", text):
-        name = str(match.group(1) or "").strip().lower()
-        if not name or name in keywords:
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(", text):
+        name = str(match.group(1) or "").strip()
+        lowered = name.lower()
+        leaf = lowered.split("::")[-1]
+        if not lowered or leaf in keywords:
             continue
-        if name == "llvmfuzzertestoneinput":
+        if leaf == "llvmfuzzertestoneinput":
             continue
-        return name
+        return lowered
     return ""
+
+
+def _readme_drift_status(repo_root: Path, alignment: dict[str, Any]) -> dict[str, Any]:
+    readme = repo_root / "fuzz" / "README.md"
+    if not readme.is_file():
+        return {
+            "complete": False,
+            "missing": ["selected_target", "final_target", "technical_reason", "relation"],
+            "relation": "",
+            "reason": "",
+        }
+    text = readme.read_text(encoding="utf-8", errors="replace")
+    lowered = text.lower()
+    selected = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip().lower()
+    observed = str(alignment.get("observed_api") or "").strip().lower()
+    relation = ""
+    reason = ""
+    relation_match = re.search(r"(?:relation|关系)\s*[:：]\s*(.+)", text, re.IGNORECASE)
+    if relation_match:
+        relation = str(relation_match.group(1) or "").strip()
+    reason_match = re.search(r"(?:technical reason|reason|原因)\s*[:：]\s*(.+)", text, re.IGNORECASE)
+    if reason_match:
+        reason = str(reason_match.group(1) or "").strip()
+    missing: list[str] = []
+    if selected and selected not in lowered:
+        missing.append("selected_target")
+    if observed and observed not in lowered:
+        missing.append("final_target")
+    if not reason:
+        missing.append("technical_reason")
+    if not relation:
+        missing.append("relation")
+    return {
+        "complete": not missing,
+        "missing": missing,
+        "relation": relation,
+        "reason": reason,
+    }
 
 
 def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
@@ -691,6 +802,17 @@ def _build_fallback_targets_doc(
                 target_type=target_type,
                 risk_signals=list(item.get("risk_signals") or []),
             )
+        runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
+        selection_rationale = str(item.get("selection_rationale") or "").strip()
+        runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
+        if not runtime_viability:
+            runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
+                name,
+                file_hint,
+                file_hint=file_hint,
+            )
+            selection_rationale = selection_rationale or auto_rationale
+            runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
         candidates.append(
             {
                 "name": name,
@@ -701,6 +823,9 @@ def _build_fallback_targets_doc(
                 "depth_score": depth_score,
                 "depth_class": depth_class,
                 "selection_bias_reason": selection_bias_reason,
+                "runtime_viability": runtime_viability,
+                "selection_rationale": selection_rationale,
+                "runtime_replacement_candidates": runtime_replacement_candidates,
             }
         )
         if len(candidates) >= 3:
@@ -710,7 +835,13 @@ def _build_fallback_targets_doc(
         has_deep = any(str(item.get("depth_class") or "") == "deep" for item in candidates)
         if has_deep:
             candidates = [item for item in candidates if str(item.get("depth_class") or "") != "shallow"]
-        candidates.sort(key=lambda item: (-int(item.get("depth_score") or 0), str(item.get("name") or "")))
+        candidates.sort(
+            key=lambda item: (
+                -{"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
+                -int(item.get("depth_score") or 0),
+                str(item.get("name") or ""),
+            )
+        )
         return candidates
 
     return [
@@ -723,6 +854,9 @@ def _build_fallback_targets_doc(
             "depth_score": 0,
             "depth_class": "shallow",
             "selection_bias_reason": "fallback-default",
+            "runtime_viability": "medium",
+            "selection_rationale": "fallback-default",
+            "runtime_replacement_candidates": [],
         }
     ]
 
@@ -1321,12 +1455,21 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             target_type=str(item.get("target_type") or "generic"),
             risk_signals=list(item.get("risk_signals") or []),
         )
+        runtime_viability, selection_rationale, replacement_candidates = _runtime_viability_details(
+            str(item.get("name") or ""),
+            str(item.get("signature") or ""),
+            file_hint=str(item.get("file") or ""),
+        )
         item["depth_score"] = depth_score
         item["depth_class"] = depth_class
         item["selection_bias_reason"] = selection_bias_reason
+        item["runtime_viability"] = runtime_viability
+        item["selection_rationale"] = selection_rationale
+        item["runtime_replacement_candidates"] = replacement_candidates
 
     candidate_functions.sort(
         key=lambda item: (
+            {"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
             int(item.get("depth_score") or 0),
             len(list(item.get("risk_signals") or [])),
             str(item.get("name") or ""),
@@ -1359,6 +1502,9 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "depth_score": int(item.get("depth_score") or 0),
                 "depth_class": str(item.get("depth_class") or "shallow"),
                 "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+                "selection_rationale": str(item.get("selection_rationale") or ""),
+                "runtime_replacement_candidates": list(item.get("runtime_replacement_candidates") or []),
             }
         )
         if len(recommended_targets) >= 24:
@@ -1863,6 +2009,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
         seed_families_required = list(selected_primary.get("seed_families_required") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
+        selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
         replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
         replan_effective = bool(state.get("coverage_replan_effective") or False)
         replan_stop_reason = ""
@@ -1926,7 +2073,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_summary": target_analysis_summary,
             "selected_targets_path": selected_targets_path,
             "coverage_target_name": new_target_name or prev_target_name,
+            "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
+            "selected_target_runtime_viability": selected_runtime_viability or str(state.get("selected_target_runtime_viability") or ""),
             "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
             "coverage_seed_families_required": seed_families_required or list(state.get("coverage_seed_families_required") or []),
             "coverage_seed_families_covered": list(state.get("coverage_seed_families_covered") or []),
@@ -1974,6 +2123,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
     selected_targets_path = str(state.get("selected_targets_path") or "").strip()
     selected_target_api = str(state.get("selected_target_api") or "").strip()
+    selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
     selected_target_doc = _load_selected_targets_doc(gen.repo_root)
     selected_target_name = ""
     if selected_target_doc:
@@ -2000,10 +2150,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "If the selected target is compile-time-only, detail-only, constexpr-only, or otherwise not a viable runtime fuzz entrypoint,\n"
             "you may choose a nearby runtime-executable replacement target.\n"
             "When you do that, you MUST record in `fuzz/README.md`:\n"
-            "- the originally selected target\n"
-            "- the final target you chose\n"
-            "- the technical reason for switching\n"
-            "- how the final target relates to the original target\n"
+            "- Selected target: <original target>\n"
+            "- Final target: <observed runtime target>\n"
+            "- Technical reason: <why the original target is not the best runtime entrypoint>\n"
+            "- Relation: <how the final target relates to the original target>\n"
             "Prefer public/runtime parser APIs over generic wrappers when a direct runtime target exists."
         )
         if "selected_targets.json" not in hint:
@@ -2138,6 +2288,39 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
 
+    def _run_readme_alignment_completion(timeout: int, alignment: dict[str, Any]) -> None:
+        selected_label = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip() or "unknown"
+        observed_label = str(alignment.get("observed_api") or "").strip() or "unknown"
+        observed_harness = str(alignment.get("observed_harness") or "").strip() or "unknown"
+        prompt = textwrap.dedent(
+            f"""
+            Update `fuzz/README.md` only. Do not rewrite the harness.
+
+            The generated harness drifted from the originally selected target.
+            Make `fuzz/README.md` consistent with the actual harness and include these exact fields:
+            - Selected target: {selected_label}
+            - Final target: {observed_label}
+            - Technical reason: <brief technical explanation>
+            - Relation: <how the final target relates to the selected target>
+            - Harness file: {observed_harness}
+
+            Requirements:
+            - The README must describe the actual observed target, not the original one.
+            - Keep the README concise.
+            - Do not edit any source/build files.
+            - Write `fuzz/README.md` into `./done` before finishing.
+            """
+        ).strip()
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=_completion_context() or None,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
+        )
+
     if not _has_codex_key():
         out = {
             **state,
@@ -2246,12 +2429,28 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
             raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
+        readme_alignment = {
+            "complete": True,
+            "missing": [],
+            "relation": "",
+            "reason": "",
+        }
         if target_alignment.get("drifted"):
             _wf_log(
                 cast(dict[str, Any], state),
                 "synthesize: soft target drift accepted: "
                 + str(target_alignment.get("reason") or "selected target drift detected"),
             )
+            readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
+            if not bool(readme_alignment.get("complete")):
+                remaining_for_readme = _remaining_time_budget_sec(state, min_timeout=0)
+                if remaining_for_readme > 0:
+                    _wf_log(
+                        cast(dict[str, Any], state),
+                        "synthesize: README drift record incomplete; repairing README metadata",
+                    )
+                    _run_readme_alignment_completion(remaining_for_readme, target_alignment)
+                    readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
         out = {
             **state,
             "last_step": "synthesize",
@@ -2267,7 +2466,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_observed_target_api": str(target_alignment.get("observed_api") or ""),
             "synthesize_observed_harness": str(target_alignment.get("observed_harness") or ""),
             "synthesize_target_drifted": bool(target_alignment.get("drifted") or False),
-            "synthesize_target_drift_reason": str(target_alignment.get("reason") or ""),
+            "synthesize_target_drift_reason": str(readme_alignment.get("reason") or target_alignment.get("reason") or ""),
+            "synthesize_target_relation": str(readme_alignment.get("relation") or ""),
+            "synthesize_target_runtime_viability": selected_target_runtime_viability,
+            "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
+            "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
             "message": "synthesized",
         }
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -4055,10 +4258,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
         last_seed_profile = str(state.get("coverage_seed_profile") or "")
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+        seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+        seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_sources: set[str] = set()
         repo_examples_filtered = False
         repo_examples_rejected_count = 0
         repo_examples_accepted_count = 0
+        seed_noise_rejected_count = 0
+        seed_family_coverage_state: dict[str, Any] = {}
         try:
             for bin_path in bins:
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
@@ -4081,6 +4288,20 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     seed_count_total[key] = int(seed_count_total.get(key, 0)) + int(counts.get(key) or 0)
                                 except Exception:
                                     continue
+                        raw_counts = meta.get("seed_counts_raw") or {}
+                        if isinstance(raw_counts, dict):
+                            for key in ("repo_examples", "ai", "radamsa", "total"):
+                                try:
+                                    seed_count_raw_total[key] = int(seed_count_raw_total.get(key, 0)) + int(raw_counts.get(key) or 0)
+                                except Exception:
+                                    continue
+                        filtered_counts = meta.get("seed_counts_filtered") or {}
+                        if isinstance(filtered_counts, dict):
+                            for key in ("repo_examples", "ai", "radamsa", "total"):
+                                try:
+                                    seed_count_filtered_total[key] = int(seed_count_filtered_total.get(key, 0)) + int(filtered_counts.get(key) or 0)
+                                except Exception:
+                                    continue
                         sources = meta.get("sources") or []
                         if isinstance(sources, list):
                             for src in sources:
@@ -4090,6 +4311,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         repo_examples_filtered = bool(meta.get("repo_examples_filtered") or repo_examples_filtered)
                         repo_examples_rejected_count += int(meta.get("repo_examples_rejected_count") or 0)
                         repo_examples_accepted_count += int(meta.get("repo_examples_accepted_count") or 0)
+                        seed_noise_rejected_count += int(meta.get("seed_noise_rejected_count") or 0)
+                        if not seed_family_coverage_state and isinstance(meta.get("seed_family_coverage"), dict):
+                            seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
                 except Exception as e:
                     # Seed generation is best-effort; do not block fuzzing.
                     print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
@@ -4441,7 +4665,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
-                last_fuzzer
+                str(state.get("synthesize_observed_target_api") or "").strip()
+                or last_fuzzer
                 or next(
                     (
                         str(detail.get("fuzzer") or "").strip()
@@ -4450,6 +4675,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     ),
                     str(state.get("coverage_target_name") or ""),
                 )
+            ),
+            "coverage_target_api": (
+                str(state.get("synthesize_observed_target_api") or "").strip()
+                or str(state.get("selected_target_api") or "").strip()
             ),
             "coverage_seed_profile": last_seed_profile,
             "coverage_seed_quality": next(
@@ -4501,6 +4730,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_selection_bias_reason": str(state.get("coverage_selection_bias_reason") or ""),
             "coverage_corpus_sources": sorted(seed_sources),
             "coverage_seed_counts": seed_count_total,
+            "coverage_seed_counts_raw": seed_count_raw_total,
+            "coverage_seed_counts_filtered": seed_count_filtered_total,
+            "coverage_seed_noise_rejected_count": seed_noise_rejected_count,
+            "coverage_seed_family_coverage": seed_family_coverage_state,
             "coverage_repo_examples_filtered": repo_examples_filtered,
             "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
             "coverage_repo_examples_accepted_count": repo_examples_accepted_count,
@@ -4546,6 +4779,19 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 crash_signature=crash_signature,
                 re_workspace_root=str(out.get("re_workspace_root") or ""),
             )
+        quality_flags = list(out.get("coverage_quality_flags") or [])
+        if bool(state.get("synthesize_target_drifted")):
+            quality_flags.append("target_runtime_mismatch")
+        if list(out.get("coverage_seed_families_missing") or []):
+            quality_flags.append("seed_family_undercovered")
+        raw_total = int((out.get("coverage_seed_counts_raw") or {}).get("total") or 0)
+        noise_rejected = int(out.get("coverage_seed_noise_rejected_count") or 0)
+        if noise_rejected > 0 and (raw_total <= 0 or float(noise_rejected) / float(max(raw_total, 1)) >= 0.25):
+            quality_flags.append("seed_noise_high")
+        observed_api = str(out.get("coverage_target_api") or "").lower()
+        if observed_api in {"println", "fmt::println", "print", "fmt::print", "format", "fmt::format", "format_to", "fmt::format_to", "vformat", "fmt::vformat"}:
+            quality_flags.append("generic_wrapper_fallback")
+        out["coverage_quality_flags"] = sorted({flag for flag in quality_flags if flag})
         _wf_log(
             cast(dict[str, Any], out),
             (
@@ -4585,12 +4831,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_cov = _max_cov_from_run_details(run_details)
         current_ft = 0
         current_target_name = ""
+        current_target_api = str(state.get("coverage_target_api") or "")
         if run_details:
             try:
                 current_ft = max(int(detail.get("final_ft") or 0) for detail in run_details)
             except Exception:
                 current_ft = 0
-            current_target_name = str(run_details[0].get("fuzzer") or "")
+            current_target_name = current_target_api or str(run_details[0].get("fuzzer") or "")
         plateau_detected = any(bool(detail.get("plateau_detected")) for detail in run_details)
         plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
         prev_cov = max(0, int(state.get("coverage_last_max_cov") or 0))
@@ -4634,6 +4881,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     "high_homogeneity",
                     "missing_required_families",
                     "repo_examples_missing",
+                    "seed_family_undercovered",
+                    "seed_noise_high",
                 }
             )
         )
@@ -4707,6 +4956,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "plateau_streak": plateau_streak,
                 "seed_profile": current_seed_profile,
                 "target_name": current_target_name,
+                "target_api": current_target_api or current_target_name,
                 "target_depth_score": current_depth_score,
                 "target_depth_class": current_depth_class,
                 "selection_bias_reason": current_selection_bias_reason,
@@ -4742,6 +4992,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_improve_reason": reason,
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
+            "coverage_target_api": current_target_api or current_target_name or str(state.get("coverage_target_api") or ""),
             "coverage_seed_profile": current_seed_profile,
             "coverage_seed_quality": seed_quality,
             "coverage_seed_families_required": seed_families_required,
@@ -4794,6 +5045,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
 
         cov_reason = str(state.get("coverage_improve_reason") or "").strip()
         target_name = str(state.get("coverage_target_name") or "").strip()
+        target_api = str(state.get("coverage_target_api") or "").strip()
         seed_profile = str(state.get("coverage_seed_profile") or "").strip()
         selected_target_api = str(state.get("selected_target_api") or "").strip()
         depth_class = str(state.get("coverage_target_depth_class") or "").strip()
@@ -4806,6 +5058,9 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         seed_families_required = list(state.get("coverage_seed_families_required") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
         seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
+        seed_counts_raw = dict(state.get("coverage_seed_counts_raw") or {})
+        seed_counts_filtered = dict(state.get("coverage_seed_counts_filtered") or {})
+        seed_noise_rejected_count = int(state.get("coverage_seed_noise_rejected_count") or 0)
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
@@ -4814,7 +5069,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 允许重新评估 targets.json，并重新选择更可能提高覆盖率或发现漏洞的 target。\n"
                 "- 结合 fuzz/target_analysis.json 与 fuzz/antlr_plan_context.json 重新规划。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
-                f"- 当前 target api: {selected_target_api or 'unknown'}\n"
+                f"- 当前 target api: {target_api or selected_target_api or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
                 f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
@@ -4830,12 +5085,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 优先补 seed 生成、dictionary、输入建模、调用顺序、边界值与 corpus bootstrap。\n"
                 "- 保持可构建与可运行。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
-                f"- 当前 target api: {selected_target_api or 'unknown'}\n"
+                f"- 当前 target api: {target_api or selected_target_api or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
                 f"- seed quality flags: {', '.join(quality_flags) if quality_flags else 'none'}\n"
                 f"- required seed families: {', '.join(seed_families_required) if seed_families_required else 'none'}\n"
                 f"- covered seed families: {', '.join(seed_families_covered) if seed_families_covered else 'none'}\n"
                 f"- missing seed families: {', '.join(seed_families_missing) if seed_families_missing else 'none'}\n"
+                f"- seed raw counts: {seed_counts_raw or {}}\n"
+                f"- seed filtered counts: {seed_counts_filtered or {}}\n"
+                f"- seed noise rejected: {seed_noise_rejected_count}\n"
                 f"- seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
                 f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
