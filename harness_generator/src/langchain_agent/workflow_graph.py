@@ -27,6 +27,7 @@ from fuzz_unharnessed_repo import (
     HarnessGeneratorError,
     NonOssFuzzHarnessGenerator,
     RepoSpec,
+    _seed_families_for_target,
     snapshot_repo_text,
     write_patch_from_snapshot,
 )
@@ -69,6 +70,13 @@ class FuzzWorkflowState(TypedDict, total=False):
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
+    selected_targets_path: str
+    selected_target_api: str
+    coverage_seed_quality: dict[str, Any]
+    coverage_seed_families_required: list[str]
+    coverage_seed_families_covered: list[str]
+    coverage_seed_families_missing: list[str]
+    coverage_quality_flags: list[str]
     plan_retry_reason: str
     plan_targets_schema_valid_before_retry: bool
     plan_targets_schema_valid_after_retry: bool
@@ -467,6 +475,93 @@ def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
 def _select_primary_target(repo_root: Path) -> dict[str, Any]:
     targets = _load_targets_doc(repo_root)
     return dict(targets[0]) if targets else {}
+
+
+def _selected_targets_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "selected_targets.json"
+
+
+def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in _load_targets_doc(repo_root):
+        target_name = str(item.get("name") or "").strip()
+        api = str(item.get("api") or target_name).strip()
+        target_type = str(item.get("target_type") or "generic").strip().lower()
+        seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
+        required, optional = _seed_families_for_target(seed_profile, target_name, api)
+        out.append(
+            {
+                "target_name": target_name,
+                "name": target_name,
+                "api": api,
+                "lang": str(item.get("lang") or ""),
+                "target_type": target_type,
+                "seed_profile": seed_profile,
+                "depth_score": int(item.get("depth_score") or 0),
+                "depth_class": str(item.get("depth_class") or ""),
+                "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+                "seed_families_required": required,
+                "seed_families_optional": optional,
+                "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
+            }
+        )
+    return out
+
+
+def _write_selected_targets_doc(repo_root: Path) -> tuple[str, list[dict[str, Any]]]:
+    path = _selected_targets_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = _build_selected_targets_doc(repo_root)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _load_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
+    path = _selected_targets_path(repo_root)
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _detect_harness_target_consistency(repo_root: Path) -> tuple[bool, str]:
+    selected_doc = _load_selected_targets_doc(repo_root)
+    if not selected_doc:
+        return True, ""
+    primary = selected_doc[0]
+    target_name = str(primary.get("target_name") or primary.get("name") or "").strip()
+    api = str(primary.get("api") or "").strip()
+    fuzz_dir = repo_root / "fuzz"
+    harnesses = [
+        p for p in fuzz_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}
+        and not str(p.relative_to(fuzz_dir)).startswith(("out/", "corpus/"))
+    ]
+    if not harnesses:
+        return True, ""
+    normalized_target = re.sub(r"_fuzz(?:er)?$", "", target_name.lower())
+    for harness in harnesses:
+        rel = str(harness.relative_to(fuzz_dir)).replace("\\", "/")
+        text = harness.read_text(encoding="utf-8", errors="replace").lower()
+        name = harness.stem.lower()
+        if api and api.lower() in text:
+            return True, ""
+        if normalized_target and (normalized_target in name or name in normalized_target):
+            return True, ""
+        if target_name and target_name.lower() in text:
+            return True, ""
+        if api:
+            m = re.search(r"([a-z_][a-z0-9_]*)\s*\(", text)
+            if m and m.group(1) and m.group(1) != api.lower():
+                continue
+        if "llvmfuzzertestoneinput" in text and api and api.lower() not in text:
+            continue
+    return False, f"selected target drift: expected api `{api or target_name}` to appear in generated harness"
 
 
 def _build_fallback_targets_doc(
@@ -1682,11 +1777,20 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 f"{antlr_context_summary}"
             )
         primary_target = _select_primary_target(gen.repo_root)
+        selected_targets_path = ""
+        try:
+            selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
+        except Exception:
+            selected_targets_doc = []
         new_target_name = str(primary_target.get("name") or "")
+        new_target_api = str(primary_target.get("api") or new_target_name)
         new_seed_profile = str(primary_target.get("seed_profile") or "")
         new_depth_score = int(primary_target.get("depth_score") or 0)
         new_depth_class = str(primary_target.get("depth_class") or "")
         new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
+        selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
+        seed_families_required = list(selected_primary.get("seed_families_required") or [])
+        seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
         replan_effective = bool(state.get("coverage_replan_effective") or False)
         replan_stop_reason = ""
@@ -1748,8 +1852,15 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "antlr_context_summary": antlr_context_summary,
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
+            "selected_targets_path": selected_targets_path,
             "coverage_target_name": new_target_name or prev_target_name,
+            "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
             "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
+            "coverage_seed_families_required": seed_families_required or list(state.get("coverage_seed_families_required") or []),
+            "coverage_seed_families_covered": list(state.get("coverage_seed_families_covered") or []),
+            "coverage_seed_families_missing": list(state.get("coverage_seed_families_missing") or seed_families_required),
+            "coverage_seed_quality": dict(state.get("coverage_seed_quality") or {}),
+            "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
             "coverage_target_depth_score": new_depth_score,
             "coverage_target_depth_class": new_depth_class,
             "coverage_selection_bias_reason": new_selection_bias_reason,
@@ -1789,6 +1900,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
     target_analysis_path = str(state.get("target_analysis_path") or "").strip()
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    selected_targets_path = str(state.get("selected_targets_path") or "").strip()
     if antlr_context_summary and "antlr_plan_context.json" not in hint:
         hint = (
             (hint.strip() + "\n\n") if hint.strip() else ""
@@ -1895,6 +2007,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         "=== fuzz/target_analysis.json ===\n"
                         + analysis_path_obj.read_text(encoding="utf-8", errors="replace")
                     )
+            if selected_targets_path:
+                selected_path_obj = Path(selected_targets_path)
+                if not selected_path_obj.is_absolute():
+                    selected_path_obj = gen.repo_root / selected_path_obj
+                if selected_path_obj.is_file():
+                    parts.append(
+                        "=== fuzz/selected_targets.json ===\n"
+                        + selected_path_obj.read_text(encoding="utf-8", errors="replace")
+                    )
             status = _synthesis_output_status()
             if status.get("harnesses"):
                 parts.append("=== existing harness files ===\n" + "\n".join(str(x) for x in status.get("harnesses") or []))
@@ -1965,6 +2086,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         ctx += "\n=== fuzz/target_analysis.json ===\n" + analysis_path_obj.read_text(
                             encoding="utf-8", errors="replace"
                         )
+                if selected_targets_path:
+                    selected_path_obj = Path(selected_targets_path)
+                    if not selected_path_obj.is_absolute():
+                        selected_path_obj = gen.repo_root / selected_path_obj
+                    if selected_path_obj.is_file():
+                        ctx += "\n=== fuzz/selected_targets.json ===\n" + selected_path_obj.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
             except Exception:
                 pass
             gen.patcher.run_codex_command(
@@ -2023,6 +2152,32 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         if not _has_required_synthesis_outputs():
             missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
             raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
+        consistent, drift_reason = _detect_harness_target_consistency(gen.repo_root)
+        if not consistent:
+            remaining_after_check = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_after_check <= 0:
+                raise HarnessGeneratorError(drift_reason)
+            _wf_log(cast(dict[str, Any], state), f"synthesize: {drift_reason}; retrying targeted completion")
+            prompt = _render_opencode_prompt(
+                "synthesize_complete_scaffold",
+                missing_items=(
+                    "- keep the selected target from fuzz/selected_targets.json\n"
+                    "- do not switch to another api or generic wrapper target\n"
+                    "- update harness/build glue so the selected api remains the primary call path"
+                ),
+            )
+            gen.patcher.run_codex_command(
+                prompt,
+                additional_context=_completion_context() or None,
+                timeout=remaining_after_check,
+                max_attempts=1,
+                max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+                activity_watch_paths=_synthesize_activity_watch_paths(),
+            )
+            consistent, drift_reason = _detect_harness_target_consistency(gen.repo_root)
+            if not consistent:
+                raise HarnessGeneratorError(drift_reason or "selected_target_drift")
         out = {
             **state,
             "last_step": "synthesize",
@@ -4037,6 +4192,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         "final_corpus_size_bytes": 0,
                         "corpus_files": 0,
                         "corpus_size_bytes": 0,
+                        "seed_quality": {},
                     }
                 )
                 continue
@@ -4071,6 +4227,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         "final_corpus_size_bytes": 0,
                         "corpus_files": 0,
                         "corpus_size_bytes": 0,
+                        "seed_quality": {},
                     }
                 )
                 continue
@@ -4114,6 +4271,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "terminal_reason": str(run.terminal_reason or ""),
                     "plateau_detected": bool(run.plateau_detected),
                     "plateau_idle_seconds": int(run.plateau_idle_seconds or 0),
+                    "seed_quality": dict(run.seed_quality or {}),
                 }
             )
             if run.error and not run_last_error:
@@ -4214,6 +4372,50 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             ),
             "coverage_seed_profile": last_seed_profile,
+            "coverage_seed_quality": next(
+                (dict(detail.get("seed_quality") or {}) for detail in run_details if detail.get("seed_quality")),
+                dict(state.get("coverage_seed_quality") or {}),
+            ),
+            "coverage_seed_families_required": list(
+                next(
+                    (
+                        list((meta.get("seed_families_required") or []))
+                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
+                        if isinstance(meta, dict) and meta.get("seed_families_required")
+                    ),
+                    list(state.get("coverage_seed_families_required") or []),
+                )
+            ),
+            "coverage_seed_families_covered": list(
+                next(
+                    (
+                        list(((meta.get("seed_family_coverage") or {}).get("covered") or []))
+                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
+                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("covered")
+                    ),
+                    list(state.get("coverage_seed_families_covered") or []),
+                )
+            ),
+            "coverage_seed_families_missing": list(
+                next(
+                    (
+                        list(((meta.get("seed_family_coverage") or {}).get("missing") or []))
+                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
+                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("missing") is not None
+                    ),
+                    list(state.get("coverage_seed_families_missing") or []),
+                )
+            ),
+            "coverage_quality_flags": list(
+                next(
+                    (
+                        list((detail.get("seed_quality") or {}).get("quality_flags") or [])
+                        for detail in run_details
+                        if detail.get("seed_quality")
+                    ),
+                    list(state.get("coverage_quality_flags") or []),
+                )
+            ),
             "coverage_target_depth_score": int(state.get("coverage_target_depth_score") or 0),
             "coverage_target_depth_class": str(state.get("coverage_target_depth_class") or ""),
             "coverage_selection_bias_reason": str(state.get("coverage_selection_bias_reason") or ""),
@@ -4318,6 +4520,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_depth_score = int(state.get("coverage_target_depth_score") or 0)
         current_depth_class = str(state.get("coverage_target_depth_class") or "")
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
+        seed_quality = dict(state.get("coverage_seed_quality") or {})
+        quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
+        seed_families_required = list(state.get("coverage_seed_families_required") or [])
+        seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
+        seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
         if not current_seed_profile:
             for detail in run_details:
                 profile = str(detail.get("seed_profile") or "")
@@ -4338,6 +4545,18 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
+        seed_quality_issue = bool(
+            any(
+                flag in quality_flags
+                for flag in {
+                    "low_retention",
+                    "low_early_yield",
+                    "high_homogeneity",
+                    "missing_required_families",
+                    "repo_examples_missing",
+                }
+            )
+        )
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
@@ -4346,7 +4565,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         should_improve = False
         replan_required = False
         if base_should_improve:
-            if requested_replan:
+            if seed_quality_issue and can_in_place:
+                should_improve = True
+                improve_mode = "in_place"
+                replan_reason = "seed_quality_issue"
+            elif requested_replan:
                 if can_replan:
                     should_improve = True
                     replan_required = True
@@ -4376,6 +4599,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     f"mode=in_place; round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}, "
                     f"max_ft={current_ft}, prev_ft={prev_ft}"
                 )
+            if seed_quality_issue:
+                reason += f"; seed_quality_flags={','.join(quality_flags) or 'none'}"
         elif round_budget_exhausted:
             if requested_replan:
                 reason = (
@@ -4413,6 +4638,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "stop_reason": stop_reason,
                 "corpus_sources": list(state.get("coverage_corpus_sources") or []),
                 "seed_counts": dict(state.get("coverage_seed_counts") or {}),
+                "seed_quality": seed_quality,
+                "seed_families_required": seed_families_required,
+                "seed_families_covered": seed_families_covered,
+                "seed_families_missing": seed_families_missing,
+                "quality_flags": quality_flags,
                 "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
                 "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
@@ -4433,6 +4663,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
             "coverage_seed_profile": current_seed_profile,
+            "coverage_seed_quality": seed_quality,
+            "coverage_seed_families_required": seed_families_required,
+            "coverage_seed_families_covered": seed_families_covered,
+            "coverage_seed_families_missing": seed_families_missing,
+            "coverage_quality_flags": quality_flags,
             "coverage_target_depth_score": current_depth_score,
             "coverage_target_depth_class": current_depth_class,
             "coverage_selection_bias_reason": current_selection_bias_reason,
@@ -4480,11 +4715,17 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         cov_reason = str(state.get("coverage_improve_reason") or "").strip()
         target_name = str(state.get("coverage_target_name") or "").strip()
         seed_profile = str(state.get("coverage_seed_profile") or "").strip()
+        selected_target_api = str(state.get("selected_target_api") or "").strip()
         depth_class = str(state.get("coverage_target_depth_class") or "").strip()
         depth_score = int(state.get("coverage_target_depth_score") or 0)
         selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "").strip()
         replan_reason = str(state.get("coverage_replan_reason") or "").strip()
         replan_required = bool(state.get("coverage_replan_required"))
+        seed_quality = dict(state.get("coverage_seed_quality") or {})
+        quality_flags = list(state.get("coverage_quality_flags") or [])
+        seed_families_required = list(state.get("coverage_seed_families_required") or [])
+        seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
+        seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
@@ -4493,6 +4734,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 允许重新评估 targets.json，并重新选择更可能提高覆盖率或发现漏洞的 target。\n"
                 "- 结合 fuzz/target_analysis.json 与 fuzz/antlr_plan_context.json 重新规划。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
+                f"- 当前 target api: {selected_target_api or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
                 f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
@@ -4508,7 +4750,13 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 优先补 seed 生成、dictionary、输入建模、调用顺序、边界值与 corpus bootstrap。\n"
                 "- 保持可构建与可运行。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
+                f"- 当前 target api: {selected_target_api or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
+                f"- seed quality flags: {', '.join(quality_flags) if quality_flags else 'none'}\n"
+                f"- required seed families: {', '.join(seed_families_required) if seed_families_required else 'none'}\n"
+                f"- covered seed families: {', '.join(seed_families_covered) if seed_families_covered else 'none'}\n"
+                f"- missing seed families: {', '.join(seed_families_missing) if seed_families_missing else 'none'}\n"
+                f"- seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
                 f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
                 f"- 诊断: {cov_reason}"

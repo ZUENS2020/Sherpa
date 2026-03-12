@@ -162,6 +162,17 @@ ALLOWED_SEED_PROFILES = {
     "generic",
 }
 
+YAML_SEED_FAMILIES = {
+    "flow_structures",
+    "block_scalars",
+    "anchors_aliases",
+    "tags_directives",
+    "document_markers",
+    "delimiter_fragments",
+    "unterminated_fragments",
+    "malformed_separators",
+}
+
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
 
@@ -635,6 +646,7 @@ class FuzzerRunResult:
     terminal_reason: str = ""
     plateau_detected: bool = False
     plateau_idle_seconds: int = 0
+    seed_quality: Dict[str, object] | None = None
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
@@ -695,6 +707,104 @@ def parse_libfuzzer_final_stats(text: str) -> Dict[str, int]:
     return stats
 
 
+def parse_libfuzzer_progress_events(text: str) -> List[Dict[str, int | str]]:
+    events: List[Dict[str, int | str]] = []
+    if not text:
+        return events
+    for line in text.splitlines():
+        m = _LIBFUZZER_PROGRESS_RE.search(line)
+        if not m:
+            continue
+        events.append(
+            {
+                "iteration": int(m.group("iter") or 0),
+                "kind": str(m.group("kind") or "").upper(),
+                "cov": int(m.group("cov") or 0),
+                "ft": int(m.group("ft") or 0),
+                "corpus_files": int(m.group("corp_files") or 0),
+                "corpus_size_bytes": _parse_size_token_to_bytes(m.group("corp_size") or ""),
+                "execs_per_sec": int(m.group("execs") or 0),
+                "rss_mb": int(m.group("rss") or 0),
+            }
+        )
+    return events
+
+
+def _seed_quality_from_run(
+    *,
+    log: str,
+    initial_corpus_files: int,
+    initial_corpus_bytes: int,
+    final_stats: Dict[str, int],
+    required_families: list[str],
+    covered_families: list[str],
+    repo_examples_count: int,
+    plateau_idle_seconds: int,
+) -> Dict[str, object]:
+    events = parse_libfuzzer_progress_events(log)
+    inited_cov = 0
+    inited_ft = 0
+    if events:
+        first = events[0]
+        inited_cov = int(first.get("cov") or 0)
+        inited_ft = int(first.get("ft") or 0)
+
+    def _event_by_iter(iter_limit: int) -> Dict[str, int | str]:
+        chosen: Dict[str, int | str] = {}
+        for event in events:
+            if int(event.get("iteration") or 0) <= iter_limit:
+                chosen = event
+            else:
+                break
+        return chosen
+
+    at_30s = _event_by_iter(131072)
+    at_60s = _event_by_iter(262144)
+    early_new_units_30s = max(0, int(at_30s.get("corpus_files") or 0) - initial_corpus_files)
+    early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
+    final_files = int(final_stats.get("corpus_files") or 0)
+    final_bytes = int(final_stats.get("corpus_size_bytes") or 0)
+    retention_files = (float(final_files) / float(initial_corpus_files)) if initial_corpus_files > 0 else 0.0
+    retention_bytes = (float(final_bytes) / float(initial_corpus_bytes)) if initial_corpus_bytes > 0 else 0.0
+
+    def _slope(key: str) -> float:
+        if len(events) < 2:
+            return 0.0
+        start = events[0]
+        end = events[-1]
+        delta_iter = max(1, int(end.get("iteration") or 0) - int(start.get("iteration") or 0))
+        return float(int(end.get(key) or 0) - int(start.get(key) or 0)) / float(delta_iter)
+
+    quality_flags: list[str] = []
+    missing_families = [x for x in required_families if x and x not in set(covered_families)]
+    if initial_corpus_files >= 16 and retention_files > 0 and retention_files <= 0.25:
+        quality_flags.append("low_retention")
+    if early_new_units_30s <= 0 and early_new_units_60s <= 0:
+        quality_flags.append("low_early_yield")
+    if initial_corpus_files >= 16 and final_files <= 12 and int(final_stats.get("cov") or 0) <= max(inited_cov, 1):
+        quality_flags.append("high_homogeneity")
+    if missing_families:
+        quality_flags.append("missing_required_families")
+    if repo_examples_count == 0 and any(f in YAML_SEED_FAMILIES for f in required_families):
+        quality_flags.append("repo_examples_missing")
+    return {
+        "initial_corpus_files": initial_corpus_files,
+        "initial_corpus_bytes": initial_corpus_bytes,
+        "initial_inited_cov": inited_cov,
+        "initial_inited_ft": inited_ft,
+        "early_new_units_30s": early_new_units_30s,
+        "early_new_units_60s": early_new_units_60s,
+        "final_corpus_files": final_files,
+        "final_corpus_bytes": final_bytes,
+        "corpus_retention_ratio_files": retention_files,
+        "corpus_retention_ratio_bytes": retention_bytes,
+        "cov_growth_slope_pre_plateau": _slope("cov"),
+        "ft_growth_slope_pre_plateau": _slope("ft"),
+        "plateau_after_sec": plateau_idle_seconds,
+        "quality_flags": quality_flags,
+    }
+
+
 def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
     if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
@@ -716,6 +826,60 @@ def _infer_target_type(*parts: str) -> str:
     if any(tok in text for tok in ("eval", "vm", "execute", "compile", "bytecode", "script", "interp")):
         return "interpreter"
     return "generic"
+
+
+def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
+    profile = str(seed_profile or "").strip().lower()
+    text = " ".join(p for p in parts if p).lower()
+    required: list[str] = []
+    optional: list[str] = []
+    if profile == "parser-structure":
+        required.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
+        optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
+    elif profile == "parser-token":
+        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        optional.extend(["document_markers", "tags_directives", "flow_structures"])
+    elif profile == "parser-format":
+        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+    elif profile == "parser-numeric":
+        required.extend(["delimiter_fragments", "malformed_separators"])
+    if any(tok in text for tok in ("yaml", "yml")):
+        for family in [
+            "flow_structures",
+            "block_scalars",
+            "anchors_aliases",
+            "tags_directives",
+            "document_markers",
+            "delimiter_fragments",
+            "unterminated_fragments",
+            "malformed_separators",
+        ]:
+            if family not in required:
+                required.append(family)
+    return required, [x for x in optional if x not in required]
+
+
+def _classify_seed_family(path: Path) -> set[str]:
+    name = path.name.lower()
+    text = read_text_safely(path)[:2048].lower()
+    families: set[str] = set()
+    if any(tok in name for tok in ("delimiter-", "leading-colon", "trailing-space", "indicator-question")):
+        families.add("delimiter_fragments")
+    if any(tok in name for tok in ("unterminated-",)):
+        families.add("unterminated_fragments")
+    if any(tok in name for tok in ("malformed-",)):
+        families.add("malformed_separators")
+    if any(tok in name for tok in ("block-only", "block-scalar")) or any(tok in text for tok in ("\n|", "\n>", "|-", ">-", "|+", ">+")):
+        families.add("block_scalars")
+    if any(tok in name for tok in ("anchor", "alias")) or any(tok in text for tok in ("&", "*")):
+        families.add("anchors_aliases")
+    if any(tok in name for tok in ("tag", "directive", "yaml-version")) or any(tok in text for tok in ("%yaml", "%tag", "!!", "!<")):
+        families.add("tags_directives")
+    if any(tok in name for tok in ("doc-marker", "yaml-version")) or any(tok in text for tok in ("---", "...")):
+        families.add("document_markers")
+    if any(tok in name for tok in ("flow", "array", "mapping", "json")) or any(tok in text for tok in ("[", "]", "{", "}")):
+        families.add("flow_structures")
+    return families
 
 
 class NonOssFuzzHarnessGenerator:
@@ -754,6 +918,7 @@ class NonOssFuzzHarnessGenerator:
         self.current_run_hard_timeout_sec: Optional[int] = None
         self.last_seed_profile_by_fuzzer: Dict[str, str] = {}
         self.last_seed_bootstrap_by_fuzzer: Dict[str, Dict[str, object]] = {}
+        self.last_selected_target_by_fuzzer: Dict[str, Dict[str, object]] = {}
         self.rss_limit_mb = rss_limit_mb
         self.max_len = max_len
         self.max_build_retries = max_build_retries
@@ -1976,6 +2141,13 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _resolve_seed_target_metadata(self, fuzzer_name: str, harness_text: str) -> tuple[str, str]:
+        selected = self._resolve_selected_target(fuzzer_name, harness_text)
+        if selected:
+            target_type = str(selected.get("target_type") or "").strip().lower()
+            seed_profile = str(selected.get("seed_profile") or "").strip().lower()
+            if target_type in ALLOWED_TARGET_TYPES and seed_profile in ALLOWED_SEED_PROFILES:
+                return target_type, seed_profile
+
         targets_path = self.fuzz_dir / "targets.json"
         candidates: list[dict[str, object]] = []
         try:
@@ -2007,6 +2179,55 @@ class NonOssFuzzHarnessGenerator:
 
         target_type = _infer_target_type(fuzzer_name, harness_text)
         return target_type, self._infer_seed_profile(fuzzer_name, harness_text, target_type)
+
+    def _load_selected_targets_doc(self) -> list[dict[str, object]]:
+        path = self.fuzz_dir / "selected_targets.json"
+        try:
+            if not path.is_file():
+                return []
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _resolve_selected_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
+        doc = self._load_selected_targets_doc()
+        if not doc:
+            return {}
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        lowered_harness = harness_text.lower()
+        for item in doc:
+            api = str(item.get("api") or "").strip().lower()
+            target_name = str(item.get("target_name") or item.get("name") or "").strip().lower()
+            wrapper_name = str(item.get("wrapper_fuzzer_name") or "").strip().lower()
+            if wrapper_name and wrapper_name == fuzzer_name.lower():
+                return dict(item)
+            if target_name and (target_name in normalized_fuzzer or normalized_fuzzer in target_name):
+                return dict(item)
+            if api and (api in normalized_fuzzer or api in lowered_harness):
+                return dict(item)
+        return dict(doc[0]) if len(doc) == 1 else {}
+
+    def _seed_family_coverage(self, corpus_dir: Path, required_families: list[str]) -> dict[str, object]:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        covered: set[str] = set()
+        family_examples: dict[str, list[str]] = {}
+        for path in files:
+            for family in _classify_seed_family(path):
+                covered.add(family)
+                family_examples.setdefault(family, [])
+                if len(family_examples[family]) < 3:
+                    family_examples[family].append(path.name)
+        required = [x for x in required_families if x]
+        missing = [x for x in required if x not in covered]
+        return {
+            "required": required,
+            "covered": sorted(covered),
+            "missing": missing,
+            "family_examples": family_examples,
+        }
 
     def _infer_seed_profile(self, fuzzer_name: str, harness_text: str, target_type: str) -> str:
         lowered = f"{fuzzer_name}\n{harness_text}".lower()
@@ -2088,7 +2309,14 @@ class NonOssFuzzHarnessGenerator:
             + yaml_hint
         )
 
-    def _collect_repo_seed_examples(self, seed_profile: str, fuzzer_name: str, corpus_dir: Path) -> tuple[list[Path], dict[str, Any]]:
+    def _collect_repo_seed_examples(
+        self,
+        seed_profile: str,
+        fuzzer_name: str,
+        corpus_dir: Path,
+        *,
+        required_families: list[str] | None = None,
+    ) -> tuple[list[Path], dict[str, Any]]:
         search_roots = ["tests", "examples", "regression-inputs", "testdata", "samples", "docs"]
         structured_text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml"}
         binary_suffixes = {".bin", ".dat", ".arc", ".zip", ".tar", ".gz", ".xz", ".png", ".jpg", ".jpeg", ".gif"}
@@ -2099,10 +2327,28 @@ class NonOssFuzzHarnessGenerator:
         accepted = 0
         rejected = 0
         lowered_name = fuzzer_name.lower()
+        family_limits: dict[str, int] = {}
+        required_set = set(required_families or [])
 
         def _under_sample_dir(path: Path) -> bool:
             parts = [part.lower() for part in path.parts]
             return any(tok in sample_dir_tokens for tok in parts)
+
+        def _yaml_like_candidate(path: Path, size: int) -> bool:
+            suffix = path.suffix.lower()
+            if suffix not in {".yaml", ".yml", ".txt", ".in"}:
+                return False
+            if size > 32768:
+                return False
+            try:
+                snippet = path.read_text(encoding="utf-8", errors="replace")[:512].lower()
+            except Exception:
+                return False
+            if any(tok in snippet for tok in ("---", "%yaml", "%tag", "&", "*", "[", "]", "{", "}")):
+                return True
+            if any(tok in path.name.lower() for tok in ("yaml", "tag", "anchor", "alias", "directive", "flow", "mapping", "scalar")):
+                return True
+            return False
 
         def _allow_path(path: Path, size: int) -> bool:
             nonlocal rejected
@@ -2152,6 +2398,8 @@ class NonOssFuzzHarnessGenerator:
                 if suffix and suffix not in structured_text_suffixes and suffix not in {".dat", ".in", ".txt"}:
                     rejected += 1
                     return False
+                if any(tok in lowered_name for tok in ("yaml", "yml")) and _yaml_like_candidate(path, size):
+                    return True
                 if not any(tok in haystack for tok in ("token", "scan", "lex", "arg", "field", "name", "spec")):
                     rejected += 1
                     return False
@@ -2212,6 +2460,8 @@ class NonOssFuzzHarnessGenerator:
                     continue
                 selected.append(dest)
                 accepted += 1
+                for family in _classify_seed_family(dest):
+                    family_limits[family] = family_limits.get(family, 0) + 1
                 if len(selected) >= 12:
                     break
             if len(selected) >= 12:
@@ -2221,6 +2471,8 @@ class NonOssFuzzHarnessGenerator:
             "accepted_count": accepted,
             "rejected_count": rejected,
             "filtered": True,
+            "family_limits": family_limits,
+            "required_families": sorted(required_set),
         }
 
     def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
@@ -2298,26 +2550,56 @@ class NonOssFuzzHarnessGenerator:
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+        selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
+        if selected_target:
+            self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
+        required_families, optional_families = _seed_families_for_target(
+            seed_profile,
+            fuzzer_name,
+            harness_text,
+            str(selected_target.get("target_name") or ""),
+            str(selected_target.get("api") or ""),
+        )
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
-        repo_seed_files, repo_meta = self._collect_repo_seed_examples(seed_profile, fuzzer_name, corpus_dir)
+        repo_seed_files, repo_meta = self._collect_repo_seed_examples(
+            seed_profile,
+            fuzzer_name,
+            corpus_dir,
+            required_families=required_families,
+        )
         sources = list(repo_meta.get("sources") or [])
+        family_coverage = self._seed_family_coverage(corpus_dir, required_families)
 
         instructions = textwrap.dedent(
             f"""
-            Add 1–5 **high-value warm-up seed files** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and add only missing cases.
+            Add or refine **warm-up seed files by family bucket** inside `{corpus_dir.relative_to(self.repo_root)}` for the
+            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and prioritize missing families.
             Use appropriate file extensions if known. If binary, you may write contents via hex bytes.
 
             {seed_guidance}
 
+            Required seed families:
+            {", ".join(required_families) if required_families else "none"}
+
+            Optional seed families:
+            {", ".join(optional_families) if optional_families else "none"}
+
             Current corpus summary:
             {self._summarize_seed_corpus(corpus_dir)}
+
+            Current seed family coverage:
+            covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
+            missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
 
             Coverage-oriented gap hints:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
-            Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
+            Rules:
+            - Each missing required family should have at least one representative seed after your edits.
+            - Prefer missing families over adding more variants to already-covered malformed cases.
+            - Do not only generate malformed separator variants if structure families are missing.
+            - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
         ).strip()
 
@@ -2325,9 +2607,19 @@ class NonOssFuzzHarnessGenerator:
         patcher_kwargs: Dict[str, object] = {}
         if isinstance(seed_timeout, int) and seed_timeout > 0:
             patcher_kwargs["timeout"] = seed_timeout
+        selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
+        target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
+        antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
+        additional_context_parts = [
+            "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
+            "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
+            "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
+            "=== harness source ===\n" + (harness_text or "(no harness found)"),
+            "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+        ]
         stdout = self.patcher.run_codex_command(
             instructions,
-            additional_context=harness_text or "(no harness found)",
+            additional_context="\n\n".join(additional_context_parts),
             **patcher_kwargs,
         )
         if stdout is None:
@@ -2350,6 +2642,10 @@ class NonOssFuzzHarnessGenerator:
             "sources": sorted(set(sources)),
             "seed_profile": seed_profile,
             "target_type": target_type,
+            "selected_target": dict(selected_target),
+            "seed_families_required": required_families,
+            "seed_families_optional": optional_families,
+            "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
@@ -2376,6 +2672,19 @@ class NonOssFuzzHarnessGenerator:
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        initial_corpus_files = 0
+        initial_corpus_bytes = 0
+        try:
+            for p in corpus_dir.rglob("*"):
+                if p.is_file():
+                    initial_corpus_files += 1
+                    try:
+                        initial_corpus_bytes += int(p.stat().st_size)
+                    except Exception:
+                        pass
+        except Exception:
+            initial_corpus_files = 0
+            initial_corpus_bytes = 0
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
@@ -2451,6 +2760,10 @@ class NonOssFuzzHarnessGenerator:
         print(tail)
 
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
+        seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
+        seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
+        required_families = list(seed_bootstrap.get("seed_families_required") or [])
+        covered_families = list(seed_family_coverage.get("covered") or [])
 
         # Detect new artifacts
         post = set(p for p in artifacts_dir.glob("*") if p.is_file())
@@ -2577,6 +2890,9 @@ class NonOssFuzzHarnessGenerator:
         except Exception:
             pass
 
+        plateau_detected = "[callback-stop] coverage_plateau" in log.lower()
+        plateau_idle_seconds = plateau_idle_growth_sec if plateau_detected else 0
+
         return FuzzerRunResult(
             rc=int(rc),
             new_artifacts=list(new_artifacts),
@@ -2595,9 +2911,19 @@ class NonOssFuzzHarnessGenerator:
             final_iteration=int(libfuzzer_stats.get("iteration", 0)),
             corpus_files=corpus_files,
             corpus_size_bytes=corpus_size_bytes,
-            terminal_reason="coverage_plateau" if "[callback-stop] coverage_plateau" in log.lower() else "",
-            plateau_detected="[callback-stop] coverage_plateau" in log.lower(),
-            plateau_idle_seconds=plateau_idle_growth_sec if "[callback-stop] coverage_plateau" in log.lower() else 0,
+            terminal_reason="coverage_plateau" if plateau_detected else "",
+            plateau_detected=plateau_detected,
+            plateau_idle_seconds=plateau_idle_seconds,
+            seed_quality=_seed_quality_from_run(
+                log=log,
+                initial_corpus_files=initial_corpus_files,
+                initial_corpus_bytes=initial_corpus_bytes,
+                final_stats=libfuzzer_stats,
+                required_families=required_families,
+                covered_families=covered_families,
+                repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
+                plateau_idle_seconds=plateau_idle_seconds,
+            ),
         )
 
     # ────────────────────────────────────────────────────────────────────
