@@ -67,6 +67,8 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert "antlr_context_path" in out
     antlr_ctx = Path(str(out.get("antlr_context_path") or ""))
     assert antlr_ctx.is_file()
+    selected_targets = tmp_path / "fuzz" / "selected_targets.json"
+    assert selected_targets.is_file()
     assert "antlr_plan_context.json" in str(out.get("codex_hint") or "")
 
 
@@ -82,6 +84,11 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     antlr_ctx.write_text('{"entrypoint_candidates":[{"name":"parse_zip"}]}\n', encoding="utf-8")
     target_ctx = fuzz_dir / "target_analysis.json"
     target_ctx.write_text('{"recommended_targets":[{"name":"a","seed_profile":"parser-structure"}]}\n', encoding="utf-8")
+    selected_targets = fuzz_dir / "selected_targets.json"
+    selected_targets.write_text(
+        '[{"target_name":"a","api":"a","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
 
     captured: dict[str, str] = {}
 
@@ -105,11 +112,60 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
             "antlr_context_summary": "antlr_context_file=fuzz/antlr_plan_context.json",
             "target_analysis_path": str(target_ctx),
             "target_analysis_summary": "target_analysis_file=fuzz/target_analysis.json",
+            "selected_targets_path": str(selected_targets),
         }
     )
     assert out["last_error"] == ""
     assert "fuzz/antlr_plan_context.json" in captured.get("additional_context", "")
     assert "fuzz/target_analysis.json" in captured.get("additional_context", "")
+    assert "fuzz/selected_targets.json" in captured.get("additional_context", "")
+
+
+def test_node_synthesize_retries_when_selected_target_drifts(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+    selected_targets = fuzz_dir / "selected_targets.json"
+    selected_targets.write_text(
+        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+
+    calls = {"n": 0}
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                (fuzz_dir / "yaml_parser_fuzz.cc").write_text(
+                    "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return yaml_parser_load_document(0, 0); }\n",
+                    encoding="utf-8",
+                )
+                (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+                (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+                return None
+            (fuzz_dir / "yaml_parser_fuzz.cc").write_text(
+                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return yaml_parser_parse(0, 0); }\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+    out = workflow_graph._node_synthesize(
+        {
+            "generator": gen,
+            "codex_hint": "keep target",
+            "selected_targets_path": str(selected_targets),
+        }
+    )
+    assert out["last_error"] == ""
+    assert calls["n"] == 2
 
 
 def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_output(tmp_path: Path, monkeypatch):

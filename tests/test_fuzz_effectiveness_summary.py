@@ -89,6 +89,25 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
                     "corpus_size_bytes": 10,
                 }
             ],
+            "coverage_seed_quality": {
+                "initial_corpus_files": 2,
+                "initial_corpus_bytes": 10,
+                "initial_inited_cov": 100,
+                "initial_inited_ft": 200,
+                "early_new_units_30s": 0,
+                "early_new_units_60s": 0,
+                "final_corpus_files": 2,
+                "final_corpus_bytes": 10,
+                "corpus_retention_ratio_files": 1.0,
+                "corpus_retention_ratio_bytes": 1.0,
+                "cov_growth_slope_pre_plateau": 0.0,
+                "ft_growth_slope_pre_plateau": 0.0,
+                "plateau_after_sec": 180,
+                "quality_flags": ["high_homogeneity"],
+            },
+            "coverage_seed_families_required": ["document_markers", "flow_structures"],
+            "coverage_seed_families_covered": ["document_markers"],
+            "coverage_seed_families_missing": ["flow_structures"],
         }
     )
 
@@ -105,6 +124,8 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["fuzz_inventory"]["fuzzer_count"] == 1
     assert summary["fuzz_inventory"]["corpus_total_files"] == 2
     assert summary["fuzz_inventory"]["artifact_count"] == 1
+    assert summary["seed_quality"]["initial_corpus_files"] == 2
+    assert summary["seed_family_coverage"]["missing"] == ["flow_structures"]
     assert summary["build_error_kind"] == ""
     assert summary["build_error_code"] == ""
     assert len(summary["run_details"]) == 1

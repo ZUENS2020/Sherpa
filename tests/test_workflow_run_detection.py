@@ -618,6 +618,42 @@ def test_node_coverage_analysis_allows_resource_exhaustion_to_improve():
     assert out["coverage_improve_mode"] == "in_place"
 
 
+def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing"]},
+            "coverage_quality_flags": ["missing_required_families", "repo_examples_missing"],
+            "coverage_seed_families_required": ["flow_structures", "anchors_aliases"],
+            "coverage_seed_families_covered": ["anchors_aliases"],
+            "coverage_seed_families_missing": ["flow_structures"],
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 5,
+            "coverage_last_ft": 19,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 19,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                    "seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing"]},
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert "seed_quality_flags" in out["coverage_improve_reason"]
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {
