@@ -56,6 +56,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_last_ft: int
     coverage_replan_required: bool
     coverage_improve_mode: str
+    coverage_round_budget_exhausted: bool
+    coverage_stop_reason: str
     coverage_corpus_sources: list[str]
     coverage_seed_counts: dict[str, int]
     antlr_context_path: str
@@ -1241,6 +1243,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_last_ft": int(state.get("coverage_last_ft") or 0),
             "coverage_replan_required": bool(state.get("coverage_replan_required") or False),
             "coverage_improve_mode": str(state.get("coverage_improve_mode") or ""),
+            "coverage_round_budget_exhausted": bool(state.get("coverage_round_budget_exhausted") or False),
+            "coverage_stop_reason": str(state.get("coverage_stop_reason") or ""),
             "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
             "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
@@ -1299,6 +1303,12 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                         out["coverage_last_ft"] = int(coverage_loop.get("last_ft") or out.get("coverage_last_ft") or 0)
                         out["coverage_replan_required"] = bool(coverage_loop.get("replan_required") or out.get("coverage_replan_required") or False)
                         out["coverage_improve_mode"] = str(coverage_loop.get("improve_mode") or out.get("coverage_improve_mode") or "")
+                        out["coverage_round_budget_exhausted"] = bool(
+                            coverage_loop.get("round_budget_exhausted") or out.get("coverage_round_budget_exhausted") or False
+                        )
+                        out["coverage_stop_reason"] = str(
+                            coverage_loop.get("stop_reason") or out.get("coverage_stop_reason") or ""
+                        )
                         out["coverage_corpus_sources"] = list(coverage_loop.get("corpus_sources") or out.get("coverage_corpus_sources") or [])
                         out["coverage_seed_counts"] = dict(coverage_loop.get("seed_counts") or out.get("coverage_seed_counts") or {})
                     plan_policy = doc.get("plan_policy")
@@ -2875,34 +2885,61 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     def _try_hotfix_missing_llvmfuzzer_entrypoint() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
-        build_py = gen.repo_root / "fuzz" / "build.py"
+        has_diag_signal = "undefined reference to `llvmfuzzertestoneinput'" in diag
+        has_file_signal = build_error_code == "missing_llvmfuzzer_entrypoint"
+        if not (has_diag_signal or has_file_signal):
+            return False
+
+        fuzz_dir = gen.repo_root / "fuzz"
+        cpp_exts = {".cc", ".cpp", ".cxx"}
+        entry_pat = re.compile(r"(?m)^(\s*)int\s+LLVMFuzzerTestOneInput\s*\(")
+        extern_entry_pat = re.compile(r'(?m)^\s*extern\s+"C"\s+int\s+LLVMFuzzerTestOneInput\s*\(')
+        for src in fuzz_dir.rglob("*"):
+            if not src.is_file() or src.suffix.lower() not in cpp_exts:
+                continue
+            try:
+                text = src.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if "LLVMFuzzerTestOneInput" not in text:
+                continue
+            if extern_entry_pat.search(text):
+                continue
+            if not entry_pat.search(text):
+                continue
+            text2 = entry_pat.sub(r'\1extern "C" int LLVMFuzzerTestOneInput(', text, count=1)
+            if text2 == text:
+                continue
+            try:
+                src.write_text(text2, encoding="utf-8", errors="replace")
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    f"fix_build: applied local hotfix for missing_llvmfuzzer_entrypoint in {src.relative_to(gen.repo_root)}",
+                )
+                return True
+            except Exception:
+                continue
+
+        build_py = fuzz_dir / "build.py"
         if not build_py.is_file():
             return False
         try:
             text = build_py.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return False
-        has_diag_signal = "undefined reference to `llvmfuzzertestoneinput'" in diag
-        # Fallback file-based signal is intentionally strict to avoid stealing
-        # other rules (e.g. include-flag collapse / C-vs-C++ mismatch).
-        has_file_signal = (
-            build_error_code == "missing_llvmfuzzer_entrypoint"
-            and ("clang++" in text and ".c" in text)
-        )
-        if not (has_diag_signal or has_file_signal):
-            return False
+
         changed = False
+        # Fallback for scripts that compile C harnesses with clang++ and rely on
+        # libFuzzer's C linkage entrypoint.
         if "'clang++'" in text and ".c" in text:
             text2 = text.replace("'clang++'", "'clang'").replace('"clang++"', '"clang"')
             if text2 != text:
                 text = text2
                 changed = True
-        if "'-x'" not in text and '"-x"' not in text:
-            if "flags = [" in text:
-                text2 = text.replace("flags = [", "flags = ['-x', 'c', ", 1)
-                if text2 != text:
-                    text = text2
-                    changed = True
+        if changed and "'-x'" not in text and '"-x"' not in text and "flags = [" in text:
+            text2 = text.replace("flags = [", "flags = ['-x', 'c', ", 1)
+            if text2 != text:
+                text = text2
         if not changed:
             return False
         try:
@@ -4019,22 +4056,42 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     break
         plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
         plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
-        replan_required = bool(
+        requested_replan = bool(
             plateau_no_gain
             and plateau_streak >= 2
             and bool(current_seed_profile)
         )
         improve_mode = ""
-        should_improve = (
+        can_in_place = current_round < max_rounds
+        can_replan = (current_round + 1) < max_rounds
+        round_budget_exhausted = False
+        stop_reason = ""
+        base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
             and (not str(state.get("run_error_kind") or "").strip())
-            and (current_round < max_rounds)
         )
+        should_improve = False
+        replan_required = False
+        if base_should_improve:
+            if requested_replan:
+                if can_replan:
+                    should_improve = True
+                    replan_required = True
+                    improve_mode = "replan"
+                else:
+                    round_budget_exhausted = True
+                    stop_reason = "coverage_loop_budget_exhausted"
+            elif can_in_place:
+                should_improve = True
+                improve_mode = "in_place"
+            else:
+                round_budget_exhausted = True
+                stop_reason = "coverage_loop_budget_exhausted"
+
         next_round = current_round + (1 if should_improve else 0)
         reason = "skip coverage loop"
         if should_improve:
-            improve_mode = "replan" if replan_required else "in_place"
             if plateau_detected:
                 reason = (
                     f"coverage plateau detected; mode={improve_mode}; round={next_round}/{max_rounds}, "
@@ -4045,6 +4102,18 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 reason = (
                     f"mode=in_place; round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}, "
                     f"max_ft={current_ft}, prev_ft={prev_ft}"
+                )
+        elif round_budget_exhausted:
+            if requested_replan:
+                reason = (
+                    f"coverage plateau detected but replan budget exhausted; "
+                    f"round={current_round}/{max_rounds}, max_cov={current_cov}, max_ft={current_ft}, "
+                    f"plateau_streak={plateau_streak}"
+                )
+            else:
+                reason = (
+                    f"coverage loop budget exhausted; round={current_round}/{max_rounds}, "
+                    f"max_cov={current_cov}, max_ft={current_ft}"
                 )
         history.append(
             {
@@ -4062,6 +4131,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "target_name": current_target_name,
                 "replan_required": replan_required,
                 "improve_mode": improve_mode,
+                "round_budget_exhausted": round_budget_exhausted,
+                "stop_reason": stop_reason,
                 "corpus_sources": list(state.get("coverage_corpus_sources") or []),
                 "seed_counts": dict(state.get("coverage_seed_counts") or {}),
                 "crash_found": bool(state.get("crash_found")),
@@ -4086,6 +4157,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_last_ft": current_ft,
             "coverage_replan_required": replan_required,
             "coverage_improve_mode": improve_mode,
+            "coverage_round_budget_exhausted": round_budget_exhausted,
+            "coverage_stop_reason": stop_reason,
             "message": "coverage analysis done",
         }
         _wf_log(
@@ -4120,7 +4193,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         target_name = str(state.get("coverage_target_name") or "").strip()
         seed_profile = str(state.get("coverage_seed_profile") or "").strip()
         replan_required = bool(state.get("coverage_replan_required"))
-        improve_mode = "replan" if replan_required else "in_place"
+        improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
                 "覆盖率闭环改进任务（重新选 target）：\n"
@@ -4834,6 +4907,8 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")):
         return "stop"
     if (state.get("last_error") or "").strip():
+        return "stop"
+    if bool(state.get("coverage_round_budget_exhausted")):
         return "stop"
     if bool(state.get("coverage_should_improve")):
         if str(state.get("coverage_improve_mode") or "").strip() == "in_place":

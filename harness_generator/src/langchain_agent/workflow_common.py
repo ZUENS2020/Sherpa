@@ -232,6 +232,12 @@ def classify_build_failure(
     if build_rc == 0 and not has_fuzzer_binaries:
         return "source", "no_fuzzer_binaries"
 
+    if "undefined reference to `llvmfuzzertestoneinput" in low:
+        return "source", "missing_llvmfuzzer_entrypoint"
+    if "cannot find -lz" in low or "cannot find -l" in low:
+        return "source", "missing_link_library"
+    if "undefined reference to `gz" in low or "undefined reference to `inflate" in low:
+        return "source", "missing_link_library"
     if "missing fuzz/build.py" in low:
         return "source", "missing_build_script"
     if any(k in low for k in ["no such file", "cannot find", "not found"]):
