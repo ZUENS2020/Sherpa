@@ -1,4 +1,4 @@
-ARG FRONTEND_NODE_IMAGE=docker.io/library/node:20-alpine
+ARG FRONTEND_NODE_IMAGE=m.daocloud.io/docker.io/library/node:20-alpine
 FROM ${FRONTEND_NODE_IMAGE} AS deps
 ARG NPM_REGISTRY_CANDIDATES="https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm https://registry.npmjs.org" \
 ENV NPM_CONFIG_REGISTRY="https://registry.npmmirror.com" \
