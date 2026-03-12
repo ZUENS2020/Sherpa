@@ -51,15 +51,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_history: list[dict[str, Any]]
     coverage_target_name: str
     coverage_seed_profile: str
-    coverage_target_depth_score: int
-    coverage_target_depth_class: str
-    coverage_selection_bias_reason: str
     coverage_plateau_streak: int
     coverage_last_max_cov: int
     coverage_last_ft: int
     coverage_replan_required: bool
-    coverage_replan_effective: bool
-    coverage_replan_reason: str
     coverage_improve_mode: str
     coverage_round_budget_exhausted: bool
     coverage_stop_reason: str
@@ -73,8 +68,6 @@ class FuzzWorkflowState(TypedDict, total=False):
     plan_targets_schema_valid_before_retry: bool
     plan_targets_schema_valid_after_retry: bool
     plan_used_fallback_targets: bool
-    replan_effective: bool
-    replan_stop_reason: str
 
     step_count: int
     max_steps: int
@@ -380,95 +373,6 @@ def _infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
     return mapping.get(target_type, "generic")
 
 
-def _score_target_depth(
-    name: str,
-    context: str,
-    *,
-    target_type: str,
-    risk_signals: list[str] | None = None,
-) -> tuple[int, str, str]:
-    text = f"{name}\n{context}".lower()
-    score = 0
-    reasons: list[str] = []
-    positive_weights = {
-        "parse": 5,
-        "parser": 5,
-        "scan": 4,
-        "scanner": 5,
-        "decode": 5,
-        "inflate": 5,
-        "deflate": 4,
-        "read": 3,
-        "load": 3,
-        "stream": 3,
-        "archive": 4,
-        "reader": 4,
-        "container": 4,
-        "process": 2,
-        "consume": 3,
-    }
-    negative_weights = {
-        "adler": -7,
-        "crc": -6,
-        "hash": -5,
-        "checksum": -6,
-        "bound": -5,
-        "combine": -5,
-        "version": -4,
-        "copy": -3,
-        "helper": -4,
-        "util": -3,
-        "utility": -3,
-    }
-    for token, weight in positive_weights.items():
-        if token in text:
-            score += weight
-            reasons.append(f"+{token}")
-    for token, weight in negative_weights.items():
-        if token in text:
-            score += weight
-            reasons.append(token)
-    if target_type in {"parser", "decoder", "archive", "document"}:
-        score += 4
-        reasons.append(f"type:{target_type}")
-    elif target_type in {"serializer", "network"}:
-        score += 2
-        reasons.append(f"type:{target_type}")
-    signals = list(risk_signals or [])
-    score += min(len(signals), 4)
-    if "state-machine" in signals:
-        score += 2
-        reasons.append("state-machine")
-    if "parser-like" in signals:
-        score += 2
-        reasons.append("parser-like")
-    if score >= 8:
-        depth_class = "deep"
-    elif score >= 3:
-        depth_class = "medium"
-    else:
-        depth_class = "shallow"
-    return score, depth_class, ", ".join(reasons[:5]) or "neutral"
-
-
-def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
-    targets_path = repo_root / "fuzz" / "targets.json"
-    if not targets_path.is_file():
-        return []
-    try:
-        data = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    return [item for item in data if isinstance(item, dict)]
-
-
-def _select_primary_target(repo_root: Path) -> dict[str, Any]:
-    targets = _load_targets_doc(repo_root)
-    return dict(targets[0]) if targets else {}
-
-
 def _build_fallback_targets_doc(
     repo_root: Path,
     *,
@@ -513,37 +417,19 @@ def _build_fallback_targets_doc(
         if key in seen:
             continue
         seen.add(key)
-        target_type = str(item.get("target_type") or _infer_target_type(name, file_hint))
-        depth_score = int(item.get("depth_score") or 0)
-        depth_class = str(item.get("depth_class") or "shallow")
-        selection_bias_reason = str(item.get("selection_bias_reason") or "")
-        if not selection_bias_reason:
-            depth_score, depth_class, selection_bias_reason = _score_target_depth(
-                name,
-                file_hint,
-                target_type=target_type,
-                risk_signals=list(item.get("risk_signals") or []),
-            )
         candidates.append(
             {
                 "name": name,
                 "api": name,
                 "lang": lang,
-                "target_type": target_type,
-                "seed_profile": str(item.get("seed_profile") or _infer_seed_profile(name, file_hint, target_type=target_type)),
-                "depth_score": depth_score,
-                "depth_class": depth_class,
-                "selection_bias_reason": selection_bias_reason,
+                "target_type": _infer_target_type(name, file_hint),
+                "seed_profile": _infer_seed_profile(name, file_hint, target_type=_infer_target_type(name, file_hint)),
             }
         )
         if len(candidates) >= 3:
             break
 
     if candidates:
-        has_deep = any(str(item.get("depth_class") or "") == "deep" for item in candidates)
-        if has_deep:
-            candidates = [item for item in candidates if str(item.get("depth_class") or "") != "shallow"]
-        candidates.sort(key=lambda item: (-int(item.get("depth_score") or 0), str(item.get("name") or "")))
         return candidates
 
     return [
@@ -553,9 +439,6 @@ def _build_fallback_targets_doc(
             "lang": _infer_target_lang_from_repo(repo_root),
             "target_type": "generic",
             "seed_profile": "generic",
-            "depth_score": 0,
-            "depth_class": "shallow",
-            "selection_bias_reason": "fallback-default",
         }
     ]
 
@@ -1147,34 +1030,11 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         if len(candidate_functions) >= 240:
             break
 
-    for item in candidate_functions:
-        depth_score, depth_class, selection_bias_reason = _score_target_depth(
-            str(item.get("name") or ""),
-            str(item.get("signature") or ""),
-            target_type=str(item.get("target_type") or "generic"),
-            risk_signals=list(item.get("risk_signals") or []),
-        )
-        item["depth_score"] = depth_score
-        item["depth_class"] = depth_class
-        item["selection_bias_reason"] = selection_bias_reason
-
-    candidate_functions.sort(
-        key=lambda item: (
-            int(item.get("depth_score") or 0),
-            len(list(item.get("risk_signals") or [])),
-            str(item.get("name") or ""),
-        ),
-        reverse=True,
-    )
-
     recommended_targets = []
     seen: set[tuple[str, str]] = set()
-    has_deep = any(str(item.get("depth_class") or "") == "deep" for item in candidate_functions)
     for item in candidate_functions:
         risk = list(item.get("risk_signals") or [])
         if not risk and str(item.get("target_type") or "") == "generic":
-            continue
-        if has_deep and str(item.get("depth_class") or "") == "shallow":
             continue
         key = (str(item.get("name") or ""), str(item.get("file") or ""))
         if key in seen:
@@ -1189,9 +1049,6 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "seed_profile": str(item.get("seed_profile") or "generic"),
                 "risk_signals": risk,
                 "file": str(item.get("file") or ""),
-                "depth_score": int(item.get("depth_score") or 0),
-                "depth_class": str(item.get("depth_class") or "shallow"),
-                "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
             }
         )
         if len(recommended_targets) >= 24:
@@ -1441,25 +1298,10 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                         )
                         out["coverage_target_name"] = str(coverage_loop.get("target_name") or out.get("coverage_target_name") or "")
                         out["coverage_seed_profile"] = str(coverage_loop.get("seed_profile") or out.get("coverage_seed_profile") or "")
-                        out["coverage_target_depth_score"] = int(
-                            coverage_loop.get("target_depth_score") or out.get("coverage_target_depth_score") or 0
-                        )
-                        out["coverage_target_depth_class"] = str(
-                            coverage_loop.get("target_depth_class") or out.get("coverage_target_depth_class") or ""
-                        )
-                        out["coverage_selection_bias_reason"] = str(
-                            coverage_loop.get("selection_bias_reason") or out.get("coverage_selection_bias_reason") or ""
-                        )
                         out["coverage_plateau_streak"] = int(coverage_loop.get("plateau_streak") or out.get("coverage_plateau_streak") or 0)
                         out["coverage_last_max_cov"] = int(coverage_loop.get("last_max_cov") or out.get("coverage_last_max_cov") or 0)
                         out["coverage_last_ft"] = int(coverage_loop.get("last_ft") or out.get("coverage_last_ft") or 0)
                         out["coverage_replan_required"] = bool(coverage_loop.get("replan_required") or out.get("coverage_replan_required") or False)
-                        out["coverage_replan_effective"] = bool(
-                            coverage_loop.get("replan_effective") if "replan_effective" in coverage_loop else out.get("coverage_replan_effective") or False
-                        )
-                        out["coverage_replan_reason"] = str(
-                            coverage_loop.get("replan_reason") or out.get("coverage_replan_reason") or ""
-                        )
                         out["coverage_improve_mode"] = str(coverage_loop.get("improve_mode") or out.get("coverage_improve_mode") or "")
                         out["coverage_round_budget_exhausted"] = bool(
                             coverage_loop.get("round_budget_exhausted") or out.get("coverage_round_budget_exhausted") or False
@@ -1469,21 +1311,6 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                         )
                         out["coverage_corpus_sources"] = list(coverage_loop.get("corpus_sources") or out.get("coverage_corpus_sources") or [])
                         out["coverage_seed_counts"] = dict(coverage_loop.get("seed_counts") or out.get("coverage_seed_counts") or {})
-                        out["coverage_repo_examples_filtered"] = bool(
-                            coverage_loop.get("repo_examples_filtered")
-                            if "repo_examples_filtered" in coverage_loop
-                            else out.get("coverage_repo_examples_filtered") or False
-                        )
-                        out["coverage_repo_examples_rejected_count"] = int(
-                            coverage_loop.get("repo_examples_rejected_count")
-                            or out.get("coverage_repo_examples_rejected_count")
-                            or 0
-                        )
-                        out["coverage_repo_examples_accepted_count"] = int(
-                            coverage_loop.get("repo_examples_accepted_count")
-                            or out.get("coverage_repo_examples_accepted_count")
-                            or 0
-                        )
                     plan_policy = doc.get("plan_policy")
                     if isinstance(plan_policy, dict):
                         out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
@@ -1564,24 +1391,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         )
         hint = (hint + "\n\n" + target_note).strip() if hint else target_note
     injected_ctx = ""
-    prev_plan_text = ""
-    prev_targets_text = ""
-    fuzz_dir = gen.repo_root / "fuzz"
-    plan_md_path = fuzz_dir / "PLAN.md"
-    targets_json_path = fuzz_dir / "targets.json"
-    try:
-        if plan_md_path.is_file():
-            prev_plan_text = plan_md_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        prev_plan_text = ""
-    try:
-        if targets_json_path.is_file():
-            prev_targets_text = targets_json_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        prev_targets_text = ""
-    prev_target_name = str(state.get("coverage_target_name") or "")
-    prev_target_depth_score = int(state.get("coverage_target_depth_score") or 0)
-    prev_target_depth_class = str(state.get("coverage_target_depth_class") or "")
     if restart_to_plan:
         report_tail = ""
         if restart_report_path:
@@ -1681,58 +1490,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "Use `fuzz/antlr_plan_context.json` as grammar-aware grounding for API/entrypoint selection.\n"
                 f"{antlr_context_summary}"
             )
-        primary_target = _select_primary_target(gen.repo_root)
-        new_target_name = str(primary_target.get("name") or "")
-        new_seed_profile = str(primary_target.get("seed_profile") or "")
-        new_depth_score = int(primary_target.get("depth_score") or 0)
-        new_depth_class = str(primary_target.get("depth_class") or "")
-        new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
-        replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
-        replan_effective = bool(state.get("coverage_replan_effective") or False)
-        replan_stop_reason = ""
-        coverage_should_improve = bool(state.get("coverage_should_improve") or False)
-        coverage_round_budget_exhausted = bool(state.get("coverage_round_budget_exhausted") or False)
-        coverage_stop_reason = str(state.get("coverage_stop_reason") or "")
-        coverage_replan_effective = bool(state.get("coverage_replan_effective") or False)
-        coverage_replan_reason = str(state.get("coverage_replan_reason") or "")
-        if replan_mode:
-            new_plan_text = ""
-            new_targets_text = ""
-            try:
-                if plan_md_path.is_file():
-                    new_plan_text = plan_md_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                new_plan_text = ""
-            try:
-                if targets_json_path.is_file():
-                    new_targets_text = targets_json_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                new_targets_text = ""
-            depth_rank = {"shallow": 0, "medium": 1, "deep": 2}
-            plan_changed = new_plan_text != prev_plan_text
-            targets_changed = new_targets_text != prev_targets_text
-            target_changed = new_target_name != prev_target_name
-            depth_improved = (
-                new_depth_score > prev_target_depth_score
-                or depth_rank.get(new_depth_class, -1) > depth_rank.get(prev_target_depth_class, -1)
-            )
-            replan_effective = any((plan_changed, targets_changed, target_changed, depth_improved))
-            coverage_replan_effective = replan_effective
-            if replan_effective:
-                replan_stop_reason = ""
-                coverage_replan_reason = (
-                    "depth_improved"
-                    if depth_improved and not target_changed
-                    else "target_changed"
-                    if target_changed
-                    else "plan_changed"
-                )
-            else:
-                replan_stop_reason = "no_material_change"
-                coverage_should_improve = False
-                coverage_round_budget_exhausted = True
-                coverage_stop_reason = "no_material_change"
-                coverage_replan_reason = "no_material_change"
         out = {
             **state,
             "last_step": "plan",
@@ -1748,18 +1505,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "antlr_context_summary": antlr_context_summary,
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
-            "coverage_target_name": new_target_name or prev_target_name,
-            "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
-            "coverage_target_depth_score": new_depth_score,
-            "coverage_target_depth_class": new_depth_class,
-            "coverage_selection_bias_reason": new_selection_bias_reason,
-            "coverage_should_improve": coverage_should_improve,
-            "coverage_round_budget_exhausted": coverage_round_budget_exhausted,
-            "coverage_stop_reason": coverage_stop_reason,
-            "coverage_replan_effective": coverage_replan_effective,
-            "coverage_replan_reason": coverage_replan_reason,
-            "replan_effective": replan_effective,
-            "replan_stop_reason": replan_stop_reason,
             "restart_to_plan": restart_to_plan,
             "restart_to_plan_reason": restart_reason,
             "restart_to_plan_stage": restart_stage,
@@ -3821,9 +3566,6 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         last_seed_profile = str(state.get("coverage_seed_profile") or "")
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_sources: set[str] = set()
-        repo_examples_filtered = False
-        repo_examples_rejected_count = 0
-        repo_examples_accepted_count = 0
         try:
             for bin_path in bins:
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
@@ -3852,9 +3594,6 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                 src_text = str(src or "").strip()
                                 if src_text:
                                     seed_sources.add(src_text)
-                        repo_examples_filtered = bool(meta.get("repo_examples_filtered") or repo_examples_filtered)
-                        repo_examples_rejected_count += int(meta.get("repo_examples_rejected_count") or 0)
-                        repo_examples_accepted_count += int(meta.get("repo_examples_accepted_count") or 0)
                 except Exception as e:
                     # Seed generation is best-effort; do not block fuzzing.
                     print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
@@ -4214,14 +3953,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             ),
             "coverage_seed_profile": last_seed_profile,
-            "coverage_target_depth_score": int(state.get("coverage_target_depth_score") or 0),
-            "coverage_target_depth_class": str(state.get("coverage_target_depth_class") or ""),
-            "coverage_selection_bias_reason": str(state.get("coverage_selection_bias_reason") or ""),
             "coverage_corpus_sources": sorted(seed_sources),
             "coverage_seed_counts": seed_count_total,
-            "coverage_repo_examples_filtered": repo_examples_filtered,
-            "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
-            "coverage_repo_examples_accepted_count": repo_examples_accepted_count,
             "crash_signature": crash_signature,
             "same_crash_repeats": same_crash_repeats,
             "timeout_signature": timeout_signature,
@@ -4315,9 +4048,6 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         prev_ft = max(0, int(state.get("coverage_last_ft") or 0))
         prev_plateau_streak = max(0, int(state.get("coverage_plateau_streak") or 0))
         current_seed_profile = str(state.get("coverage_seed_profile") or "")
-        current_depth_score = int(state.get("coverage_target_depth_score") or 0)
-        current_depth_class = str(state.get("coverage_target_depth_class") or "")
-        current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
         if not current_seed_profile:
             for detail in run_details:
                 profile = str(detail.get("seed_profile") or "")
@@ -4331,7 +4061,6 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             and plateau_streak >= 2
             and bool(current_seed_profile)
         )
-        replan_reason = ""
         improve_mode = ""
         can_in_place = current_round < max_rounds
         can_replan = (current_round + 1) < max_rounds
@@ -4350,7 +4079,6 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     should_improve = True
                     replan_required = True
                     improve_mode = "replan"
-                    replan_reason = "prefer_deeper_target" if current_depth_class == "shallow" else "stalled_current_target"
                 else:
                     round_budget_exhausted = True
                     stop_reason = "coverage_loop_budget_exhausted"
@@ -4401,20 +4129,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "plateau_streak": plateau_streak,
                 "seed_profile": current_seed_profile,
                 "target_name": current_target_name,
-                "target_depth_score": current_depth_score,
-                "target_depth_class": current_depth_class,
-                "selection_bias_reason": current_selection_bias_reason,
                 "replan_required": replan_required,
-                "replan_effective": bool(state.get("coverage_replan_effective") or False),
-                "replan_reason": replan_reason or str(state.get("coverage_replan_reason") or ""),
                 "improve_mode": improve_mode,
                 "round_budget_exhausted": round_budget_exhausted,
                 "stop_reason": stop_reason,
                 "corpus_sources": list(state.get("coverage_corpus_sources") or []),
                 "seed_counts": dict(state.get("coverage_seed_counts") or {}),
-                "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
-                "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
-                "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
                 "crash_found": bool(state.get("crash_found")),
                 "run_error_kind": str(state.get("run_error_kind") or ""),
                 "should_improve": should_improve,
@@ -4432,20 +4152,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
             "coverage_seed_profile": current_seed_profile,
-            "coverage_target_depth_score": current_depth_score,
-            "coverage_target_depth_class": current_depth_class,
-            "coverage_selection_bias_reason": current_selection_bias_reason,
             "coverage_plateau_streak": plateau_streak,
             "coverage_last_max_cov": current_cov,
             "coverage_last_ft": current_ft,
             "coverage_replan_required": replan_required,
-            "coverage_replan_reason": replan_reason or str(state.get("coverage_replan_reason") or ""),
             "coverage_improve_mode": improve_mode,
             "coverage_round_budget_exhausted": round_budget_exhausted,
             "coverage_stop_reason": stop_reason,
-            "coverage_repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
-            "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
-            "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "message": "coverage analysis done",
         }
         _wf_log(
@@ -4479,10 +4192,6 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         cov_reason = str(state.get("coverage_improve_reason") or "").strip()
         target_name = str(state.get("coverage_target_name") or "").strip()
         seed_profile = str(state.get("coverage_seed_profile") or "").strip()
-        depth_class = str(state.get("coverage_target_depth_class") or "").strip()
-        depth_score = int(state.get("coverage_target_depth_score") or 0)
-        selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "").strip()
-        replan_reason = str(state.get("coverage_replan_reason") or "").strip()
         replan_required = bool(state.get("coverage_replan_required"))
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
@@ -4493,11 +4202,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 结合 fuzz/target_analysis.json 与 fuzz/antlr_plan_context.json 重新规划。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
-                f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
-                f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
-                f"- replan 原因: {replan_reason or cov_reason or 'coverage plateau'}\n"
-                "- 如果当前 target 属于 shallow，优先选择 medium/deep 候选，不要再次落到 checksum/hash/helper/bound/combine/version/copy 类浅目标。\n"
-                "- 优先考虑 decode/inflate/deflate/parse/read/load/scan/archive/stream 这类更深入口。"
+                f"- 诊断: {cov_reason}"
             )
         else:
             hint = (
@@ -4508,8 +4213,6 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 "- 保持可构建与可运行。\n"
                 f"- 当前 target: {target_name or 'unknown'}\n"
                 f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
-                f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
-                f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
                 f"- 诊断: {cov_reason}"
             )
         out = {
@@ -5204,10 +4907,6 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")):
         return "stop"
     if (state.get("last_error") or "").strip():
-        return "stop"
-    if str(state.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
-        state.get("coverage_replan_effective", True)
-    ):
         return "stop"
     if bool(state.get("coverage_round_budget_exhausted")):
         return "stop"
