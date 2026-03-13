@@ -18,6 +18,8 @@ def test_compose_web_uses_tmp_runtime_config_and_runtime_init():
     assert web["environment"]["TMPDIR"] == "/tmp"
     assert web["depends_on"]["sherpa-runtime-init"]["condition"] == "service_completed_successfully"
     assert "/tmp" in web["tmpfs"]
+    runtime_init_command = "\n".join(services["sherpa-runtime-init"]["entrypoint"])
+    assert "find \"$$d\" -mindepth 1 -exec chown 10001:10001 {} +" in runtime_init_command
 
 
 def test_compose_gateway_has_non_root_runtime_support():
@@ -40,6 +42,8 @@ def test_k8s_web_deployment_initializes_shared_volumes_for_non_root():
     mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
     assert "/app/config" in mounts
     assert "/shared/tmp" in mounts
+    command = "\n".join(init_container["command"])
+    assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
 
 def test_non_root_dockerfiles_define_user_and_non_root_home():
     gateway = (ROOT / "docker" / "Dockerfile.gateway").read_text(encoding="utf-8")

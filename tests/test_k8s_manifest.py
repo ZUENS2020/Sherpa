@@ -142,3 +142,5 @@ def test_k8s_manifest_initializes_runtime_volume_permissions():
     mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
     assert "/app/config" in mounts
     assert "/shared/tmp" in mounts
+    command = "\n".join(init_container["command"])
+    assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
