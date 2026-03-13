@@ -40,7 +40,6 @@ def test_k8s_web_deployment_initializes_shared_volumes_for_non_root():
     assert "/app/config" in mounts
     assert "/shared/tmp" in mounts
 
-
 def test_non_root_dockerfiles_define_user_and_non_root_home():
     gateway = (ROOT / "docker" / "Dockerfile.gateway").read_text(encoding="utf-8")
     fuzz = (ROOT / "docker" / "Dockerfile.fuzz").read_text(encoding="utf-8")
