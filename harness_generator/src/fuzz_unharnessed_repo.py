@@ -818,6 +818,8 @@ def _seed_quality_from_run(
 
 def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
+    if any(tok in text for tok in ("format", "printf", "replacement field", "specifier", "brace", "template")):
+        return "parser"
     if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
         return "parser"
     if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
@@ -2213,6 +2215,25 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _resolve_seed_target_metadata(self, fuzzer_name: str, harness_text: str) -> tuple[str, str]:
+        observed = self._resolve_observed_target(fuzzer_name, harness_text)
+        if observed:
+            observed_markers = "\n".join(
+                [
+                    str(observed.get("observed_target_api") or ""),
+                    str(observed.get("selected_target_api") or ""),
+                    str(observed.get("observed_harness") or ""),
+                    harness_text,
+                ]
+            )
+            target_type = str(observed.get("target_type") or "").strip().lower()
+            if target_type not in ALLOWED_TARGET_TYPES:
+                target_type = _infer_target_type(fuzzer_name, observed_markers)
+            seed_profile = str(observed.get("seed_profile") or "").strip().lower()
+            if seed_profile not in ALLOWED_SEED_PROFILES:
+                seed_profile = self._infer_seed_profile(fuzzer_name, observed_markers, target_type)
+            if target_type in ALLOWED_TARGET_TYPES and seed_profile in ALLOWED_SEED_PROFILES:
+                return target_type, seed_profile
+
         selected = self._resolve_selected_target(fuzzer_name, harness_text)
         if selected:
             target_type = str(selected.get("target_type") or "").strip().lower()
@@ -2263,6 +2284,36 @@ class NonOssFuzzHarnessGenerator:
         if not isinstance(raw, list):
             return []
         return [item for item in raw if isinstance(item, dict)]
+
+    def _load_observed_target_doc(self) -> dict[str, object]:
+        path = self.fuzz_dir / "observed_target.json"
+        try:
+            if not path.is_file():
+                return {}
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _resolve_observed_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
+        doc = self._load_observed_target_doc()
+        if not doc:
+            return {}
+        observed_api = str(doc.get("observed_target_api") or "").strip().lower()
+        observed_harness = str(doc.get("observed_harness") or "").strip().lower()
+        selected_api = str(doc.get("selected_target_api") or "").strip().lower()
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        lowered_harness = harness_text.lower()
+        harness_name = Path(observed_harness).stem.lower() if observed_harness else ""
+        if observed_harness and harness_name and (harness_name == fuzzer_name.lower() or harness_name == normalized_fuzzer):
+            return dict(doc)
+        if observed_api and observed_api in lowered_harness:
+            return dict(doc)
+        if harness_name and (harness_name in normalized_fuzzer or normalized_fuzzer in harness_name):
+            return dict(doc)
+        if selected_api and selected_api in lowered_harness:
+            return dict(doc)
+        return dict(doc) if len(doc) > 0 else {}
 
     def _resolve_selected_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
         doc = self._load_selected_targets_doc()
@@ -2718,6 +2769,8 @@ class NonOssFuzzHarnessGenerator:
         corpus_dir.mkdir(parents=True, exist_ok=True)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
+        observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
+        execution_target = dict(observed_target or selected_target)
         if selected_target:
             self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
         required_families, optional_families = _seed_families_for_target(
@@ -2725,8 +2778,10 @@ class NonOssFuzzHarnessGenerator:
             fuzzer_name,
             harness_text,
             readme_text,
-            str(selected_target.get("target_name") or ""),
-            str(selected_target.get("api") or ""),
+            str(execution_target.get("observed_target_api") or ""),
+            str(execution_target.get("selected_target_api") or ""),
+            str(execution_target.get("target_name") or ""),
+            str(execution_target.get("api") or ""),
         )
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
@@ -2780,9 +2835,11 @@ class NonOssFuzzHarnessGenerator:
         if isinstance(seed_timeout, int) and seed_timeout > 0:
             patcher_kwargs["timeout"] = seed_timeout
         selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
+        observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
         antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
         additional_context_parts = [
+            "=== fuzz/observed_target.json ===\n" + (observed_target_text or "(missing)"),
             "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
             "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
             "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
@@ -2813,8 +2870,10 @@ class NonOssFuzzHarnessGenerator:
                 fuzzer_name,
                 harness_text,
                 readme_text,
-                str(selected_target.get("target_name") or ""),
-                str(selected_target.get("api") or ""),
+                str(execution_target.get("observed_target_api") or ""),
+                str(execution_target.get("selected_target_api") or ""),
+                str(execution_target.get("target_name") or ""),
+                str(execution_target.get("api") or ""),
             ],
         )
         self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = {
@@ -2828,6 +2887,7 @@ class NonOssFuzzHarnessGenerator:
             "seed_profile": seed_profile,
             "target_type": target_type,
             "selected_target": dict(selected_target),
+            "observed_target": dict(observed_target),
             "seed_families_required": required_families,
             "seed_families_optional": optional_families,
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
