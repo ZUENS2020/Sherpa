@@ -13,10 +13,22 @@ spec:
         app: sherpa-web
     spec:
       serviceAccountName: sherpa-web
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: web
           image: sherpa-web:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8001
               name: http
@@ -39,6 +51,13 @@ spec:
               port: 8001
             initialDelaySeconds: 20
             periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
           volumeMounts:
             - name: config
               mountPath: /app/config
