@@ -496,6 +496,28 @@ jobs:
           echo "frontend_changed=${frontend_changed}" >> "$GITHUB_OUTPUT"
           echo "::notice::force_rebuild_all=${FORCE_REBUILD_ALL}, uncertain=${change_detection_uncertain}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
 
+      - name: Resolve base images
+        id: base_images
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          reg="${DOCKER_REGISTRY_PREFIX_DEV:-}"
+          if [[ -n "$reg" ]]; then
+            reg="${reg%/}"
+            web_python_image="${reg}/library/python:3.10-slim"
+            frontend_node_image="${reg}/library/node:20-alpine"
+          else
+            web_python_image="python:3.10-slim"
+            frontend_node_image="node:20-alpine"
+          fi
+          echo "web_python_image=${web_python_image}" >> "$GITHUB_OUTPUT"
+          echo "frontend_node_image=${frontend_node_image}" >> "$GITHUB_OUTPUT"
+          echo "::notice::web_python_image=${web_python_image}"
+          echo "::notice::frontend_node_image=${frontend_node_image}"
+        env:
+          DOCKER_REGISTRY_PREFIX_DEV: ${{ secrets.DOCKER_REGISTRY_PREFIX_DEV }}
+
       - name: Build and export web image
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
         timeout-minutes: 75
@@ -503,6 +525,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.web
+          build-args: |
+            WEB_PYTHON_BASE_IMAGE=${{ steps.base_images.outputs.web_python_image }}
           tags: ${{ steps.prep.outputs.web_image }}
           outputs: type=docker,dest=${{ steps.prep.outputs.web_tar }}
           cache-from: type=gha,scope=sherpa-web
@@ -517,6 +541,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.frontend
+          build-args: |
+            FRONTEND_NODE_IMAGE=${{ steps.base_images.outputs.frontend_node_image }}
           tags: ${{ steps.prep.outputs.frontend_image }}
           outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
           cache-from: type=gha,scope=sherpa-frontend
@@ -530,6 +556,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.frontend
+          build-args: |
+            FRONTEND_NODE_IMAGE=${{ steps.base_images.outputs.frontend_node_image }}
           tags: ${{ steps.prep.outputs.frontend_image }}
           outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
           cache-from: type=gha,scope=sherpa-frontend
