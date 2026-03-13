@@ -120,3 +120,11 @@ def test_write_opencode_env_uses_runtime_parent_and_cross_device_fallback(
     assert "OPENAI_API_KEY=key" in content
     assert "OPENAI_BASE_URL=https://example.invalid/v1" in content
     assert "OPENAI_MODEL=model-x" in content
+
+
+def test_normalize_model_for_opencode_prefixes_single_configured_provider():
+    cfg = pc.WebPersistentConfig()
+
+    out = pc.normalize_model_for_opencode("MiniMax-M2.5", cfg=cfg)
+
+    assert out == "minimax/MiniMax-M2.5"

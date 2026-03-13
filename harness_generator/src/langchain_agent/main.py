@@ -28,6 +28,7 @@ from persistent_config import (
     apply_config_to_env,
     as_public_dict,
     list_opencode_provider_models_resolved,
+    normalize_model_for_opencode,
     opencode_env_path,
     opencode_runtime_config_path,
     load_config,
@@ -111,6 +112,13 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
     global _CFG
     with _CFG_LOCK:
         _CFG = cfg
+
+
+def _normalized_opencode_model_value(raw_model: object) -> str:
+    value = str(raw_model or "").strip()
+    if not value:
+        return ""
+    return normalize_model_for_opencode(value, cfg=_cfg_get())
 
 
 def _track_job_future(job_id: str, future: Future) -> None:
@@ -377,6 +385,8 @@ def _k8s_result_paths(job_id: str, *, stage: str | None = None, seq: int | None 
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+    raw_model = str(payload.get("model") or "").strip()
+    normalized_model = _normalized_opencode_model_value(raw_model)
     ttl = _k8s_job_ttl_seconds()
     keep_finished = _k8s_keep_finished_jobs()
 
@@ -471,8 +481,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             },
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
-                                {"name": "OPENCODE_MODEL", "value": str(payload.get("model") or "")},
-                                {"name": "OPENAI_MODEL", "value": str(payload.get("model") or "")},
+                                {"name": "OPENCODE_MODEL", "value": normalized_model},
+                                {"name": "OPENAI_MODEL", "value": raw_model},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
                             ],
                             "volumeMounts": [

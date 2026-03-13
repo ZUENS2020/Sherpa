@@ -46,6 +46,23 @@ def test_k8s_manifest_does_not_force_empty_opencode_docker_image():
     assert "SHERPA_OPENCODE_DOCKER_IMAGE" not in env_names
 
 
+def test_k8s_manifest_normalizes_opencode_model_value():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_map = {item["name"]: item["value"] for item in env_items}
+
+    assert env_map["OPENCODE_MODEL"] == "minimax/MiniMax-M2.5"
+    assert env_map["OPENAI_MODEL"] == "MiniMax-M2.5"
+
+
 def test_k8s_configmap_does_not_set_opencode_docker_image():
     configmap = yaml.safe_load((ROOT / "k8s" / "base" / "configmap.yaml").read_text(encoding="utf-8"))
     data = configmap["data"]
