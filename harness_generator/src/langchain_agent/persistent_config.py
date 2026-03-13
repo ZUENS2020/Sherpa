@@ -106,9 +106,6 @@ def runtime_generated_dir() -> Path:
     raw = os.environ.get("SHERPA_RUNTIME_CONFIG_DIR", "").strip()
     if raw:
         return Path(raw).expanduser()
-    shared_tmp = Path("/shared/tmp")
-    if shared_tmp.exists():
-        return shared_tmp / "sherpa-runtime"
     return Path("/tmp/sherpa-runtime")
 
 

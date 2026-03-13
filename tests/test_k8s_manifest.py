@@ -92,3 +92,26 @@ def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.Mo
     assert resources["requests"]["memory"] == "768Mi"
     assert resources["limits"]["cpu"] == "1"
     assert resources["limits"]["memory"] == "1536Mi"
+
+
+def test_k8s_manifest_applies_non_root_security_context():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    pod_sc = manifest["spec"]["template"]["spec"]["securityContext"]
+    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+
+    assert pod_sc["seccompProfile"]["type"] == "RuntimeDefault"
+    assert pod_sc["fsGroup"] == 10001
+    assert pod_sc["fsGroupChangePolicy"] == "OnRootMismatch"
+    assert container_sc["runAsNonRoot"] is True
+    assert container_sc["runAsUser"] == 10001
+    assert container_sc["runAsGroup"] == 10001
+    assert container_sc["allowPrivilegeEscalation"] is False
+    assert container_sc["capabilities"]["drop"] == ["ALL"]

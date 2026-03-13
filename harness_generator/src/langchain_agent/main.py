@@ -417,12 +417,24 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                 "spec": {
                     "restartPolicy": "Never",
                     "serviceAccountName": (os.environ.get("SHERPA_K8S_JOB_SERVICE_ACCOUNT", "sherpa-web") or "sherpa-web"),
+                    "securityContext": {
+                        "seccompProfile": {"type": "RuntimeDefault"},
+                        "fsGroup": 10001,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
                     "containers": [
                         {
                             "name": "worker",
                             "image": _k8s_worker_image(),
                             "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
                             "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "runAsNonRoot": True,
+                                "runAsUser": 10001,
+                                "runAsGroup": 10001,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
                                 {"name": "OPENCODE_MODEL", "value": str(payload.get("model") or "")},

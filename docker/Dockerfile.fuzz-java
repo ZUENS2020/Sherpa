@@ -2,7 +2,8 @@
 ARG FUZZ_JAVA_BASE_IMAGE=m.daocloud.io/docker.io/library/ubuntu:24.04
 FROM ${FUZZ_JAVA_BASE_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/fuzzer
 
 ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/ubuntu"
 RUN set -e; \
@@ -28,5 +29,11 @@ RUN apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
     zip \
   && true
 
+RUN groupadd -g 10001 fuzzer \
+  && useradd -m -d /home/fuzzer -u 10001 -g 10001 -s /bin/bash fuzzer \
+  && mkdir -p /work \
+  && chown -R 10001:10001 /home/fuzzer /work
+
 WORKDIR /work
+USER 10001:10001
 CMD ["bash"]
