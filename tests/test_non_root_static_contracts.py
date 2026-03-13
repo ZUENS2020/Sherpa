@@ -15,6 +15,7 @@ def test_compose_web_uses_tmp_runtime_config_and_runtime_init():
 
     assert "sherpa-runtime-init" in services
     assert web["environment"]["OPENCODE_CONFIG"] == "/tmp/sherpa-runtime/opencode.generated.json"
+    assert web["environment"]["TMPDIR"] == "/tmp"
     assert web["depends_on"]["sherpa-runtime-init"]["condition"] == "service_completed_successfully"
     assert "/tmp" in web["tmpfs"]
 

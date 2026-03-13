@@ -53,6 +53,13 @@ def test_k8s_configmap_does_not_set_opencode_docker_image():
     assert "SHERPA_OPENCODE_DOCKER_IMAGE" not in data
 
 
+def test_k8s_configmap_defaults_tmpdir_to_container_tmp():
+    configmap = yaml.safe_load((ROOT / "k8s" / "base" / "configmap.yaml").read_text(encoding="utf-8"))
+    data = configmap["data"]
+
+    assert data["TMPDIR"] == "/tmp"
+
+
 def test_k8s_manifest_applies_default_worker_resources():
     manifest_yaml = web_main._k8s_build_manifest(
         "job-test",
