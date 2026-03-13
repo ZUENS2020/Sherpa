@@ -102,20 +102,32 @@ def config_dir() -> Path:
     return _repo_root() / "config"
 
 
+def runtime_generated_dir() -> Path:
+    raw = os.environ.get("SHERPA_RUNTIME_CONFIG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    shared_tmp = Path("/shared/tmp")
+    if shared_tmp.exists():
+        return shared_tmp / "sherpa-runtime"
+    return Path("/tmp/sherpa-runtime")
+
+
 def config_path() -> Path:
     return config_dir() / "web_config.json"
 
 
 def opencode_env_path() -> Path:
     # Used by fuzz pipeline (CodexHelper reads from a file path).
-    return config_dir() / "web_opencode.env"
+    # Keep generated runtime files out of /app/config so non-root web pods
+    # don't need write access to the config PVC.
+    return runtime_generated_dir() / "web_opencode.env"
 
 
 def opencode_runtime_config_path() -> Path:
     raw = os.environ.get("SHERPA_OPENCODE_CONFIG_PATH", "").strip()
     if raw:
         return Path(raw).expanduser()
-    return config_dir() / "opencode.generated.json"
+    return runtime_generated_dir() / "opencode.generated.json"
 
 
 def _normalize_provider_name(raw: str) -> str:
