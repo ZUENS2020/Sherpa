@@ -207,7 +207,33 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
     assert out["synthesize_selected_target_api"] == "yaml_parser_parse"
     assert out["synthesize_observed_target_api"] == "yaml_parser_load_document"
     assert out["synthesize_target_relation"].startswith("final target")
+    observed_target = fuzz_dir / "observed_target.json"
+    assert observed_target.is_file()
+    assert "yaml_parser_load_document" in observed_target.read_text(encoding="utf-8")
     assert "runtime-executable replacement target" in captured["prompt"]
+
+
+def test_analyze_harness_target_alignment_prefers_external_api_over_local_helper(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","seed_families_required":["replacement_fields"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "format_fuzz.cc").write_text(
+        "static bool balanced_braces(const char* s) { return s != nullptr; }\n"
+        "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) {\n"
+        "  if (!balanced_braces(reinterpret_cast<const char*>(data))) return 0;\n"
+        "  fmt::format_to((char*)0, \"{}\", reinterpret_cast<const char*>(data));\n"
+        "  return 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    alignment = workflow_graph._analyze_harness_target_alignment(tmp_path)
+
+    assert alignment["drifted"] is True
+    assert alignment["observed_api"] == "fmt::format_to"
 
 
 def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeypatch):

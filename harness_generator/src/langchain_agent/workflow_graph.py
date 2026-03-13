@@ -538,6 +538,10 @@ def _selected_targets_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "selected_targets.json"
 
 
+def _observed_target_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "observed_target.json"
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
@@ -600,6 +604,45 @@ def _load_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
+def _write_observed_target_doc(
+    repo_root: Path,
+    *,
+    expected_target_name: str,
+    expected_api: str,
+    observed_api: str,
+    observed_harness: str,
+    drifted: bool,
+    drift_reason: str,
+    relation: str,
+    runtime_viability: str,
+) -> tuple[str, dict[str, Any]]:
+    path = _observed_target_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "selected_target_name": str(expected_target_name or ""),
+        "selected_target_api": str(expected_api or ""),
+        "observed_target_api": str(observed_api or ""),
+        "observed_harness": str(observed_harness or ""),
+        "drifted": bool(drifted),
+        "drift_reason": str(drift_reason or ""),
+        "relation": str(relation or ""),
+        "runtime_viability": str(runtime_viability or ""),
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _load_observed_target_doc(repo_root: Path) -> dict[str, Any]:
+    path = _observed_target_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def _infer_harness_primary_api(text: str) -> str:
     keywords = {
         "if",
@@ -614,6 +657,7 @@ def _infer_harness_primary_api(text: str) -> str:
         "const_cast",
         "dynamic_cast",
     }
+    candidates: list[str] = []
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(", text):
         name = str(match.group(1) or "").strip()
         lowered = name.lower()
@@ -622,7 +666,14 @@ def _infer_harness_primary_api(text: str) -> str:
             continue
         if leaf == "llvmfuzzertestoneinput":
             continue
-        return lowered
+        if leaf.startswith(("is_", "has_", "check_", "validate_", "balanced_", "helper_", "local_")):
+            continue
+        candidates.append(lowered)
+    for candidate in candidates:
+        if "::" in candidate and not candidate.startswith(("std::", "absl::")):
+            return candidate
+    if candidates:
+        return candidates[0]
     return ""
 
 
@@ -2449,6 +2500,21 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     )
                     _run_readme_alignment_completion(remaining_for_readme, target_alignment)
                     readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
+        observed_target_path = ""
+        try:
+            observed_target_path, _ = _write_observed_target_doc(
+                gen.repo_root,
+                expected_target_name=str(target_alignment.get("expected_target_name") or selected_target_name),
+                expected_api=str(target_alignment.get("expected_api") or selected_target_api),
+                observed_api=str(target_alignment.get("observed_api") or ""),
+                observed_harness=str(target_alignment.get("observed_harness") or ""),
+                drifted=bool(target_alignment.get("drifted") or False),
+                drift_reason=str(readme_alignment.get("reason") or target_alignment.get("reason") or ""),
+                relation=str(readme_alignment.get("relation") or ""),
+                runtime_viability=selected_target_runtime_viability,
+            )
+        except Exception:
+            observed_target_path = ""
         out = {
             **state,
             "last_step": "synthesize",
@@ -2459,6 +2525,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "restart_to_plan_stage": "",
             "restart_to_plan_error_text": "",
             "restart_to_plan_report_path": "",
+            "observed_target_path": observed_target_path,
             "synthesize_selected_target_name": str(target_alignment.get("expected_target_name") or selected_target_name),
             "synthesize_selected_target_api": str(target_alignment.get("expected_api") or selected_target_api),
             "synthesize_observed_target_api": str(target_alignment.get("observed_api") or ""),

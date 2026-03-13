@@ -59,6 +59,36 @@ def test_collect_repo_seed_examples_accepts_yaml_samples_for_parser_token(tmp_pa
     assert meta["accepted_count"] >= 1
 
 
+def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"generic","seed_profile":"generic","seed_families_required":[],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "observed_target.json").write_text(
+        '{'
+        '"selected_target_name":"parse_replacement_field_then_tail",'
+        '"selected_target_api":"parse_replacement_field_then_tail",'
+        '"observed_target_api":"fmt::println",'
+        '"observed_harness":"println_fuzz.cc",'
+        '"drifted":true,'
+        '"drift_reason":"runtime wrapper",'
+        '"relation":"wrapper",'
+        '"runtime_viability":"high"'
+        '}',
+        encoding="utf-8",
+    )
+    gen = _make_generator(tmp_path)
+    target_type, seed_profile = gen._resolve_seed_target_metadata(
+        "println_fuzz",
+        'extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) { fmt::println("{}", (const char*)data); return 0; }',
+    )
+
+    assert target_type == "parser"
+    assert seed_profile == "parser-format"
+
+
 def test_seed_quality_flags_detect_low_retention_and_missing_families():
     log = "\n".join(
         [
