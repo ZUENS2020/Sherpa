@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,41 +105,6 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert "antlr_plan_context.json" in str(out.get("codex_hint") or "")
 
 
-def test_node_plan_reorders_targets_by_runtime_viability(tmp_path: Path, monkeypatch):
-    class _Patcher:
-        def run_codex_command(self, _prompt: str, **kwargs):
-            _pass_plan_targets(timeout=int(kwargs.get("timeout") or 1))
-            return None
-
-    def _pass_plan_targets(*, timeout: int) -> None:
-        fuzz_dir = tmp_path / "fuzz"
-        fuzz_dir.mkdir(parents=True, exist_ok=True)
-        (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-        (fuzz_dir / "targets.json").write_text(
-            json.dumps(
-                [
-                    {"name": "parse_replacement_field_then_tail", "api": "parse_replacement_field_then_tail", "lang": "cpp", "target_type": "parser", "seed_profile": "parser-format"},
-                    {"name": "println", "api": "println", "lang": "cpp", "target_type": "generic", "seed_profile": "generic"},
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-    gen = SimpleNamespace(repo_root=tmp_path, _pass_plan_targets=_pass_plan_targets, patcher=_Patcher())
-    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
-    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
-    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
-
-    out = workflow_graph._node_plan({"generator": gen, "codex_hint": ""})
-
-    assert out["last_error"] == ""
-    targets_doc = json.loads((tmp_path / "fuzz" / "targets.json").read_text(encoding="utf-8"))
-    selected_doc = json.loads((tmp_path / "fuzz" / "selected_targets.json").read_text(encoding="utf-8"))
-    assert targets_doc[0]["name"] == "println"
-    assert selected_doc[0]["target_name"] == "println"
-    assert out["selected_target_api"] == "println"
-
-
 def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -221,8 +185,7 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
                 "Selected target: yaml_parser_parse\n"
                 "Final target: yaml_parser_load_document\n"
                 "Technical reason: runtime parser entrypoint is deeper.\n"
-                "Relation: final target is a runtime replacement for the selected parser API.\n"
-                "Harness file: yaml_parser_fuzz.cc\n",
+                "Relation: final target is a runtime replacement for the selected parser API.\n",
                 encoding="utf-8",
             )
             return None
@@ -244,48 +207,7 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
     assert out["synthesize_selected_target_api"] == "yaml_parser_parse"
     assert out["synthesize_observed_target_api"] == "yaml_parser_load_document"
     assert out["synthesize_target_relation"].startswith("final target")
-    observed_doc = json.loads((fuzz_dir / "observed_target.json").read_text(encoding="utf-8"))
-    assert observed_doc["observed_target_api"] == "yaml_parser_load_document"
     assert "runtime-executable replacement target" in captured["prompt"]
-
-
-def test_analyze_harness_target_alignment_prefers_external_api_over_local_helper(tmp_path: Path):
-    fuzz_dir = tmp_path / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "selected_targets.json").write_text(
-        json.dumps(
-            [
-                {
-                    "target_name": "parse_replacement_field_then_tail",
-                    "api": "parse_replacement_field_then_tail",
-                    "target_type": "parser",
-                    "seed_profile": "parser-format",
-                    "runtime_viability": "low",
-                    "runtime_replacement_candidates": ["fmt::format_to", "fmt::println"],
-                    "seed_families_required": ["replacement_fields"],
-                    "seed_families_optional": [],
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (fuzz_dir / "parse_format_string_fuzz.cc").write_text(
-        "bool balanced_braces(const char* b, const char* e) { return b && e; }\n"
-        "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) {\n"
-        "  if (!balanced_braces((const char*)data, (const char*)data + size)) return 0;\n"
-        "  auto buf = fmt::memory_buffer();\n"
-        "  fmt::format_to(std::back_inserter(buf), fmt::string_view((const char*)data, size), 42);\n"
-        "  return 0;\n"
-        "}\n",
-        encoding="utf-8",
-    )
-
-    alignment = workflow_graph._analyze_harness_target_alignment(tmp_path)
-
-    assert alignment["observed_api"] == "fmt::format_to"
-    observed_doc = json.loads((fuzz_dir / "observed_target.json").read_text(encoding="utf-8"))
-    assert observed_doc["observed_target_api"] == "fmt::format_to"
-    assert observed_doc["seed_profile"] == "parser-format"
 
 
 def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeypatch):
@@ -339,134 +261,6 @@ def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeyp
     assert len(prompts) == 2
     assert "Update `fuzz/README.md` only" in prompts[1]
     assert out["synthesize_target_runtime_viability"] == "low"
-
-
-def test_node_synthesize_repairs_readme_when_fields_do_not_match_observed_target(tmp_path: Path, monkeypatch):
-    fuzz_dir = tmp_path / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-    (fuzz_dir / "targets.json").write_text(
-        '[{"name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
-        encoding="utf-8",
-    )
-    (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","runtime_viability":"low","seed_families_required":["replacement_fields"],"seed_families_optional":[]}]',
-        encoding="utf-8",
-    )
-    prompts: list[str] = []
-
-    class _Patcher:
-        def run_codex_command(self, prompt: str, **kwargs):
-            prompts.append(prompt)
-            (fuzz_dir / "println_fuzz.cc").write_text(
-                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return fmt::println(\"{}\"); }\n",
-                encoding="utf-8",
-            )
-            (fuzz_dir / "build.py").write_text("FUZZ_SOURCES = ['println_fuzz.cc']\n", encoding="utf-8")
-            if len(prompts) == 1:
-                (fuzz_dir / "README.md").write_text(
-                    "# fuzz\n\n"
-                    "Selected target: parse_replacement_field_then_tail\n"
-                    "Final target: fmtdata\n"
-                    "Technical reason: old explanation.\n"
-                    "Relation: old relation.\n"
-                    "Harness file: print_fuzz.cc\n",
-                    encoding="utf-8",
-                )
-            else:
-                (fuzz_dir / "README.md").write_text(
-                    "# fuzz\n\n"
-                    "Selected target: parse_replacement_field_then_tail\n"
-                    "Final target: fmt::println\n"
-                    "Technical reason: selected target is not a practical runtime entrypoint.\n"
-                    "Relation: fmt::println exercises the same formatting pipeline from a runtime API.\n"
-                    "Harness file: println_fuzz.cc\n",
-                    encoding="utf-8",
-                )
-            return None
-
-    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
-    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
-    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
-
-    out = workflow_graph._node_synthesize(
-        {
-            "generator": gen,
-            "codex_hint": "prefer runtime target",
-            "selected_targets_path": str(fuzz_dir / "selected_targets.json"),
-            "selected_target_api": "parse_replacement_field_then_tail",
-            "selected_target_runtime_viability": "low",
-        }
-    )
-
-    assert out["last_error"] == ""
-    assert len(prompts) == 2
-    assert "Update `fuzz/README.md` only" in prompts[1]
-    assert out["synthesize_readme_consistent"] is True
-    assert out["synthesize_observed_target_api"] == "fmt::println"
-    assert out["synthesize_observed_harness"] == "println_fuzz.cc"
-
-
-def test_node_synthesize_repairs_build_scaffold_when_sources_are_missing(tmp_path: Path, monkeypatch):
-    fuzz_dir = tmp_path / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
-    (fuzz_dir / "targets.json").write_text(
-        '[{"name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
-        encoding="utf-8",
-    )
-    (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","runtime_viability":"low","seed_families_required":["replacement_fields"],"seed_families_optional":[]}]',
-        encoding="utf-8",
-    )
-    prompts: list[str] = []
-
-    class _Patcher:
-        def run_codex_command(self, prompt: str, **kwargs):
-            prompts.append(prompt)
-            (fuzz_dir / "println_fuzz.cc").write_text(
-                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { return fmt::println(\"{}\"); }\n",
-                encoding="utf-8",
-            )
-            (fuzz_dir / "README.md").write_text(
-                "# fuzz\n\n"
-                "Selected target: parse_replacement_field_then_tail\n"
-                "Final target: fmt::println\n"
-                "Technical reason: selected target is not a practical runtime entrypoint.\n"
-                "Relation: fmt::println exercises the same formatting pipeline from a runtime API.\n"
-                "Harness file: println_fuzz.cc\n",
-                encoding="utf-8",
-            )
-            if len(prompts) == 1:
-                (fuzz_dir / "build.py").write_text(
-                    "FUZZ_SOURCES = ['print_fuzz.cc', 'println_fuzz.cc']\n",
-                    encoding="utf-8",
-                )
-            else:
-                (fuzz_dir / "build.py").write_text(
-                    "FUZZ_SOURCES = ['println_fuzz.cc']\n",
-                    encoding="utf-8",
-                )
-            return None
-
-    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
-    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
-    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
-
-    out = workflow_graph._node_synthesize(
-        {
-            "generator": gen,
-            "codex_hint": "prefer runtime target",
-            "selected_targets_path": str(fuzz_dir / "selected_targets.json"),
-            "selected_target_api": "parse_replacement_field_then_tail",
-            "selected_target_runtime_viability": "low",
-        }
-    )
-
-    assert out["last_error"] == ""
-    assert len(prompts) == 2
-    assert "Update `fuzz/build.py` and/or `fuzz/build.sh` only" in prompts[1]
-    assert out["synthesize_build_scaffold_consistent"] is True
 
 
 def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_output(tmp_path: Path, monkeypatch):

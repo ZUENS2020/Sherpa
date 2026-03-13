@@ -77,7 +77,6 @@ class FuzzWorkflowState(TypedDict, total=False):
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
-    observed_target_path: str
     selected_target_api: str
     selected_target_runtime_viability: str
     coverage_seed_quality: dict[str, Any]
@@ -134,8 +133,6 @@ class FuzzWorkflowState(TypedDict, total=False):
     synthesize_target_drift_reason: str
     synthesize_target_relation: str
     synthesize_target_runtime_viability: str
-    synthesize_readme_consistent: bool
-    synthesize_build_scaffold_consistent: bool
     run_children_exit_count: int
     run_details: list[dict[str, Any]]
     run_batch_plan: list[dict[str, Any]]
@@ -332,31 +329,7 @@ def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
 
 def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
-    if any(
-        tok in text
-        for tok in (
-            "parse",
-            "parser",
-            "scan",
-            "scanner",
-            "yaml",
-            "json",
-            "xml",
-            "token",
-            "lex",
-            "reader",
-            "format",
-            "format_to",
-            "vformat",
-            "printf",
-            "println",
-            "print",
-            "replacement field",
-            "placeholder",
-            "specifier",
-            "brace",
-        )
-    ):
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
         return "parser"
     if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
         return "decoder"
@@ -565,112 +538,42 @@ def _selected_targets_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "selected_targets.json"
 
 
-def _observed_target_path(repo_root: Path) -> Path:
-    return repo_root / "fuzz" / "observed_target.json"
-
-
-def _target_runtime_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
-    return (
-        {"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
-        int(item.get("depth_score") or 0),
-        len(list(item.get("risk_signals") or [])),
-        str(item.get("name") or item.get("target_name") or ""),
-    )
-
-
-def _enrich_target_doc_item(item: dict[str, Any]) -> dict[str, Any]:
-    enriched = dict(item)
-    target_name = str(enriched.get("name") or enriched.get("target_name") or "").strip()
-    api = str(enriched.get("api") or target_name).strip()
-    target_type = str(enriched.get("target_type") or _infer_target_type(target_name, api)).strip().lower()
-    seed_profile = str(enriched.get("seed_profile") or _infer_seed_profile(target_name, api, target_type=target_type)).strip().lower()
-    runtime_viability = str(enriched.get("runtime_viability") or "").strip().lower()
-    selection_rationale = str(enriched.get("selection_rationale") or "").strip()
-    runtime_replacement_candidates = list(enriched.get("runtime_replacement_candidates") or [])
-    if not runtime_viability:
-        runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
-            target_name,
-            api,
-            file_hint=str(enriched.get("file") or ""),
-        )
-        selection_rationale = selection_rationale or auto_rationale
-        runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
-    enriched["name"] = target_name
-    enriched["target_name"] = str(enriched.get("target_name") or target_name)
-    enriched["api"] = api
-    enriched["target_type"] = target_type
-    enriched["seed_profile"] = seed_profile
-    enriched["runtime_viability"] = runtime_viability
-    enriched["selection_rationale"] = selection_rationale
-    enriched["runtime_replacement_candidates"] = runtime_replacement_candidates
-    return enriched
-
-
-def _normalize_and_write_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
-    path = repo_root / "fuzz" / "targets.json"
-    raw = _load_targets_doc(repo_root)
-    if not raw:
-        return []
-    doc = [_enrich_target_doc_item(item) for item in raw]
-    doc.sort(key=_target_runtime_sort_key, reverse=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return doc
-
-
-def _semantic_target_doc_item(item: dict[str, Any]) -> dict[str, Any]:
-    enriched = _enrich_target_doc_item(item)
-    return {
-        "name": str(enriched.get("name") or ""),
-        "api": str(enriched.get("api") or ""),
-        "lang": str(enriched.get("lang") or ""),
-        "target_type": str(enriched.get("target_type") or ""),
-        "seed_profile": str(enriched.get("seed_profile") or ""),
-        "runtime_viability": str(enriched.get("runtime_viability") or ""),
-        "depth_score": int(enriched.get("depth_score") or 0),
-        "depth_class": str(enriched.get("depth_class") or ""),
-    }
-
-
-def _semantic_targets_doc_from_text(text: str) -> list[dict[str, Any]]:
-    if not text.strip():
-        return []
-    try:
-        raw = json.loads(text)
-    except Exception:
-        return []
-    if not isinstance(raw, list):
-        return []
-    doc = [_semantic_target_doc_item(item) for item in raw if isinstance(item, dict)]
-    doc.sort(key=_target_runtime_sort_key, reverse=True)
-    return doc
-
-
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
-        enriched = _enrich_target_doc_item(item)
-        target_name = str(enriched.get("name") or "").strip()
-        api = str(enriched.get("api") or target_name).strip()
-        target_type = str(enriched.get("target_type") or "generic").strip().lower()
-        seed_profile = str(enriched.get("seed_profile") or "generic").strip().lower()
+        target_name = str(item.get("name") or "").strip()
+        api = str(item.get("api") or target_name).strip()
+        target_type = str(item.get("target_type") or "generic").strip().lower()
+        seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
         required, optional = _seed_families_for_target(seed_profile, target_name, api)
+        runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
+        selection_rationale = str(item.get("selection_rationale") or "").strip()
+        runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
+        if not runtime_viability:
+            runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
+                target_name,
+                api,
+                file_hint=str(item.get("file") or ""),
+            )
+            selection_rationale = selection_rationale or auto_rationale
+            runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
         out.append(
             {
                 "target_name": target_name,
                 "name": target_name,
                 "api": api,
-                "lang": str(enriched.get("lang") or ""),
+                "lang": str(item.get("lang") or ""),
                 "target_type": target_type,
                 "seed_profile": seed_profile,
-                "depth_score": int(enriched.get("depth_score") or 0),
-                "depth_class": str(enriched.get("depth_class") or ""),
-                "selection_bias_reason": str(enriched.get("selection_bias_reason") or ""),
-                "runtime_viability": str(enriched.get("runtime_viability") or ""),
-                "selection_rationale": str(enriched.get("selection_rationale") or ""),
-                "runtime_replacement_candidates": list(enriched.get("runtime_replacement_candidates") or []),
+                "depth_score": int(item.get("depth_score") or 0),
+                "depth_class": str(item.get("depth_class") or ""),
+                "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+                "runtime_viability": runtime_viability,
+                "selection_rationale": selection_rationale,
+                "runtime_replacement_candidates": runtime_replacement_candidates,
                 "seed_families_required": required,
                 "seed_families_optional": optional,
-                "wrapper_fuzzer_name": str(enriched.get("wrapper_fuzzer_name") or ""),
+                "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
             }
         )
     return out
@@ -723,200 +626,42 @@ def _infer_harness_primary_api(text: str) -> str:
     return ""
 
 
-def _harness_local_symbol_names(text: str) -> set[str]:
-    names: set[str] = set()
-    patterns = [
-        r"(?m)^\s*(?:static\s+|inline\s+|constexpr\s+|consteval\s+|extern\s+\"C\"\s+|extern\s+|virtual\s+|const\s+)*[A-Za-z_][A-Za-z0-9_:<>\s\*&]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;\n{}]*\)\s*\{",
-        r"(?m)^\s*(?:struct|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            name = str(match.group(1) or "").strip().lower()
-            if name:
-                names.add(name)
-    names.add("llvmfuzzertestoneinput")
-    return names
-
-
-def _observed_api_candidates(text: str, *, replacement_candidates: list[str] | None = None) -> list[str]:
-    lowered = text.lower()
-    local_names = _harness_local_symbol_names(lowered)
-    replacements = {str(x or "").strip().lower() for x in (replacement_candidates or []) if str(x or "").strip()}
-    ignored_leafs = {
-        "string_view",
-        "memory_buffer",
-        "back_inserter",
-        "data",
-        "size",
-        "begin",
-        "end",
-        "what",
-        "push_back",
-        "append",
-        "resize",
-        "clear",
-    }
-    scored: list[tuple[int, int, str]] = []
-    seen: set[str] = set()
-    keywords = {
-        "if",
-        "for",
-        "while",
-        "switch",
-        "return",
-        "sizeof",
-        "catch",
-        "static_cast",
-        "reinterpret_cast",
-        "const_cast",
-        "dynamic_cast",
-    }
-    for idx, match in enumerate(re.finditer(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(", lowered)):
-        name = str(match.group(1) or "").strip().lower()
-        leaf = name.split("::")[-1]
-        if not name or name in keywords or leaf in keywords:
-            continue
-        if leaf in local_names or name in local_names:
-            continue
-        if leaf in ignored_leafs:
-            continue
-        score = 0
-        if name in replacements or leaf in replacements:
-            score += 120
-        if "::" in name:
-            score += 40
-        if any(tok in leaf for tok in ("parse", "format", "print", "decode", "load", "read", "write", "serialize", "emit")):
-            score += 25
-        if any(tok in leaf for tok in ("helper", "check", "balanced", "brace", "buffer", "view", "iterator")):
-            score -= 15
-        if score <= 0:
-            continue
-        if name in seen:
-            continue
-        seen.add(name)
-        scored.append((score, -idx, name))
-    scored.sort(reverse=True)
-    return [name for _, _, name in scored]
-
-
-def _readme_field_map(text: str) -> dict[str, str]:
-    field_map: dict[str, str] = {}
-    patterns = {
-        "selected_target": r"(?:selected target|原 target|选中目标)\s*[:：]\s*(.+)",
-        "final_target": r"(?:final target|最终 target|最终目标)\s*[:：]\s*(.+)",
-        "technical_reason": r"(?:technical reason|reason|技术原因|原因)\s*[:：]\s*(.+)",
-        "relation": r"(?:relation|关系)\s*[:：]\s*(.+)",
-        "harness_file": r"(?:harness file|harness|目标文件)\s*[:：]\s*(.+)",
-    }
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            field_map[key] = str(match.group(1) or "").strip()
-    return field_map
-
-
-def _normalize_doc_field(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip()).strip().lower()
-
-
 def _readme_drift_status(repo_root: Path, alignment: dict[str, Any]) -> dict[str, Any]:
     readme = repo_root / "fuzz" / "README.md"
     if not readme.is_file():
         return {
             "complete": False,
-            "missing": ["selected_target", "final_target", "technical_reason", "relation", "harness_file"],
+            "missing": ["selected_target", "final_target", "technical_reason", "relation"],
             "relation": "",
             "reason": "",
-            "fields": {},
         }
     text = readme.read_text(encoding="utf-8", errors="replace")
-    fields = _readme_field_map(text)
-    selected = _normalize_doc_field(str(alignment.get("expected_api") or alignment.get("expected_target_name") or ""))
-    observed = _normalize_doc_field(str(alignment.get("observed_api") or ""))
-    observed_harness = _normalize_doc_field(str(alignment.get("observed_harness") or ""))
-    relation = str(fields.get("relation") or "").strip()
-    reason = str(fields.get("technical_reason") or "").strip()
-    selected_field = _normalize_doc_field(str(fields.get("selected_target") or ""))
-    final_field = _normalize_doc_field(str(fields.get("final_target") or ""))
-    harness_field = _normalize_doc_field(str(fields.get("harness_file") or ""))
+    lowered = text.lower()
+    selected = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip().lower()
+    observed = str(alignment.get("observed_api") or "").strip().lower()
+    relation = ""
+    reason = ""
+    relation_match = re.search(r"(?:relation|关系)\s*[:：]\s*(.+)", text, re.IGNORECASE)
+    if relation_match:
+        relation = str(relation_match.group(1) or "").strip()
+    reason_match = re.search(r"(?:technical reason|reason|原因)\s*[:：]\s*(.+)", text, re.IGNORECASE)
+    if reason_match:
+        reason = str(reason_match.group(1) or "").strip()
     missing: list[str] = []
-    if not selected_field or (selected and selected_field != selected):
+    if selected and selected not in lowered:
         missing.append("selected_target")
-    if not final_field or (observed and final_field != observed):
+    if observed and observed not in lowered:
         missing.append("final_target")
     if not reason:
         missing.append("technical_reason")
     if not relation:
         missing.append("relation")
-    if not harness_field or (observed_harness and harness_field != observed_harness):
-        missing.append("harness_file")
     return {
         "complete": not missing,
         "missing": missing,
         "relation": relation,
         "reason": reason,
-        "fields": fields,
     }
-
-
-def _extract_scaffold_source_refs(text: str) -> list[str]:
-    refs: list[str] = []
-    for match in re.finditer(r"['\"]([^'\"]+\.(?:c|cc|cpp|cxx|java))['\"]", text, re.IGNORECASE):
-        candidate = str(match.group(1) or "").strip().replace("\\", "/")
-        if not candidate:
-            continue
-        if "/" in candidate and not candidate.startswith("fuzz/"):
-            continue
-        refs.append(candidate.split("/", 1)[-1])
-    return sorted({ref for ref in refs if ref})
-
-
-def _build_scaffold_source_status(repo_root: Path) -> dict[str, Any]:
-    fuzz_dir = repo_root / "fuzz"
-    existing = sorted(
-        {
-            str(p.relative_to(fuzz_dir)).replace("\\", "/")
-            for p in fuzz_dir.rglob("*")
-            if p.is_file()
-            and p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}
-            and not str(p.relative_to(fuzz_dir)).startswith(("out/", "corpus/"))
-        }
-    )
-    referenced: list[str] = []
-    for rel in ("build.py", "build.sh"):
-        path = fuzz_dir / rel
-        if not path.is_file():
-            continue
-        referenced.extend(_extract_scaffold_source_refs(path.read_text(encoding="utf-8", errors="replace")))
-    referenced = sorted({ref for ref in referenced if ref})
-    existing_set = set(existing)
-    missing = [ref for ref in referenced if ref not in existing_set]
-    return {
-        "complete": not missing,
-        "referenced": referenced,
-        "existing": existing,
-        "missing": missing,
-    }
-
-
-def _write_observed_target_doc(repo_root: Path, doc: dict[str, Any]) -> str:
-    path = _observed_target_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return str(path)
-
-
-def _load_observed_target_doc(repo_root: Path) -> dict[str, Any]:
-    path = _observed_target_path(repo_root)
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return {}
-    return dict(raw) if isinstance(raw, dict) else {}
-
-
 def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
     selected_doc = _load_selected_targets_doc(repo_root)
     if not selected_doc:
@@ -927,17 +672,11 @@ def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
             "expected_api": "",
             "observed_api": "",
             "observed_harness": "",
-            "observed_target_type": "",
-            "observed_seed_profile": "",
-            "seed_families_required": [],
-            "seed_families_optional": [],
-            "observed_target_path": "",
             "reason": "",
         }
     primary = selected_doc[0]
     target_name = str(primary.get("target_name") or primary.get("name") or "").strip()
     api = str(primary.get("api") or "").strip()
-    replacements = list(primary.get("runtime_replacement_candidates") or [])
     fuzz_dir = repo_root / "fuzz"
     harnesses = [
         p for p in fuzz_dir.rglob("*")
@@ -952,11 +691,6 @@ def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
             "expected_api": api,
             "observed_api": "",
             "observed_harness": "",
-            "observed_target_type": "",
-            "observed_seed_profile": "",
-            "seed_families_required": [],
-            "seed_families_optional": [],
-            "observed_target_path": "",
             "reason": "",
         }
     normalized_target = re.sub(r"_fuzz(?:er)?$", "", target_name.lower())
@@ -964,74 +698,42 @@ def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
         rel = str(harness.relative_to(fuzz_dir)).replace("\\", "/")
         text = harness.read_text(encoding="utf-8", errors="replace").lower()
         name = harness.stem.lower()
-        observed_api = ""
         if api and api.lower() in text:
-            observed_api = api.lower()
-        elif normalized_target and (normalized_target in name or name in normalized_target):
-            candidates = _observed_api_candidates(text, replacement_candidates=replacements)
-            observed_api = candidates[0] if candidates else _infer_harness_primary_api(text)
-        elif target_name and target_name.lower() in text:
-            candidates = _observed_api_candidates(text, replacement_candidates=replacements)
-            observed_api = candidates[0] if candidates else _infer_harness_primary_api(text)
-        else:
-            continue
-        observed_target_type = _infer_target_type(observed_api or target_name, text)
-        observed_seed_profile = _infer_seed_profile(observed_api or target_name, text, target_type=observed_target_type)
-        required, optional = _seed_families_for_target(observed_seed_profile, observed_api or target_name, text)
-        doc = {
-            "selected_target_name": target_name,
-            "selected_target_api": api,
-            "observed_target_api": observed_api,
-            "observed_harness": rel,
-            "drifted": bool(observed_api and api and observed_api != api.lower()),
-            "drift_reason": "",
-            "relation": "",
-            "runtime_viability": str(primary.get("runtime_viability") or ""),
-            "target_type": observed_target_type,
-            "seed_profile": observed_seed_profile,
-            "seed_families_required": required,
-            "seed_families_optional": optional,
-        }
-        observed_target_path = _write_observed_target_doc(repo_root, doc)
-        return {
-            "matched": not bool(doc["drifted"]),
-            "drifted": bool(doc["drifted"]),
-            "expected_target_name": target_name,
-            "expected_api": api,
-            "observed_api": observed_api,
-            "observed_harness": rel,
-            "observed_target_type": observed_target_type,
-            "observed_seed_profile": observed_seed_profile,
-            "seed_families_required": required,
-            "seed_families_optional": optional,
-            "observed_target_path": observed_target_path,
-            "reason": "",
-        }
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": api.lower(),
+                "observed_harness": rel,
+                "reason": "",
+            }
+        if normalized_target and (normalized_target in name or name in normalized_target):
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": _infer_harness_primary_api(text),
+                "observed_harness": rel,
+                "reason": "",
+            }
+        if target_name and target_name.lower() in text:
+            return {
+                "matched": True,
+                "drifted": False,
+                "expected_target_name": target_name,
+                "expected_api": api,
+                "observed_api": _infer_harness_primary_api(text),
+                "observed_harness": rel,
+                "reason": "",
+            }
     first_harness = harnesses[0]
     first_rel = str(first_harness.relative_to(fuzz_dir)).replace("\\", "/")
     first_text = first_harness.read_text(encoding="utf-8", errors="replace").lower()
-    candidates = _observed_api_candidates(first_text, replacement_candidates=replacements)
-    observed_api = candidates[0] if candidates else _infer_harness_primary_api(first_text)
-    observed_target_type = _infer_target_type(observed_api or target_name, first_text)
-    observed_seed_profile = _infer_seed_profile(observed_api or target_name, first_text, target_type=observed_target_type)
-    required, optional = _seed_families_for_target(observed_seed_profile, observed_api or target_name, first_text)
+    observed_api = _infer_harness_primary_api(first_text)
     expected = api or target_name
     reason = f"selected target drift: expected api `{expected}` but observed `{observed_api or 'unknown'}`"
-    doc = {
-        "selected_target_name": target_name,
-        "selected_target_api": api,
-        "observed_target_api": observed_api,
-        "observed_harness": first_rel,
-        "drifted": True,
-        "drift_reason": reason,
-        "relation": "",
-        "runtime_viability": str(primary.get("runtime_viability") or ""),
-        "target_type": observed_target_type,
-        "seed_profile": observed_seed_profile,
-        "seed_families_required": required,
-        "seed_families_optional": optional,
-    }
-    observed_target_path = _write_observed_target_doc(repo_root, doc)
     return {
         "matched": False,
         "drifted": True,
@@ -1039,11 +741,6 @@ def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
         "expected_api": api,
         "observed_api": observed_api,
         "observed_harness": first_rel,
-        "observed_target_type": observed_target_type,
-        "observed_seed_profile": observed_seed_profile,
-        "seed_families_required": required,
-        "seed_families_optional": optional,
-        "observed_target_path": observed_target_path,
         "reason": reason,
     }
 
@@ -2295,14 +1992,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "Use `fuzz/antlr_plan_context.json` as grammar-aware grounding for API/entrypoint selection.\n"
                 f"{antlr_context_summary}"
             )
-        normalized_targets_doc = _normalize_and_write_targets_doc(gen.repo_root)
         primary_target = _select_primary_target(gen.repo_root)
         selected_targets_path = ""
         try:
             selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
         except Exception:
             selected_targets_doc = []
-        primary_target = dict(normalized_targets_doc[0]) if normalized_targets_doc else primary_target
         new_target_name = str(primary_target.get("name") or "")
         new_target_api = str(primary_target.get("api") or new_target_name)
         new_seed_profile = str(primary_target.get("seed_profile") or "")
@@ -2336,10 +2031,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 new_targets_text = ""
             depth_rank = {"shallow": 0, "medium": 1, "deep": 2}
             plan_changed = new_plan_text != prev_plan_text
-            targets_changed = (
-                _semantic_targets_doc_from_text(new_targets_text)
-                != _semantic_targets_doc_from_text(prev_targets_text)
-            )
+            targets_changed = new_targets_text != prev_targets_text
             target_changed = new_target_name != prev_target_name
             depth_improved = (
                 new_depth_score > prev_target_depth_score
@@ -2577,9 +2269,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             readme = gen.repo_root / "fuzz" / "README.md"
             if readme.is_file():
                 parts.append("=== existing fuzz/README.md ===\n" + readme.read_text(encoding="utf-8", errors="replace"))
-            observed = _observed_target_path(gen.repo_root)
-            if observed.is_file():
-                parts.append("=== fuzz/observed_target.json ===\n" + observed.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             pass
         return "\n\n".join(parts)
@@ -2618,39 +2307,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             - Keep the README concise.
             - Do not edit any source/build files.
             - Write `fuzz/README.md` into `./done` before finishing.
-            """
-        ).strip()
-        gen.patcher.run_codex_command(
-            prompt,
-            additional_context=_completion_context() or None,
-            timeout=timeout,
-            max_attempts=1,
-            max_cli_retries=_opencode_cli_retries(),
-            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
-            activity_watch_paths=_synthesize_activity_watch_paths(),
-        )
-
-    def _run_build_scaffold_alignment_completion(timeout: int, scaffold_status: dict[str, Any]) -> None:
-        observed_harness = str(target_alignment.get("observed_harness") or "").strip()
-        observed_api = str(target_alignment.get("observed_api") or "").strip() or "unknown"
-        missing_refs = ", ".join(str(x) for x in scaffold_status.get("missing") or []) or "none"
-        existing_harnesses = ", ".join(str(x) for x in scaffold_status.get("existing") or []) or "none"
-        prompt = textwrap.dedent(
-            f"""
-            Update `fuzz/build.py` and/or `fuzz/build.sh` only. Do not rewrite the harness or README.
-
-            The build scaffold references harness source files that do not exist.
-            Actual observed target: {observed_api}
-            Actual harness file: {observed_harness or 'unknown'}
-            Existing harness files under `fuzz/`: {existing_harnesses}
-            Missing referenced sources: {missing_refs}
-
-            Requirements:
-            - Remove or replace references to missing harness files.
-            - Keep only harness source files that actually exist under `fuzz/`.
-            - Ensure the build scaffold is consistent with the observed harness.
-            - Do not edit any harness source file or `fuzz/README.md`.
-            - Write updated build scaffold files into `./done` before finishing.
             """
         ).strip()
         gen.patcher.run_codex_command(
@@ -2776,7 +2432,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "missing": [],
             "relation": "",
             "reason": "",
-            "fields": {},
         }
         if target_alignment.get("drifted"):
             _wf_log(
@@ -2794,23 +2449,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     )
                     _run_readme_alignment_completion(remaining_for_readme, target_alignment)
                     readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
-        build_scaffold_status = _build_scaffold_source_status(gen.repo_root)
-        if not bool(build_scaffold_status.get("complete")):
-            remaining_for_scaffold = _remaining_time_budget_sec(state, min_timeout=0)
-            if remaining_for_scaffold > 0:
-                _wf_log(
-                    cast(dict[str, Any], state),
-                    "synthesize: build scaffold references missing harnesses; repairing build scaffold",
-                )
-                _run_build_scaffold_alignment_completion(remaining_for_scaffold, build_scaffold_status)
-                build_scaffold_status = _build_scaffold_source_status(gen.repo_root)
-        observed_doc = _load_observed_target_doc(gen.repo_root)
-        if observed_doc:
-            observed_doc["drift_reason"] = str(readme_alignment.get("reason") or target_alignment.get("reason") or observed_doc.get("drift_reason") or "")
-            observed_doc["relation"] = str(readme_alignment.get("relation") or observed_doc.get("relation") or "")
-            observed_doc["readme_consistent"] = bool(readme_alignment.get("complete"))
-            observed_doc["build_scaffold_consistent"] = bool(build_scaffold_status.get("complete"))
-            target_alignment["observed_target_path"] = _write_observed_target_doc(gen.repo_root, observed_doc)
         out = {
             **state,
             "last_step": "synthesize",
@@ -2821,7 +2459,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "restart_to_plan_stage": "",
             "restart_to_plan_error_text": "",
             "restart_to_plan_report_path": "",
-            "observed_target_path": str(target_alignment.get("observed_target_path") or ""),
             "synthesize_selected_target_name": str(target_alignment.get("expected_target_name") or selected_target_name),
             "synthesize_selected_target_api": str(target_alignment.get("expected_api") or selected_target_api),
             "synthesize_observed_target_api": str(target_alignment.get("observed_api") or ""),
@@ -2830,13 +2467,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_drift_reason": str(readme_alignment.get("reason") or target_alignment.get("reason") or ""),
             "synthesize_target_relation": str(readme_alignment.get("relation") or ""),
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
-            "synthesize_readme_consistent": bool(readme_alignment.get("complete")),
-            "synthesize_build_scaffold_consistent": bool(build_scaffold_status.get("complete")),
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
             "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
-            "coverage_seed_profile": str(target_alignment.get("observed_seed_profile") or state.get("coverage_seed_profile") or ""),
-            "coverage_seed_families_required": list(target_alignment.get("seed_families_required") or state.get("coverage_seed_families_required") or []),
-            "coverage_seed_families_missing": list(target_alignment.get("seed_families_required") or state.get("coverage_seed_families_missing") or []),
             "message": "synthesized",
         }
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -5147,7 +4779,6 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
         quality_flags = list(out.get("coverage_quality_flags") or [])
         if bool(state.get("synthesize_target_drifted")):
-            quality_flags.append("target_drifted")
             quality_flags.append("target_runtime_mismatch")
         if list(out.get("coverage_seed_families_missing") or []):
             quality_flags.append("seed_family_undercovered")
