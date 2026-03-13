@@ -80,7 +80,7 @@ services:
       PORT: "8001"
 
       # Ensure all temp repos land on the shared volume so Docker mounts work.
-      TMPDIR: "/shared/tmp"
+      TMPDIR: "/tmp"
 
       # Route docker CLI calls to the dind daemon.
       DOCKER_HOST: "tcp://sherpa-docker:2375"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import shutil
 import tempfile
@@ -133,7 +134,7 @@ def _replace_file(tmp_name: str, target: Path) -> None:
     try:
         tmp_path.replace(target)
     except OSError as exc:
-        if getattr(exc, "errno", None) != os.EXDEV:
+        if getattr(exc, "errno", None) != errno.EXDEV:
             raise
         shutil.copyfile(tmp_path, target)
         tmp_path.unlink(missing_ok=True)
@@ -613,7 +614,7 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             f.write(content)
-        Path(tmp_name).replace(p)
+        _replace_file(tmp_name, p)
         try:
             os.chmod(p, 0o600)
         except Exception:

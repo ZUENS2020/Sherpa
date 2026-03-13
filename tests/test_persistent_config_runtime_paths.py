@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import sys
 import tempfile
 from pathlib import Path
@@ -60,3 +61,62 @@ def test_save_config_uses_runtime_dir_for_tempfiles(monkeypatch: pytest.MonkeyPa
 
     assert config_file.is_file()
     assert captured_dirs == [str(runtime_dir)]
+
+
+def test_save_config_falls_back_on_cross_device_replace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    runtime_dir = tmp_path / "runtime"
+    config_dir = tmp_path / "config"
+    config_file = config_dir / "web_config.json"
+
+    monkeypatch.setattr(pc, "runtime_generated_dir", lambda: runtime_dir)
+    monkeypatch.setattr(pc, "config_path", lambda: config_file)
+
+    real_replace = Path.replace
+
+    def _replace_once(self: Path, target: Path):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(pc.Path, "replace", _replace_once)
+
+    cfg = pc.WebPersistentConfig(openrouter_model="cross-device-model")
+    pc.save_config(cfg)
+
+    assert config_file.is_file()
+    assert "cross-device-model" in config_file.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(pc.Path, "replace", real_replace)
+
+
+def test_write_opencode_env_uses_runtime_parent_and_cross_device_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    runtime_dir = tmp_path / "runtime"
+    env_file = runtime_dir / "web_opencode.env"
+    captured_dirs: list[str] = []
+    real_mkstemp = tempfile.mkstemp
+
+    monkeypatch.setattr(pc, "opencode_env_path", lambda: env_file)
+
+    def _wrapped_mkstemp(*args, **kwargs):
+        captured_dirs.append(str(kwargs.get("dir")))
+        return real_mkstemp(*args, **kwargs)
+
+    def _replace_once(self: Path, target: Path):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(pc.tempfile, "mkstemp", _wrapped_mkstemp)
+    monkeypatch.setattr(pc.Path, "replace", _replace_once)
+
+    cfg = pc.WebPersistentConfig(
+        openai_api_key="key",
+        openai_base_url="https://example.invalid/v1",
+        openai_model="model-x",
+    )
+    pc.write_opencode_env_file(cfg)
+
+    assert captured_dirs == [str(runtime_dir)]
+    assert env_file.is_file()
+    content = env_file.read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY=key" in content
+    assert "OPENAI_BASE_URL=https://example.invalid/v1" in content
+    assert "OPENAI_MODEL=model-x" in content
