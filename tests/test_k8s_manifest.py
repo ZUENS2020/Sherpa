@@ -115,3 +115,23 @@ def test_k8s_manifest_applies_non_root_security_context():
     assert container_sc["runAsGroup"] == 10001
     assert container_sc["allowPrivilegeEscalation"] is False
     assert container_sc["capabilities"]["drop"] == ["ALL"]
+
+
+def test_k8s_manifest_initializes_runtime_volume_permissions():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    init_container = manifest["spec"]["template"]["spec"]["initContainers"][0]
+
+    assert init_container["name"] == "runtime-permissions"
+    assert init_container["securityContext"]["runAsUser"] == 0
+    assert init_container["securityContext"]["allowPrivilegeEscalation"] is False
+    mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
+    assert "/app/config" in mounts
+    assert "/shared/tmp" in mounts

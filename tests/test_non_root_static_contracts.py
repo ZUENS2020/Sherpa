@@ -30,6 +30,17 @@ def test_compose_gateway_has_non_root_runtime_support():
     assert "/tmp" in gateway["tmpfs"]
 
 
+def test_k8s_web_deployment_initializes_shared_volumes_for_non_root():
+    doc = yaml.safe_load((ROOT / "k8s" / "base" / "web-deployment.yaml").read_text(encoding="utf-8"))
+    init_container = doc["spec"]["template"]["spec"]["initContainers"][0]
+
+    assert init_container["name"] == "runtime-permissions"
+    assert init_container["securityContext"]["runAsUser"] == 0
+    mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
+    assert "/app/config" in mounts
+    assert "/shared/tmp" in mounts
+
+
 def test_non_root_dockerfiles_define_user_and_non_root_home():
     gateway = (ROOT / "docker" / "Dockerfile.gateway").read_text(encoding="utf-8")
     fuzz = (ROOT / "docker" / "Dockerfile.fuzz").read_text(encoding="utf-8")

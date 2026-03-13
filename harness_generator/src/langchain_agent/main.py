@@ -422,6 +422,38 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                         "fsGroup": 10001,
                         "fsGroupChangePolicy": "OnRootMismatch",
                     },
+                    "initContainers": [
+                        {
+                            "name": "runtime-permissions",
+                            "image": _k8s_worker_image(),
+                            "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
+                            "command": [
+                                "sh",
+                                "-lc",
+                                (
+                                    "set -eu\n"
+                                    "for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do\n"
+                                    '  mkdir -p "$d"\n'
+                                    "  chown 10001:10001 \"$d\" || true\n"
+                                    "  chmod 0775 \"$d\" || true\n"
+                                    "done\n"
+                                ),
+                            ],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "runAsUser": 0,
+                                "runAsGroup": 0,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "volumeMounts": [
+                                {"name": "shared-tmp", "mountPath": "/shared/tmp"},
+                                {"name": "shared-output", "mountPath": "/shared/output"},
+                                {"name": "oss-fuzz", "mountPath": "/shared/oss-fuzz"},
+                                {"name": "config", "mountPath": "/app/config"},
+                                {"name": "job-logs", "mountPath": "/app/job-logs"},
+                            ],
+                        }
+                    ],
                     "containers": [
                         {
                             "name": "worker",
@@ -1603,9 +1635,12 @@ def put_config(request: WebPersistentConfig = Body(...)):
         item.api_key = None
         item.clear_api_key = False
 
-    save_config(persisted_cfg)
-    _cfg_set(runtime_cfg)
-    apply_config_to_env(runtime_cfg)
+    try:
+        save_config(persisted_cfg)
+        _cfg_set(runtime_cfg)
+        apply_config_to_env(runtime_cfg)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"保存配置失败: {exc}") from exc
     return {"ok": True}
 
 
