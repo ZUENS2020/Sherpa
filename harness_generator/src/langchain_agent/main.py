@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shutil
+import resource
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading
@@ -149,6 +150,136 @@ def _cancel_job_future(job_id: str) -> bool:
         return False
 
 
+def _read_text_if_exists(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _read_int_if_exists(path: str) -> int | None:
+    raw = _read_text_if_exists(path)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _cgroup_memory_status() -> dict[str, object]:
+    current = _read_int_if_exists("/sys/fs/cgroup/memory.current")
+    limit_raw = _read_text_if_exists("/sys/fs/cgroup/memory.max")
+    oom_kill_count = None
+    events_raw = _read_text_if_exists("/sys/fs/cgroup/memory.events")
+
+    if current is None:
+        current = _read_int_if_exists("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if not limit_raw:
+        limit_raw = _read_text_if_exists("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if events_raw:
+        for line in events_raw.splitlines():
+            key, _, value = line.partition(" ")
+            if key.strip() == "oom_kill":
+                try:
+                    oom_kill_count = int(value.strip())
+                except Exception:
+                    pass
+                break
+
+    limit_bytes = None
+    if limit_raw and limit_raw != "max":
+        try:
+            parsed_limit = int(limit_raw)
+            if parsed_limit < (1 << 60):
+                limit_bytes = parsed_limit
+        except Exception:
+            pass
+
+    usage_ratio = None
+    if current is not None and limit_bytes and limit_bytes > 0:
+        usage_ratio = current / limit_bytes
+
+    return {
+        "current_bytes": current,
+        "limit_bytes": limit_bytes,
+        "usage_ratio": usage_ratio,
+        "oom_kill_count": oom_kill_count,
+    }
+
+
+def _process_rss_bytes() -> int | None:
+    try:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if raw > 0:
+            return int(raw) * 1024
+    except Exception:
+        pass
+
+    proc_status = _read_text_if_exists("/proc/self/status")
+    for line in proc_status.splitlines():
+        if not line.startswith("VmRSS:"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                return int(parts[1]) * 1024
+            except Exception:
+                return None
+    return None
+
+
+def _memory_status() -> dict[str, object]:
+    cgroup = _cgroup_memory_status()
+    usage_ratio = cgroup.get("usage_ratio")
+    pressure = "unknown"
+    if isinstance(usage_ratio, (int, float)):
+        if usage_ratio >= 0.95:
+            pressure = "critical"
+        elif usage_ratio >= 0.85:
+            pressure = "high"
+        elif usage_ratio >= 0.7:
+            pressure = "elevated"
+        else:
+            pressure = "normal"
+
+    return {
+        "process_rss_bytes": _process_rss_bytes(),
+        "cgroup_current_bytes": cgroup.get("current_bytes"),
+        "cgroup_limit_bytes": cgroup.get("limit_bytes"),
+        "cgroup_usage_ratio": usage_ratio,
+        "oom_kill_count": cgroup.get("oom_kill_count"),
+        "pressure": pressure,
+    }
+
+
+def _k8s_worker_resources() -> dict[str, dict[str, str]] | None:
+    request_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_REQUEST", "500m") or "").strip()
+    limit_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_LIMIT", "2") or "").strip()
+    request_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_REQUEST", "512Mi") or "").strip()
+    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "2Gi") or "").strip()
+
+    requests: dict[str, str] = {}
+    limits: dict[str, str] = {}
+    if request_cpu:
+        requests["cpu"] = request_cpu
+    if request_memory:
+        requests["memory"] = request_memory
+    if limit_cpu:
+        limits["cpu"] = limit_cpu
+    if limit_memory:
+        limits["memory"] = limit_memory
+    if not requests and not limits:
+        return None
+
+    resources: dict[str, dict[str, str]] = {}
+    if requests:
+        resources["requests"] = requests
+    if limits:
+        resources["limits"] = limits
+    return resources
+
+
 def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -259,6 +390,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     pvc_cfg = (os.environ.get("SHERPA_K8S_PVC_CONFIG", "sherpa-config") or "").strip()
     pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
     target_node_name = str(payload.get("target_node_name") or "").strip()
+    worker_resources = _k8s_worker_resources()
 
     manifest = {
         "apiVersion": "batch/v1",
@@ -327,6 +459,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
         env_from.append({"secretRef": {"name": pg_secret}})
     if env_from:
         manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
+    if worker_resources:
+        manifest["spec"]["template"]["spec"]["containers"][0]["resources"] = worker_resources
 
     if target_node_name:
         manifest["spec"]["template"]["spec"]["nodeName"] = target_node_name
@@ -1172,6 +1306,7 @@ def _system_status() -> dict:
     ]
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
+    memory = _memory_status()
     return {
         "ok": True,
         "server_time": now,
@@ -1188,6 +1323,7 @@ def _system_status() -> dict:
             "exists": log_dir.exists(),
             "size_bytes": _dir_size(log_dir),
         },
+        "memory": memory,
         "config": {
             "runtime_mode": "native",
             "oss_fuzz_dir": cfg.oss_fuzz_dir,
@@ -1232,6 +1368,7 @@ def _metrics_payload() -> str:
     finished_total = len(finished_in_window)
     failed_total = len(failed_in_window)
     failure_rate = (failed_total / finished_total) if finished_total > 0 else 0.0
+    memory = _memory_status()
 
     lines = [
         "# HELP sherpa_jobs_total Total jobs in memory.",
@@ -1256,6 +1393,51 @@ def _metrics_payload() -> str:
         "# TYPE sherpa_jobs_failure_rate_window gauge",
         f"sherpa_jobs_failure_rate_window {failure_rate:.6f}",
     ]
+    rss_bytes = memory.get("process_rss_bytes")
+    if isinstance(rss_bytes, int):
+        lines.extend(
+            [
+                "# HELP sherpa_process_resident_memory_bytes Resident memory size of the web process.",
+                "# TYPE sherpa_process_resident_memory_bytes gauge",
+                f"sherpa_process_resident_memory_bytes {rss_bytes}",
+            ]
+        )
+    cgroup_current = memory.get("cgroup_current_bytes")
+    if isinstance(cgroup_current, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_current_bytes Current cgroup memory usage.",
+                "# TYPE sherpa_cgroup_memory_current_bytes gauge",
+                f"sherpa_cgroup_memory_current_bytes {cgroup_current}",
+            ]
+        )
+    cgroup_limit = memory.get("cgroup_limit_bytes")
+    if isinstance(cgroup_limit, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_limit_bytes Effective cgroup memory limit.",
+                "# TYPE sherpa_cgroup_memory_limit_bytes gauge",
+                f"sherpa_cgroup_memory_limit_bytes {cgroup_limit}",
+            ]
+        )
+    usage_ratio = memory.get("cgroup_usage_ratio")
+    if isinstance(usage_ratio, (int, float)):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_usage_ratio Current cgroup memory usage divided by limit.",
+                "# TYPE sherpa_cgroup_memory_usage_ratio gauge",
+                f"sherpa_cgroup_memory_usage_ratio {usage_ratio:.6f}",
+            ]
+        )
+    oom_kill_count = memory.get("oom_kill_count")
+    if isinstance(oom_kill_count, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_oom_kill_total Total OOM kills reported by the current cgroup.",
+                "# TYPE sherpa_cgroup_memory_oom_kill_total gauge",
+                f"sherpa_cgroup_memory_oom_kill_total {oom_kill_count}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 class fuzz_model(BaseModel):
