@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -113,3 +114,45 @@ def test_worker_preserves_zero_budgets_for_unlimited_mode(tmp_path: Path, monkey
     assert captured["coverage_loop_max_rounds"] == 5
     assert captured["max_fix_rounds"] == 4
     assert captured["same_error_max_retries"] == 2
+
+
+def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    runtime_dir = tmp_path / "runtime"
+
+    payload = {
+        "job_id": "job-bootstrap-opencode",
+        "repo_url": "https://github.com/fmtlib/fmt.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "model": "MiniMax-M2.5",
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.setenv("SHERPA_RUNTIME_CONFIG_DIR", str(runtime_dir))
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+
+    def _fake_fuzz_logic(**kwargs):
+        captured.update(kwargs)
+        cfg_path = Path(str(os.environ.get("OPENCODE_CONFIG") or ""))
+        assert cfg_path == runtime_dir / "opencode.generated.json"
+        assert cfg_path.is_file()
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        provider = data["provider"]["minimax"]
+        assert provider["options"]["baseURL"] == "https://api.minimaxi.com/anthropic/v1"
+        assert provider["options"]["apiKey"] == "test-minimax-key"
+        return {"ok": True}
+
+    monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
+
+    rc = k8s_job_worker.main()
+    assert rc == 0
+    assert captured["docker_image"] is None

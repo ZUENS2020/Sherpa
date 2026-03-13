@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 
 from fuzz_relative_functions import fuzz_logic
+from persistent_config import apply_config_to_env, load_config
 
 
 def _decode_payload() -> dict:
@@ -49,6 +50,11 @@ def main() -> int:
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
+        # Rebuild runtime OpenCode config inside the worker container.
+        # The path is injected via OPENCODE_CONFIG, but the file itself is
+        # container-local and must be generated after secrets/env are loaded.
+        apply_config_to_env(load_config())
+
         # Native runtime baseline: never execute inner Docker in k8s worker.
         effective_docker_image = None
 
