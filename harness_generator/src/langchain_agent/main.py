@@ -435,9 +435,9 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                     "for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do\n"
                                     '  mkdir -p "$d"\n'
                                     "  chown 10001:10001 \"$d\" || true\n"
-                                    "  chmod 0775 \"$d\" || true\n"
+                                    "  chmod 0777 \"$d\" || true\n"
                                     "  find \"$d\" -mindepth 1 -exec chown 10001:10001 {} + || true\n"
-                                    "  find \"$d\" -mindepth 1 -exec chmod u+rwX,g+rwX {} + || true\n"
+                                    "  find \"$d\" -mindepth 1 -exec chmod a+rwX {} + || true\n"
                                     "done\n"
                                 ),
                             ],
