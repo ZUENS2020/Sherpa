@@ -57,11 +57,9 @@ jobs:
             env.HTTP_PROXY=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
             env.HTTPS_PROXY=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
             env.ALL_PROXY=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.NO_PROXY=127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc
             env.http_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
             env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
             env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.no_proxy=127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc
 
       - name: Setup kubectl (self-hosted fast path)
         shell: bash
