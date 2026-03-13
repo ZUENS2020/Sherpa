@@ -56,9 +56,6 @@ jobs:
             env.http_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
             env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
             env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_PROD }}
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["hfnaroxd1op1q2.xuanyuan.run", "hfnaroxd1op1q2.xuanyuan.dev"]
 
 
       - name: Setup kubectl (self-hosted fast path)
