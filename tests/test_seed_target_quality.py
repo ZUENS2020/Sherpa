@@ -41,6 +41,26 @@ def test_resolve_seed_target_metadata_prefers_selected_targets(tmp_path: Path):
     assert seed_profile == "parser-structure"
 
 
+def test_resolve_seed_target_metadata_prefers_observed_target_over_selected(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "observed_target.json").write_text(
+        '{"selected_target_name":"parse_replacement_field_then_tail","selected_target_api":"parse_replacement_field_then_tail","observed_target_api":"fmt::format_to","observed_harness":"parse_format_string_fuzz.cc","drifted":true,"drift_reason":"runtime replacement","relation":"same pipeline","runtime_viability":"low","target_type":"generic","seed_profile":"parser-format","seed_families_required":["replacement_fields","width_precision"],"seed_families_optional":[]}',
+        encoding="utf-8",
+    )
+    gen = _make_generator(tmp_path)
+    target_type, seed_profile = gen._resolve_seed_target_metadata(
+        "parse_format_string_fuzz",
+        "extern \"C\" int LLVMFuzzerTestOneInput(...) { fmt::format_to(0, fmt::string_view(\"{}\"), 1); return 0; }",
+    )
+    assert target_type == "generic"
+    assert seed_profile == "parser-format"
+
+
 def test_collect_repo_seed_examples_accepts_yaml_samples_for_parser_token(tmp_path: Path):
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +114,19 @@ def test_fmt_seed_families_replace_generic_parser_format():
         "fmt::println",
         "fmt::format_to",
         "replacement field",
+    )
+    assert "replacement_fields" in required
+    assert "width_precision" in required
+    assert "malformed_replacement_fields" in required
+    assert optional == []
+
+
+def test_generic_textual_dsl_seed_families_are_enabled_without_repo_specific_branch():
+    required, optional = _seed_families_for_target(
+        "generic",
+        "template placeholder formatter",
+        "replacement field",
+        "width precision specifier",
     )
     assert "replacement_fields" in required
     assert "width_precision" in required

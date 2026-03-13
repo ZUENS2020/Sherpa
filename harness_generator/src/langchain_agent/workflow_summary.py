@@ -241,6 +241,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "count": int(out.get("restart_to_plan_count") or 0),
         },
         "selected_targets_path": str(out.get("selected_targets_path") or ""),
+        "observed_target_path": str(out.get("observed_target_path") or ""),
         "synthesize_target": {
             "selected_name": str(out.get("synthesize_selected_target_name") or ""),
             "selected_api": str(out.get("synthesize_selected_target_api") or ""),
@@ -297,6 +298,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
         f"- Coverage target: {data['coverage_loop']['target_name'] or 'n/a'}",
         f"- Coverage target api: {data['coverage_loop']['target_api'] or 'n/a'}",
         f"- Seed profile: {data['coverage_loop']['seed_profile'] or 'n/a'}",
+        f"- Observed target path: {data['observed_target_path'] or 'n/a'}",
         f"- Synthesize selected target: {data['synthesize_target']['selected_api'] or data['synthesize_target']['selected_name'] or 'n/a'}",
         f"- Synthesize observed target: {data['synthesize_target']['observed_api'] or 'n/a'}",
         f"- Synthesize target drifted: {data['synthesize_target']['drifted']}",

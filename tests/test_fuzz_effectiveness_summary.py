@@ -113,6 +113,7 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
             "coverage_seed_counts_filtered": {"repo_examples": 1, "ai": 2, "radamsa": 1, "total": 4},
             "coverage_seed_noise_rejected_count": 5,
             "coverage_seed_family_coverage": {"covered": ["replacement_fields"], "missing": ["width_precision"]},
+            "observed_target_path": str(repo_root / "fuzz" / "observed_target.json"),
             "synthesize_selected_target_name": "parse_replacement_field_then_tail",
             "synthesize_selected_target_api": "parse_replacement_field_then_tail",
             "synthesize_observed_target_api": "fmt::println",
@@ -142,6 +143,7 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["seed_quality"]["initial_corpus_files"] == 2
     assert summary["seed_family_coverage"]["missing"] == ["flow_structures"]
     assert summary["seed_bootstrap"]["noise_rejected_count"] == 5
+    assert summary["observed_target_path"].endswith("fuzz/observed_target.json")
     assert summary["synthesize_target"]["relation"] == "runtime wrapper for same formatting path"
     assert summary["synthesize_target"]["readme_consistent"] is True
     assert summary["synthesize_target"]["build_scaffold_consistent"] is True

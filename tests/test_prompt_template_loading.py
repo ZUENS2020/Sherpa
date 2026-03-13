@@ -46,3 +46,18 @@ def test_plan_prompt_hardens_targets_schema_on_first_attempt():
     assert "Never wrap the array inside another object" in out
     assert '"lang": "c-cpp"' in out
     assert '"target_type": "parser"' in out
+    assert "Put the best runtime target first" in out
+    assert "Do not put compile-only, constexpr-only, detail/helper" in out
+
+
+def test_synthesize_prompts_require_observed_target_alignment():
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    synth = workflow_common.render_opencode_prompt("synthesize_with_hint", hint="runtime-first")
+    scaffold = workflow_common.render_opencode_prompt("synthesize_complete_scaffold", missing_items="- fuzz/build.py")
+
+    assert "fuzz/observed_target.json" in synth
+    assert "The final target must be the actual external/library API" in synth
+    assert "`Harness file: ...`" in synth
+    assert "local helper, checker, wrapper utility" in synth
+    assert "fuzz/observed_target.json" in scaffold
+    assert "never reference missing scaffold files" in scaffold

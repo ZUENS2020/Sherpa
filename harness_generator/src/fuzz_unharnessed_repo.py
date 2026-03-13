@@ -818,7 +818,31 @@ def _seed_quality_from_run(
 
 def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
-    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+    if any(
+        tok in text
+        for tok in (
+            "parse",
+            "parser",
+            "scan",
+            "scanner",
+            "yaml",
+            "json",
+            "xml",
+            "token",
+            "lex",
+            "reader",
+            "format",
+            "format_to",
+            "vformat",
+            "printf",
+            "println",
+            "print",
+            "replacement field",
+            "placeholder",
+            "specifier",
+            "brace",
+        )
+    ):
         return "parser"
     if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
         return "decoder"
@@ -844,6 +868,14 @@ def _is_fmt_format_target(*parts: str) -> bool:
     return bool(
         "fmt" in text
         and any(tok in text for tok in ("format", "format_to", "vformat", "println", "print", "replacement field", "specifier"))
+    )
+
+
+def _is_textual_dsl_target(*parts: str) -> bool:
+    text = " ".join(p for p in parts if p).lower()
+    return bool(
+        any(tok in text for tok in ("format", "template", "specifier", "replacement field", "placeholder", "printf", "brace"))
+        or _is_fmt_format_target(text)
     )
 
 
@@ -874,7 +906,21 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
     text = " ".join(p for p in parts if p).lower()
     required: list[str] = []
     optional: list[str] = []
-    if profile == "parser-format" and _is_fmt_format_target(text):
+    if profile == "parser-format" and _is_textual_dsl_target(text):
+        required.extend(
+            [
+                "replacement_fields",
+                "escaped_braces",
+                "positional_arguments",
+                "format_specifiers",
+                "width_precision",
+                "fill_align",
+                "type_conversions",
+                "malformed_replacement_fields",
+            ]
+        )
+        return required, optional
+    if profile in {"generic", "document-text", "serializer-structured"} and _is_textual_dsl_target(text):
         required.extend(
             [
                 "replacement_fields",
@@ -898,6 +944,18 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
         required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
     elif profile == "parser-numeric":
         required.extend(["delimiter_fragments", "malformed_separators"])
+    elif profile in {"decoder-binary", "archive-container", "network-message"}:
+        required.extend(
+            [
+                "magic_headers",
+                "length_fields",
+                "truncated_frames",
+                "metadata_footers",
+                "invalid_checksums",
+                "deep_nesting",
+                "repeated_entries",
+            ]
+        )
     if any(tok in text for tok in ("yaml", "yml")):
         for family in [
             "flow_structures",
@@ -951,6 +1009,18 @@ def _classify_seed_family(path: Path) -> set[str]:
         families.add("document_markers")
     if any(tok in name for tok in ("flow", "array", "mapping", "json")) or any(tok in text for tok in ("[", "]", "{", "}")):
         families.add("flow_structures")
+    if name.endswith((".bin", ".dat", ".pkt", ".msg", ".raw")):
+        families.add("magic_headers")
+    if any(tok in name for tok in ("header", "magic")):
+        families.add("magic_headers")
+    if any(tok in name for tok in ("length", "len", "size")):
+        families.add("length_fields")
+    if any(tok in name for tok in ("trunc", "partial", "cut")):
+        families.add("truncated_frames")
+    if any(tok in name for tok in ("footer", "meta", "directory")):
+        families.add("metadata_footers")
+    if any(tok in name for tok in ("checksum", "crc", "invalid")):
+        families.add("invalid_checksums")
     return families
 
 
@@ -2213,6 +2283,13 @@ class NonOssFuzzHarnessGenerator:
     # ────────────────────────────────────────────────────────────────────
 
     def _resolve_seed_target_metadata(self, fuzzer_name: str, harness_text: str) -> tuple[str, str]:
+        observed = self._resolve_observed_target(fuzzer_name, harness_text)
+        if observed:
+            target_type = str(observed.get("target_type") or "").strip().lower()
+            seed_profile = str(observed.get("seed_profile") or "").strip().lower()
+            if target_type in ALLOWED_TARGET_TYPES and seed_profile in ALLOWED_SEED_PROFILES:
+                return target_type, seed_profile
+
         selected = self._resolve_selected_target(fuzzer_name, harness_text)
         if selected:
             target_type = str(selected.get("target_type") or "").strip().lower()
@@ -2263,6 +2340,29 @@ class NonOssFuzzHarnessGenerator:
         if not isinstance(raw, list):
             return []
         return [item for item in raw if isinstance(item, dict)]
+
+    def _load_observed_target_doc(self) -> dict[str, object]:
+        path = self.fuzz_dir / "observed_target.json"
+        try:
+            if not path.is_file():
+                return {}
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _resolve_observed_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
+        doc = self._load_observed_target_doc()
+        if not doc:
+            return {}
+        observed_api = str(doc.get("observed_target_api") or "").strip().lower()
+        observed_harness = str(doc.get("observed_harness") or "").strip().lower()
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        if observed_harness and observed_harness.rsplit("/", 1)[-1].split(".")[0] in normalized_fuzzer:
+            return dict(doc)
+        if observed_api and observed_api in harness_text.lower():
+            return dict(doc)
+        return dict(doc)
 
     def _resolve_selected_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
         doc = self._load_selected_targets_doc()
@@ -2371,11 +2471,10 @@ class NonOssFuzzHarnessGenerator:
         extra = guidance.get(seed_profile, guidance["generic"])
         yaml_hint = ""
         lowered = f"{fuzzer_name}\n{harness_text}".lower()
-        if seed_profile == "parser-format" and _is_fmt_format_target(fuzzer_name, harness_text):
+        if seed_profile in {"parser-format", "generic", "document-text", "serializer-structured"} and _is_textual_dsl_target(fuzzer_name, harness_text):
             extra = (
-                "Create fmt-style format-string seeds by family bucket: replacement fields (`{}`), escaped braces (`{{`/`}}`), "
-                "positional arguments (`{0}`), format specifiers (`{:x}`/`{:s}`), width/precision (`{:10.3f}`), fill/alignment (`{:_>8}`), "
-                "type conversions, and malformed replacement fields (mismatched braces, truncated specs, mixed bad fields). "
+                "Create textual DSL seeds by family bucket: replacement/placeholder fields, escaped delimiters, positional or named arguments, "
+                "format specifiers/modifiers, width/precision, fill/alignment, type conversions, and malformed/truncated directives. "
                 "Prefer textual UTF-8 seeds. Do not flood the corpus with random binary noise."
             )
         if any(tok in lowered for tok in ("yaml", "yml")):
@@ -2582,7 +2681,7 @@ class NonOssFuzzHarnessGenerator:
                 "missing long numeric ids and leading-zero cases",
                 "missing separator-boundary and non-ASCII cases",
             ])
-        elif seed_profile == "parser-format":
+        elif seed_profile == "parser-format" or (seed_profile in {"generic", "document-text", "serializer-structured"} and _is_textual_dsl_target(names)):
             if any(tok in names for tok in ("fmt", "format", "print", "println")):
                 gaps.extend([
                     "missing replacement field / escaped brace coverage",
@@ -2654,7 +2753,7 @@ class NonOssFuzzHarnessGenerator:
         family_caps: dict[str, int] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
-        textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        textual_mode = seed_profile in {"parser-format", "generic", "document-text", "serializer-structured"} and _is_textual_dsl_target(*(target_markers or []))
         kept: list[Path] = []
         for path in files:
             reject = False
@@ -2717,6 +2816,7 @@ class NonOssFuzzHarnessGenerator:
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+        observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
         if selected_target:
             self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
@@ -2725,8 +2825,11 @@ class NonOssFuzzHarnessGenerator:
             fuzzer_name,
             harness_text,
             readme_text,
+            str(observed_target.get("observed_target_api") or ""),
             str(selected_target.get("target_name") or ""),
             str(selected_target.get("api") or ""),
+            str(selected_target.get("selection_rationale") or ""),
+            " ".join(str(x) for x in (selected_target.get("runtime_replacement_candidates") or [])),
         )
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
@@ -2764,9 +2867,13 @@ class NonOssFuzzHarnessGenerator:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
             Rules:
+            - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Prefer missing families over adding more variants to already-covered malformed cases.
             - Do not only generate malformed separator variants if structure families are missing.
+            - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
+            - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
+            - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
             - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
         ).strip()
@@ -2778,7 +2885,9 @@ class NonOssFuzzHarnessGenerator:
         selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
         antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
+        observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         additional_context_parts = [
+            "=== fuzz/observed_target.json ===\n" + (observed_target_text or "(missing)"),
             "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
             "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
             "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
@@ -2809,6 +2918,7 @@ class NonOssFuzzHarnessGenerator:
                 fuzzer_name,
                 harness_text,
                 readme_text,
+                str(observed_target.get("observed_target_api") or ""),
                 str(selected_target.get("target_name") or ""),
                 str(selected_target.get("api") or ""),
             ],
@@ -2823,6 +2933,7 @@ class NonOssFuzzHarnessGenerator:
             "sources": sorted(set(sources)),
             "seed_profile": seed_profile,
             "target_type": target_type,
+            "observed_target": dict(observed_target),
             "selected_target": dict(selected_target),
             "seed_families_required": required_families,
             "seed_families_optional": optional_families,
