@@ -12,13 +12,12 @@ if str(APP_DIR) not in sys.path:
 import persistent_config as pc
 
 
-def test_generated_runtime_paths_use_shared_tmp_when_present(monkeypatch):
+def test_generated_runtime_paths_default_to_tmp(monkeypatch):
     monkeypatch.delenv("SHERPA_RUNTIME_CONFIG_DIR", raising=False)
-    monkeypatch.setattr(pc.Path, "exists", lambda self: str(self) == "/shared/tmp")
 
-    assert str(pc.runtime_generated_dir()) == "/shared/tmp/sherpa-runtime"
-    assert str(pc.opencode_env_path()) == "/shared/tmp/sherpa-runtime/web_opencode.env"
-    assert str(pc.opencode_runtime_config_path()) == "/shared/tmp/sherpa-runtime/opencode.generated.json"
+    assert str(pc.runtime_generated_dir()) == "/tmp/sherpa-runtime"
+    assert str(pc.opencode_env_path()) == "/tmp/sherpa-runtime/web_opencode.env"
+    assert str(pc.opencode_runtime_config_path()) == "/tmp/sherpa-runtime/opencode.generated.json"
 
 
 def test_generated_runtime_paths_honor_override(monkeypatch, tmp_path: Path):
