@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import urllib.error
 import urllib.parse
@@ -125,6 +126,39 @@ def opencode_runtime_config_path() -> Path:
     if raw:
         return Path(raw).expanduser()
     return runtime_generated_dir() / "opencode.generated.json"
+
+
+def _replace_file(tmp_name: str, target: Path) -> None:
+    tmp_path = Path(tmp_name)
+    try:
+        tmp_path.replace(target)
+    except OSError as exc:
+        if getattr(exc, "errno", None) != os.EXDEV:
+            raise
+        shutil.copyfile(tmp_path, target)
+        tmp_path.unlink(missing_ok=True)
+
+
+def _write_json_file(path: Path, payload: dict[str, Any], *, temp_dir: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(temp_dir))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        _replace_file(tmp_name, path)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+    finally:
+        try:
+            if Path(tmp_name).exists() and str(Path(tmp_name)) != str(path):
+                Path(tmp_name).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _normalize_provider_name(raw: str) -> str:
@@ -424,25 +458,8 @@ def build_opencode_runtime_config(cfg: WebPersistentConfig) -> dict[str, Any]:
 
 def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
     p = opencode_runtime_config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     payload = build_opencode_runtime_config(cfg)
-
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=p.name + ".", dir=str(p.parent))
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        Path(tmp_name).replace(p)
-        try:
-            os.chmod(p, 0o600)
-        except Exception:
-            pass
-    finally:
-        try:
-            if Path(tmp_name).exists() and str(Path(tmp_name)) != str(p):
-                Path(tmp_name).unlink(missing_ok=True)
-        except Exception:
-            pass
+    _write_json_file(p, payload, temp_dir=p.parent)
     return p
 
 
@@ -523,28 +540,9 @@ def load_config() -> WebPersistentConfig:
 
 
 def save_config(cfg: WebPersistentConfig) -> None:
-    d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-
     path = config_path()
     payload = cfg.model_dump()
-
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(d))
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        Path(tmp_name).replace(path)
-        try:
-            os.chmod(path, 0o600)
-        except Exception:
-            pass
-    finally:
-        try:
-            if Path(tmp_name).exists() and str(Path(tmp_name)) != str(path):
-                Path(tmp_name).unlink(missing_ok=True)
-        except Exception:
-            pass
+    _write_json_file(path, payload, temp_dir=runtime_generated_dir())
 
 
 def _set_env_if_value(name: str, value: str | None) -> None:

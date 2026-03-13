@@ -11,6 +11,26 @@ import {
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || '/api').replace(/\/$/, '');
 
+function extractErrorDetail(status: number, text: string, contentType: string | null): string {
+  const trimmed = text.trim();
+  if (!trimmed) return `HTTP ${status}`;
+
+  const isJson = (contentType || '').includes('application/json');
+  if (isJson) {
+    try {
+      const data = JSON.parse(trimmed);
+      const detail = data?.detail;
+      if (typeof detail === 'string' && detail.trim()) {
+        return detail.trim();
+      }
+    } catch {
+      // Fall through to plain-text handling.
+    }
+  }
+
+  return trimmed.slice(0, 300);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -22,14 +42,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
+  const contentType = res.headers.get('content-type');
 
   if (!res.ok) {
-    const detail = data?.detail || `HTTP ${res.status}`;
-    throw new Error(String(detail));
+    throw new Error(extractErrorDetail(res.status, text, contentType));
   }
 
-  return data as T;
+  if (!text) {
+    return {} as T;
+  }
+
+  const isJson = (contentType || '').includes('application/json');
+  if (!isJson) {
+    throw new Error(`Expected JSON response from ${path}, got ${contentType || 'unknown content type'}`);
+  }
+
+  return JSON.parse(text) as T;
 }
 
 export async function getConfig(): Promise<WebConfig> {

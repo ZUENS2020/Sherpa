@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,3 +37,26 @@ def test_runtime_config_path_prefers_explicit_config_override(monkeypatch, tmp_p
     monkeypatch.setenv("SHERPA_OPENCODE_CONFIG_PATH", str(tmp_path / "custom.json"))
 
     assert pc.opencode_runtime_config_path() == tmp_path / "custom.json"
+
+
+def test_save_config_uses_runtime_dir_for_tempfiles(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    runtime_dir = tmp_path / "runtime"
+    config_dir = tmp_path / "config"
+    config_file = config_dir / "web_config.json"
+    captured_dirs: list[str] = []
+    real_mkstemp = tempfile.mkstemp
+
+    monkeypatch.setattr(pc, "runtime_generated_dir", lambda: runtime_dir)
+    monkeypatch.setattr(pc, "config_path", lambda: config_file)
+
+    def _wrapped_mkstemp(*args, **kwargs):
+        captured_dirs.append(str(kwargs.get("dir")))
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(pc.tempfile, "mkstemp", _wrapped_mkstemp)
+
+    cfg = pc.WebPersistentConfig(openrouter_model="test-model")
+    pc.save_config(cfg)
+
+    assert config_file.is_file()
+    assert captured_dirs == [str(runtime_dir)]
