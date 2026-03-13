@@ -14,6 +14,12 @@ Write `fuzz/PLAN.md` into `./done` (single line). Missing `./done` means this st
 If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN.md` and schema-valid `fuzz/targets.json`, then write `fuzz/PLAN.md` into `./done`.
 
 Use both `fuzz/antlr_plan_context.json` and `fuzz/target_analysis.json` as grounding when available.
+Planning policy:
+- Prefer runtime-executable, buildable, fuzzable entrypoints first.
+- Put the best runtime target first in `fuzz/targets.json`.
+- If `fuzz/target_analysis.json` ranks a public/runtime API above compile-time/detail/helper APIs, preserve that ordering in `fuzz/targets.json`.
+- Do not put compile-only, constexpr-only, detail/helper, local utility, or wrapper-only APIs ahead of a clearly viable runtime entrypoint.
+- If no direct runtime entrypoint exists, still choose the closest executable target and keep likely runtime replacements near the top.
 
 `fuzz/targets.json` format is STRICT:
 - MUST be plain JSON, not Markdown and not fenced code blocks
@@ -61,6 +67,19 @@ If external system dependencies are required, write package names (one per line)
 Use package names only; no shell commands.
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
+Target-selection policy:
+- Treat `fuzz/selected_targets.json` as the preferred plan, but only use its first target if it is a viable runtime fuzz entrypoint.
+- Prefer a directly callable public/runtime API over compile-time, detail/helper, constexpr-only, or local utility functions.
+- If you must drift from the selected target, choose the nearest runtime-executable replacement target that exercises the same parsing/formatting/decoding path.
+- The final target must be the actual external/library API exercised by the harness, not a local helper, checker, wrapper utility, or placeholder name.
+- Your harness, `fuzz/README.md`, and build scaffold must all agree on the same final observed target and harness filename.
+- If `fuzz/observed_target.json` already exists, treat it as the execution truth source and keep new outputs consistent with it unless the harness itself changes.
+- `fuzz/README.md` MUST contain these exact fields with values that match the actual harness:
+  - `Selected target: ...`
+  - `Final target: ...`
+  - `Technical reason: ...`
+  - `Relation: ...`
+  - `Harness file: ...`
 
 Additional instruction from coordinator:
 {{hint}}
@@ -85,6 +104,11 @@ Rules:
   - `Final target: ...`
   - `Technical reason: ...`
   - `Relation: ...`
+- Also record:
+  - `Harness file: ...`
+- If `fuzz/observed_target.json` exists, treat it as the execution truth source and keep `README.md`, harness filenames, and build scaffold consistent with it.
+- Do not describe a local helper/checker/wrapper as the final target when the harness actually calls an external/library API.
+- Keep only real harness source files in `fuzz/build.py` / `fuzz/build.sh`; never reference missing scaffold files.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, still create the missing required files immediately, then write `fuzz/out/` into `./done`.
 

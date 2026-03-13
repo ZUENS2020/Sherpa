@@ -2764,9 +2764,13 @@ class NonOssFuzzHarnessGenerator:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
             Rules:
+            - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Prefer missing families over adding more variants to already-covered malformed cases.
             - Do not only generate malformed separator variants if structure families are missing.
+            - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
+            - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
+            - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
             - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
         ).strip()
