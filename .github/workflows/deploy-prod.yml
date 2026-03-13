@@ -459,21 +459,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          reg="${DOCKER_REGISTRY_PREFIX_PROD:-}"
-          if [[ -n "$reg" ]]; then
-            reg="${reg%/}"
-            web_python_image="${reg}/library/python:3.10-slim"
-            frontend_node_image="${reg}/library/node:20-alpine"
-          else
-            web_python_image="python:3.10-slim"
-            frontend_node_image="node:20-alpine"
-          fi
+          web_python_image="${WEB_PYTHON_BASE_IMAGE_PROD:-python:3.10-slim}"
+          frontend_node_image="${FRONTEND_NODE_IMAGE_PROD:-node:20-alpine}"
           echo "web_python_image=${web_python_image}" >> "$GITHUB_OUTPUT"
           echo "frontend_node_image=${frontend_node_image}" >> "$GITHUB_OUTPUT"
           echo "::notice::web_python_image=${web_python_image}"
           echo "::notice::frontend_node_image=${frontend_node_image}"
         env:
-          DOCKER_REGISTRY_PREFIX_PROD: ${{ secrets.DOCKER_REGISTRY_PREFIX_PROD }}
+          WEB_PYTHON_BASE_IMAGE_PROD: ${{ secrets.WEB_PYTHON_BASE_IMAGE_PROD }}
+          FRONTEND_NODE_IMAGE_PROD: ${{ secrets.FRONTEND_NODE_IMAGE_PROD }}
 
       - name: Build and export web image
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
