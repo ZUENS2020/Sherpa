@@ -49,15 +49,6 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            network=host
-            env.http_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-            env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
-
       - name: Setup kubectl (self-hosted fast path)
         shell: bash
         timeout-minutes: 5
@@ -515,47 +506,56 @@ jobs:
       - name: Build and export web image
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
         timeout-minutes: 75
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.web
-          build-args: |
-            WEB_PYTHON_BASE_IMAGE=${{ steps.base_images.outputs.web_python_image }}
-          tags: ${{ steps.prep.outputs.web_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.web_tar }}
-          cache-from: type=gha,scope=sherpa-web
-          cache-to: type=gha,mode=max,scope=sherpa-web,ignore-error=true
+        shell: bash
+        env:
+          WEB_PYTHON_IMAGE: ${{ steps.base_images.outputs.web_python_image }}
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          WEB_TAR: ${{ steps.prep.outputs.web_tar }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=0 docker build \
+            --file docker/Dockerfile.web \
+            --build-arg "WEB_PYTHON_BASE_IMAGE=${WEB_PYTHON_IMAGE}" \
+            --tag "${WEB_IMAGE}" \
+            .
+          docker save -o "${WEB_TAR}" "${WEB_IMAGE}"
 
       - name: Build and export frontend image (attempt 1)
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.frontend_changed == 'true'
         id: frontend_build_1
         continue-on-error: true
         timeout-minutes: 20
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          build-args: |
-            FRONTEND_NODE_IMAGE=${{ steps.base_images.outputs.frontend_node_image }}
-          tags: ${{ steps.prep.outputs.frontend_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
-          cache-from: type=gha,scope=sherpa-frontend
-          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
+        shell: bash
+        env:
+          FRONTEND_NODE_IMAGE_BASE: ${{ steps.base_images.outputs.frontend_node_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=0 docker build \
+            --file docker/Dockerfile.frontend \
+            --build-arg "FRONTEND_NODE_IMAGE=${FRONTEND_NODE_IMAGE_BASE}" \
+            --tag "${FRONTEND_IMAGE}" \
+            .
+          docker save -o "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
 
       - name: Build and export frontend image (attempt 2)
         if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.frontend_changed == 'true' && steps.frontend_build_1.outcome == 'failure'
         id: frontend_build_2
         timeout-minutes: 20
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile.frontend
-          build-args: |
-            FRONTEND_NODE_IMAGE=${{ steps.base_images.outputs.frontend_node_image }}
-          tags: ${{ steps.prep.outputs.frontend_image }}
-          outputs: type=docker,dest=${{ steps.prep.outputs.frontend_tar }}
-          cache-from: type=gha,scope=sherpa-frontend
-          cache-to: type=gha,mode=max,scope=sherpa-frontend,ignore-error=true
+        shell: bash
+        env:
+          FRONTEND_NODE_IMAGE_BASE: ${{ steps.base_images.outputs.frontend_node_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=0 docker build \
+            --file docker/Dockerfile.frontend \
+            --build-arg "FRONTEND_NODE_IMAGE=${FRONTEND_NODE_IMAGE_BASE}" \
+            --tag "${FRONTEND_IMAGE}" \
+            .
+          docker save -o "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
 
       - name: Cleanup legacy dev tunnel in shared namespace
         if: steps.kube_preflight.outputs.reachable == 'true'

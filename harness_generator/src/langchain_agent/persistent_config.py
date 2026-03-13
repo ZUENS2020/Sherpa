@@ -595,9 +595,9 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
 
 
 def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
-    d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
     p = opencode_env_path()
+    d = p.parent
+    d.mkdir(parents=True, exist_ok=True)
 
     # Minimal env file used by CodexHelper(ai_key_path=...).
     # Prefer OPENAI_API_KEY (common, OpenAI-compatible).
