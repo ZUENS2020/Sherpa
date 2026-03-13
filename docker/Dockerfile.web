@@ -1,4 +1,4 @@
-ARG WEB_PYTHON_BASE_IMAGE=python:3.10-slim
+ARG WEB_PYTHON_BASE_IMAGE=docker.m.daocloud.io/library/python:3.10-slim
 FROM ${WEB_PYTHON_BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1 \

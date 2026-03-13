@@ -294,7 +294,7 @@ def _opencode_base_image_candidates() -> list[str]:
                 out.append(v)
         return out
     return [
-        "docker.io/library/node:20-slim",
+        "docker.m.daocloud.io/library/node:20-slim",
         "node:20-slim",
     ]
 

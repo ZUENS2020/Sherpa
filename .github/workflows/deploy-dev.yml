@@ -58,7 +58,6 @@ jobs:
             env.https_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
             env.all_proxy=${{ secrets.BUILDKIT_PROXY_URL_DEV }}
 
-
       - name: Setup kubectl (self-hosted fast path)
         shell: bash
         timeout-minutes: 5
