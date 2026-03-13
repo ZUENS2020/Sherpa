@@ -121,6 +121,8 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
             "synthesize_target_drift_reason": "selected target is not a runtime entrypoint",
             "synthesize_target_relation": "runtime wrapper for same formatting path",
             "synthesize_target_runtime_viability": "low",
+            "synthesize_readme_consistent": True,
+            "synthesize_build_scaffold_consistent": True,
         }
     )
 
@@ -141,6 +143,8 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["seed_family_coverage"]["missing"] == ["flow_structures"]
     assert summary["seed_bootstrap"]["noise_rejected_count"] == 5
     assert summary["synthesize_target"]["relation"] == "runtime wrapper for same formatting path"
+    assert summary["synthesize_target"]["readme_consistent"] is True
+    assert summary["synthesize_target"]["build_scaffold_consistent"] is True
     assert summary["coverage_loop"]["target_api"] == "fmt::println"
     assert summary["build_error_kind"] == ""
     assert summary["build_error_code"] == ""

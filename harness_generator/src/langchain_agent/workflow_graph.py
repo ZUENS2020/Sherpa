@@ -133,6 +133,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     synthesize_target_drift_reason: str
     synthesize_target_relation: str
     synthesize_target_runtime_viability: str
+    synthesize_readme_consistent: bool
+    synthesize_build_scaffold_consistent: bool
     run_children_exit_count: int
     run_details: list[dict[str, Any]]
     run_batch_plan: list[dict[str, Any]]
@@ -626,41 +628,103 @@ def _infer_harness_primary_api(text: str) -> str:
     return ""
 
 
+def _readme_field_map(text: str) -> dict[str, str]:
+    field_map: dict[str, str] = {}
+    patterns = {
+        "selected_target": r"(?:selected target|原 target|选中目标)\s*[:：]\s*(.+)",
+        "final_target": r"(?:final target|最终 target|最终目标)\s*[:：]\s*(.+)",
+        "technical_reason": r"(?:technical reason|reason|技术原因|原因)\s*[:：]\s*(.+)",
+        "relation": r"(?:relation|关系)\s*[:：]\s*(.+)",
+        "harness_file": r"(?:harness file|harness|目标文件)\s*[:：]\s*(.+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            field_map[key] = str(match.group(1) or "").strip()
+    return field_map
+
+
+def _normalize_doc_field(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).strip().lower()
+
+
 def _readme_drift_status(repo_root: Path, alignment: dict[str, Any]) -> dict[str, Any]:
     readme = repo_root / "fuzz" / "README.md"
     if not readme.is_file():
         return {
             "complete": False,
-            "missing": ["selected_target", "final_target", "technical_reason", "relation"],
+            "missing": ["selected_target", "final_target", "technical_reason", "relation", "harness_file"],
             "relation": "",
             "reason": "",
+            "fields": {},
         }
     text = readme.read_text(encoding="utf-8", errors="replace")
-    lowered = text.lower()
-    selected = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip().lower()
-    observed = str(alignment.get("observed_api") or "").strip().lower()
-    relation = ""
-    reason = ""
-    relation_match = re.search(r"(?:relation|关系)\s*[:：]\s*(.+)", text, re.IGNORECASE)
-    if relation_match:
-        relation = str(relation_match.group(1) or "").strip()
-    reason_match = re.search(r"(?:technical reason|reason|原因)\s*[:：]\s*(.+)", text, re.IGNORECASE)
-    if reason_match:
-        reason = str(reason_match.group(1) or "").strip()
+    fields = _readme_field_map(text)
+    selected = _normalize_doc_field(str(alignment.get("expected_api") or alignment.get("expected_target_name") or ""))
+    observed = _normalize_doc_field(str(alignment.get("observed_api") or ""))
+    observed_harness = _normalize_doc_field(str(alignment.get("observed_harness") or ""))
+    relation = str(fields.get("relation") or "").strip()
+    reason = str(fields.get("technical_reason") or "").strip()
+    selected_field = _normalize_doc_field(str(fields.get("selected_target") or ""))
+    final_field = _normalize_doc_field(str(fields.get("final_target") or ""))
+    harness_field = _normalize_doc_field(str(fields.get("harness_file") or ""))
     missing: list[str] = []
-    if selected and selected not in lowered:
+    if not selected_field or (selected and selected_field != selected):
         missing.append("selected_target")
-    if observed and observed not in lowered:
+    if not final_field or (observed and final_field != observed):
         missing.append("final_target")
     if not reason:
         missing.append("technical_reason")
     if not relation:
         missing.append("relation")
+    if not harness_field or (observed_harness and harness_field != observed_harness):
+        missing.append("harness_file")
     return {
         "complete": not missing,
         "missing": missing,
         "relation": relation,
         "reason": reason,
+        "fields": fields,
+    }
+
+
+def _extract_scaffold_source_refs(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r"['\"]([^'\"]+\.(?:c|cc|cpp|cxx|java))['\"]", text, re.IGNORECASE):
+        candidate = str(match.group(1) or "").strip().replace("\\", "/")
+        if not candidate:
+            continue
+        if "/" in candidate and not candidate.startswith("fuzz/"):
+            continue
+        refs.append(candidate.split("/", 1)[-1])
+    return sorted({ref for ref in refs if ref})
+
+
+def _build_scaffold_source_status(repo_root: Path) -> dict[str, Any]:
+    fuzz_dir = repo_root / "fuzz"
+    existing = sorted(
+        {
+            str(p.relative_to(fuzz_dir)).replace("\\", "/")
+            for p in fuzz_dir.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}
+            and not str(p.relative_to(fuzz_dir)).startswith(("out/", "corpus/"))
+        }
+    )
+    referenced: list[str] = []
+    for rel in ("build.py", "build.sh"):
+        path = fuzz_dir / rel
+        if not path.is_file():
+            continue
+        referenced.extend(_extract_scaffold_source_refs(path.read_text(encoding="utf-8", errors="replace")))
+    referenced = sorted({ref for ref in referenced if ref})
+    existing_set = set(existing)
+    missing = [ref for ref in referenced if ref not in existing_set]
+    return {
+        "complete": not missing,
+        "referenced": referenced,
+        "existing": existing,
+        "missing": missing,
     }
 def _analyze_harness_target_alignment(repo_root: Path) -> dict[str, Any]:
     selected_doc = _load_selected_targets_doc(repo_root)
@@ -2319,6 +2383,39 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
 
+    def _run_build_scaffold_alignment_completion(timeout: int, scaffold_status: dict[str, Any]) -> None:
+        observed_harness = str(target_alignment.get("observed_harness") or "").strip()
+        observed_api = str(target_alignment.get("observed_api") or "").strip() or "unknown"
+        missing_refs = ", ".join(str(x) for x in scaffold_status.get("missing") or []) or "none"
+        existing_harnesses = ", ".join(str(x) for x in scaffold_status.get("existing") or []) or "none"
+        prompt = textwrap.dedent(
+            f"""
+            Update `fuzz/build.py` and/or `fuzz/build.sh` only. Do not rewrite the harness or README.
+
+            The build scaffold references harness source files that do not exist.
+            Actual observed target: {observed_api}
+            Actual harness file: {observed_harness or 'unknown'}
+            Existing harness files under `fuzz/`: {existing_harnesses}
+            Missing referenced sources: {missing_refs}
+
+            Requirements:
+            - Remove or replace references to missing harness files.
+            - Keep only harness source files that actually exist under `fuzz/`.
+            - Ensure the build scaffold is consistent with the observed harness.
+            - Do not edit any harness source file or `fuzz/README.md`.
+            - Write updated build scaffold files into `./done` before finishing.
+            """
+        ).strip()
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=_completion_context() or None,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
+        )
+
     if not _has_codex_key():
         out = {
             **state,
@@ -2432,6 +2529,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "missing": [],
             "relation": "",
             "reason": "",
+            "fields": {},
         }
         if target_alignment.get("drifted"):
             _wf_log(
@@ -2449,6 +2547,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     )
                     _run_readme_alignment_completion(remaining_for_readme, target_alignment)
                     readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
+        build_scaffold_status = _build_scaffold_source_status(gen.repo_root)
+        if not bool(build_scaffold_status.get("complete")):
+            remaining_for_scaffold = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_for_scaffold > 0:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: build scaffold references missing harnesses; repairing build scaffold",
+                )
+                _run_build_scaffold_alignment_completion(remaining_for_scaffold, build_scaffold_status)
+                build_scaffold_status = _build_scaffold_source_status(gen.repo_root)
         out = {
             **state,
             "last_step": "synthesize",
@@ -2467,6 +2575,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_drift_reason": str(readme_alignment.get("reason") or target_alignment.get("reason") or ""),
             "synthesize_target_relation": str(readme_alignment.get("relation") or ""),
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
+            "synthesize_readme_consistent": bool(readme_alignment.get("complete")),
+            "synthesize_build_scaffold_consistent": bool(build_scaffold_status.get("complete")),
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
             "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
             "message": "synthesized",

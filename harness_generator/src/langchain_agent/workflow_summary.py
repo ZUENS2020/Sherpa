@@ -250,6 +250,8 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "drift_reason": str(out.get("synthesize_target_drift_reason") or ""),
             "relation": str(out.get("synthesize_target_relation") or ""),
             "runtime_viability": str(out.get("synthesize_target_runtime_viability") or ""),
+            "readme_consistent": bool(out.get("synthesize_readme_consistent") or False),
+            "build_scaffold_consistent": bool(out.get("synthesize_build_scaffold_consistent") or False),
         },
         "seed_quality": dict(out.get("coverage_seed_quality") or {}),
         "seed_family_coverage": {
@@ -300,6 +302,8 @@ def write_run_summary(out: dict[str, Any]) -> None:
         f"- Synthesize target drifted: {data['synthesize_target']['drifted']}",
         f"- Synthesize target relation: {data['synthesize_target']['relation'] or 'n/a'}",
         f"- Synthesize runtime viability: {data['synthesize_target']['runtime_viability'] or 'n/a'}",
+        f"- Synthesize README consistent: {data['synthesize_target']['readme_consistent']}",
+        f"- Synthesize build scaffold consistent: {data['synthesize_target']['build_scaffold_consistent']}",
         f"- Target depth: {data['coverage_loop']['target_depth_class'] or 'n/a'} ({data['coverage_loop']['target_depth_score']})",
         f"- Target selection bias: {data['coverage_loop']['selection_bias_reason'] or 'n/a'}",
         f"- Improve mode: {data['coverage_loop']['improve_mode'] or 'n/a'}",
