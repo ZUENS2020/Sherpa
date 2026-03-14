@@ -28,7 +28,6 @@ export const configSchema = z.object({
   same_error_max_retries: z.number().int().nonnegative().default(1),
   fuzz_use_docker: z.boolean().default(true),
   fuzz_docker_image: z.string().default('auto'),
-  oss_fuzz_dir: z.string().default(''),
   sherpa_git_mirrors: z.string().default(''),
   sherpa_docker_http_proxy: z.string().default(''),
   sherpa_docker_https_proxy: z.string().default(''),

@@ -1,171 +1,217 @@
-<p align="center">
-  <img src="./assets/banner.svg" alt="Sherpa Banner" width="100%" />
-</p>
-
 # Sherpa
 
-Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统。输入仓库 URL 后，系统会在 Kubernetes 上按阶段调度任务，自动完成 target 规划、harness 生成、构建、seed bootstrap、fuzz 运行、覆盖率驱动改进，以及 crash 复现。
+Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统。用户输入仓库地址后，系统会通过 `FastAPI + Postgres + Kubernetes stage jobs` 执行完整的 fuzz 生命周期：目标规划、harness 生成、构建修复、seed bootstrap、fuzz 运行、覆盖率驱动改进，以及 crash 复现。
 
-当前仓库的真实主线以代码为准，不再依赖历史 README 叙述。当前线上主流程由 `FastAPI + Postgres + stage-per-job Kubernetes workflow` 驱动，核心代码位于：
+本文档只基于当前代码实现整理，不沿用历史 README 的叙述。
 
-- `harness_generator/src/langchain_agent/main.py`
-- `harness_generator/src/langchain_agent/workflow_graph.py`
-- `harness_generator/src/fuzz_unharnessed_repo.py`
-- `frontend-next/`
-- `k8s/base` 与 `k8s/overlays/*`
+## 系统定位
 
-## 核心能力
+Sherpa 解决的不是“生成一个 harness”这一件事，而是把 fuzz 工程中的高重复步骤串成一个可恢复、可观测、可迭代的自动化流水线：
 
-- `plan` 阶段输出 `fuzz/PLAN.md`、`fuzz/targets.json`、`fuzz/target_analysis.json`
-- `targets.json` 强制包含：`name`、`api`、`lang`、`target_type`、`seed_profile`
-- `synthesize` 生成单 target fuzz scaffold，并支持 partial scaffold completion
-- `build` / `fix_build` 支持规则修复、错误签名、quick-check、env rebuild
-- `run` 默认先 AI 生成 seed，再复用 repo examples，并可接 `radamsa` 变异
-- `run` 支持 plateau 检测、首个 crash 提前收口、typed seed bootstrap
-- `coverage-analysis` / `improve-harness` 形成覆盖率反馈闭环
-- `re-build` / `re-run` 是独立 crash 复现链路
-- `repro_context.json` 用于跨 job 持久化 crash 上下文
-- `k8s_job` 模式下 OpenCode 原生运行于 worker 容器，不依赖内嵌 Docker CLI
+- 自动分析任意公开仓库并生成 target 候选
+- 为单个 target 生成外部 harness 和 build scaffold
+- 自动修复常见构建错误并沉淀错误分类
+- 自动生成初始 corpus，并结合 repo examples、AI 补种和 `radamsa` 做 bootstrap
+- 自动运行 fuzzer，识别 plateau、crash、OOM、timeout 等运行结果
+- 基于覆盖率和质量信号继续改当前 target，而不是盲目重新规划
+- 进入独立的 crash 复现链路，产出可追踪的复现场景
 
-## 当前工作流
+## 当前真实架构
 
 ```mermaid
 flowchart LR
-  U["User"] --> FE["frontend-next"]
-  U --> API["sherpa-web"]
-  FE --> API
+  U["User"] --> FE["Next.js Console"]
+  FE --> API["FastAPI Web"]
   API --> DB[("Postgres")]
+  API --> LOGS["/app/job-logs"]
   API --> OUT["/shared/output"]
 
-  API --> P["plan"]
-  P --> S["synthesize"]
-  S --> B["build"]
-  B --> R["run"]
-  R --> CA["coverage-analysis"]
+  API --> PLAN["plan Job"]
+  PLAN --> SYN["synthesize Job"]
+  SYN --> BUILD["build Job"]
+  BUILD --> RUN["run Job"]
+  RUN --> CA["coverage-analysis"]
   CA --> IH["improve-harness"]
-  IH --> B
-  R --> RB["re-build"]
+  IH --> BUILD
+  RUN --> RB["re-build"]
   RB --> RR["re-run"]
-  RR --> OUT
-  P --> OUT
-  S --> OUT
-  B --> OUT
-  R --> OUT
-  CA --> OUT
-  IH --> OUT
-  RB --> OUT
 ```
 
-### 路由语义
+当前线上统一口径：
 
-- `plan -> synthesize -> build -> run` 是基础主链路。
-- `run` 发现 crash 时进入 `re-build -> re-run`。
-- `run` 无 crash 但进入平台期时，先进入 `coverage-analysis`。
-- `coverage-analysis` 优先触发当前 target 的 in-place improve；连续无收益且有预算时才允许 replan。
-- `workflow_recommended_next` 由工作流状态动态计算，外层调度不再硬编码固定尾序列。
+- 常驻服务只有 `sherpa-web`、`sherpa-frontend`、`postgres`
+- 各工作流阶段由短生命周期 Kubernetes Job 执行
+- OpenCode 在 worker 容器内原生运行，不依赖嵌套 Docker CLI
+- 运行时默认按 non-root 设计，临时文件优先使用容器内 `/tmp`
 
-## 关键状态文件
+## 核心模块
 
-每个任务工作目录一般位于：
+### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/main.py`
 
-- `/shared/output/<repo>-<shortid>`
+负责 Web API、任务调度、作业状态聚合、Kubernetes Job manifest 生成，以及系统级观测信息输出。
 
-常见文件：
+### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/workflow_graph.py`
+
+定义工作流状态机和各阶段节点，是 Sherpa 的核心编排入口。这里负责：
+
+- `plan -> synthesize -> build -> run` 主链路
+- `coverage-analysis -> improve-harness` 闭环
+- `re-build -> re-run` crash 复现链路
+- build/run 失败分类
+- 关键状态字段与 `run_summary.json` 写回
+
+### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/fuzz_unharnessed_repo.py`
+
+负责底层仓库 clone、构建、运行、repo example 复用、seed bootstrap、以及 OpenCode 合成步骤的直接执行。
+
+### `/Users/zuens2020/Documents/Sherpa/frontend-next/`
+
+Next.js 控制台。前端主要承担配置编辑、任务提交、任务进度展示、系统概况展示，不承载工作流逻辑。
+
+### `/Users/zuens2020/Documents/Sherpa/k8s/base/`
+
+常驻服务与 PVC 的基础清单。当前 k8s 基础层定义了：
+
+- `sherpa-web`
+- `sherpa-frontend`
+- `postgres`
+- `serviceaccount + rbac`
+- `configmap`
+- 共享 PVC
+
+## 工作流阶段
+
+### 1. `plan`
+
+对目标仓库做初步结构分析，输出：
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
 - `fuzz/target_analysis.json`
+
+当前 target schema 的关键字段包括：
+
+- `name`
+- `api`
+- `lang`
+- `target_type`
+- `seed_profile`
+
+### 2. `synthesize`
+
+根据 plan 选中的 target 生成：
+
+- harness 源文件
 - `fuzz/build.py` 或 `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/observed_target.json`
+- `fuzz/build_strategy.json`
+
+当前默认原则是不复用仓库自带 fuzz target，而是统一生成外部 scaffold。
+
+### 3. `build`
+
+执行 build scaffold。系统会在进入实际构建前做静态预检，避免以下错误前提：
+
+- 假设仓库存在某个猜测出来的 fuzz target
+- 直接走 `cmake --build --target xxx-fuzzer`
+- 缺少明确的 fuzzer entry 策略
+
+### 4. `fix_build`
+
+按 build 失败类型进入定向修复，而不是泛化重试。当前重点分类包括：
+
+- `build_strategy_mismatch`
+- `missing_fuzzer_main`
+- `missing_link_symbols`
+- `include_path_mismatch`
+
+### 5. `run`
+
+`run` 阶段先做 seed bootstrap，再实际运行 fuzzer。当前 seed bootstrap 是三段式：
+
+1. repo examples
+2. AI 补种
+3. `radamsa` 变异
+
+运行阶段会结构化记录：
+
+- `run_error_kind`
+- `terminal_reason`
+- `cov/ft` 增长
+- plateau 状态
+- crash / OOM / timeout 分类
+
+### 6. `coverage-analysis` 与 `improve-harness`
+
+当 `run` 没有 crash 且覆盖率进入平台期时，Sherpa 优先做当前 target 的 in-place 改进，而不是直接回到 plan。
+
+只有在以下条件成立时才允许 replan：
+
+- 连续改进无收益
+- 当前预算允许
+- replan 能产生实质变化
+
+### 7. `re-build` 与 `re-run`
+
+crash 复现阶段单独执行，不复用主链路的“继续探索”逻辑。复现链路会持久化 `repro_context.json` 和相关报告，保证复现结果可追踪。
+
+## 当前部署形态
+
+### Kubernetes
+
+线上执行模式是 `k8s_job`，配置位于：
+
+- `/Users/zuens2020/Documents/Sherpa/k8s/base/`
+- `/Users/zuens2020/Documents/Sherpa/k8s/overlays/`
+
+关键配置项：
+
+- `ConfigMap` 提供默认运行时参数，如 `TMPDIR=/tmp`、`SHERPA_GIT_MIRRORS`
+- `web-deployment.yaml` 给常驻服务注入代理和 non-root 约束
+- 动态 worker Job 由 `main.py` 生成 manifest，并显式注入代理与 git mirrors
+
+### Docker Compose
+
+本地开发链路保留在 `/Users/zuens2020/Documents/Sherpa/docker-compose.yml`。它主要用于：
+
+- 快速本地起一套完整服务
+- 初始化共享卷权限
+- 本地验证前后端与网关行为
+
+## 关键运行时产物
+
+任务目录通常位于：
+
+- `/shared/output/<repo>-<shortid>`
+
+常见产物：
+
+- `fuzz/PLAN.md`
+- `fuzz/targets.json`
+- `fuzz/target_analysis.json`
+- `fuzz/build.py`
+- `fuzz/observed_target.json`
+- `fuzz/build_strategy.json`
 - `run_summary.json`
 - `run_summary.md`
 - `repro_context.json`
-- `.repro_crash/`
 
 Kubernetes stage 元数据位于：
 
 - `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
 - `/shared/output/_k8s_jobs/<job_id>/stage-*.error.txt`
 
-聚合日志位于：
+## 当前工程约束
 
-- `/app/job-logs/jobs/<job_id>.log`
+- 默认禁止直接复用仓库自带 fuzz target
+- 运行时临时文件默认只写容器内 `/tmp` 路径
+- `run` / `repro_crash` 默认禁止 AI 改写源码参与验证结果判断
+- `dev` 是集成验证分支，`main` 只接受来自 `dev` 的变更
 
-## Seed bootstrap
+## 推荐阅读顺序
 
-当前 `run` 阶段的 seed bootstrap 是三段式：
-
-1. repo examples 复用
-2. AI 定向补种
-3. `radamsa` 变异
-
-`seed_profile` 决定 seed prompt 和 repo example 过滤规则，例如：
-
-- `parser-structure`
-- `parser-token`
-- `parser-format`
-- `parser-numeric`
-- `decoder-binary`
-- `archive-container`
-- `serializer-structured`
-- `document-text`
-- `network-message`
-- `generic`
-
-## 平台期与改进闭环
-
-当前系统在 `run` 中会记录 plateau 信息，并在 `coverage-analysis` 中生成这些关键字段：
-
-- `coverage_loop.round`
-- `coverage_loop.plateau_detected`
-- `coverage_loop.seed_profile`
-- `coverage_loop.improve_mode`
-- `coverage_loop.replan_effective`
-- `coverage_loop.stop_reason`
-- `coverage_loop.repo_examples_*`
-- `coverage_loop.target_depth_*`
-
-目标是避免“长时间空跑”以及“空 replan”。
-
-## 当前部署口径
-
-- 线上只看 `k8s_job` 路径
-- `sherpa-web`、`frontend-next`、`postgres` 为常驻 Deployment
-- 各个 workflow stage 由短生命周期 Job 执行
-- `OpenCode` 在 k8s worker 中原生执行
-- `GitNexus` 当前不在运行时主链路中
-
-## 文档索引
-
-- `docs/README.md`：文档入口
-- `docs/CODEBASE_TECHNICAL_ANALYSIS.md`：代码级技术解析
-- `docs/k8s/DEPLOYMENT_DETAILED.md`：部署与故障树
-- `docs/k8s/RUNBOOK.md`：运维与排障
-- `harness_generator/README.md`：后端工具链说明
-- `harness_generator/docs/TECHNICAL_HANDOFF_ZH.md`：中文技术交接文档
-
-## 开发检查
-
-后端常用：
-
-```bash
-python -m py_compile harness_generator/src/langchain_agent/main.py harness_generator/src/langchain_agent/workflow_graph.py harness_generator/src/fuzz_unharnessed_repo.py
-pytest -q tests/test_workflow_run_detection.py tests/test_workflow_build_resilience.py
-```
-
-前端常用：
-
-```bash
-cd frontend-next
-npm test
-npm run build
-```
-
-## 当前已知重点问题类型
-
-- `synthesize` partial scaffold 但未写 sentinel
-- `fix_build` 需要区分 source 问题、system package 问题、link 问题
-- plateau 最后一轮预算收口
-- target 过浅导致 fuzz 收益低
-- repo_examples 误吸收源码文件
-
-这些问题的当前实现状态和约束，以下文档已按代码现状同步更新。
+1. [文档入口](/Users/zuens2020/Documents/Sherpa/docs/README.md)
+2. [代码级技术分析](/Users/zuens2020/Documents/Sherpa/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+3. [比赛展示版技术解读](/Users/zuens2020/Documents/Sherpa/docs/COMPETITION_TECHNICAL_BRIEF.md)
+4. [标准变更流程](/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md)

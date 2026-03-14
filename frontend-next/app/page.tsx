@@ -52,7 +52,7 @@ export default function HomePage() {
     <Box sx={{ maxWidth: 1600, mx: 'auto', px: 2.5, py: 2.5 }}>
       <Stack spacing={2}>
         <Stack>
-          <Typography variant="h4" fontWeight={700}>Sherpa / OSS-Fuzz 控制台</Typography>
+          <Typography variant="h4" fontWeight={700}>Sherpa 控制台</Typography>
           <Typography variant="body2" color="text.secondary">
             重点视图：任务进度、子任务状态、日志与错误摘要。
           </Typography>
