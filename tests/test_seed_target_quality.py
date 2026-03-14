@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
 from fuzz_unharnessed_repo import (
     NonOssFuzzHarnessGenerator,
     _classify_seed_family,
+    _host_git_proxy_env,
     _seed_families_for_target,
     _seed_quality_from_run,
 )
@@ -116,6 +117,20 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     assert "low_retention" in flags
     assert "missing_required_families" in flags
     assert "repo_examples_missing" in flags
+
+
+def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:6789")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,.svc")
+    monkeypatch.setenv("SHERPA_DOCKER_HTTP_PROXY", "http://host.docker.internal:7897")
+
+    env = _host_git_proxy_env()
+
+    assert env["HTTP_PROXY"] == "http://10.0.0.10:6789"
+    assert env["http_proxy"] == "http://10.0.0.10:6789"
+    assert env["NO_PROXY"] == "127.0.0.1,localhost,.svc"
+    assert env["no_proxy"] == "127.0.0.1,localhost,.svc"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
 
 
 def test_fmt_seed_families_replace_generic_parser_format():

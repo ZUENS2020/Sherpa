@@ -57,7 +57,7 @@ def test_k8s_manifest_normalizes_opencode_model_value():
     )
     manifest = yaml.safe_load(manifest_yaml)
     env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
-    env_map = {item["name"]: item["value"] for item in env_items}
+    env_map = {item["name"]: item["value"] for item in env_items if "value" in item}
 
     assert env_map["OPENCODE_MODEL"] == "minimax/MiniMax-M2.5"
     assert env_map["OPENAI_MODEL"] == "MiniMax-M2.5"
@@ -93,6 +93,30 @@ def test_k8s_manifest_applies_default_worker_resources():
     assert resources["requests"]["memory"] == "4Gi"
     assert resources["limits"]["cpu"] == "2"
     assert resources["limits"]["memory"] == "128Gi"
+
+
+def test_k8s_manifest_injects_host_proxy_env():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_map = {item["name"]: item for item in env_items}
+
+    assert env_map["SHERPA_NODE_IP"]["valueFrom"]["fieldRef"]["fieldPath"] == "status.hostIP"
+    assert env_map["HTTP_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert env_map["HTTPS_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert env_map["ALL_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert env_map["http_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert env_map["https_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert env_map["all_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
+    assert ".cluster.local" in env_map["NO_PROXY"]["value"]
+    assert ".cluster.local" in env_map["no_proxy"]["value"]
 
 
 def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.MonkeyPatch):
