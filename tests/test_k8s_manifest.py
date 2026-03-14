@@ -119,6 +119,30 @@ def test_k8s_manifest_injects_host_proxy_env():
     assert ".cluster.local" in env_map["no_proxy"]["value"]
 
 
+def test_k8s_manifest_explicitly_injects_git_mirrors(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "SHERPA_GIT_MIRRORS",
+        "https://ghfast.top/{url},https://ghproxy.net/{url},https://github.com",
+    )
+
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_map = {item["name"]: item["value"] for item in env_items if "value" in item}
+
+    assert (
+        env_map["SHERPA_GIT_MIRRORS"]
+        == "https://ghfast.top/{url},https://ghproxy.net/{url},https://github.com"
+    )
+
+
 def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SHERPA_K8S_JOB_CPU_REQUEST", "250m")
     monkeypatch.setenv("SHERPA_K8S_JOB_CPU_LIMIT", "1")
