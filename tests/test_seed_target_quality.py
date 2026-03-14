@@ -10,8 +10,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from fuzz_unharnessed_repo import (
+    GIT_CLONE_RETRIES,
     NonOssFuzzHarnessGenerator,
+    RepoSpec,
     _classify_seed_family,
+    _host_git_proxy_env,
     _seed_families_for_target,
     _seed_quality_from_run,
 )
@@ -116,6 +119,56 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     assert "low_retention" in flags
     assert "missing_required_families" in flags
     assert "repo_examples_missing" in flags
+
+
+def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:6789")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,.svc")
+    monkeypatch.setenv("SHERPA_DOCKER_HTTP_PROXY", "http://host.docker.internal:7897")
+
+    env = _host_git_proxy_env()
+
+    assert env["HTTP_PROXY"] == "http://10.0.0.10:6789"
+    assert env["http_proxy"] == "http://10.0.0.10:6789"
+    assert env["NO_PROXY"] == "127.0.0.1,localhost,.svc"
+    assert env["no_proxy"] == "127.0.0.1,localhost,.svc"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_host_git_clone_retries_before_failing_over(monkeypatch, tmp_path: Path):
+    attempts = []
+    sleeps = []
+    clone_url = "https://github.com/fmtlib/fmt.git"
+
+    def fake_run(cmd, timeout=None, env=None):
+        attempts.append((tuple(cmd), timeout, dict(env or {})))
+        if len(attempts) == 1:
+            return 128, "", "GnuTLS, handshake failed", False
+        dest = Path(cmd[-1])
+        dest.mkdir(parents=True, exist_ok=True)
+        return 0, "", "", False
+
+    monkeypatch.setattr("fuzz_unharnessed_repo._run_cmd_capture", fake_run)
+    monkeypatch.setattr("fuzz_unharnessed_repo._candidate_clone_urls", lambda url: [clone_url])
+    monkeypatch.setattr("fuzz_unharnessed_repo._host_git_proxy_override_args", lambda: [])
+    monkeypatch.setattr("fuzz_unharnessed_repo._host_git_proxy_env", lambda: {"HTTP_PROXY": "http://192.168.1.79:6789"})
+    monkeypatch.setattr("fuzz_unharnessed_repo.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    gen = NonOssFuzzHarnessGenerator.__new__(NonOssFuzzHarnessGenerator)
+    gen.docker_image = None
+    dest = tmp_path / "repo"
+
+    repo_root = NonOssFuzzHarnessGenerator._clone_repo(gen, RepoSpec(url=clone_url, workdir=dest))
+
+    assert repo_root == dest
+    assert dest.exists()
+    clone_attempts = [item for item in attempts if len(item[0]) >= 2 and item[0][1] == "clone"]
+
+    assert len(clone_attempts) == 2
+    assert clone_attempts[0][1] == clone_attempts[1][1]
+    assert clone_attempts[0][2]["HTTP_PROXY"] == "http://192.168.1.79:6789"
+    assert sleeps == [2]
+    assert GIT_CLONE_RETRIES >= 2
 
 
 def test_fmt_seed_families_replace_generic_parser_format():

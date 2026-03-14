@@ -587,6 +587,37 @@ def _host_git_proxy_override_args() -> List[str]:
     return ["-c", "http.proxy=", "-c", "https.proxy="]
 
 
+def _host_git_proxy_env() -> Dict[str, str]:
+    env = os.environ.copy()
+
+    def _pick_env(*names: str) -> str:
+        for n in names:
+            v = env.get(n)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return ""
+
+    http_proxy = _pick_env("HTTP_PROXY", "http_proxy", "SHERPA_GIT_HTTP_PROXY", "SHERPA_DOCKER_HTTP_PROXY")
+    https_proxy = _pick_env("HTTPS_PROXY", "https_proxy", "SHERPA_GIT_HTTPS_PROXY", "SHERPA_DOCKER_HTTPS_PROXY")
+    all_proxy = _pick_env("ALL_PROXY", "all_proxy")
+    no_proxy = _pick_env("NO_PROXY", "no_proxy", "SHERPA_GIT_NO_PROXY", "SHERPA_DOCKER_NO_PROXY")
+
+    if http_proxy:
+        env["HTTP_PROXY"] = http_proxy
+        env["http_proxy"] = http_proxy
+    if https_proxy:
+        env["HTTPS_PROXY"] = https_proxy
+        env["https_proxy"] = https_proxy
+    if all_proxy:
+        env["ALL_PROXY"] = all_proxy
+        env["all_proxy"] = all_proxy
+    if no_proxy:
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
 def _candidate_clone_urls(url: str) -> List[str]:
     """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
@@ -3525,35 +3556,53 @@ class NonOssFuzzHarnessGenerator:
             attempted: List[str] = []
             for clone_url in _candidate_clone_urls(spec.url):
                 attempted.append(clone_url)
-                try:
-                    if dest.exists():
-                        shutil.rmtree(dest, ignore_errors=True)
-                except Exception:
-                    pass
-
                 print(f"[*] (host/git) Cloning {clone_url} → {dest}")
-                proxy_overrides = _host_git_proxy_override_args()
-                if proxy_overrides:
-                    print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
-                clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
-                print(f"[*] ➜  {' '.join(clone_cmd)}")
-                rc, out, err, timed_out = _run_cmd_capture(clone_cmd, timeout=GIT_HOST_CLONE_TIMEOUT_SEC)
-                last_rc = rc
-                if timed_out:
+                clone_success = False
+                for attempt in range(1, max(1, GIT_CLONE_RETRIES) + 1):
+                    try:
+                        if dest.exists():
+                            shutil.rmtree(dest, ignore_errors=True)
+                    except Exception:
+                        pass
+
+                    proxy_overrides = _host_git_proxy_override_args()
+                    if proxy_overrides:
+                        print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
+                    clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
+                    print(f"[*] ➜  {' '.join(clone_cmd)}")
+                    rc, out, err, timed_out = _run_cmd_capture(
+                        clone_cmd,
+                        timeout=GIT_HOST_CLONE_TIMEOUT_SEC,
+                        env=_host_git_proxy_env(),
+                    )
+                    last_rc = rc
+
+                    if timed_out:
+                        if (t := _tail_lines(err)):
+                            print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(out)):
+                            print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                        print(
+                            f"[warn] (host/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_HOST_CLONE_TIMEOUT_SEC}s); retrying..."
+                        )
+                        time.sleep(2 * attempt)
+                        continue
+
+                    if rc == 0:
+                        clone_success = True
+                        break
+
                     if (t := _tail_lines(err)):
                         print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
                     if (t := _tail_lines(out)):
                         print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
                     print(
-                        f"[warn] (host/git) clone timed out after {GIT_HOST_CLONE_TIMEOUT_SEC}s (url={clone_url}); retrying next URL..."
+                        f"[warn] (host/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    continue
-                if rc == 0:
+                    time.sleep(2 * attempt)
+
+                if clone_success:
                     break
-                if (t := _tail_lines(err)):
-                    print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
-                if (t := _tail_lines(out)):
-                    print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
             if last_rc != 0 or not dest.exists():
                 raise HarnessGeneratorError(
                     "git clone failed on host. "
@@ -3565,7 +3614,7 @@ class NonOssFuzzHarnessGenerator:
                 proxy_overrides = _host_git_proxy_override_args()
                 checkout_cmd = ["git", *proxy_overrides, "-C", str(dest), "checkout", spec.ref]
                 print(f"[*] ➜  {' '.join(checkout_cmd)}")
-                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd)
+                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd, env=_host_git_proxy_env())
                 if crc != 0:
                     if (t := _tail_lines(cerr)):
                         print("[warn] (host/git) checkout stderr (tail):\n" + textwrap.indent(t, "    "))
@@ -3573,7 +3622,7 @@ class NonOssFuzzHarnessGenerator:
                         print("[warn] (host/git) checkout stdout (tail):\n" + textwrap.indent(t, "    "))
                     fetch_cmd = ["git", *proxy_overrides, "-C", str(dest), "fetch", "origin", spec.ref]
                     print(f"[*] ➜  {' '.join(fetch_cmd)}")
-                    frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd)
+                    frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd, env=_host_git_proxy_env())
                     if frc != 0:
                         if (t := _tail_lines(ferr)):
                             print("[warn] (host/git) fetch stderr (tail):\n" + textwrap.indent(t, "    "))
@@ -3582,7 +3631,7 @@ class NonOssFuzzHarnessGenerator:
                         raise HarnessGeneratorError(f"git fetch failed on host (rc={frc}).")
                     checkout_fh = ["git", *proxy_overrides, "-C", str(dest), "checkout", "FETCH_HEAD"]
                     print(f"[*] ➜  {' '.join(checkout_fh)}")
-                    c2rc, c2out, c2err, _ = _run_cmd_capture(checkout_fh)
+                    c2rc, c2out, c2err, _ = _run_cmd_capture(checkout_fh, env=_host_git_proxy_env())
                     if c2rc != 0:
                         if (t := _tail_lines(c2err)):
                             print("[warn] (host/git) checkout FETCH_HEAD stderr (tail):\n" + textwrap.indent(t, "    "))
