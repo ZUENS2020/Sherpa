@@ -1,44 +1,33 @@
-# Sherpa K8s 迁移清单（最终口径）
+# K8s 迁移检查清单
 
-## 里程碑状态
+本清单按当前代码状态维护，目的是确认线上执行链是否仍然与仓库实现一致。
 
-- [x] M1：基础设施与路由
-- [x] M2：执行链路去 inner Docker（k8s native）
-- [x] M3：SQLite -> Postgres
-- [x] M4：可观测性与发布门禁
+## 已完成
 
-## M1 基础设施
+- [x] stage-per-job 调度
+- [x] Postgres 持久化
+- [x] `coverage-analysis` / `improve-harness`
+- [x] `re-build` / `re-run`
+- [x] `repro_context.json` 持久化 crash 上下文
+- [x] k8s worker 原生执行 `opencode`
+- [x] `run` typed seed bootstrap
+- [x] `plan` 产出 `target_analysis.json`
+- [x] `targets.json` 强制 `target_type + seed_profile`
 
-- [x] Ingress 路由：`/` -> frontend，`/api/*` -> web
-- [x] ConfigMap/Secret 外置化
-- [x] PVC 共享目录定义与挂载
+## 持续验证项
 
-## M2 执行链路
+- [ ] target 深度排序是否足够稳定
+- [ ] plateau 后最后一轮预算收口是否总能正常停止
+- [ ] `fix_build` 规则修复覆盖更多链接错误与 build system 变体
+- [ ] `repo_examples` 过滤是否仍会混入低价值文件
 
-- [x] 执行器固定 `k8s_job`
-- [x] 多阶段多 Job：`plan/synthesize/build/run`
-- [x] 阶段结果回传与上下文续跑（`repo_root + resume_from_step`）
-- [x] stop 清理阶段 Job 列表
+## 每次部署后建议验收
 
-## M3 数据层
-
-- [x] `DATABASE_URL` 必填
-- [x] Job 状态落库
-- [x] 恢复与幂等路径稳定
-
-## M4 可观测与发布
-
-- [x] API 统一可观测字段
-- [x] k8s runbook/release gate 文档化
-- [x] zlib E2E 验收流程文档化
-
-## 验收图
-
-```mermaid
-flowchart TD
-  A["提交任务"] --> B["plan job"]
-  B --> C["synthesize job"]
-  C --> D["build job"]
-  D --> E["run job"]
-  E --> F["落库 + 可观测字段"]
-```
+1. 跑一条 `libyaml`
+2. 跑一条 `zlib`
+3. 检查：
+- `run_summary.json`
+- 是否有 `seed_profile`
+- 是否有 `corpus_sources`
+- `coverage_loop.stop_reason`
+- 是否没有无限空转到 dispatch limit

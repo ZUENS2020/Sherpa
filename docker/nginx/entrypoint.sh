@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CERT_DIR="/etc/nginx/certs"
+CERT_DIR="${CERT_DIR:-/tmp/nginx-certs}"
 CERT_FILE="${CERT_DIR}/sherpa-gateway.crt"
 KEY_FILE="${CERT_DIR}/sherpa-gateway.key"
 TLS_HOST="${SHERPA_GATEWAY_TLS_HOST:-sherpa-gateway.sherpa.orb.local}"

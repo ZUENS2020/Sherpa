@@ -381,10 +381,7 @@ def test_build_opencode_runtime_config_uses_local_mcp_command_array():
         ]
     )
     payload = build_opencode_runtime_config(cfg)
-    mcp = payload.get("mcp", {})
-    gitnexus = mcp.get("gitnexus", {})
-    assert gitnexus.get("type") == "local"
-    assert gitnexus.get("command") == ["gitnexus", "mcp"]
+    assert "mcp" not in payload
 
 
 def test_task_submit_no_auto_init_is_successful_and_does_not_crash(monkeypatch):

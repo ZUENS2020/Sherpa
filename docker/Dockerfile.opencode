@@ -1,8 +1,9 @@
 # OpenCode runner image (separate from web UI)
-ARG OPENCODE_BASE_IMAGE=m.daocloud.io/docker.io/library/node:20-slim
+ARG OPENCODE_BASE_IMAGE=node:20-slim
 FROM ${OPENCODE_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/opencode \
     NPM_CONFIG_REGISTRY="https://registry.npmmirror.com" \
     NPM_CONFIG_FETCH_RETRIES=5 \
     NPM_CONFIG_FETCH_RETRY_FACTOR=2 \
@@ -34,6 +35,9 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -g 10001 opencode \
+    && useradd -m -d /home/opencode -u 10001 -g 10001 -s /bin/bash opencode
+
 RUN set -eux; \
     npm config set registry "$NPM_CONFIG_REGISTRY"; \
     npm config set fetch-retries "$NPM_CONFIG_FETCH_RETRIES"; \
@@ -41,7 +45,7 @@ RUN set -eux; \
     npm config set fetch-retry-mintimeout "$NPM_CONFIG_FETCH_RETRY_MINTIMEOUT"; \
     npm config set fetch-retry-maxtimeout "$NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT"; \
     npm config set fetch-timeout "$NPM_CONFIG_FETCH_TIMEOUT"; \
-    for pkg in opencode-ai gitnexus; do \
+    for pkg in opencode-ai; do \
       ok=0; \
       for attempt in 1 2 3; do \
         echo "[npm] installing $pkg (attempt $attempt/3)"; \
@@ -57,14 +61,14 @@ RUN set -eux; \
       fi; \
     done; \
     command -v opencode; \
-    command -v gitnexus; \
-    opencode --version; \
-    gitnexus --version
+    opencode --version
 
 # Create opencode config with Qwen models (simplified format without $schema)
-RUN mkdir -p /root/.opencode && \
+RUN mkdir -p /home/opencode/.opencode && \
     echo '{"provider":{"openrouter":{"models":{"qwen/qwen3-max-thinking":{},"qwen/qwen3-max":{},"qwen/qwen3-coder-plus":{}}}}}' \
-    > /root/.opencode/config.json
+    > /home/opencode/.opencode/config.json && \
+    chown -R 10001:10001 /home/opencode /repo
 
 WORKDIR /repo
+USER 10001:10001
 CMD ["opencode", "run"]

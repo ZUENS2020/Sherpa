@@ -13,13 +13,81 @@ spec:
         app: sherpa-web
     spec:
       serviceAccountName: sherpa-web
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: runtime-permissions
+          image: sherpa-web:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -lc
+            - |
+              set -eu
+              for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do
+                mkdir -p "$d"
+                chown 10001:10001 "$d" || true
+                chmod 0777 "$d" || true
+                find "$d" -mindepth 1 -exec chown 10001:10001 {} + || true
+                find "$d" -mindepth 1 -exec chmod a+rwX {} + || true
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+            - name: job-logs
+              mountPath: /app/job-logs
+            - name: shared-tmp
+              mountPath: /shared/tmp
+            - name: shared-output
+              mountPath: /shared/output
+            - name: oss-fuzz
+              mountPath: /shared/oss-fuzz
       containers:
         - name: web
           image: sherpa-web:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8001
               name: http
+          env:
+            - name: SHERPA_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: SHERPA_K8S_NODE_PROXY_PORT
+              value: "6789"
+            - name: HTTP_PROXY
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: HTTPS_PROXY
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: ALL_PROXY
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: NO_PROXY
+              value: "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc"
+            - name: http_proxy
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: https_proxy
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: all_proxy
+              value: "http://$(SHERPA_NODE_IP):$(SHERPA_K8S_NODE_PROXY_PORT)"
+            - name: no_proxy
+              value: "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc"
           envFrom:
             - configMapRef:
                 name: sherpa-config
@@ -39,6 +107,13 @@ spec:
               port: 8001
             initialDelaySeconds: 20
             periodSeconds: 10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
           volumeMounts:
             - name: config
               mountPath: /app/config

@@ -159,6 +159,7 @@ def _append_opencode_metadata(repo_root: Path, payload: dict) -> None:
 
 def _build_blocklist() -> list[str]:
     # Default: block build/test/fuzz/run commands but allow read-only tools.
+    always_allow = {"grep", "egrep", "fgrep", "rg", "ripgrep"}
     default = [
         "make",
         "cmake",
@@ -203,7 +204,7 @@ def _build_blocklist() -> list[str]:
     }
     merged = []
     for c in default + extra:
-        if c and c not in allow and c not in merged:
+        if c and c not in allow and c not in always_allow and c not in merged:
             merged.append(c)
     return merged
 
@@ -251,6 +252,12 @@ def _docker_opencode_image() -> str:
     return os.environ.get("SHERPA_OPENCODE_DOCKER_IMAGE", "").strip()
 
 
+def _opencode_container_mode_enabled() -> bool:
+    if (os.environ.get("SHERPA_EXECUTOR_MODE", "") or "").strip().lower() == "k8s_job":
+        return False
+    return bool(_docker_opencode_image())
+
+
 def _opencode_auto_build_enabled() -> bool:
     return _bool_env("SHERPA_OPENCODE_AUTO_BUILD", True)
 
@@ -287,7 +294,6 @@ def _opencode_base_image_candidates() -> list[str]:
                 out.append(v)
         return out
     return [
-        "m.daocloud.io/docker.io/library/node:20-slim",
         "node:20-slim",
     ]
 
@@ -350,14 +356,6 @@ def _run_streaming_combined(
     output_for_scan = "".join(scan_buf)
     output_tail = "\n".join(tail_buf)
     return rc, output_for_scan, output_tail
-
-
-def _gitnexus_auto_analyze_enabled() -> bool:
-    return _bool_env("SHERPA_GITNEXUS_AUTO_ANALYZE", True)
-
-
-def _gitnexus_skip_embeddings() -> bool:
-    return _bool_env("SHERPA_GITNEXUS_SKIP_EMBEDDINGS", True)
 
 
 def _opencode_repo_slug(working_dir: Path) -> str:
@@ -566,7 +564,7 @@ def _build_opencode_cmd(
     working_dir: Path,
     env: dict,
 ) -> list[str]:
-    image = _docker_opencode_image()
+    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
     if not image:
         return [cli_exe] + argv
 
@@ -810,133 +808,6 @@ class CodexHelper:
             return f"{diff_text}\n\n=== status ===\n{status_text}"
         return diff_text or status_text
 
-    def _maybe_prepare_gitnexus_context(self) -> None:
-        """Best-effort: build GitNexus index snapshot for OpenCode MCP usage.
-
-        To avoid polluting the mutable working repository (which affects diff-based
-        success detection), we copy the current working tree into a persistent
-        snapshot under SHERPA_OUTPUT_DIR and analyze that snapshot instead.
-        """
-        if not _gitnexus_auto_analyze_enabled():
-            return
-
-        image = _docker_opencode_image()
-        if not image:
-            return
-
-        env = os.environ.copy()
-        _ensure_opencode_image(image, env)
-
-        shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
-        if not shared_out:
-            LOGGER.warning(
-                "[OpenCodeHelper] GitNexus auto analyze skipped: SHERPA_OUTPUT_DIR is empty"
-            )
-            return
-
-        snapshot_root_raw = (
-            env.get("SHERPA_GITNEXUS_SNAPSHOT_ROOT", "").strip()
-            or f"{shared_out.rstrip('/')}/.gitnexus-snapshots"
-        )
-        snapshot_root = Path(snapshot_root_raw)
-        snapshot_root.mkdir(parents=True, exist_ok=True)
-
-        repo_key = hashlib.sha1(
-            str(self.working_dir.resolve()).encode("utf-8", errors="replace")
-        ).hexdigest()[:16]
-        snapshot_dir = snapshot_root / f"repo-{repo_key}"
-
-        if snapshot_dir.exists():
-            shutil.rmtree(snapshot_dir, ignore_errors=True)
-        shutil.copytree(
-            self.working_dir,
-            snapshot_dir,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".gitnexus"),
-        )
-
-        # Preserve uncommitted state in snapshot by creating a local commit.
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "config", "user.email", "sherpa@example.com"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "config", "user.name", "sherpa"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "add", "-A"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(snapshot_dir), "commit", "--allow-empty", "-m", "sherpa gitnexus snapshot"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-        )
-
-        home_dir = _resolve_opencode_home_dir(shared_out)
-        clean_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{shared_out}:{shared_out}",
-            "-e",
-            f"HOME={home_dir}",
-            image,
-            "gitnexus",
-            "clean",
-            "--all",
-            "--force",
-        ]
-        subprocess.run(
-            clean_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            text=True,
-            env=env,
-        )
-
-        analyze_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{shared_out}:{shared_out}",
-            "-w",
-            str(snapshot_dir),
-            "-e",
-            f"HOME={home_dir}",
-            image,
-            "gitnexus",
-            "analyze",
-            str(snapshot_dir),
-        ]
-        if not _gitnexus_skip_embeddings():
-            analyze_cmd.append("--embeddings")
-
-        rc, _scan, tail = _run_streaming_combined(analyze_cmd, env=env)
-        if rc != 0:
-            LOGGER.warning(
-                "[OpenCodeHelper] GitNexus analyze failed (non-fatal, rc=%s). Tail:\n%s",
-                rc,
-                tail,
-            )
-        else:
-            LOGGER.info("[OpenCodeHelper] GitNexus snapshot analyzed: %s", snapshot_dir)
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1084,7 +955,7 @@ class CodexHelper:
             tasks = str(instructions)
 
         repo_root = str(self.working_dir.resolve())
-        if _docker_opencode_image():
+        if _opencode_container_mode_enabled():
             repo_path_hint = "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output)."
         else:
             repo_path_hint = (
@@ -1095,14 +966,13 @@ class CodexHelper:
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
             repo_path_hint,
-            "GitNexus MCP tooling is available for codebase dependency/call-flow analysis; use it before guessing architecture details.",
             "Apply the edits requested below. Avoid refactors and unrelated changes.",
             "IMPORTANT ENV NOTE: The build/fuzz runtime environment is a separate container managed by the workflow, "
             "not this OpenCode execution environment. Do not infer runtime availability from this environment.",
             "Typical runtime images are sherpa-fuzz-cpp:latest or sherpa-fuzz-java:latest; "
             "OpenCode must only edit source files and must not attempt runtime verification.",
             "CRITICAL RULE: You MUST NOT execute build/test/fuzz commands or run binaries. "
-            "Read-only commands (rg, ls, cat, find, sed) are allowed for inspection. "
+            "Read-only commands (grep, egrep, fgrep, rg, ripgrep, ls, cat, find, sed) are allowed for inspection. "
             "Your ONLY job is to create and edit source files. "
             "Do NOT run cmake, make, gcc, clang, python, cargo, javac, mvn, gradle, npm, or similar build/run tools. "
             "The build and test steps are handled by a separate automated system. "
@@ -1136,11 +1006,6 @@ class CodexHelper:
         # ----------------------------------------------------------------
         # Outer loop – retry full patch attempt if no diff produced.
         # ----------------------------------------------------------------
-        try:
-            self._maybe_prepare_gitnexus_context()
-        except Exception as e:
-            LOGGER.warning("[OpenCodeHelper] GitNexus pre-analysis skipped (non-fatal): %s", e)
-
         for attempt in range(1, max_attempts + 1):
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 
@@ -1201,7 +1066,7 @@ class CodexHelper:
                                 break
 
                 # If we're using a dedicated opencode container, default to docker CLI.
-                if _docker_opencode_image():
+                if _opencode_container_mode_enabled():
                     cli_exe = "docker"
 
                 if cli_exe is None:
@@ -1221,7 +1086,7 @@ class CodexHelper:
                     ),
                 )
                 run_name = ""
-                if _docker_opencode_image():
+                if _opencode_container_mode_enabled():
                     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.working_dir.name or "repo").strip("-") or "repo"
                     run_name = f"sherpa-opencode-{slug}-{os.getpid()}-{int(time.time())}-{cli_try}-{attempt}".lower()
                     env["SHERPA_OPENCODE_RUN_NAME"] = run_name
@@ -1234,7 +1099,7 @@ class CodexHelper:
 
                 try:
                     _apply_opencode_exec_policy(env)
-                    image = _docker_opencode_image()
+                    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
                     if image:
                         _ensure_opencode_image(image, env)
                     full_cmd = _build_opencode_cmd(cli_exe, cmd, self.working_dir, env)
@@ -1244,7 +1109,7 @@ class CodexHelper:
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        env=None if _docker_opencode_image() else env,
+                        env=None if _opencode_container_mode_enabled() else env,
                         text=True,
                         errors="replace",
                     )

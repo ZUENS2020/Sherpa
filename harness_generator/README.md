@@ -1,129 +1,130 @@
-# OSS-Fuzz Harness Generation Toolkit
+# Harness Generator Backend
 
-The **Harness Generation Toolkit** automates the workflow of adding new fuzz
-harnesses and running them end-to-end. It supports two modes:
+`harness_generator/` 是 Sherpa 的后端实现目录，包含 Web API、stage worker、工作流状态机、OpenCode 封装以及非 OSS-Fuzz 仓库处理逻辑。
 
-- **OSS-Fuzz mode** (traditional OSS-Fuzz projects)
-- **Non-OSS-Fuzz mode** (local workflow for arbitrary Git repos)
+当前线上主路径是：
 
----
+- `FastAPI + Postgres + Kubernetes stage jobs`
+- 非 OSS-Fuzz workflow
+- `OpenCode` 原生运行于 k8s worker
 
-## Contents
+## 目录结构
 
-```
-harness-generator/
-├── batch_generate.py          # batch driver (multiple targets)
-├── src/                       # Python package with core logic
-│   ├── codex_helper.py        # OpenCode CLI wrapper (sentinel + retry logic)
-│   ├── harness_generator.py   # OSS-Fuzz orchestrator
-│   └── fuzz_unharnessed_repo.py  # Non-OSS-Fuzz local workflow
-└── scripts/                   # triage & reporting utilities
-    ├── sort_jobs.py
-    ├── summarize.py
-    ├── generate_reports.py
-    └── gather_reports.py
-```
-
----
-
-## 1. Non-OSS-Fuzz Workflow (Local)
-
-The default Web API uses this path. It:
-1. Plan target APIs (`fuzz/PLAN.md`, `fuzz/targets.json`)
-2. Synthesize harness + `fuzz/build.py`
-3. Build (auto-fix if failed)
-4. Run fuzzers
-5. Analyze crash, generate reports and optional fix patch
-
-### Output Files (repo root)
-- `crash_info.md`
-- `crash_analysis.md`
-- `reproduce.py`
-- `fix.patch` / `fix_summary.md` (if fix step is triggered)
-- `run_summary.md` / `run_summary.json`
-- `challenge_bundle*/`, `false_positive*/`, or `unreproducible*/`
-
-### Output Root
-You can force all outputs into a single host directory via:
-```
-SHERPA_OUTPUT_DIR=/path/to/output
-```
-Each run creates its own subfolder `<repo>-<8位id>/` under that root.
-
-### Run a single repo (local workflow)
-```
-python -m src.fuzz_unharnessed_repo --repo https://github.com/user/repo.git \
-  --time-budget 900 --max-len 1024 --docker-image auto
+```text
+harness_generator/
+├── src/
+│   ├── codex_helper.py
+│   ├── fuzz_unharnessed_repo.py
+│   └── langchain_agent/
+│       ├── main.py
+│       ├── workflow_graph.py
+│       ├── workflow_common.py
+│       ├── workflow_summary.py
+│       └── prompts/
+├── docs/
+└── README.md
 ```
 
----
+## 当前主职责
 
-## 2. OSS-Fuzz Workflow
+### `src/langchain_agent/main.py`
+- 提供 FastAPI API
+- 调度 stage job
+- 记录任务、子任务、日志与状态
+- 根据 `workflow_recommended_next` 决定下一阶段，而不是固定死链路
 
-`harness_generator.py` targets a **local OSS-Fuzz checkout** and automates:
-1. Baseline build
-2. Harness creation
-3. Rebuild with retries
-4. Seed generation
-5. Fuzzer run + crash analysis
+### `src/langchain_agent/workflow_graph.py`
+- 定义工作流节点与路由
+- 当前节点包括：
+  - `init`
+  - `plan`
+  - `synthesize`
+  - `build`
+  - `fix_build`
+  - `run`
+  - `coverage-analysis`
+  - `improve-harness`
+  - `re-build`
+  - `re-run`
+  - `fix_crash`
+- 负责：
+  - `targets.json` schema 校验
+  - coverage loop
+  - env rebuild build rerun
+  - plateau 收口
+  - replan 有效性校验
 
-### Run a single OSS-Fuzz project
-```
-python -m src.harness_generator <project> <path/to/oss-fuzz/checkout> <key.env> \
-  --sanitizer address --codex-cli opencode --max-retries 3
-```
+### `src/fuzz_unharnessed_repo.py`
+- 仓库 clone、build、run 的底层执行
+- seed bootstrap 三段式实现
+- repo examples 过滤
+- OpenCode scaffolding passes
+- 本地 build/run 命令执行与日志解析
 
----
+### `src/codex_helper.py`
+- OpenCode CLI 调用封装
+- sentinel 与 idle timeout
+- 原生 `opencode` 执行
+- 对只读命令（含 `grep/rg`）的白名单控制
 
-## 3. Batch Generation
+## 当前数据产物
 
-`batch_generate.py` reads YAML describing multiple targets and runs the workflow
-multiple rounds per repo.
+任务输出目录典型内容：
 
-```
-python batch_generate.py --targets ./yamls/c-projects.yaml --threads 32 --rounds 8
-```
+- `fuzz/PLAN.md`
+- `fuzz/targets.json`
+- `fuzz/target_analysis.json`
+- `fuzz/build.py`
+- `fuzz/*.cc`
+- `fuzz/corpus/<fuzzer>/`
+- `run_summary.json`
+- `repro_context.json`
+- `.repro_crash/`
 
-Outputs are stored under `./jobs/<project>_<uuid>/` by default.
+## 当前关键约束
 
----
+### 1. Target 元数据
+`fuzz/targets.json` 当前要求每个 target 至少包含：
 
-## 4. Triage & Reporting Utilities
+- `name`
+- `api`
+- `lang`
+- `target_type`
+- `seed_profile`
 
-| Script | Purpose |
-|--------|---------|
-| `sort_jobs.py` | Move each job directory into `./sorted/<bucket>` |
-| `generate_reports.py` | Create disclosure-style `bug_report.md` |
-| `gather_reports.py` | Collect artifacts into `./sorted/reports/` |
-| `summarize.py` | Markdown summary of jobs |
+### 2. Seed profile
+当前固定枚举：
 
----
+- `parser-structure`
+- `parser-token`
+- `parser-format`
+- `parser-numeric`
+- `decoder-binary`
+- `archive-container`
+- `serializer-structured`
+- `document-text`
+- `network-message`
+- `generic`
 
-## 5. Requirements
+### 3. Coverage loop
+- plateau 后先做当前 target 的 in-place improve
+- 连续无收益且预算允许才 replan
+- replan 必须有实质变化，否则停止
 
-- Docker + OSS-Fuzz build dependencies (for OSS-Fuzz mode)
-- OpenCode CLI in `$PATH` (or specify `--codex-cli`)
-- OpenAI-compatible API key via `OPENAI_API_KEY` or `.env` file
-- Python ≥ 3.9
+### 4. Build resilience
+- `max_fix_rounds`
+- `same_error_max_retries`
+- `error_signature_before/after`
+- `requires_env_rebuild`
+- quick-check build
 
----
+## 当前与历史实现的差异
 
-## 6. Notes
+旧版实现里曾存在：
+- inner Docker OpenCode
+- 固定阶段尾序列
+- 无 `seed_profile`
+- 无 `target_analysis.json`
+- plateau 后直接反复回 `plan`
 
-- Crash analysis marks **HARNESS ERROR** for false positives
-- Fix patches are recorded as `fix.patch` whenever the fix step runs
-- `run_summary.md/json` provides a compact per-run summary for automation
-
-### Domestic network mirrors
-- Node.js: `https://npmmirror.com/mirrors/node`
-- npm registry: `https://registry.npmmirror.com`
-- pip index: `https://pypi.tuna.tsinghua.edu.cn/simple`
-- APT mirrors (TUNA): `http://mirrors.tuna.tsinghua.edu.cn`
-- Git clone default: `https://github.com/`（可通过环境变量覆盖为企业镜像）
-
-### OpenCode safety
-By default, `SHERPA_OPENCODE_NO_EXEC=1` blocks build/run commands during OpenCode runs. Only read-only inspection commands are permitted.
-
-### Split OpenCode container
-The Web UI runs without OpenCode installed. OpenCode is executed inside a separate image:
-- `SHERPA_OPENCODE_DOCKER_IMAGE=sherpa-opencode:latest`
+这些都不是当前主线行为。请以当前代码和本文档为准。

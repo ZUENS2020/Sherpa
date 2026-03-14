@@ -14,6 +14,30 @@ from persistent_config import load_config
 
 _DEFAULT_TIME_BUDGET_SEC = 900
 _UNLIMITED_TIME_BUDGET_SENTINEL_SEC = 2_147_483_647
+ALLOWED_TARGET_TYPES = {
+    "parser",
+    "decoder",
+    "archive",
+    "image",
+    "document",
+    "network",
+    "database",
+    "serializer",
+    "interpreter",
+    "generic",
+}
+ALLOWED_SEED_PROFILES = {
+    "parser-structure",
+    "parser-token",
+    "parser-format",
+    "parser-numeric",
+    "decoder-binary",
+    "archive-container",
+    "serializer-structured",
+    "document-text",
+    "network-message",
+    "generic",
+}
 
 
 def parse_budget_value(raw: Any, *, default: int = _DEFAULT_TIME_BUDGET_SEC) -> int:
@@ -88,13 +112,19 @@ def validate_targets_json(repo_root: Path) -> tuple[bool, str]:
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             return False, f"targets[{i}] must be an object"
-        for key in ("name", "api", "lang"):
+        for key in ("name", "api", "lang", "target_type", "seed_profile"):
             val = item.get(key)
             if not isinstance(val, str) or not val.strip():
                 return False, f"targets[{i}].{key} must be a non-empty string"
         lang = str(item.get("lang") or "").strip().lower()
         if lang not in allowed_lang:
             return False, f"targets[{i}].lang unsupported: {item.get('lang')}"
+        target_type = str(item.get("target_type") or "").strip().lower()
+        if target_type not in ALLOWED_TARGET_TYPES:
+            return False, f"targets[{i}].target_type unsupported: {item.get('target_type')}"
+        seed_profile = str(item.get("seed_profile") or "").strip().lower()
+        if seed_profile not in ALLOWED_SEED_PROFILES:
+            return False, f"targets[{i}].seed_profile unsupported: {item.get('seed_profile')}"
     return True, ""
 
 
@@ -202,6 +232,16 @@ def classify_build_failure(
     if build_rc == 0 and not has_fuzzer_binaries:
         return "source", "no_fuzzer_binaries"
 
+    if "no rule to make target" in low:
+        return "source", "build_strategy_mismatch"
+    if "undefined reference to `main'" in low or "undefined reference to main" in low:
+        return "source", "missing_fuzzer_main"
+    if "undefined reference to `llvmfuzzertestoneinput" in low:
+        return "source", "missing_llvmfuzzer_entrypoint"
+    if "cannot find -lz" in low or "cannot find -l" in low:
+        return "source", "missing_link_library"
+    if "undefined reference to `gz" in low or "undefined reference to `inflate" in low:
+        return "source", "missing_link_library"
     if "missing fuzz/build.py" in low:
         return "source", "missing_build_script"
     if any(k in low for k in ["no such file", "cannot find", "not found"]):
@@ -217,6 +257,19 @@ def classify_build_failure(
 
 
 def build_failure_recovery_advice(error_kind: str, error_code: str) -> str:
+    if error_kind == "source":
+        source_recovery: dict[str, str] = {
+            "build_strategy_mismatch": (
+                "Generated build scaffold appears to depend on a repository-provided fuzz target. "
+                "Regenerate or repair fuzz/build.py to build the repository library/objects and "
+                "link the generated harness externally instead of invoking a guessed fuzz target."
+            ),
+            "missing_fuzzer_main": (
+                "Fuzzer main/entrypoint is missing. Add `-fsanitize=fuzzer` or explicitly link a "
+                "repo-provided main source as a normal source input, not as a repository fuzz target."
+            ),
+        }
+        return source_recovery.get(error_code, "")
     if error_kind != "infra":
         return ""
 

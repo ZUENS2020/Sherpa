@@ -38,5 +38,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
+RUN addgroup -S -g 10001 sherpa \
+    && adduser -S -D -H -u 10001 -G sherpa sherpa \
+    && chown -R 10001:10001 /app
+USER 10001:10001
 EXPOSE 3000
 CMD ["node", "server.js"]

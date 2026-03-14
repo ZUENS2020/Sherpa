@@ -89,6 +89,39 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
                     "corpus_size_bytes": 10,
                 }
             ],
+            "coverage_seed_quality": {
+                "initial_corpus_files": 2,
+                "initial_corpus_bytes": 10,
+                "initial_inited_cov": 100,
+                "initial_inited_ft": 200,
+                "early_new_units_30s": 0,
+                "early_new_units_60s": 0,
+                "final_corpus_files": 2,
+                "final_corpus_bytes": 10,
+                "corpus_retention_ratio_files": 1.0,
+                "corpus_retention_ratio_bytes": 1.0,
+                "cov_growth_slope_pre_plateau": 0.0,
+                "ft_growth_slope_pre_plateau": 0.0,
+                "plateau_after_sec": 180,
+                "quality_flags": ["high_homogeneity"],
+            },
+            "coverage_seed_families_required": ["document_markers", "flow_structures"],
+            "coverage_seed_families_covered": ["document_markers"],
+            "coverage_seed_families_missing": ["flow_structures"],
+            "coverage_target_api": "fmt::println",
+            "coverage_seed_counts_raw": {"repo_examples": 2, "ai": 3, "radamsa": 4, "total": 9},
+            "coverage_seed_counts_filtered": {"repo_examples": 1, "ai": 2, "radamsa": 1, "total": 4},
+            "coverage_seed_noise_rejected_count": 5,
+            "coverage_seed_family_coverage": {"covered": ["replacement_fields"], "missing": ["width_precision"]},
+            "synthesize_selected_target_name": "parse_replacement_field_then_tail",
+            "synthesize_selected_target_api": "parse_replacement_field_then_tail",
+            "synthesize_observed_target_api": "fmt::println",
+            "synthesize_observed_harness": "println_fuzz.cc",
+            "synthesize_target_drifted": True,
+            "synthesize_target_drift_reason": "selected target is not a runtime entrypoint",
+            "synthesize_target_relation": "runtime wrapper for same formatting path",
+            "synthesize_target_runtime_viability": "low",
+            "observed_target_path": str(repo_root / "fuzz" / "observed_target.json"),
         }
     )
 
@@ -105,6 +138,12 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert summary["fuzz_inventory"]["fuzzer_count"] == 1
     assert summary["fuzz_inventory"]["corpus_total_files"] == 2
     assert summary["fuzz_inventory"]["artifact_count"] == 1
+    assert summary["seed_quality"]["initial_corpus_files"] == 2
+    assert summary["seed_family_coverage"]["missing"] == ["flow_structures"]
+    assert summary["seed_bootstrap"]["noise_rejected_count"] == 5
+    assert summary["synthesize_target"]["relation"] == "runtime wrapper for same formatting path"
+    assert summary["observed_target_path"].endswith("fuzz/observed_target.json")
+    assert summary["coverage_loop"]["target_api"] == "fmt::println"
     assert summary["build_error_kind"] == ""
     assert summary["build_error_code"] == ""
     assert len(summary["run_details"]) == 1

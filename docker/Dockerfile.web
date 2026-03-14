@@ -47,6 +47,29 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+ARG RADAMSA_VERSION="0.7"
+RUN set -e; \
+    if apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+       && apt-get install -y --no-install-recommends radamsa; then \
+      command -v radamsa >/dev/null; \
+      rm -rf /var/lib/apt/lists/*; \
+      exit 0; \
+    fi; \
+    echo "[warn] apt radamsa install failed, building from source"; \
+    rm -rf /var/lib/apt/lists/*; \
+    workdir="$(mktemp -d)"; \
+    curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
+      -fsSL "https://gitlab.com/akihe/radamsa/-/archive/v${RADAMSA_VERSION}/radamsa-v${RADAMSA_VERSION}.tar.gz" \
+      -o "${workdir}/radamsa.tar.gz"; \
+    tar -xzf "${workdir}/radamsa.tar.gz" -C "${workdir}"; \
+    cd "${workdir}/radamsa-v${RADAMSA_VERSION}"; \
+
+    make; \
+    install -m 0755 bin/radamsa /usr/local/bin/radamsa; \
+    cd /; \
+    rm -rf "${workdir}"; \
+    command -v radamsa >/dev/null
+
 # Toolchain smoke check: fail image build early if fuzz sanitizer runtime is incomplete.
 RUN set -e; \
     command -v clang++ >/dev/null; \
@@ -97,6 +120,12 @@ RUN python -m pip install -r /app/docker/requirements.web.txt
 
 COPY . /app
 
+RUN set -e; \
+    groupadd --system --gid 10001 sherpa; \
+    useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/sherpa sherpa; \
+    mkdir -p /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; \
+    chown -R 10001:10001 /app /home/sherpa /shared/tmp /shared/output /shared/oss-fuzz
+
 # Optional: install OpenCode CLI. This requires network access during build.
 # If you cannot reach external package registries from your build environment, rebuild with:
 #   --build-arg INSTALL_OPENCODE=0
@@ -122,13 +151,16 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
             selected=""; \
             for r in $NPM_REGISTRY_CANDIDATES; do \
+              echo "[npm] probing registry: $r"; \
               if npm --fetch-timeout=12000 --loglevel=error --registry "$r" view lodash version >/dev/null 2>&1; then \
                 selected="$r"; \
+                echo "[npm] selected registry: $selected"; \
                 break; \
               fi; \
             done; \
             if [ -z "$selected" ]; then \
               selected="$NPM_CONFIG_REGISTRY"; \
+              echo "[npm] probe failed; fallback registry: $selected"; \
             fi; \
             npm config set registry "$selected"; \
             npm config set fetch-retries 5; \
@@ -136,7 +168,21 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             npm config set fetch-retry-mintimeout 2000; \
             npm config set fetch-retry-maxtimeout 30000; \
             npm config set fetch-timeout 180000; \
-            npm i -g opencode-ai; \
+            ok=0; \
+            for attempt in 1 2 3; do \
+              echo "[npm] installing opencode-ai (attempt $attempt/3)"; \
+              if npm i -g --loglevel=info opencode-ai; then \
+                ok=1; \
+                echo "[npm] installed opencode-ai"; \
+                break; \
+              fi; \
+              echo "[npm] failed to install opencode-ai on attempt $attempt/3"; \
+              sleep $((attempt * 2)); \
+            done; \
+            if [ "$ok" -ne 1 ]; then \
+              echo "[npm] failed to install opencode-ai after retries"; \
+              exit 1; \
+            fi; \
             opencode --version || true; \
         else \
             echo "Skipping OpenCode CLI install"; \
@@ -144,6 +190,9 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
 
 # Run the FastAPI API backend from its folder so relative imports work.
 WORKDIR /app/harness_generator/src/langchain_agent
+
+ENV HOME=/home/sherpa
+USER 10001:10001
 
 EXPOSE 8001
 

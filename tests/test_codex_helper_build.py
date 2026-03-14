@@ -141,3 +141,47 @@ def test_run_streaming_combined_redacts_output(monkeypatch: pytest.MonkeyPatch):
     assert "sk-out-secret" not in scan
     assert "sk-out-secret" not in tail
     assert "OPENAI_API_KEY=***" in scan
+
+
+def test_opencode_k8s_job_forces_native_even_with_docker_image(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "k8s_job")
+    monkeypatch.setenv("SHERPA_OPENCODE_DOCKER_IMAGE", "sherpa-opencode:latest")
+
+    assert ch._opencode_container_mode_enabled() is False
+    assert ch._build_opencode_cmd("opencode", ["run", "prompt"], Path("/tmp/repo"), {}) == [
+        "opencode",
+        "run",
+        "prompt",
+    ]
+
+
+def test_opencode_non_k8s_keeps_container_mode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_EXECUTOR_MODE", "docker")
+    monkeypatch.setenv("SHERPA_OPENCODE_DOCKER_IMAGE", "sherpa-opencode:latest")
+
+    env = {
+        "SHERPA_OUTPUT_DIR": "/shared/output",
+        "OPENCODE_CONFIG": "/app/config/opencode.generated.json",
+    }
+    cmd = ch._build_opencode_cmd("opencode", ["run", "prompt"], Path("/tmp/repo"), env)
+
+    assert ch._opencode_container_mode_enabled() is True
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert "sherpa-opencode:latest" in cmd
+
+
+def test_build_blocklist_never_blocks_grep_family(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "SHERPA_OPENCODE_BLOCKLIST",
+        "grep,egrep,fgrep,rg,ripgrep,make,python",
+    )
+
+    blocked = ch._build_blocklist()
+
+    assert "make" in blocked
+    assert "python" in blocked
+    assert "grep" not in blocked
+    assert "egrep" not in blocked
+    assert "fgrep" not in blocked
+    assert "rg" not in blocked
+    assert "ripgrep" not in blocked

@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shutil
+import resource
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 import threading
@@ -27,6 +28,7 @@ from persistent_config import (
     apply_config_to_env,
     as_public_dict,
     list_opencode_provider_models_resolved,
+    normalize_model_for_opencode,
     opencode_env_path,
     opencode_runtime_config_path,
     load_config,
@@ -112,6 +114,13 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
         _CFG = cfg
 
 
+def _normalized_opencode_model_value(raw_model: object) -> str:
+    value = str(raw_model or "").strip()
+    if not value:
+        return ""
+    return normalize_model_for_opencode(value, cfg=_cfg_get())
+
+
 def _track_job_future(job_id: str, future: Future) -> None:
     with _JOB_FUTURES_LOCK:
         _JOB_FUTURES[job_id] = future
@@ -147,6 +156,136 @@ def _cancel_job_future(job_id: str) -> bool:
         return bool(cancel_fn())
     except Exception:
         return False
+
+
+def _read_text_if_exists(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _read_int_if_exists(path: str) -> int | None:
+    raw = _read_text_if_exists(path)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _cgroup_memory_status() -> dict[str, object]:
+    current = _read_int_if_exists("/sys/fs/cgroup/memory.current")
+    limit_raw = _read_text_if_exists("/sys/fs/cgroup/memory.max")
+    oom_kill_count = None
+    events_raw = _read_text_if_exists("/sys/fs/cgroup/memory.events")
+
+    if current is None:
+        current = _read_int_if_exists("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if not limit_raw:
+        limit_raw = _read_text_if_exists("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if events_raw:
+        for line in events_raw.splitlines():
+            key, _, value = line.partition(" ")
+            if key.strip() == "oom_kill":
+                try:
+                    oom_kill_count = int(value.strip())
+                except Exception:
+                    pass
+                break
+
+    limit_bytes = None
+    if limit_raw and limit_raw != "max":
+        try:
+            parsed_limit = int(limit_raw)
+            if parsed_limit < (1 << 60):
+                limit_bytes = parsed_limit
+        except Exception:
+            pass
+
+    usage_ratio = None
+    if current is not None and limit_bytes and limit_bytes > 0:
+        usage_ratio = current / limit_bytes
+
+    return {
+        "current_bytes": current,
+        "limit_bytes": limit_bytes,
+        "usage_ratio": usage_ratio,
+        "oom_kill_count": oom_kill_count,
+    }
+
+
+def _process_rss_bytes() -> int | None:
+    try:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if raw > 0:
+            return int(raw) * 1024
+    except Exception:
+        pass
+
+    proc_status = _read_text_if_exists("/proc/self/status")
+    for line in proc_status.splitlines():
+        if not line.startswith("VmRSS:"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                return int(parts[1]) * 1024
+            except Exception:
+                return None
+    return None
+
+
+def _memory_status() -> dict[str, object]:
+    cgroup = _cgroup_memory_status()
+    usage_ratio = cgroup.get("usage_ratio")
+    pressure = "unknown"
+    if isinstance(usage_ratio, (int, float)):
+        if usage_ratio >= 0.95:
+            pressure = "critical"
+        elif usage_ratio >= 0.85:
+            pressure = "high"
+        elif usage_ratio >= 0.7:
+            pressure = "elevated"
+        else:
+            pressure = "normal"
+
+    return {
+        "process_rss_bytes": _process_rss_bytes(),
+        "cgroup_current_bytes": cgroup.get("current_bytes"),
+        "cgroup_limit_bytes": cgroup.get("limit_bytes"),
+        "cgroup_usage_ratio": usage_ratio,
+        "oom_kill_count": cgroup.get("oom_kill_count"),
+        "pressure": pressure,
+    }
+
+
+def _k8s_worker_resources() -> dict[str, dict[str, str]] | None:
+    request_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_REQUEST", "500m") or "").strip()
+    limit_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_LIMIT", "2") or "").strip()
+    request_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_REQUEST", "4Gi") or "").strip()
+    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "128Gi") or "").strip()
+
+    requests: dict[str, str] = {}
+    limits: dict[str, str] = {}
+    if request_cpu:
+        requests["cpu"] = request_cpu
+    if request_memory:
+        requests["memory"] = request_memory
+    if limit_cpu:
+        limits["cpu"] = limit_cpu
+    if limit_memory:
+        limits["memory"] = limit_memory
+    if not requests and not limits:
+        return None
+
+    resources: dict[str, dict[str, str]] = {}
+    if requests:
+        resources["requests"] = requests
+    if limits:
+        resources["limits"] = limits
+    return resources
 
 
 def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
@@ -243,9 +382,42 @@ def _k8s_result_paths(job_id: str, *, stage: str | None = None, seq: int | None 
     return (root / f"{prefix}.json", root / f"{prefix}.error.txt")
 
 
+def _k8s_proxy_env_items() -> list[dict[str, object]]:
+    no_proxy = (
+        os.environ.get("NO_PROXY")
+        or os.environ.get("no_proxy")
+        or "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc"
+    ).strip()
+    proxy_port = (os.environ.get("SHERPA_K8S_NODE_PROXY_PORT", "6789") or "6789").strip()
+    proxy_url = f"http://$(SHERPA_NODE_IP):{proxy_port}"
+    return [
+        {"name": "SHERPA_NODE_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}},
+        {"name": "SHERPA_K8S_NODE_PROXY_PORT", "value": proxy_port},
+        {"name": "HTTP_PROXY", "value": proxy_url},
+        {"name": "HTTPS_PROXY", "value": proxy_url},
+        {"name": "ALL_PROXY", "value": proxy_url},
+        {"name": "NO_PROXY", "value": no_proxy},
+        {"name": "http_proxy", "value": proxy_url},
+        {"name": "https_proxy", "value": proxy_url},
+        {"name": "all_proxy", "value": proxy_url},
+        {"name": "no_proxy", "value": no_proxy},
+    ]
+
+
+def _k8s_git_env_items() -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for name in ("SHERPA_GIT_MIRRORS", "SHERPA_GITHUB_MIRROR"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            items.append({"name": name, "value": value})
+    return items
+
+
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+    raw_model = str(payload.get("model") or "").strip()
+    normalized_model = _normalized_opencode_model_value(raw_model)
     ttl = _k8s_job_ttl_seconds()
     keep_finished = _k8s_keep_finished_jobs()
 
@@ -259,6 +431,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     pvc_cfg = (os.environ.get("SHERPA_K8S_PVC_CONFIG", "sherpa-config") or "").strip()
     pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
     target_node_name = str(payload.get("target_node_name") or "").strip()
+    worker_resources = _k8s_worker_resources()
 
     manifest = {
         "apiVersion": "batch/v1",
@@ -285,18 +458,65 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                 "spec": {
                     "restartPolicy": "Never",
                     "serviceAccountName": (os.environ.get("SHERPA_K8S_JOB_SERVICE_ACCOUNT", "sherpa-web") or "sherpa-web"),
+                    "securityContext": {
+                        "seccompProfile": {"type": "RuntimeDefault"},
+                        "fsGroup": 10001,
+                        "fsGroupChangePolicy": "OnRootMismatch",
+                    },
+                    "initContainers": [
+                        {
+                            "name": "runtime-permissions",
+                            "image": _k8s_worker_image(),
+                            "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
+                            "command": [
+                                "sh",
+                                "-lc",
+                                (
+                                    "set -eu\n"
+                                    "for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do\n"
+                                    '  mkdir -p "$d"\n'
+                                    "  chown 10001:10001 \"$d\" || true\n"
+                                    "  chmod 0777 \"$d\" || true\n"
+                                    "  find \"$d\" -mindepth 1 -exec chown 10001:10001 {} + || true\n"
+                                    "  find \"$d\" -mindepth 1 -exec chmod a+rwX {} + || true\n"
+                                    "done\n"
+                                ),
+                            ],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "runAsUser": 0,
+                                "runAsGroup": 0,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "volumeMounts": [
+                                {"name": "shared-tmp", "mountPath": "/shared/tmp"},
+                                {"name": "shared-output", "mountPath": "/shared/output"},
+                                {"name": "oss-fuzz", "mountPath": "/shared/oss-fuzz"},
+                                {"name": "config", "mountPath": "/app/config"},
+                                {"name": "job-logs", "mountPath": "/app/job-logs"},
+                            ],
+                        }
+                    ],
                     "containers": [
                         {
                             "name": "worker",
                             "image": _k8s_worker_image(),
                             "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
                             "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "runAsNonRoot": True,
+                                "runAsUser": 10001,
+                                "runAsGroup": 10001,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
-                                {"name": "SHERPA_OPENCODE_DOCKER_IMAGE", "value": ""},
-                                {"name": "OPENCODE_MODEL", "value": str(payload.get("model") or "")},
-                                {"name": "OPENAI_MODEL", "value": str(payload.get("model") or "")},
+                                {"name": "OPENCODE_MODEL", "value": normalized_model},
+                                {"name": "OPENAI_MODEL", "value": raw_model},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
+                                *_k8s_git_env_items(),
+                                *_k8s_proxy_env_items(),
                             ],
                             "volumeMounts": [
                                 {"name": "shared-tmp", "mountPath": "/shared/tmp"},
@@ -328,6 +548,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
         env_from.append({"secretRef": {"name": pg_secret}})
     if env_from:
         manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
+    if worker_resources:
+        manifest["spec"]["template"]["spec"]["containers"][0]["resources"] = worker_resources
 
     if target_node_name:
         manifest["spec"]["template"]["spec"]["nodeName"] = target_node_name
@@ -351,6 +573,163 @@ def _k8s_collect_job_logs(job_name: str, *, tail: int = 200) -> str:
     if rc == 0:
         return out
     return (out + "\n" + err).strip()
+
+
+def _k8s_get_job_pod_details(job_name: str) -> dict[str, object]:
+    if not job_name:
+        return {}
+    rc, out, _ = _kubectl(["get", "pod", "-l", f"job-name={job_name}", "-o", "json"], timeout=15)
+    if rc != 0:
+        return {}
+    try:
+        doc = json.loads(out)
+    except Exception:
+        return {}
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        return {}
+    pod = items[0]
+    meta = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+    status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+    details: dict[str, object] = {
+        "pod_name": str(meta.get("name") or "").strip(),
+        "phase": str(status.get("phase") or "").strip(),
+    }
+    for key in ("reason", "message"):
+        val = str(status.get(key) or "").strip()
+        if val:
+            details[key] = val
+    cstats = status.get("containerStatuses")
+    if isinstance(cstats, list):
+        for cs in cstats:
+            if not isinstance(cs, dict):
+                continue
+            details["container_name"] = str(cs.get("name") or "").strip()
+            if cs.get("ready") is not None:
+                details["container_ready"] = bool(cs.get("ready"))
+            if cs.get("restartCount") is not None:
+                details["restart_count"] = int(cs.get("restartCount") or 0)
+            st = cs.get("state") if isinstance(cs.get("state"), dict) else {}
+            waiting = st.get("waiting") if isinstance(st.get("waiting"), dict) else {}
+            terminated = st.get("terminated") if isinstance(st.get("terminated"), dict) else {}
+            if waiting:
+                reason = str(waiting.get("reason") or "").strip()
+                message = str(waiting.get("message") or "").strip()
+                if reason:
+                    details["container_reason"] = reason
+                if message:
+                    details["container_message"] = message
+            if terminated:
+                reason = str(terminated.get("reason") or "").strip()
+                message = str(terminated.get("message") or "").strip()
+                if reason:
+                    details["terminated_reason"] = reason
+                if message:
+                    details["terminated_message"] = message
+                if terminated.get("exitCode") is not None:
+                    details["exit_code"] = int(terminated.get("exitCode") or 0)
+                if terminated.get("signal") is not None:
+                    details["signal"] = int(terminated.get("signal") or 0)
+                if terminated.get("startedAt") is not None:
+                    details["terminated_started_at"] = str(terminated.get("startedAt") or "")
+                if terminated.get("finishedAt") is not None:
+                    details["terminated_finished_at"] = str(terminated.get("finishedAt") or "")
+            last_state = cs.get("lastState") if isinstance(cs.get("lastState"), dict) else {}
+            last_terminated = last_state.get("terminated") if isinstance(last_state.get("terminated"), dict) else {}
+            if last_terminated:
+                last_reason = str(last_terminated.get("reason") or "").strip()
+                last_message = str(last_terminated.get("message") or "").strip()
+                if last_reason and "last_terminated_reason" not in details:
+                    details["last_terminated_reason"] = last_reason
+                if last_message and "last_terminated_message" not in details:
+                    details["last_terminated_message"] = last_message
+                if last_terminated.get("exitCode") is not None and "last_exit_code" not in details:
+                    details["last_exit_code"] = int(last_terminated.get("exitCode") or 0)
+            break
+    return details
+
+
+def _k8s_summarize_logs(logs: str, *, max_chars: int = 600) -> str:
+    txt = str(logs or "").strip()
+    if not txt:
+        return ""
+    if len(txt) <= max_chars:
+        return txt
+    return txt[-max_chars:]
+
+
+def _classify_k8s_stage_failure(stage: str, pod_details: dict[str, object], logs: str, err_txt: str) -> dict[str, object]:
+    stage_name = str(stage or "").strip().lower()
+    detail_texts = [
+        str(pod_details.get("reason") or "").strip(),
+        str(pod_details.get("message") or "").strip(),
+        str(pod_details.get("container_reason") or "").strip(),
+        str(pod_details.get("container_message") or "").strip(),
+        str(pod_details.get("terminated_reason") or "").strip(),
+        str(pod_details.get("terminated_message") or "").strip(),
+        str(pod_details.get("last_terminated_reason") or "").strip(),
+        str(pod_details.get("last_terminated_message") or "").strip(),
+        str(err_txt or "").strip(),
+        _k8s_summarize_logs(logs),
+    ]
+    joined = "\n".join(part for part in detail_texts if part).lower()
+    exit_code = pod_details.get("exit_code")
+    if exit_code is None:
+        exit_code = pod_details.get("last_exit_code")
+    try:
+        exit_code_int = int(exit_code) if exit_code is not None else None
+    except Exception:
+        exit_code_int = None
+
+    error_kind = "unknown"
+    error_code = "k8s_job_failed"
+    run_error_kind = ""
+    run_terminal_reason = ""
+
+    if any(tok in joined for tok in ("oomkilled", "oom killed", "out of memory", "memory cgroup out of memory")) or exit_code_int == 137:
+        error_kind = "resource"
+        error_code = "oom_killed"
+        if stage_name == "run":
+            run_error_kind = "run_resource_exhaustion"
+            run_terminal_reason = "run_resource_exhaustion"
+    elif any(tok in joined for tok in ("deadlineexceeded", "deadline exceeded", "context deadline exceeded", "timed out", "timeout")) or exit_code_int == 143:
+        error_kind = "timeout"
+        error_code = "timeout"
+        if stage_name == "run":
+            run_error_kind = "run_timeout"
+            run_terminal_reason = "run_timeout"
+    elif stage_name == "run":
+        error_kind = "runtime"
+        error_code = "run_failed"
+        run_error_kind = "run_exception"
+        run_terminal_reason = "run_exception"
+
+    result: dict[str, object] = {
+        "stage": stage_name,
+        "error_kind": error_kind,
+        "error_code": error_code,
+        "k8s_failure": {
+            "pod_name": str(pod_details.get("pod_name") or "").strip(),
+            "phase": str(pod_details.get("phase") or "").strip(),
+            "reason": str(pod_details.get("reason") or "").strip(),
+            "message": str(pod_details.get("message") or "").strip(),
+            "container_reason": str(pod_details.get("container_reason") or "").strip(),
+            "terminated_reason": str(pod_details.get("terminated_reason") or "").strip(),
+            "exit_code": exit_code_int,
+            "logs_tail": _k8s_summarize_logs(logs),
+        },
+    }
+    if run_error_kind:
+        result["run_error_kind"] = run_error_kind
+    if run_terminal_reason:
+        result["run_terminal_reason"] = run_terminal_reason
+    return result
+
+
+class _K8sJobFailure(RuntimeError):
+    def __init__(self, message: str, *, result: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.result = dict(result or {})
 
 
 def _k8s_get_job_pod_phase(job_name: str) -> tuple[str, str]:
@@ -562,6 +941,7 @@ def _execute_k8s_job(
     wait_timeout: int,
 ) -> tuple[object, str]:
     manifest = _k8s_build_manifest(job_name, payload)
+    stage_name = str(payload.get("stop_after_step") or payload.get("resume_from_step") or "").strip().lower()
     rc_apply, _, err_apply = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=60)
     if rc_apply != 0:
         raise RuntimeError(f"k8s job submit failed: {err_apply.strip()}")
@@ -582,17 +962,57 @@ def _execute_k8s_job(
         raise RuntimeError("k8s_job_timeout")
     if status == "Failed":
         logs = _k8s_collect_job_logs(job_name)
+        pod_details = _k8s_get_job_pod_details(job_name)
         err_txt = ""
         if error_path.is_file():
             err_txt = error_path.read_text(encoding="utf-8", errors="replace")
+        failure_result = _classify_k8s_stage_failure(stage_name, pod_details, logs, err_txt)
+        try:
+            if not error_path.is_file():
+                error_path.parent.mkdir(parents=True, exist_ok=True)
+            error_lines = [f"k8s_job_failed phase={last_phase}"]
+            pod_name = str(((failure_result.get("k8s_failure") or {}) if isinstance(failure_result, dict) else {}).get("pod_name") or "").strip()
+            if pod_name:
+                error_lines.append(f"pod={pod_name}")
+            code = str(failure_result.get("error_code") or "").strip()
+            if code:
+                error_lines.append(f"error_code={code}")
+            kind = str(failure_result.get("error_kind") or "").strip()
+            if kind:
+                error_lines.append(f"error_kind={kind}")
+            log_tail = str(((failure_result.get("k8s_failure") or {}) if isinstance(failure_result, dict) else {}).get("logs_tail") or "").strip()
+            if log_tail:
+                error_lines.append("")
+                error_lines.append(log_tail)
+            error_path.write_text("\n".join(error_lines).strip() + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": f"k8s_job_failed phase={last_phase}",
+                        "result": failure_result,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
         if not _k8s_keep_finished_jobs():
             _k8s_delete_job(job_name)
         msg = f"k8s_job_failed phase={last_phase}"
         if err_txt.strip():
             msg += f": {err_txt.strip()}"
+        elif str(failure_result.get("error_code") or "").strip():
+            msg += f": {failure_result.get('error_code')}"
         if logs.strip():
             print(f"[job {job_id}] k8s logs tail:\n{logs}")
-        raise RuntimeError(msg)
+        raise _K8sJobFailure(msg, result=failure_result)
     if not result_path.is_file():
         logs = _k8s_collect_job_logs(job_name)
         if logs.strip():
@@ -1173,6 +1593,7 @@ def _system_status() -> dict:
     ]
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
+    memory = _memory_status()
     return {
         "ok": True,
         "server_time": now,
@@ -1189,6 +1610,7 @@ def _system_status() -> dict:
             "exists": log_dir.exists(),
             "size_bytes": _dir_size(log_dir),
         },
+        "memory": memory,
         "config": {
             "runtime_mode": "native",
             "oss_fuzz_dir": cfg.oss_fuzz_dir,
@@ -1233,6 +1655,7 @@ def _metrics_payload() -> str:
     finished_total = len(finished_in_window)
     failed_total = len(failed_in_window)
     failure_rate = (failed_total / finished_total) if finished_total > 0 else 0.0
+    memory = _memory_status()
 
     lines = [
         "# HELP sherpa_jobs_total Total jobs in memory.",
@@ -1257,6 +1680,51 @@ def _metrics_payload() -> str:
         "# TYPE sherpa_jobs_failure_rate_window gauge",
         f"sherpa_jobs_failure_rate_window {failure_rate:.6f}",
     ]
+    rss_bytes = memory.get("process_rss_bytes")
+    if isinstance(rss_bytes, int):
+        lines.extend(
+            [
+                "# HELP sherpa_process_resident_memory_bytes Resident memory size of the web process.",
+                "# TYPE sherpa_process_resident_memory_bytes gauge",
+                f"sherpa_process_resident_memory_bytes {rss_bytes}",
+            ]
+        )
+    cgroup_current = memory.get("cgroup_current_bytes")
+    if isinstance(cgroup_current, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_current_bytes Current cgroup memory usage.",
+                "# TYPE sherpa_cgroup_memory_current_bytes gauge",
+                f"sherpa_cgroup_memory_current_bytes {cgroup_current}",
+            ]
+        )
+    cgroup_limit = memory.get("cgroup_limit_bytes")
+    if isinstance(cgroup_limit, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_limit_bytes Effective cgroup memory limit.",
+                "# TYPE sherpa_cgroup_memory_limit_bytes gauge",
+                f"sherpa_cgroup_memory_limit_bytes {cgroup_limit}",
+            ]
+        )
+    usage_ratio = memory.get("cgroup_usage_ratio")
+    if isinstance(usage_ratio, (int, float)):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_usage_ratio Current cgroup memory usage divided by limit.",
+                "# TYPE sherpa_cgroup_memory_usage_ratio gauge",
+                f"sherpa_cgroup_memory_usage_ratio {usage_ratio:.6f}",
+            ]
+        )
+    oom_kill_count = memory.get("oom_kill_count")
+    if isinstance(oom_kill_count, int):
+        lines.extend(
+            [
+                "# HELP sherpa_cgroup_memory_oom_kill_total Total OOM kills reported by the current cgroup.",
+                "# TYPE sherpa_cgroup_memory_oom_kill_total gauge",
+                f"sherpa_cgroup_memory_oom_kill_total {oom_kill_count}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 class fuzz_model(BaseModel):
@@ -1410,9 +1878,12 @@ def put_config(request: WebPersistentConfig = Body(...)):
         item.api_key = None
         item.clear_api_key = False
 
-    save_config(persisted_cfg)
-    _cfg_set(runtime_cfg)
-    apply_config_to_env(runtime_cfg)
+    try:
+        save_config(persisted_cfg)
+        _cfg_set(runtime_cfg)
+        apply_config_to_env(runtime_cfg)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"保存配置失败: {exc}") from exc
     return {"ok": True}
 
 
@@ -1937,10 +2408,6 @@ def _run_fuzz_job(
                 raise RuntimeError(cancel_error)
             try:
                 start_step = _normalize_resume_step(resume_from_step) if resumed else "plan"
-                stages = _staged_sequence_from(start_step)
-                if not stages:
-                    stages = ["plan", "synthesize", "build", "run"]
-
                 stage_results: list[dict[str, object]] = []
                 stage_job_names: list[str] = []
                 current_repo_root = str(resume_repo_root or "").strip()
@@ -1953,10 +2420,19 @@ def _run_fuzz_job(
                 }
                 env_rebuild_retries = 0
                 max_env_rebuild_retries = 1
-                stage_index = 0
-                while stage_index < len(stages):
-                    stage = stages[stage_index]
-                    idx = stage_index + 1
+                current_stage = start_step
+                if current_stage in {"fix_build", "fix_crash"}:
+                    current_stage = "build"
+                if current_stage not in _STAGED_WORKFLOW_STEPS:
+                    current_stage = "plan"
+                max_stage_dispatches = 20
+                dispatch_count = 0
+                while current_stage:
+                    stage = current_stage
+                    dispatch_count += 1
+                    if dispatch_count > max_stage_dispatches:
+                        raise RuntimeError("staged_workflow_dispatch_limit_exceeded")
+                    idx = dispatch_count
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
@@ -2064,18 +2540,23 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    next_stage = ""
                     if isinstance(stage_result, dict):
                         terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
                         if stage == "build" and terminal_reason == "requires_env_rebuild":
                             if env_rebuild_retries >= max_env_rebuild_retries:
                                 raise RuntimeError("fix_build_requires_env_rebuild_retry_exceeded")
                             env_rebuild_retries += 1
-                            stages.insert(stage_index + 1, "build")
+                            next_stage = "build"
                             print(
                                 f"[job {job_id}] stage {stage} requested env rebuild; "
                                 f"dispatching fresh build job (attempt {env_rebuild_retries}/{max_env_rebuild_retries})"
                             )
-                    stage_index += 1
+                        else:
+                            next_stage = _normalize_resume_step(stage_result.get("workflow_recommended_next"))
+                    if next_stage in {"", "stop"}:
+                        break
+                    current_stage = next_stage
 
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results
@@ -2112,11 +2593,13 @@ def _run_fuzz_job(
             fail_status = "resume_failed" if resumed else "error"
             err_text = _redact_sensitive_text(str(e))
         fail_result = None
+        if isinstance(e, _K8sJobFailure):
+            fail_result = dict(e.result or {})
         if isinstance(err_text, str) and ":" in err_text:
             reason = err_text.split(":", 1)[0].strip()
-            if reason.startswith("fix_build_"):
+            if fail_result is None and reason.startswith("fix_build_"):
                 fail_result = {"fix_build_terminal_reason": reason}
-            elif reason.startswith("run_"):
+            elif fail_result is None and reason.startswith("run_"):
                 fail_result = {"run_terminal_reason": reason}
         _job_update(
             job_id,

@@ -214,8 +214,6 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
-    # Enable legacy AI seed generation path for this budget-exhaustion test.
-    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -258,7 +256,7 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["message"] == "workflow stopped (time budget exceeded)"
 
 
-def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
+def test_node_run_default_generates_ai_seeds(tmp_path: Path):
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -288,7 +286,7 @@ def test_node_run_default_verify_stage_skips_ai_seed_generation(tmp_path: Path):
     out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
     assert out["last_step"] == "run"
     assert out.get("failed") is not True
-    assert gen.seed_calls == 0
+    assert gen.seed_calls == 2
 
 
 def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch):
@@ -439,6 +437,13 @@ def test_route_after_run_routes_idle_timeout_to_stop():
     assert route == "stop"
 
 
+def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
 def test_route_after_coverage_analysis_routes_to_improve_harness():
     route = workflow_graph._route_after_coverage_analysis_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
@@ -451,6 +456,204 @@ def test_route_after_improve_harness_routes_back_to_plan():
         {"failed": False, "last_error": "", "coverage_should_improve": True}
     )
     assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_on_ineffective_replan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_effective": False,
+        }
+    )
+    assert route == "stop"
+
+
+def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "in_place",
+        }
+    )
+    assert route == "build"
+
+
+def test_route_after_improve_harness_stops_when_round_budget_exhausted():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_round_budget_exhausted": True,
+        }
+    )
+    assert route == "stop"
+
+
+def test_node_coverage_analysis_keeps_first_plateau_in_place():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert out["coverage_replan_required"] is False
+    assert out["coverage_plateau_streak"] == 1
+
+
+def test_node_coverage_analysis_replans_after_second_plateau_without_gain():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "replan"
+    assert out["coverage_replan_required"] is True
+    assert out["coverage_plateau_streak"] == 2
+
+
+def test_node_coverage_analysis_stops_when_replan_budget_exhausted():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 2,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_should_improve"] is False
+    assert out["coverage_improve_mode"] == ""
+    assert out["coverage_replan_required"] is False
+    assert out["coverage_round_budget_exhausted"] is True
+    assert out["coverage_stop_reason"] == "coverage_loop_budget_exhausted"
+    assert "budget exhausted" in out["coverage_improve_reason"]
+
+
+def test_node_coverage_analysis_allows_resource_exhaustion_to_improve():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "run_resource_exhaustion",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+
+
+def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_target_api": "fmt::println",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"]},
+            "coverage_quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"],
+            "coverage_seed_families_required": ["flow_structures", "anchors_aliases"],
+            "coverage_seed_families_covered": ["anchors_aliases"],
+            "coverage_seed_families_missing": ["flow_structures"],
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 5,
+            "coverage_last_ft": 19,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 19,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                    "seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing"]},
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert "seed_quality_flags" in out["coverage_improve_reason"]
+    assert out["coverage_target_api"] == "fmt::println"
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():
@@ -622,7 +825,50 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "stop"
+    assert route == "coverage-analysis"
+
+
+def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
+    fake_out = {
+        "repo_root": str(tmp_path),
+        "last_step": "run",
+        "message": "Fuzzing run failed.",
+        "last_error": "fuzzer produced oom-like artifacts for demo_fuzz",
+        "run_error_kind": "run_resource_exhaustion",
+        "crash_found": False,
+    }
+
+    class _FakeCompiledWorkflow:
+        def invoke(self, _state):
+            return dict(fake_out)
+
+    class _FakeWorkflow:
+        def compile(self):
+            return _FakeCompiledWorkflow()
+
+    monkeypatch.setattr(workflow_graph, "build_fuzz_workflow", lambda: _FakeWorkflow())
+    monkeypatch.setattr(workflow_graph, "_write_run_summary", lambda _out: None)
+
+    result = workflow_graph.run_fuzz_workflow(
+        workflow_graph.FuzzWorkflowInput(
+            repo_url="https://github.com/example/repo.git",
+            email=None,
+            time_budget=0,
+            run_time_budget=0,
+            max_len=1000,
+            docker_image=None,
+            ai_key_path=tmp_path / ".env",
+            resume_from_step="run",
+            resume_repo_root=tmp_path,
+            stop_after_step="run",
+            coverage_loop_max_rounds=3,
+            max_fix_rounds=3,
+            same_error_max_retries=3,
+        )
+    )
+
+    assert result["workflow_last_step"] == "run"
+    assert result["workflow_recommended_next"] == "coverage-analysis"
 
 
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):

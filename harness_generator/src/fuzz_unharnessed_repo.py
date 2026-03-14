@@ -61,7 +61,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -136,6 +136,53 @@ FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
+ALLOWED_TARGET_TYPES = {
+    "parser",
+    "decoder",
+    "archive",
+    "image",
+    "document",
+    "network",
+    "database",
+    "serializer",
+    "interpreter",
+    "generic",
+}
+
+ALLOWED_SEED_PROFILES = {
+    "parser-structure",
+    "parser-token",
+    "parser-format",
+    "parser-numeric",
+    "decoder-binary",
+    "archive-container",
+    "serializer-structured",
+    "document-text",
+    "network-message",
+    "generic",
+}
+
+YAML_SEED_FAMILIES = {
+    "flow_structures",
+    "block_scalars",
+    "anchors_aliases",
+    "tags_directives",
+    "document_markers",
+    "delimiter_fragments",
+    "unterminated_fragments",
+    "malformed_separators",
+}
+
+FMT_SEED_FAMILIES = {
+    "replacement_fields",
+    "escaped_braces",
+    "positional_arguments",
+    "format_specifiers",
+    "width_precision",
+    "fill_align",
+    "type_conversions",
+    "malformed_replacement_fields",
+}
 
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
@@ -209,6 +256,22 @@ def _synthesize_activity_watch_paths() -> list[str]:
         "fuzz/**/*.cxx",
         "fuzz/**/*.java",
     ]
+
+
+def _run_plateau_pulses() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_PULSES") or "3").strip()
+    try:
+        return max(1, min(int(raw), 20))
+    except Exception:
+        return 3
+
+
+def _run_plateau_idle_growth_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "180").strip()
+    try:
+        return max(30, min(int(raw), 86_400))
+    except Exception:
+        return 180
 
 
 def _default_diff_excludes() -> set[str]:
@@ -524,6 +587,37 @@ def _host_git_proxy_override_args() -> List[str]:
     return ["-c", "http.proxy=", "-c", "https.proxy="]
 
 
+def _host_git_proxy_env() -> Dict[str, str]:
+    env = os.environ.copy()
+
+    def _pick_env(*names: str) -> str:
+        for n in names:
+            v = env.get(n)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return ""
+
+    http_proxy = _pick_env("HTTP_PROXY", "http_proxy", "SHERPA_GIT_HTTP_PROXY", "SHERPA_DOCKER_HTTP_PROXY")
+    https_proxy = _pick_env("HTTPS_PROXY", "https_proxy", "SHERPA_GIT_HTTPS_PROXY", "SHERPA_DOCKER_HTTPS_PROXY")
+    all_proxy = _pick_env("ALL_PROXY", "all_proxy")
+    no_proxy = _pick_env("NO_PROXY", "no_proxy", "SHERPA_GIT_NO_PROXY", "SHERPA_DOCKER_NO_PROXY")
+
+    if http_proxy:
+        env["HTTP_PROXY"] = http_proxy
+        env["http_proxy"] = http_proxy
+    if https_proxy:
+        env["HTTPS_PROXY"] = https_proxy
+        env["https_proxy"] = https_proxy
+    if all_proxy:
+        env["ALL_PROXY"] = all_proxy
+        env["all_proxy"] = all_proxy
+    if no_proxy:
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
 def _candidate_clone_urls(url: str) -> List[str]:
     """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
@@ -591,6 +685,10 @@ class FuzzerRunResult:
     final_iteration: int = 0
     corpus_files: int = 0
     corpus_size_bytes: int = 0
+    terminal_reason: str = ""
+    plateau_detected: bool = False
+    plateau_idle_seconds: int = 0
+    seed_quality: Dict[str, object] | None = None
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
@@ -651,6 +749,244 @@ def parse_libfuzzer_final_stats(text: str) -> Dict[str, int]:
     return stats
 
 
+def parse_libfuzzer_progress_events(text: str) -> List[Dict[str, int | str]]:
+    events: List[Dict[str, int | str]] = []
+    if not text:
+        return events
+    for line in text.splitlines():
+        m = _LIBFUZZER_PROGRESS_RE.search(line)
+        if not m:
+            continue
+        events.append(
+            {
+                "iteration": int(m.group("iter") or 0),
+                "kind": str(m.group("kind") or "").upper(),
+                "cov": int(m.group("cov") or 0),
+                "ft": int(m.group("ft") or 0),
+                "corpus_files": int(m.group("corp_files") or 0),
+                "corpus_size_bytes": _parse_size_token_to_bytes(m.group("corp_size") or ""),
+                "execs_per_sec": int(m.group("execs") or 0),
+                "rss_mb": int(m.group("rss") or 0),
+            }
+        )
+    return events
+
+
+def _seed_quality_from_run(
+    *,
+    log: str,
+    initial_corpus_files: int,
+    initial_corpus_bytes: int,
+    final_stats: Dict[str, int],
+    required_families: list[str],
+    covered_families: list[str],
+    repo_examples_count: int,
+    plateau_idle_seconds: int,
+) -> Dict[str, object]:
+    events = parse_libfuzzer_progress_events(log)
+    inited_cov = 0
+    inited_ft = 0
+    if events:
+        first = events[0]
+        inited_cov = int(first.get("cov") or 0)
+        inited_ft = int(first.get("ft") or 0)
+
+    def _event_by_iter(iter_limit: int) -> Dict[str, int | str]:
+        chosen: Dict[str, int | str] = {}
+        for event in events:
+            if int(event.get("iteration") or 0) <= iter_limit:
+                chosen = event
+            else:
+                break
+        return chosen
+
+    at_30s = _event_by_iter(131072)
+    at_60s = _event_by_iter(262144)
+    early_new_units_30s = max(0, int(at_30s.get("corpus_files") or 0) - initial_corpus_files)
+    early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
+    final_files = int(final_stats.get("corpus_files") or 0)
+    final_bytes = int(final_stats.get("corpus_size_bytes") or 0)
+    retention_files = (float(final_files) / float(initial_corpus_files)) if initial_corpus_files > 0 else 0.0
+    retention_bytes = (float(final_bytes) / float(initial_corpus_bytes)) if initial_corpus_bytes > 0 else 0.0
+
+    def _slope(key: str) -> float:
+        if len(events) < 2:
+            return 0.0
+        start = events[0]
+        end = events[-1]
+        delta_iter = max(1, int(end.get("iteration") or 0) - int(start.get("iteration") or 0))
+        return float(int(end.get(key) or 0) - int(start.get(key) or 0)) / float(delta_iter)
+
+    quality_flags: list[str] = []
+    missing_families = [x for x in required_families if x and x not in set(covered_families)]
+    if initial_corpus_files >= 16 and retention_files > 0 and retention_files <= 0.25:
+        quality_flags.append("low_retention")
+    if early_new_units_30s <= 0 and early_new_units_60s <= 0:
+        quality_flags.append("low_early_yield")
+    if initial_corpus_files >= 16 and final_files <= 12 and int(final_stats.get("cov") or 0) <= max(inited_cov, 1):
+        quality_flags.append("high_homogeneity")
+    if missing_families:
+        quality_flags.append("missing_required_families")
+    if repo_examples_count == 0 and any(f in (YAML_SEED_FAMILIES | FMT_SEED_FAMILIES) for f in required_families):
+        quality_flags.append("repo_examples_missing")
+    return {
+        "initial_corpus_files": initial_corpus_files,
+        "initial_corpus_bytes": initial_corpus_bytes,
+        "initial_inited_cov": inited_cov,
+        "initial_inited_ft": inited_ft,
+        "early_new_units_30s": early_new_units_30s,
+        "early_new_units_60s": early_new_units_60s,
+        "final_corpus_files": final_files,
+        "final_corpus_bytes": final_bytes,
+        "corpus_retention_ratio_files": retention_files,
+        "corpus_retention_ratio_bytes": retention_bytes,
+        "cov_growth_slope_pre_plateau": _slope("cov"),
+        "ft_growth_slope_pre_plateau": _slope("ft"),
+        "plateau_after_sec": plateau_idle_seconds,
+        "quality_flags": quality_flags,
+    }
+
+
+def _infer_target_type(*parts: str) -> str:
+    text = " ".join(p for p in parts if p).lower()
+    if any(tok in text for tok in ("format", "printf", "replacement field", "specifier", "brace", "template")):
+        return "parser"
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+        return "parser"
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
+        return "decoder"
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z")):
+        return "archive"
+    if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
+        return "image"
+    if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
+        return "document"
+    if any(tok in text for tok in ("socket", "packet", "http", "tls", "dns", "frame", "request", "response")):
+        return "network"
+    if any(tok in text for tok in ("sql", "query", "db", "database", "sqlite", "record")):
+        return "database"
+    if any(tok in text for tok in ("emit", "dump", "serialize", "serializer", "write")):
+        return "serializer"
+    if any(tok in text for tok in ("eval", "vm", "execute", "compile", "bytecode", "script", "interp")):
+        return "interpreter"
+    return "generic"
+
+
+def _is_fmt_format_target(*parts: str) -> bool:
+    text = " ".join(p for p in parts if p).lower()
+    return bool(
+        "fmt" in text
+        and any(tok in text for tok in ("format", "format_to", "vformat", "println", "print", "replacement field", "specifier"))
+    )
+
+
+def _looks_textual_seed(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return False
+    if not data:
+        return True
+    printable = 0
+    for b in data[:2048]:
+        if b in (9, 10, 13) or 32 <= b <= 126:
+            printable += 1
+    return (float(printable) / float(max(1, min(len(data), 2048)))) >= 0.8
+
+
+def _normalized_format_shape(text: str) -> str:
+    lowered = text.lower()
+    lowered = re.sub(r"\d+", "#", lowered)
+    lowered = re.sub(r"[a-z]+", "a", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip()
+
+
+def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
+    profile = str(seed_profile or "").strip().lower()
+    text = " ".join(p for p in parts if p).lower()
+    required: list[str] = []
+    optional: list[str] = []
+    if profile == "parser-format" and _is_fmt_format_target(text):
+        required.extend(
+            [
+                "replacement_fields",
+                "escaped_braces",
+                "positional_arguments",
+                "format_specifiers",
+                "width_precision",
+                "fill_align",
+                "type_conversions",
+                "malformed_replacement_fields",
+            ]
+        )
+        return required, optional
+    if profile == "parser-structure":
+        required.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
+        optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
+    elif profile == "parser-token":
+        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        optional.extend(["document_markers", "tags_directives", "flow_structures"])
+    elif profile == "parser-format":
+        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+    elif profile == "parser-numeric":
+        required.extend(["delimiter_fragments", "malformed_separators"])
+    if any(tok in text for tok in ("yaml", "yml")):
+        for family in [
+            "flow_structures",
+            "block_scalars",
+            "anchors_aliases",
+            "tags_directives",
+            "document_markers",
+            "delimiter_fragments",
+            "unterminated_fragments",
+            "malformed_separators",
+        ]:
+            if family not in required:
+                required.append(family)
+    return required, [x for x in optional if x not in required]
+
+
+def _classify_seed_family(path: Path) -> set[str]:
+    name = path.name.lower()
+    text = read_text_safely(path)[:2048].lower()
+    families: set[str] = set()
+    if "{}" in text or re.search(r"\{[^{}]*\}", text):
+        families.add("replacement_fields")
+    if "{{" in text or "}}" in text:
+        families.add("escaped_braces")
+    if re.search(r"\{[0-9]+\}", text):
+        families.add("positional_arguments")
+    if re.search(r"\{[^{}:]+:[^{}]+\}|\{:[^{}]+\}", text):
+        families.add("format_specifiers")
+    if re.search(r"\{[^{}]*(:[^{}]*[0-9]+\.[0-9]*|:[^{}]*\.[0-9]+)\}", text) or any(tok in text for tok in (".0f", ".1f", ".2f", ":.3", ":#.")):
+        families.add("width_precision")
+    if re.search(r"\{:[<>=^][^{}]*\}", text) or any(tok in text for tok in (":<", ":>", ":^", "{:*", "{:_", "{:0")):
+        families.add("fill_align")
+    if re.search(r"\{[^{}]*:[^{}]*[bcdeEfFgGosxXpn?]\}", text):
+        families.add("type_conversions")
+    if text.count("{") != text.count("}") or any(tok in text for tok in ("{", "}", "{{{", "}}}", "{:", "{0:", "{name")):
+        if not {"replacement_fields", "escaped_braces"} <= families:
+            families.add("malformed_replacement_fields")
+    if any(tok in name for tok in ("delimiter-", "leading-colon", "trailing-space", "indicator-question")):
+        families.add("delimiter_fragments")
+    if any(tok in name for tok in ("unterminated-",)):
+        families.add("unterminated_fragments")
+    if any(tok in name for tok in ("malformed-",)):
+        families.add("malformed_separators")
+    if any(tok in name for tok in ("block-only", "block-scalar")) or any(tok in text for tok in ("\n|", "\n>", "|-", ">-", "|+", ">+")):
+        families.add("block_scalars")
+    if any(tok in name for tok in ("anchor", "alias")) or any(tok in text for tok in ("&", "*")):
+        families.add("anchors_aliases")
+    if any(tok in name for tok in ("tag", "directive", "yaml-version")) or any(tok in text for tok in ("%yaml", "%tag", "!!", "!<")):
+        families.add("tags_directives")
+    if any(tok in name for tok in ("doc-marker", "yaml-version")) or any(tok in text for tok in ("---", "...")):
+        families.add("document_markers")
+    if any(tok in name for tok in ("flow", "array", "mapping", "json")) or any(tok in text for tok in ("[", "]", "{", "}")):
+        families.add("flow_structures")
+    return families
+
+
 class NonOssFuzzHarnessGenerator:
     """
     Multi-pass workflow using CodexHelper to:
@@ -685,6 +1021,9 @@ class NonOssFuzzHarnessGenerator:
         self.seed_generation_timeout_sec: Optional[int] = None
         self.current_run_time_budget_sec: Optional[int] = None
         self.current_run_hard_timeout_sec: Optional[int] = None
+        self.last_seed_profile_by_fuzzer: Dict[str, str] = {}
+        self.last_seed_bootstrap_by_fuzzer: Dict[str, Dict[str, object]] = {}
+        self.last_selected_target_by_fuzzer: Dict[str, Dict[str, object]] = {}
         self.rss_limit_mb = rss_limit_mb
         self.max_len = max_len
         self.max_build_retries = max_build_retries
@@ -1195,99 +1534,112 @@ class NonOssFuzzHarnessGenerator:
 
         # Default: translate all args for container.
         translated_for_exec = [_translate_arg(a) for a in cmd]
-        translated_cmd = list(translated_for_exec)
-
-        # Prepare optional shell prelude for two cases:
-        # 1) fuzzer run: ensure -artifact_prefix directory exists
-        # 2) build run: auto-install declared system deps before invoking build.py/build.sh
-        artifacts_path = ""
-        for a in translated_for_exec:
-            if a.startswith("-artifact_prefix="):
-                artifacts_path = a.split("=", 1)[1]
-                break
-
-        def _is_build_entry_arg(a: str) -> bool:
-            norm = (a or "").strip().replace("\\", "/")
-            if norm in {"build.py", "./build.py", "fuzz/build.py", "build.sh", "./build.sh", "fuzz/build.sh"}:
-                return True
-            return norm.endswith("/build.py") or norm.endswith("/build.sh")
-
-        should_autoinstall = any(_is_build_entry_arg(a) for a in translated_for_exec)
-        dep_setup = ""
-        if should_autoinstall and _is_truthy_env("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", True):
-            dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
-            dep_file = f"/work/{dep_rel}"
-            dep_setup = textwrap.dedent(
-                f"""
-                dep_file={shlex.quote(dep_file)}
-                if [ -f "$dep_file" ]; then
-                    pkgs=""
-                    while IFS= read -r line || [ -n "$line" ]; do
-                        line="${{line%%#*}}"
-                        line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-                        [ -n "$line" ] || continue
-                        if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
-                            pkgs="$pkgs $line"
-                        else
-                            echo "[warn] (docker/deps) skip invalid package token: $line"
-                        fi
-                    done < "$dep_file"
-
-                    if [ -n "$pkgs" ]; then
-                        missing_pkgs=""
-                        for p in $pkgs; do
-                            if command -v dpkg-query >/dev/null 2>&1; then
-                                if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-                                    continue
-                                fi
-                            fi
-                            missing_pkgs="$missing_pkgs $p"
-                        done
-
-                        if [ -z "$missing_pkgs" ]; then
-                            echo "[*] (docker/deps) all requested packages already installed; skipping"
-                        else
-                            echo "[*] (docker/deps) installing from $dep_file:$missing_pkgs"
-                            if command -v apt-get >/dev/null 2>&1; then
-                                if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
-                                    echo "[warn] (docker/deps) apt-get update failed; continuing without auto-install"
-                                elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
-                                    echo "[warn] (docker/deps) apt-get install failed; continuing without auto-install"
-                                fi
-                            elif command -v dnf >/dev/null 2>&1; then
-                                if ! dnf install -y $missing_pkgs; then
-                                    echo "[warn] (docker/deps) dnf install failed; continuing without auto-install"
-                                fi
-                            elif command -v yum >/dev/null 2>&1; then
-                                if ! yum install -y $missing_pkgs; then
-                                    echo "[warn] (docker/deps) yum install failed; continuing without auto-install"
-                                fi
-                            elif command -v apk >/dev/null 2>&1; then
-                                if ! apk add --no-cache $missing_pkgs; then
-                                    echo "[warn] (docker/deps) apk add failed; continuing without auto-install"
-                                fi
-                            else
-                                echo "[warn] (docker/deps) no supported package manager found; skipping auto-install"
-                            fi
-                        fi
-                    fi
-                fi
-                """
-            ).strip()
-
-        if artifacts_path or dep_setup:
-            exec_cmd = " ".join(shlex.quote(a) for a in translated_for_exec)
-            shell_parts: List[str] = ["set -u"]
-            if artifacts_path:
-                shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
-            if dep_setup:
-                shell_parts.append(dep_setup)
-            shell_parts.append(f"exec {exec_cmd}")
-            translated_cmd = ["sh", "-lc", "\n".join(shell_parts)]
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        translated_cmd = self._wrap_exec_with_runtime_prelude(
+            translated_for_exec,
+            dep_file=f"/work/{dep_rel}",
+            dep_log_prefix="docker/deps",
+        )
 
         docker_cmd.append(self.docker_image)
         docker_cmd += translated_cmd
         return docker_cmd
+
+    @staticmethod
+    def _is_build_entry_arg(a: str) -> bool:
+        norm = (a or "").strip().replace("\\", "/")
+        if norm in {"build.py", "./build.py", "fuzz/build.py", "build.sh", "./build.sh", "fuzz/build.sh"}:
+            return True
+        return norm.endswith("/build.py") or norm.endswith("/build.sh")
+
+    def _build_system_dep_setup(self, dep_file: str, *, log_prefix: str) -> str:
+        return textwrap.dedent(
+            f"""
+            dep_file={shlex.quote(dep_file)}
+            if [ -f "$dep_file" ]; then
+                pkgs=""
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line="${{line%%#*}}"
+                    line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+                    [ -n "$line" ] || continue
+                    if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
+                        pkgs="$pkgs $line"
+                    else
+                        echo "[warn] ({log_prefix}) skip invalid package token: $line"
+                    fi
+                done < "$dep_file"
+
+                if [ -n "$pkgs" ]; then
+                    missing_pkgs=""
+                    for p in $pkgs; do
+                        if command -v dpkg-query >/dev/null 2>&1; then
+                            if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+                                continue
+                            fi
+                        fi
+                        missing_pkgs="$missing_pkgs $p"
+                    done
+
+                    if [ -z "$missing_pkgs" ]; then
+                        echo "[*] ({log_prefix}) all requested packages already installed; skipping"
+                    else
+                        echo "[*] ({log_prefix}) installing from $dep_file:$missing_pkgs"
+                        if command -v apt-get >/dev/null 2>&1; then
+                            if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
+                                echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
+                            elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
+                            fi
+                        elif command -v dnf >/dev/null 2>&1; then
+                            if ! dnf install -y $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
+                            fi
+                        elif command -v yum >/dev/null 2>&1; then
+                            if ! yum install -y $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
+                            fi
+                        elif command -v apk >/dev/null 2>&1; then
+                            if ! apk add --no-cache $missing_pkgs; then
+                                echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
+                            fi
+                        else
+                            echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
+                        fi
+                    fi
+                fi
+            fi
+            """
+        ).strip()
+
+    def _wrap_exec_with_runtime_prelude(
+        self,
+        exec_args: Sequence[str],
+        *,
+        dep_file: str,
+        dep_log_prefix: str,
+    ) -> List[str]:
+        artifacts_path = ""
+        for a in exec_args:
+            if str(a).startswith("-artifact_prefix="):
+                artifacts_path = str(a).split("=", 1)[1]
+                break
+
+        dep_setup = ""
+        should_autoinstall = any(self._is_build_entry_arg(str(a)) for a in exec_args)
+        if should_autoinstall and _is_truthy_env("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", True):
+            dep_setup = self._build_system_dep_setup(dep_file, log_prefix=dep_log_prefix)
+
+        if not artifacts_path and not dep_setup:
+            return list(exec_args)
+
+        exec_cmd = " ".join(shlex.quote(str(a)) for a in exec_args)
+        shell_parts: List[str] = ["set -u"]
+        if artifacts_path:
+            shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
+        if dep_setup:
+            shell_parts.append(dep_setup)
+        shell_parts.append(f"exec {exec_cmd}")
+        return ["sh", "-lc", "\n".join(shell_parts)]
 
     # ────────────────────────────────────────────────────────────────────
     # Public entry
@@ -1377,6 +1729,7 @@ class NonOssFuzzHarnessGenerator:
                [{{"name": "...",
                   "api": "qualified::symbol_or_Class.method",
                   "lang": "c-cpp|java",
+                  "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
                   "proto": "const uint8_t*,size_t|byte[]|InputStream",
                   "build_target": "cmake target or path if known",
                   "reason": "...",
@@ -1387,6 +1740,14 @@ class NonOssFuzzHarnessGenerator:
 
             **Rules:**
             - Favor the highest-level API that ingests untrusted data (files/streams/packets).
+            - You MUST classify every chosen target into one `target_type` from this exact enum:
+              `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`,
+              `interpreter`, `generic`.
+            - Pick the most specific type available. For example:
+              - parse/scan/tokenize/read structured text or binary -> `parser`
+              - decode/decompress/inflate/unpack -> `decoder`
+              - tar/zip/archive extraction or listing -> `archive`
+              - emit/dump/serialize/write structured output -> `serializer`
             - Avoid low-level helpers (e.g., `_read_u32`) unless nothing higher validates input.
             - Prefer targets with small/clear init and good branch structure.
                         - Prefer the **lowest dependency footprint** target first: prioritize APIs that compile with
@@ -1445,6 +1806,12 @@ class NonOssFuzzHarnessGenerator:
                             - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
                             - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
+                        - **`build_strategy.json`**:
+                            - Record only external build-scaffold strategy fields:
+                              `build_system`, `build_mode`, `library_targets`, `library_artifacts`,
+                              `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`.
+                            - `build_mode` MUST be `library_link` or `custom_script`.
+                            - Do NOT emit or rely on repository fuzz target fields such as existing/recommended fuzz targets.
             - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
@@ -1461,6 +1828,10 @@ class NonOssFuzzHarnessGenerator:
                             if the selected target needs unavailable deps, choose a lower-dependency target instead.
             - Do not vendor large third-party code; use the repo as-is.
             - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
+            - Never invoke repository-provided fuzz targets or guessed targets such as `cmake --build --target <name>-fuzzer`.
+            - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` means a repository fuzz target should be built.
+            - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
+            - Always prefer external harness linking: build repository library/objects, compile the generated harness, and link an explicit fuzzer entry strategy.
 
             **Acceptance criteria:**
             - After `(cd {FUZZ_DIR} && python build.py)`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
@@ -1487,6 +1858,25 @@ class NonOssFuzzHarnessGenerator:
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
         if stdout is None:
+            partial_outputs = False
+            try:
+                for p in self.fuzz_dir.rglob("*"):
+                    if not p.is_file():
+                        continue
+                    rel = p.relative_to(self.fuzz_dir).as_posix()
+                    if rel.startswith("out/") or rel.startswith("corpus/"):
+                        continue
+                    if (
+                        p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}
+                        or rel in {"build.py", "build.sh", "README.md", "system_packages.txt"}
+                    ):
+                        partial_outputs = True
+                        break
+            except Exception:
+                partial_outputs = False
+            if partial_outputs:
+                print("[warn] Codex exited without done sentinel, but partial synth outputs exist; deferring completeness check")
+                return
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
 
         print(f"[*] Codex synthesis done (truncated):\n{stdout[:900]}")
@@ -1865,19 +2255,619 @@ class NonOssFuzzHarnessGenerator:
     # Step D – Generate initial seeds
     # ────────────────────────────────────────────────────────────────────
 
+    def _resolve_seed_target_metadata(self, fuzzer_name: str, harness_text: str) -> tuple[str, str]:
+        observed = self._resolve_observed_target(fuzzer_name, harness_text)
+        if observed:
+            observed_markers = "\n".join(
+                [
+                    str(observed.get("observed_target_api") or ""),
+                    str(observed.get("selected_target_api") or ""),
+                    str(observed.get("observed_harness") or ""),
+                    harness_text,
+                ]
+            )
+            target_type = str(observed.get("target_type") or "").strip().lower()
+            if target_type not in ALLOWED_TARGET_TYPES:
+                target_type = _infer_target_type(fuzzer_name, observed_markers)
+            seed_profile = str(observed.get("seed_profile") or "").strip().lower()
+            if seed_profile not in ALLOWED_SEED_PROFILES:
+                seed_profile = self._infer_seed_profile(fuzzer_name, observed_markers, target_type)
+            if target_type in ALLOWED_TARGET_TYPES and seed_profile in ALLOWED_SEED_PROFILES:
+                return target_type, seed_profile
+
+        selected = self._resolve_selected_target(fuzzer_name, harness_text)
+        if selected:
+            target_type = str(selected.get("target_type") or "").strip().lower()
+            seed_profile = str(selected.get("seed_profile") or "").strip().lower()
+            if target_type in ALLOWED_TARGET_TYPES and seed_profile in ALLOWED_SEED_PROFILES:
+                return target_type, seed_profile
+
+        targets_path = self.fuzz_dir / "targets.json"
+        candidates: list[dict[str, object]] = []
+        try:
+            if targets_path.is_file():
+                raw = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(raw, list):
+                    candidates = [item for item in raw if isinstance(item, dict)]
+        except Exception:
+            candidates = []
+
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        for item in candidates:
+            name = str(item.get("name") or "").strip().lower()
+            api = str(item.get("api") or "").strip().lower()
+            target_type = str(item.get("target_type") or "").strip().lower()
+            seed_profile = str(item.get("seed_profile") or "").strip().lower()
+            if target_type not in ALLOWED_TARGET_TYPES:
+                continue
+            if name and (name in normalized_fuzzer or normalized_fuzzer in name):
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
+            if api and (api in normalized_fuzzer or normalized_fuzzer in api):
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
+
+        if len(candidates) == 1:
+            target_type = str(candidates[0].get("target_type") or "").strip().lower()
+            if target_type in ALLOWED_TARGET_TYPES:
+                seed_profile = str(candidates[0].get("seed_profile") or "").strip().lower()
+                return target_type, (seed_profile if seed_profile in ALLOWED_SEED_PROFILES else self._infer_seed_profile(fuzzer_name, harness_text, target_type))
+
+        target_type = _infer_target_type(fuzzer_name, harness_text)
+        return target_type, self._infer_seed_profile(fuzzer_name, harness_text, target_type)
+
+    def _load_selected_targets_doc(self) -> list[dict[str, object]]:
+        path = self.fuzz_dir / "selected_targets.json"
+        try:
+            if not path.is_file():
+                return []
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _load_observed_target_doc(self) -> dict[str, object]:
+        path = self.fuzz_dir / "observed_target.json"
+        try:
+            if not path.is_file():
+                return {}
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _resolve_observed_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
+        doc = self._load_observed_target_doc()
+        if not doc:
+            return {}
+        observed_api = str(doc.get("observed_target_api") or "").strip().lower()
+        observed_harness = str(doc.get("observed_harness") or "").strip().lower()
+        selected_api = str(doc.get("selected_target_api") or "").strip().lower()
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        lowered_harness = harness_text.lower()
+        harness_name = Path(observed_harness).stem.lower() if observed_harness else ""
+        if observed_harness and harness_name and (harness_name == fuzzer_name.lower() or harness_name == normalized_fuzzer):
+            return dict(doc)
+        if observed_api and observed_api in lowered_harness:
+            return dict(doc)
+        if harness_name and (harness_name in normalized_fuzzer or normalized_fuzzer in harness_name):
+            return dict(doc)
+        if selected_api and selected_api in lowered_harness:
+            return dict(doc)
+        return dict(doc) if len(doc) > 0 else {}
+
+    def _resolve_selected_target(self, fuzzer_name: str, harness_text: str) -> dict[str, object]:
+        doc = self._load_selected_targets_doc()
+        if not doc:
+            return {}
+        normalized_fuzzer = re.sub(r"_fuzz(?:er)?$", "", fuzzer_name.lower())
+        lowered_harness = harness_text.lower()
+        for item in doc:
+            api = str(item.get("api") or "").strip().lower()
+            target_name = str(item.get("target_name") or item.get("name") or "").strip().lower()
+            wrapper_name = str(item.get("wrapper_fuzzer_name") or "").strip().lower()
+            if wrapper_name and wrapper_name == fuzzer_name.lower():
+                return dict(item)
+            if target_name and (target_name in normalized_fuzzer or normalized_fuzzer in target_name):
+                return dict(item)
+            if api and (api in normalized_fuzzer or api in lowered_harness):
+                return dict(item)
+        return dict(doc[0]) if len(doc) == 1 else {}
+
+    def _seed_family_coverage(self, corpus_dir: Path, required_families: list[str]) -> dict[str, object]:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        covered: set[str] = set()
+        family_examples: dict[str, list[str]] = {}
+        for path in files:
+            for family in _classify_seed_family(path):
+                covered.add(family)
+                family_examples.setdefault(family, [])
+                if len(family_examples[family]) < 3:
+                    family_examples[family].append(path.name)
+        required = [x for x in required_families if x]
+        missing = [x for x in required if x not in covered]
+        return {
+            "required": required,
+            "covered": sorted(covered),
+            "missing": missing,
+            "family_examples": family_examples,
+        }
+
+    def _infer_seed_profile(self, fuzzer_name: str, harness_text: str, target_type: str) -> str:
+        lowered = f"{fuzzer_name}\n{harness_text}".lower()
+        if target_type == "parser":
+            if any(tok in lowered for tok in ("arg_id", "argument id", "positional", "named arg", "named argument", "numeric", "number")):
+                return "parser-numeric"
+            if any(tok in lowered for tok in ("format", "replacement field", "specifier", "fmt::", "brace", "printf")):
+                return "parser-format"
+            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner")):
+                return "parser-token"
+            return "parser-structure"
+        mapping = {
+            "decoder": "decoder-binary",
+            "archive": "archive-container",
+            "serializer": "serializer-structured",
+            "document": "document-text",
+            "network": "network-message",
+        }
+        return mapping.get(target_type, "generic")
+
+    def _seed_generation_guidance(self, target_type: str, seed_profile: str, fuzzer_name: str, harness_text: str) -> str:
+        common = (
+            "Seed goal: maximize early coverage, not readability. Mix valid, boundary, and malformed inputs. "
+            "Prefer small files that drive distinct parser or state-machine behaviors."
+        )
+        guidance = {
+            "parser-structure": (
+                "Create seeds that exercise parser state transitions: empty/minimal input, valid structured input, "
+                "deep nesting, alternate syntactic forms, truncated/incomplete forms, invalid tokens, long scalars/strings, "
+                "duplicate keys or repeated sections, and if applicable directives/tags/anchors/aliases."
+            ),
+            "parser-token": (
+                "Create token-oriented parser seeds: single token, repeated tokens, delimiter-only inputs, "
+                "whitespace-prefixed tokens, unterminated tokens, malformed separator placement, and short malformed fragments."
+            ),
+            "parser-format": (
+                "Create format-string parser seeds: bare text, single replacement fields, nested or mismatched braces, "
+                "width/precision markers, invalid specifier suffixes, mixed named/positional fields, and truncated directives."
+            ),
+            "parser-numeric": (
+                "Create numeric/token parser seeds: `0`, `1`, `42`, leading zeros, extremely long numeric ids, mixed alpha-numeric boundaries, "
+                "truncated ids, invalid starter characters, separator-boundary tokens such as `:`, `}`, `]`, `,`, `{`, `[`, and high-byte cases."
+            ),
+            "decoder-binary": (
+                "Create binary decoder seeds: shortest valid frame, maximal headers, truncated payloads, bad checksums/lengths, "
+                "nested containers, malformed trailers, and magic-byte variations."
+            ),
+            "archive-container": (
+                "Create valid and malformed archive/container seeds: minimal single-entry container, multiple entries, nested paths, "
+                "long names, metadata edge cases, truncated directory/footer, invalid sizes, and corrupted magic headers."
+            ),
+            "serializer-structured": (
+                "Create structured serializer seeds: empty object, nested object, repeated fields, large strings, invalid tags, "
+                "alternate encodings, and partially malformed structures."
+            ),
+            "document-text": (
+                "Create text document seeds: minimal valid document, nested sections, metadata blocks, embedded markup, "
+                "malformed closing markers, and truncated bodies."
+            ),
+            "network-message": (
+                "Create packet/message seeds: minimal valid message, alternate message types, length mismatches, partial frames, "
+                "repeated headers, malformed fields, and boundary numeric values."
+            ),
+            "generic": (
+                "Create diverse seeds: empty input, smallest valid sample, largest small sample, malformed/truncated input, "
+                "repeated delimiters, and boundary numeric/text values."
+            ),
+        }
+        extra = guidance.get(seed_profile, guidance["generic"])
+        yaml_hint = ""
+        lowered = f"{fuzzer_name}\n{harness_text}".lower()
+        if seed_profile == "parser-format" and _is_fmt_format_target(fuzzer_name, harness_text):
+            extra = (
+                "Create fmt-style format-string seeds by family bucket: replacement fields (`{}`), escaped braces (`{{`/`}}`), "
+                "positional arguments (`{0}`), format specifiers (`{:x}`/`{:s}`), width/precision (`{:10.3f}`), fill/alignment (`{:_>8}`), "
+                "type conversions, and malformed replacement fields (mismatched braces, truncated specs, mixed bad fields). "
+                "Prefer textual UTF-8 seeds. Do not flood the corpus with random binary noise."
+            )
+        if any(tok in lowered for tok in ("yaml", "yml")):
+            yaml_hint = (
+                " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
+                "flow collections (`[]`/`{}`), tags, directives, malformed indentation, and truncated nested mappings."
+            )
+        return (
+            f"Target type for `{fuzzer_name}` is `{target_type}` and seed_profile is `{seed_profile}`. {common} {extra}"
+            + yaml_hint
+        )
+
+    def _collect_repo_seed_examples(
+        self,
+        seed_profile: str,
+        fuzzer_name: str,
+        corpus_dir: Path,
+        *,
+        required_families: list[str] | None = None,
+    ) -> tuple[list[Path], dict[str, Any]]:
+        search_roots = ["tests", "examples", "regression-inputs", "testdata", "samples", "docs"]
+        structured_text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml"}
+        binary_suffixes = {".bin", ".dat", ".arc", ".zip", ".tar", ".gz", ".xz", ".png", ".jpg", ".jpeg", ".gif"}
+        source_blacklist = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".html", ".md", ".rst", ".cmake", ".py", ".js", ".ts"}
+        sample_dir_tokens = ("testdata", "tests", "examples", "regression", "samples", "corpus", "data", "inputs")
+        selected: list[Path] = []
+        seen_hashes: set[str] = set()
+        accepted = 0
+        rejected = 0
+        lowered_name = fuzzer_name.lower()
+        family_limits: dict[str, int] = {}
+        required_set = set(required_families or [])
+
+        def _under_sample_dir(path: Path) -> bool:
+            parts = [part.lower() for part in path.parts]
+            return any(tok in sample_dir_tokens for tok in parts)
+
+        def _yaml_like_candidate(path: Path, size: int) -> bool:
+            suffix = path.suffix.lower()
+            if suffix not in {".yaml", ".yml", ".txt", ".in"}:
+                return False
+            if size > 32768:
+                return False
+            try:
+                snippet = path.read_text(encoding="utf-8", errors="replace")[:512].lower()
+            except Exception:
+                return False
+            if any(tok in snippet for tok in ("---", "%yaml", "%tag", "&", "*", "[", "]", "{", "}")):
+                return True
+            if any(tok in path.name.lower() for tok in ("yaml", "tag", "anchor", "alias", "directive", "flow", "mapping", "scalar")):
+                return True
+            return False
+
+        def _allow_path(path: Path, size: int) -> bool:
+            nonlocal rejected
+            suffix = path.suffix.lower()
+            if suffix in source_blacklist:
+                rejected += 1
+                return False
+            under_sample = _under_sample_dir(path)
+            name_hint = path.name.lower()
+            haystack = f"{name_hint} {lowered_name} {' '.join(part.lower() for part in path.parts)}"
+            if seed_profile in {"parser-structure", "document-text", "serializer-structured"}:
+                if suffix not in structured_text_suffixes:
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile in {"decoder-binary", "archive-container"}:
+                if suffix and suffix in binary_suffixes:
+                    return True
+                rejected += 1
+                return False
+            if seed_profile == "parser-format":
+                if not under_sample or size > 4096:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".fmt", ".in", ".tmpl"}:
+                    rejected += 1
+                    return False
+                if _is_fmt_format_target(fuzzer_name, path.name, " ".join(path.parts)):
+                    return True
+                if not any(tok in haystack for tok in ("fmt", "format", "printf", "arg", "spec", "brace", "replacement")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "parser-numeric":
+                if not under_sample or size > 2048:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".dat", ".in", ".txt"}:
+                    rejected += 1
+                    return False
+                if not any(tok in haystack for tok in ("id", "arg", "number", "numeric", "token", "name", "index", "field")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "parser-token":
+                if not under_sample or size > 4096:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in {".dat", ".in", ".txt"}:
+                    rejected += 1
+                    return False
+                if any(tok in lowered_name for tok in ("yaml", "yml")) and _yaml_like_candidate(path, size):
+                    return True
+                if not any(tok in haystack for tok in ("token", "scan", "lex", "arg", "field", "name", "spec")):
+                    rejected += 1
+                    return False
+                return True
+            if seed_profile == "network-message":
+                if suffix and suffix not in {".bin", ".dat", ".msg", ".pkt", ".txt", ".json", ".xml"}:
+                    rejected += 1
+                    return False
+                return under_sample
+            if seed_profile == "generic":
+                if not under_sample:
+                    rejected += 1
+                    return False
+                if size > 8192:
+                    rejected += 1
+                    return False
+                if suffix and suffix in source_blacklist:
+                    rejected += 1
+                    return False
+                if suffix and suffix not in structured_text_suffixes and suffix not in binary_suffixes and suffix not in {".dat", ".in", ".raw"}:
+                    rejected += 1
+                    return False
+                return True
+            return False
+
+        for rel_root in search_roots:
+            root = self.repo_root / rel_root
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    size = path.stat().st_size
+                except Exception:
+                    rejected += 1
+                    continue
+                if size <= 0 or size > 131072:
+                    rejected += 1
+                    continue
+                if not _allow_path(path, size):
+                    continue
+                try:
+                    data = path.read_bytes()
+                except Exception:
+                    rejected += 1
+                    continue
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in seen_hashes:
+                    rejected += 1
+                    continue
+                seen_hashes.add(digest)
+                dest = corpus_dir / f"repo_{len(selected)+1:02d}{path.suffix.lower()}"
+                try:
+                    dest.write_bytes(data)
+                except Exception:
+                    rejected += 1
+                    continue
+                selected.append(dest)
+                accepted += 1
+                for family in _classify_seed_family(dest):
+                    family_limits[family] = family_limits.get(family, 0) + 1
+                if len(selected) >= 12:
+                    break
+            if len(selected) >= 12:
+                break
+        return selected, {
+            "sources": ["repo_examples"] if selected else [],
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "filtered": True,
+            "family_limits": family_limits,
+            "required_families": sorted(required_set),
+        }
+
+    def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        if not files:
+            return "No existing corpus files."
+        parts: list[str] = []
+        for path in files[:12]:
+            try:
+                size = path.stat().st_size
+            except Exception:
+                size = 0
+            parts.append(f"- {path.name} ({size} bytes)")
+        return "Existing corpus files:\n" + "\n".join(parts)
+
+    def _infer_seed_gaps(self, seed_profile: str, corpus_dir: Path) -> str:
+        names = " ".join(p.name.lower() for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else ""
+        gaps: list[str] = []
+        if seed_profile == "parser-structure":
+            if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
+                gaps.append("missing malformed/truncated parser cases")
+            if not any(tok in names for tok in ("deep", "nested", "alias", "anchor", "flow")):
+                gaps.append("missing deep nesting / alternate syntax forms")
+        elif seed_profile == "parser-numeric":
+            gaps.extend([
+                "missing long numeric ids and leading-zero cases",
+                "missing separator-boundary and non-ASCII cases",
+            ])
+        elif seed_profile == "parser-format":
+            if any(tok in names for tok in ("fmt", "format", "print", "println")):
+                gaps.extend([
+                    "missing replacement field / escaped brace coverage",
+                    "missing width/precision, fill/align, and type conversion cases",
+                    "missing malformed replacement field cases",
+                ])
+            else:
+                gaps.extend([
+                    "missing mismatched brace and truncated directive cases",
+                    "missing mixed named/positional field cases",
+                ])
+        elif seed_profile == "parser-token":
+            gaps.extend([
+                "missing delimiter-only and unterminated token cases",
+                "missing malformed separator placement cases",
+            ])
+        elif seed_profile == "decoder-binary":
+            gaps.append("missing malformed length/checksum and truncated binary frames")
+        elif seed_profile == "archive-container":
+            gaps.append("missing truncated footer/directory and corrupted magic cases")
+        return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
+
+    def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
+        radamsa = which("radamsa")
+        if not radamsa:
+            print("[warn] radamsa not found; skipping corpus mutation")
+            return 0
+        base_files = [p for p in sorted(corpus_dir.iterdir()) if p.is_file()][:12]
+        if not base_files:
+            return 0
+        created = 0
+        total_bytes = sum((p.stat().st_size for p in corpus_dir.iterdir() if p.is_file()), 0)
+        max_total = 512 * 1024
+        for path in base_files:
+            for variant in range(2):
+                if created >= 24 or total_bytes >= max_total:
+                    return created
+                dest = corpus_dir / f"radamsa_{created+1:02d}{path.suffix.lower()}"
+                proc = subprocess.run([radamsa, str(path)], capture_output=True)
+                if proc.returncode != 0 or not proc.stdout:
+                    continue
+                data = proc.stdout[: min(len(proc.stdout), 32768)]
+                if total_bytes + len(data) > max_total:
+                    return created
+                dest.write_bytes(data)
+                total_bytes += len(data)
+                created += 1
+        return created
+
+    def _filter_seed_corpus(
+        self,
+        corpus_dir: Path,
+        *,
+        seed_profile: str,
+        required_families: list[str],
+        target_markers: list[str] | None = None,
+    ) -> dict[str, object]:
+        files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
+        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": len(files)}
+        for path in files:
+            if path.name.startswith("repo_"):
+                raw_counts["repo_examples"] += 1
+            elif path.name.startswith("radamsa_"):
+                raw_counts["radamsa"] += 1
+            else:
+                raw_counts["ai"] += 1
+        filtered_counts = dict(raw_counts)
+        noise_rejected = 0
+        family_caps: dict[str, int] = {}
+        content_hashes: set[str] = set()
+        shape_hashes: set[str] = set()
+        textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        kept: list[Path] = []
+        for path in files:
+            reject = False
+            try:
+                data = path.read_bytes()
+            except Exception:
+                data = b""
+            if textual_mode and not _looks_textual_seed(path):
+                reject = True
+                noise_rejected += 1
+            digest = hashlib.sha256(data).hexdigest()
+            if not reject and digest in content_hashes:
+                reject = True
+            if not reject:
+                content_hashes.add(digest)
+            if textual_mode and not reject:
+                shape = _normalized_format_shape(data.decode("utf-8", errors="replace")[:512])
+                if shape and shape in shape_hashes:
+                    reject = True
+                if shape:
+                    shape_hashes.add(shape)
+            families = _classify_seed_family(path)
+            if not reject and families:
+                cap_hit = False
+                for family in sorted(families):
+                    current = family_caps.get(family, 0)
+                    cap = 3 if family in set(required_families) else 2
+                    if current >= cap:
+                        cap_hit = True
+                        break
+                if cap_hit:
+                    reject = True
+            if reject:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                if path.name.startswith("repo_"):
+                    filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
+                elif path.name.startswith("radamsa_"):
+                    filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                else:
+                    filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
+                filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
+                continue
+            kept.append(path)
+            for family in families:
+                family_caps[family] = family_caps.get(family, 0) + 1
+        return {
+            "seed_counts_raw": raw_counts,
+            "seed_counts_filtered": filtered_counts,
+            "seed_noise_rejected_count": noise_rejected,
+            "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
+        }
+
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)
         harness_text = read_text_safely(harness_src) if harness_src else ""
+        readme_text = read_text_safely(self.fuzz_dir / "README.md")
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+        selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
+        observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
+        execution_target = dict(observed_target or selected_target)
+        if selected_target:
+            self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
+        required_families, optional_families = _seed_families_for_target(
+            seed_profile,
+            fuzzer_name,
+            harness_text,
+            readme_text,
+            str(execution_target.get("observed_target_api") or ""),
+            str(execution_target.get("selected_target_api") or ""),
+            str(execution_target.get("target_name") or ""),
+            str(execution_target.get("api") or ""),
+        )
+        seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
+        repo_seed_files, repo_meta = self._collect_repo_seed_examples(
+            seed_profile,
+            fuzzer_name,
+            corpus_dir,
+            required_families=required_families,
+        )
+        sources = list(repo_meta.get("sources") or [])
+        family_coverage = self._seed_family_coverage(corpus_dir, required_families)
 
         instructions = textwrap.dedent(
             f"""
-            Create 1–5 **meaningful seed files** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            new harness `{fuzzer_name}`. Prefer small, realistic inputs that exercise typical paths. Use
-            appropriate file extensions if known. If binary, you may write contents via hex bytes.
+            Add or refine **warm-up seed files by family bucket** inside `{corpus_dir.relative_to(self.repo_root)}` for the
+            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and prioritize missing families.
+            Use appropriate file extensions if known. If binary, you may write contents via hex bytes.
 
-            Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
+            {seed_guidance}
+
+            Required seed families:
+            {", ".join(required_families) if required_families else "none"}
+
+            Optional seed families:
+            {", ".join(optional_families) if optional_families else "none"}
+
+            Current corpus summary:
+            {self._summarize_seed_corpus(corpus_dir)}
+
+            Current seed family coverage:
+            covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
+            missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
+
+            Coverage-oriented gap hints:
+            {self._infer_seed_gaps(seed_profile, corpus_dir)}
+
+            Rules:
+            - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
+            - Each missing required family should have at least one representative seed after your edits.
+            - Prefer missing families over adding more variants to already-covered malformed cases.
+            - Do not only generate malformed separator variants if structure families are missing.
+            - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
+            - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
+            - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
+            - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
             """
         ).strip()
 
@@ -1885,13 +2875,70 @@ class NonOssFuzzHarnessGenerator:
         patcher_kwargs: Dict[str, object] = {}
         if isinstance(seed_timeout, int) and seed_timeout > 0:
             patcher_kwargs["timeout"] = seed_timeout
+        selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
+        observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
+        target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
+        antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
+        additional_context_parts = [
+            "=== fuzz/observed_target.json ===\n" + (observed_target_text or "(missing)"),
+            "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
+            "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
+            "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
+            "=== harness source ===\n" + (harness_text or "(no harness found)"),
+            "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
+            "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+        ]
         stdout = self.patcher.run_codex_command(
             instructions,
-            additional_context=harness_text or "(no harness found)",
+            additional_context="\n\n".join(additional_context_parts),
             **patcher_kwargs,
         )
         if stdout is None:
             raise HarnessGeneratorError("Codex did not generate any seed files.")
+        ai_seed_count = len([p for p in corpus_dir.iterdir() if p.is_file()]) - len(repo_seed_files)
+        if ai_seed_count < 0:
+            ai_seed_count = 0
+        radamsa_count = self._run_radamsa_bootstrap(corpus_dir)
+        if radamsa_count > 0:
+            sources.append("radamsa")
+        if ai_seed_count > 0:
+            sources.append("ai")
+        filtered_meta = self._filter_seed_corpus(
+            corpus_dir,
+            seed_profile=seed_profile,
+            required_families=required_families,
+            target_markers=[
+                fuzzer_name,
+                harness_text,
+                readme_text,
+                str(execution_target.get("observed_target_api") or ""),
+                str(execution_target.get("selected_target_api") or ""),
+                str(execution_target.get("target_name") or ""),
+                str(execution_target.get("api") or ""),
+            ],
+        )
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = {
+            "counts": {
+                "repo_examples": len(repo_seed_files),
+                "ai": ai_seed_count,
+                "radamsa": radamsa_count,
+                "total": len([p for p in corpus_dir.iterdir() if p.is_file()]),
+            },
+            "sources": sorted(set(sources)),
+            "seed_profile": seed_profile,
+            "target_type": target_type,
+            "selected_target": dict(selected_target),
+            "observed_target": dict(observed_target),
+            "seed_families_required": required_families,
+            "seed_families_optional": optional_families,
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
+            "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
+            "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
+        }
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────
@@ -1914,6 +2961,19 @@ class NonOssFuzzHarnessGenerator:
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        initial_corpus_files = 0
+        initial_corpus_bytes = 0
+        try:
+            for p in corpus_dir.rglob("*"):
+                if p.is_file():
+                    initial_corpus_files += 1
+                    try:
+                        initial_corpus_bytes += int(p.stat().st_size)
+                    except Exception:
+                        pass
+        except Exception:
+            initial_corpus_files = 0
+            initial_corpus_bytes = 0
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
@@ -1929,6 +2989,39 @@ class NonOssFuzzHarnessGenerator:
             run_idle_timeout = max(0, min(int(str(run_idle_timeout_raw).strip()), 86400))
         except Exception:
             run_idle_timeout = 120
+        plateau_pulses = _run_plateau_pulses()
+        plateau_idle_growth_sec = _run_plateau_idle_growth_sec()
+        best_cov = 0
+        best_ft = 0
+        last_growth_at = time.monotonic()
+        plateau_pulse_hits = 0
+        callback_stop_reason = ""
+
+        def _line_callback(_kind: str, text: str) -> Optional[str]:
+            nonlocal best_cov, best_ft, last_growth_at, plateau_pulse_hits, callback_stop_reason
+            m = _LIBFUZZER_PROGRESS_RE.search(text or "")
+            if not m:
+                return None
+            cov = int(m.group("cov") or 0)
+            ft = int(m.group("ft") or 0)
+            kind = str(m.group("kind") or "").upper()
+            grew = cov > best_cov or ft > best_ft
+            if grew:
+                best_cov = max(best_cov, cov)
+                best_ft = max(best_ft, ft)
+                last_growth_at = time.monotonic()
+                plateau_pulse_hits = 0
+                return None
+            if kind == "PULSE":
+                if (time.monotonic() - last_growth_at) >= plateau_idle_growth_sec:
+                    plateau_pulse_hits += 1
+                    if plateau_pulse_hits >= plateau_pulses:
+                        callback_stop_reason = (
+                            "coverage_plateau "
+                            f"(idle_no_growth={plateau_idle_growth_sec}s pulse_hits={plateau_pulse_hits})"
+                        )
+                        return callback_stop_reason
+            return None
 
         cmd = [
             str(bin_path),
@@ -1947,6 +3040,7 @@ class NonOssFuzzHarnessGenerator:
             extra_inputs=[str(corpus_dir)],
             timeout=hard_timeout,
             idle_timeout=run_idle_timeout,
+            line_callback=_line_callback,
         )
 
         # Dump the tail for quick reading.
@@ -1955,6 +3049,10 @@ class NonOssFuzzHarnessGenerator:
         print(tail)
 
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
+        seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
+        seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
+        required_families = list(seed_bootstrap.get("seed_families_required") or [])
+        covered_families = list(seed_family_coverage.get("covered") or [])
 
         # Detect new artifacts
         post = set(p for p in artifacts_dir.glob("*") if p.is_file())
@@ -2044,7 +3142,9 @@ class NonOssFuzzHarnessGenerator:
             error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
         if rc != 0 and not crash_found:
             lowered = log.lower()
-            if "error: libfuzzer: out-of-memory" in lowered:
+            if "[callback-stop] coverage_plateau" in lowered:
+                rc = 0
+            elif "error: libfuzzer: out-of-memory" in lowered:
                 if not run_error_kind:
                     run_error_kind = "run_resource_exhaustion"
                 if not error:
@@ -2079,6 +3179,9 @@ class NonOssFuzzHarnessGenerator:
         except Exception:
             pass
 
+        plateau_detected = "[callback-stop] coverage_plateau" in log.lower()
+        plateau_idle_seconds = plateau_idle_growth_sec if plateau_detected else 0
+
         return FuzzerRunResult(
             rc=int(rc),
             new_artifacts=list(new_artifacts),
@@ -2097,6 +3200,19 @@ class NonOssFuzzHarnessGenerator:
             final_iteration=int(libfuzzer_stats.get("iteration", 0)),
             corpus_files=corpus_files,
             corpus_size_bytes=corpus_size_bytes,
+            terminal_reason="coverage_plateau" if plateau_detected else "",
+            plateau_detected=plateau_detected,
+            plateau_idle_seconds=plateau_idle_seconds,
+            seed_quality=_seed_quality_from_run(
+                log=log,
+                initial_corpus_files=initial_corpus_files,
+                initial_corpus_bytes=initial_corpus_bytes,
+                final_stats=libfuzzer_stats,
+                required_families=required_families,
+                covered_families=covered_families,
+                repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
+                plateau_idle_seconds=plateau_idle_seconds,
+            ),
         )
 
     # ────────────────────────────────────────────────────────────────────
@@ -2450,35 +3566,53 @@ class NonOssFuzzHarnessGenerator:
             attempted: List[str] = []
             for clone_url in _candidate_clone_urls(spec.url):
                 attempted.append(clone_url)
-                try:
-                    if dest.exists():
-                        shutil.rmtree(dest, ignore_errors=True)
-                except Exception:
-                    pass
-
                 print(f"[*] (host/git) Cloning {clone_url} → {dest}")
-                proxy_overrides = _host_git_proxy_override_args()
-                if proxy_overrides:
-                    print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
-                clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
-                print(f"[*] ➜  {' '.join(clone_cmd)}")
-                rc, out, err, timed_out = _run_cmd_capture(clone_cmd, timeout=GIT_HOST_CLONE_TIMEOUT_SEC)
-                last_rc = rc
-                if timed_out:
+                clone_success = False
+                for attempt in range(1, max(1, GIT_CLONE_RETRIES) + 1):
+                    try:
+                        if dest.exists():
+                            shutil.rmtree(dest, ignore_errors=True)
+                    except Exception:
+                        pass
+
+                    proxy_overrides = _host_git_proxy_override_args()
+                    if proxy_overrides:
+                        print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
+                    clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
+                    print(f"[*] ➜  {' '.join(clone_cmd)}")
+                    rc, out, err, timed_out = _run_cmd_capture(
+                        clone_cmd,
+                        timeout=GIT_HOST_CLONE_TIMEOUT_SEC,
+                        env=_host_git_proxy_env(),
+                    )
+                    last_rc = rc
+
+                    if timed_out:
+                        if (t := _tail_lines(err)):
+                            print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(out)):
+                            print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                        print(
+                            f"[warn] (host/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_HOST_CLONE_TIMEOUT_SEC}s); retrying..."
+                        )
+                        time.sleep(2 * attempt)
+                        continue
+
+                    if rc == 0:
+                        clone_success = True
+                        break
+
                     if (t := _tail_lines(err)):
                         print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
                     if (t := _tail_lines(out)):
                         print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
                     print(
-                        f"[warn] (host/git) clone timed out after {GIT_HOST_CLONE_TIMEOUT_SEC}s (url={clone_url}); retrying next URL..."
+                        f"[warn] (host/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    continue
-                if rc == 0:
+                    time.sleep(2 * attempt)
+
+                if clone_success:
                     break
-                if (t := _tail_lines(err)):
-                    print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
-                if (t := _tail_lines(out)):
-                    print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
             if last_rc != 0 or not dest.exists():
                 raise HarnessGeneratorError(
                     "git clone failed on host. "
@@ -2490,7 +3624,7 @@ class NonOssFuzzHarnessGenerator:
                 proxy_overrides = _host_git_proxy_override_args()
                 checkout_cmd = ["git", *proxy_overrides, "-C", str(dest), "checkout", spec.ref]
                 print(f"[*] ➜  {' '.join(checkout_cmd)}")
-                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd)
+                crc, cout, cerr, _ = _run_cmd_capture(checkout_cmd, env=_host_git_proxy_env())
                 if crc != 0:
                     if (t := _tail_lines(cerr)):
                         print("[warn] (host/git) checkout stderr (tail):\n" + textwrap.indent(t, "    "))
@@ -2498,7 +3632,7 @@ class NonOssFuzzHarnessGenerator:
                         print("[warn] (host/git) checkout stdout (tail):\n" + textwrap.indent(t, "    "))
                     fetch_cmd = ["git", *proxy_overrides, "-C", str(dest), "fetch", "origin", spec.ref]
                     print(f"[*] ➜  {' '.join(fetch_cmd)}")
-                    frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd)
+                    frc, fout, ferr, _ = _run_cmd_capture(fetch_cmd, env=_host_git_proxy_env())
                     if frc != 0:
                         if (t := _tail_lines(ferr)):
                             print("[warn] (host/git) fetch stderr (tail):\n" + textwrap.indent(t, "    "))
@@ -2507,7 +3641,7 @@ class NonOssFuzzHarnessGenerator:
                         raise HarnessGeneratorError(f"git fetch failed on host (rc={frc}).")
                     checkout_fh = ["git", *proxy_overrides, "-C", str(dest), "checkout", "FETCH_HEAD"]
                     print(f"[*] ➜  {' '.join(checkout_fh)}")
-                    c2rc, c2out, c2err, _ = _run_cmd_capture(checkout_fh)
+                    c2rc, c2out, c2err, _ = _run_cmd_capture(checkout_fh, env=_host_git_proxy_env())
                     if c2rc != 0:
                         if (t := _tail_lines(c2err)):
                             print("[warn] (host/git) checkout FETCH_HEAD stderr (tail):\n" + textwrap.indent(t, "    "))
@@ -2799,6 +3933,7 @@ class NonOssFuzzHarnessGenerator:
         extra_inputs: Optional[List[str]] = None,
         timeout: int = 7200,
         idle_timeout: int = 0,
+        line_callback: Optional[Callable[[str, str], Optional[str]]] = None,
     ) -> Tuple[int, str, str]:
         def _redact_cmd(argv: Sequence[str]) -> List[str]:
             """Redact sensitive values from commands before printing.
@@ -2870,7 +4005,16 @@ class NonOssFuzzHarnessGenerator:
             cmd.extend(extra_inputs)
 
         effective_env = env or os.environ.copy()
-        actual_cmd = self._dockerize_cmd(cmd, cwd=cwd, env=effective_env if self.docker_image else effective_env)
+        exec_args = list(cmd)
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        if self.docker_image:
+            actual_cmd = self._dockerize_cmd(exec_args, cwd=cwd, env=effective_env)
+        else:
+            actual_cmd = self._wrap_exec_with_runtime_prelude(
+                exec_args,
+                dep_file=str((self.repo_root / dep_rel).resolve()),
+                dep_log_prefix="native/deps",
+            )
 
         start_ts = time.time()
         start_mono = time.monotonic()
@@ -2908,6 +4052,7 @@ class NonOssFuzzHarnessGenerator:
         done_readers = 0
         timed_out = False
         idle_timed_out = False
+        callback_stop_reason = ""
         heartbeat_raw = (os.environ.get("SHERPA_CMD_KEEPALIVE_SEC") or "0").strip()
         try:
             heartbeat_sec = max(0.0, min(float(heartbeat_raw), 3600.0))
@@ -2941,6 +4086,14 @@ class NonOssFuzzHarnessGenerator:
                         # Keep stderr visible in real-time to avoid silent failures.
                         print(safe_text, end="", flush=True)
                     last_activity = time.monotonic()
+                    if line_callback is not None:
+                        try:
+                            callback_stop_reason = str(line_callback(kind, safe_text) or "").strip()
+                        except Exception:
+                            callback_stop_reason = ""
+                        if callback_stop_reason:
+                            timed_out = True
+                            break
 
                 if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
                     idle_timed_out = True
@@ -2992,7 +4145,9 @@ class NonOssFuzzHarnessGenerator:
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
-        if idle_timed_out:
+        if callback_stop_reason:
+            err = (err or "") + f"\n[callback-stop] {callback_stop_reason}"
+        elif idle_timed_out:
             err = (err or "") + f"\n[idle-timeout] no output for {idle_timeout}s; process was killed."
         elif timed_out:
             err = (err or "") + "\n[timeout] process exceeded limit and was killed."
