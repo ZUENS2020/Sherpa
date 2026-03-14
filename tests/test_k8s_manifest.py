@@ -90,9 +90,9 @@ def test_k8s_manifest_applies_default_worker_resources():
     resources = manifest["spec"]["template"]["spec"]["containers"][0]["resources"]
 
     assert resources["requests"]["cpu"] == "500m"
-    assert resources["requests"]["memory"] == "512Mi"
+    assert resources["requests"]["memory"] == "4Gi"
     assert resources["limits"]["cpu"] == "2"
-    assert resources["limits"]["memory"] == "2Gi"
+    assert resources["limits"]["memory"] == "128Gi"
 
 
 def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.MonkeyPatch):

@@ -264,8 +264,8 @@ def _memory_status() -> dict[str, object]:
 def _k8s_worker_resources() -> dict[str, dict[str, str]] | None:
     request_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_REQUEST", "500m") or "").strip()
     limit_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_LIMIT", "2") or "").strip()
-    request_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_REQUEST", "512Mi") or "").strip()
-    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "2Gi") or "").strip()
+    request_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_REQUEST", "4Gi") or "").strip()
+    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "128Gi") or "").strip()
 
     requests: dict[str, str] = {}
     limits: dict[str, str] = {}
