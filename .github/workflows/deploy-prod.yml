@@ -23,7 +23,7 @@ env:
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy-prod:
@@ -36,9 +36,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
-          fetch-tags: false
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
 
       - name: Guard no GHCR push path
         shell: bash
@@ -355,10 +353,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            sha="${GITHUB_SHA}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            sha="${{ github.event.pull_request.head.sha }}"
           else
-            sha="${{ github.event.pull_request.merge_commit_sha }}"
+            sha="${GITHUB_SHA}"
           fi
           echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
@@ -427,6 +425,8 @@ jobs:
             fi
           fi
 
+          # If target sha-tag image is absent on node, force rebuild to avoid
+          # silently rolling back UI/API to stale images.
           if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
             ctr_cmd=(sudo ctr -n k8s.io)
             if sudo test -S /run/k3s/containerd/containerd.sock; then
@@ -521,6 +521,15 @@ jobs:
             --tag "${FRONTEND_IMAGE}" \
             .
           docker save -o "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
+
+      - name: Cleanup legacy dev tunnel in shared namespace
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n sherpa delete deploy cloudflared-dev --ignore-not-found=true
+          kubectl -n sherpa delete configmap cloudflared-dev-proxy-config --ignore-not-found=true
+          kubectl -n sherpa delete secret cloudflare-tunnel-dev --ignore-not-found=true
 
       - name: Deploy cloudflared tunnel
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -737,11 +746,3 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:18001/api/health
-
-      - name: Rollback on failure
-        if: failure() && steps.kube_preflight.outputs.reachable == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl -n "${NAMESPACE}" rollout undo deployment/sherpa-web || true
-          kubectl -n "${NAMESPACE}" rollout undo deployment/sherpa-frontend || true
