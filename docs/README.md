@@ -4,23 +4,23 @@
 
 ## 推荐阅读顺序
 
-1. [仓库总览](/Users/zuens2020/Documents/Sherpa/README.md)
+1. [仓库总览](/README.md)
    - 适合第一次了解项目，先建立对系统目标、模块边界和工作流的整体认知。
 
-2. [代码级技术分析](/Users/zuens2020/Documents/Sherpa/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+2. [代码级技术分析](/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
    - 面向开发者，按模块和状态文件解释系统如何工作。
 
-3. [比赛展示版技术解读](/Users/zuens2020/Documents/Sherpa/docs/COMPETITION_TECHNICAL_BRIEF.md)
+3. [比赛展示版技术解读](/docs/COMPETITION_TECHNICAL_BRIEF.md)
    - 面向展示、答辩和演示，重点解释设计价值、系统闭环和工程亮点。
 
-4. [标准变更流程](/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md)
+4. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
    - 描述 `codex/* -> dev -> main` 的标准验证和发布路径。
 
 ## 其他保留文档
 
-- `/Users/zuens2020/Documents/Sherpa/docs/k8s/`
+- `/docs/k8s/`
   - 部署、运维、发布门禁、Cloudflare、Runbook 等操作型文档。
-- `/Users/zuens2020/Documents/Sherpa/harness_generator/docs/`
+- `/docs/`
   - 后端工具链与交接类资料。
 
 ## 当前统一口径
