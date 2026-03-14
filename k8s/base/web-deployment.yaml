@@ -30,7 +30,9 @@ spec:
               for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do
                 mkdir -p "$d"
                 chown 10001:10001 "$d" || true
-                chmod 0775 "$d" || true
+                chmod 0777 "$d" || true
+                find "$d" -mindepth 1 -exec chown 10001:10001 {} + || true
+                find "$d" -mindepth 1 -exec chmod a+rwX {} + || true
               done
           securityContext:
             allowPrivilegeEscalation: false

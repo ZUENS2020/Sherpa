@@ -7,6 +7,7 @@ sys.path.append(parent_dir)  # 添加父文件夹路径
 from pathlib import Path
 
 from workflow_graph import FuzzWorkflowInput, run_fuzz_workflow
+from persistent_config import load_config, normalize_model_for_opencode
 
 load_dotenv()
 
@@ -75,7 +76,7 @@ def fuzz_logic(
 
     # Set model in environment so OpenCode can pick it up
     if model and model.strip() and not os.environ.get("OPENCODE_MODEL"):
-        os.environ["OPENCODE_MODEL"] = model.strip()
+        os.environ["OPENCODE_MODEL"] = normalize_model_for_opencode(model.strip(), cfg=load_config())
     if oss_fuzz_dir and oss_fuzz_dir.strip():
         os.environ["SHERPA_DEFAULT_OSS_FUZZ_DIR"] = oss_fuzz_dir.strip()
     print(f"[DEBUG] Entering run_fuzz_workflow with repo_url={repo_url}")

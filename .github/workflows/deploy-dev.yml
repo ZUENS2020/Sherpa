@@ -272,7 +272,13 @@ jobs:
             sudo find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
           done
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
-          sudo chown -R "$(id -u):$(id -g)" \
+          sudo chown -R 10001:10001 \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"
+          sudo chmod -R a+rwX \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \
@@ -368,7 +374,13 @@ jobs:
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
-          sudo chown -R "$(id -u):$(id -g)" \
+          sudo chown -R 10001:10001 \
+            "${DEV_SHARED_ROOT}/config" \
+            "${DEV_SHARED_ROOT}/job-logs" \
+            "${DEV_SHARED_ROOT}/oss-fuzz" \
+            "${DEV_SHARED_ROOT}/tmp" \
+            "${DEV_OUTPUT_DIR}"
+          sudo chmod -R a+rwX \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
             "${DEV_SHARED_ROOT}/oss-fuzz" \

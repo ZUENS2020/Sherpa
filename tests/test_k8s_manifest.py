@@ -46,6 +46,23 @@ def test_k8s_manifest_does_not_force_empty_opencode_docker_image():
     assert "SHERPA_OPENCODE_DOCKER_IMAGE" not in env_names
 
 
+def test_k8s_manifest_normalizes_opencode_model_value():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_map = {item["name"]: item["value"] for item in env_items}
+
+    assert env_map["OPENCODE_MODEL"] == "minimax/MiniMax-M2.5"
+    assert env_map["OPENAI_MODEL"] == "MiniMax-M2.5"
+
+
 def test_k8s_configmap_does_not_set_opencode_docker_image():
     configmap = yaml.safe_load((ROOT / "k8s" / "base" / "configmap.yaml").read_text(encoding="utf-8"))
     data = configmap["data"]
@@ -73,9 +90,9 @@ def test_k8s_manifest_applies_default_worker_resources():
     resources = manifest["spec"]["template"]["spec"]["containers"][0]["resources"]
 
     assert resources["requests"]["cpu"] == "500m"
-    assert resources["requests"]["memory"] == "512Mi"
+    assert resources["requests"]["memory"] == "4Gi"
     assert resources["limits"]["cpu"] == "2"
-    assert resources["limits"]["memory"] == "2Gi"
+    assert resources["limits"]["memory"] == "128Gi"
 
 
 def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.MonkeyPatch):
@@ -142,3 +159,7 @@ def test_k8s_manifest_initializes_runtime_volume_permissions():
     mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
     assert "/app/config" in mounts
     assert "/shared/tmp" in mounts
+    command = "\n".join(init_container["command"])
+    assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
+    assert "chmod 0777 \"$d\"" in command
+    assert "find \"$d\" -mindepth 1 -exec chmod a+rwX {} +" in command

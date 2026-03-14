@@ -233,6 +233,49 @@ def _best_provider_api_key(cfg: "WebPersistentConfig", provider: str) -> str:
     return ""
 
 
+def normalize_model_for_opencode(
+    model: str | None,
+    *,
+    cfg: "WebPersistentConfig" | None = None,
+    providers: list[OpencodeProviderConfig] | None = None,
+) -> str:
+    raw = str(model or "").strip()
+    if not raw:
+        return ""
+    if "/" in raw:
+        return raw
+
+    normalized_entries = normalize_opencode_providers(
+        providers if providers is not None else (cfg.opencode_providers if cfg is not None else _default_opencode_providers())
+    )
+    provider_models: dict[str, set[str]] = {}
+    for item in normalized_entries:
+        names: set[str] = set()
+        for candidate in item.models:
+            value = str(candidate or "").strip()
+            if not value:
+                continue
+            names.add(value)
+            if "/" in value:
+                names.add(value.split("/", 1)[1])
+        provider_models[item.name] = names
+
+    matched: list[str] = []
+    for provider, models in provider_models.items():
+        if raw in models:
+            matched.append(provider)
+    if len(matched) == 1:
+        return f"{matched[0]}/{raw}"
+
+    if len(provider_models) == 1:
+        only = next(iter(provider_models.keys()))
+        return f"{only}/{raw}"
+
+    if raw.lower().startswith("glm-"):
+        return f"zai/{raw}"
+    return raw
+
+
 def _dedupe_keep_order(items: list[str]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()

@@ -25,7 +25,11 @@ def test_execute_k8s_job_captures_stage_node_before_job_delete(
     monkeypatch.setenv("SHERPA_K8S_KEEP_FINISHED_JOBS", "0")
     monkeypatch.setattr(web_main, "_k8s_build_manifest", lambda job_name, payload: "kind: Job\n")
     monkeypatch.setattr(web_main, "_kubectl", lambda args, input_text=None, timeout=30: (0, "", ""))
-    monkeypatch.setattr(web_main, "_k8s_wait_job", lambda job_name, timeout_sec: ("Succeeded", "Running"))
+    monkeypatch.setattr(
+        web_main,
+        "_k8s_wait_job",
+        lambda job_name, timeout_sec, on_progress=None: ("Succeeded", "Running"),
+    )
     monkeypatch.setattr(web_main, "_job_update", lambda *args, **kwargs: None)
     monkeypatch.setattr(web_main, "_k8s_get_job_node_name", lambda job_name: "node-a")
 
@@ -46,3 +50,53 @@ def test_execute_k8s_job_captures_stage_node_before_job_delete(
     assert result.get("message") == "ok"
     assert deleted == ["job-name-1"]
 
+
+def test_execute_k8s_job_failed_run_classifies_pod_and_persists_failure_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+
+    monkeypatch.setenv("SHERPA_K8S_KEEP_FINISHED_JOBS", "0")
+    monkeypatch.setattr(web_main, "_k8s_build_manifest", lambda job_name, payload: "kind: Job\n")
+    monkeypatch.setattr(web_main, "_kubectl", lambda args, input_text=None, timeout=30: (0, "", ""))
+    monkeypatch.setattr(
+        web_main,
+        "_k8s_wait_job",
+        lambda job_name, timeout_sec, on_progress=None: ("Failed", "Running"),
+    )
+    monkeypatch.setattr(web_main, "_job_update", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        web_main,
+        "_k8s_get_job_pod_details",
+        lambda job_name: {
+            "pod_name": "run-pod-1",
+            "phase": "Failed",
+            "terminated_reason": "OOMKilled",
+            "exit_code": 137,
+        },
+    )
+    monkeypatch.setattr(web_main, "_k8s_collect_job_logs", lambda job_name: "tail line 1\ntail line 2")
+
+    deleted: list[str] = []
+    monkeypatch.setattr(web_main, "_k8s_delete_job", lambda name: deleted.append(name))
+
+    with pytest.raises(web_main._K8sJobFailure) as exc:
+        web_main._execute_k8s_job(
+            job_id="job-2",
+            job_name="job-name-2",
+            payload={"job_id": "job-2", "stop_after_step": "run"},
+            result_path=result_path,
+            error_path=error_path,
+            wait_timeout=30,
+        )
+
+    err = exc.value
+    assert err.result["error_code"] == "oom_killed"
+    assert err.result["error_kind"] == "resource"
+    assert err.result["run_error_kind"] == "run_resource_exhaustion"
+    assert err.result["run_terminal_reason"] == "run_resource_exhaustion"
+    assert "tail line 2" in err.result["k8s_failure"]["logs_tail"]
+    assert "oom_killed" in error_path.read_text(encoding="utf-8")
+    assert result_path.is_file()
+    assert deleted == ["job-name-2"]
