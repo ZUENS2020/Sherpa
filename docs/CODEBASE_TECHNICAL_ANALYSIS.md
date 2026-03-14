@@ -30,7 +30,7 @@ flowchart LR
 
 ## 3. 模块职责
 
-### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/main.py`
+### `/harness_generator/src/langchain_agent/main.py`
 
 这是系统的 API 与调度入口，负责：
 
@@ -43,7 +43,7 @@ flowchart LR
 
 代码层面可以把它理解为“控制面”。
 
-### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/workflow_graph.py`
+### `/harness_generator/src/langchain_agent/workflow_graph.py`
 
 这是 Sherpa 的编排核心。它定义了：
 
@@ -55,7 +55,7 @@ flowchart LR
 
 系统行为的大部分“决策逻辑”都在这里。
 
-### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/fuzz_unharnessed_repo.py`
+### `/harness_generator/src/fuzz_unharnessed_repo.py`
 
 这是“执行面”的底层实现，负责：
 
@@ -69,7 +69,7 @@ flowchart LR
 
 它并不负责工作流阶段决策，而是为工作流节点提供执行原语。
 
-### `/Users/zuens2020/Documents/Sherpa/harness_generator/src/langchain_agent/persistent_config.py`
+### `/harness_generator/src/langchain_agent/persistent_config.py`
 
 负责 Web 配置的持久化与运行时文件生成，当前重点是：
 
@@ -79,7 +79,7 @@ flowchart LR
 
 这部分已经围绕 non-root 做了收口，默认运行时生成文件落在 `/tmp/sherpa-runtime`。
 
-### `/Users/zuens2020/Documents/Sherpa/frontend-next/`
+### `/frontend-next/`
 
 前端控制台只做以下事情：
 
