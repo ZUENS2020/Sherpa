@@ -404,6 +404,15 @@ def _k8s_proxy_env_items() -> list[dict[str, object]]:
     ]
 
 
+def _k8s_git_env_items() -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for name in ("SHERPA_GIT_MIRRORS", "SHERPA_GITHUB_MIRROR"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            items.append({"name": name, "value": value})
+    return items
+
+
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
@@ -506,6 +515,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                 {"name": "OPENCODE_MODEL", "value": normalized_model},
                                 {"name": "OPENAI_MODEL", "value": raw_model},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
+                                *_k8s_git_env_items(),
                                 *_k8s_proxy_env_items(),
                             ],
                             "volumeMounts": [
