@@ -3,7 +3,7 @@ import { Providers } from './providers';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Sherpa / OSS-Fuzz 控制台',
+  title: 'Sherpa 控制台',
   description: 'Sherpa task monitor and fuzz workflow console',
 };
 
