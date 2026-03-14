@@ -3556,39 +3556,53 @@ class NonOssFuzzHarnessGenerator:
             attempted: List[str] = []
             for clone_url in _candidate_clone_urls(spec.url):
                 attempted.append(clone_url)
-                try:
-                    if dest.exists():
-                        shutil.rmtree(dest, ignore_errors=True)
-                except Exception:
-                    pass
-
                 print(f"[*] (host/git) Cloning {clone_url} → {dest}")
-                proxy_overrides = _host_git_proxy_override_args()
-                if proxy_overrides:
-                    print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
-                clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
-                print(f"[*] ➜  {' '.join(clone_cmd)}")
-                rc, out, err, timed_out = _run_cmd_capture(
-                    clone_cmd,
-                    timeout=GIT_HOST_CLONE_TIMEOUT_SEC,
-                    env=_host_git_proxy_env(),
-                )
-                last_rc = rc
-                if timed_out:
+                clone_success = False
+                for attempt in range(1, max(1, GIT_CLONE_RETRIES) + 1):
+                    try:
+                        if dest.exists():
+                            shutil.rmtree(dest, ignore_errors=True)
+                    except Exception:
+                        pass
+
+                    proxy_overrides = _host_git_proxy_override_args()
+                    if proxy_overrides:
+                        print("[warn] (host/git) detected broken localhost proxy; disabling git http(s).proxy for this operation")
+                    clone_cmd = ["git", *proxy_overrides, "clone", "--depth", "1", clone_url, str(dest)]
+                    print(f"[*] ➜  {' '.join(clone_cmd)}")
+                    rc, out, err, timed_out = _run_cmd_capture(
+                        clone_cmd,
+                        timeout=GIT_HOST_CLONE_TIMEOUT_SEC,
+                        env=_host_git_proxy_env(),
+                    )
+                    last_rc = rc
+
+                    if timed_out:
+                        if (t := _tail_lines(err)):
+                            print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
+                        if (t := _tail_lines(out)):
+                            print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
+                        print(
+                            f"[warn] (host/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_HOST_CLONE_TIMEOUT_SEC}s); retrying..."
+                        )
+                        time.sleep(2 * attempt)
+                        continue
+
+                    if rc == 0:
+                        clone_success = True
+                        break
+
                     if (t := _tail_lines(err)):
                         print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
                     if (t := _tail_lines(out)):
                         print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
                     print(
-                        f"[warn] (host/git) clone timed out after {GIT_HOST_CLONE_TIMEOUT_SEC}s (url={clone_url}); retrying next URL..."
+                        f"[warn] (host/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    continue
-                if rc == 0:
+                    time.sleep(2 * attempt)
+
+                if clone_success:
                     break
-                if (t := _tail_lines(err)):
-                    print("[warn] (host/git) clone stderr (tail):\n" + textwrap.indent(t, "    "))
-                if (t := _tail_lines(out)):
-                    print("[warn] (host/git) clone stdout (tail):\n" + textwrap.indent(t, "    "))
             if last_rc != 0 or not dest.exists():
                 raise HarnessGeneratorError(
                     "git clone failed on host. "
