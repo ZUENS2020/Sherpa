@@ -232,6 +232,10 @@ def classify_build_failure(
     if build_rc == 0 and not has_fuzzer_binaries:
         return "source", "no_fuzzer_binaries"
 
+    if "no rule to make target" in low:
+        return "source", "build_strategy_mismatch"
+    if "undefined reference to `main'" in low or "undefined reference to main" in low:
+        return "source", "missing_fuzzer_main"
     if "undefined reference to `llvmfuzzertestoneinput" in low:
         return "source", "missing_llvmfuzzer_entrypoint"
     if "cannot find -lz" in low or "cannot find -l" in low:
@@ -253,6 +257,19 @@ def classify_build_failure(
 
 
 def build_failure_recovery_advice(error_kind: str, error_code: str) -> str:
+    if error_kind == "source":
+        source_recovery: dict[str, str] = {
+            "build_strategy_mismatch": (
+                "Generated build scaffold appears to depend on a repository-provided fuzz target. "
+                "Regenerate or repair fuzz/build.py to build the repository library/objects and "
+                "link the generated harness externally instead of invoking a guessed fuzz target."
+            ),
+            "missing_fuzzer_main": (
+                "Fuzzer main/entrypoint is missing. Add `-fsanitize=fuzzer` or explicitly link a "
+                "repo-provided main source as a normal source input, not as a repository fuzz target."
+            ),
+        }
+        return source_recovery.get(error_code, "")
     if error_kind != "infra":
         return ""
 

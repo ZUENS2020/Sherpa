@@ -77,6 +77,9 @@ class FuzzWorkflowState(TypedDict, total=False):
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
+    build_strategy_path: str
+    build_mode: str
+    build_target_source: str
     selected_target_api: str
     selected_target_runtime_viability: str
     coverage_seed_quality: dict[str, Any]
@@ -1054,6 +1057,7 @@ def _synthesize_opencode_idle_timeout_sec() -> int:
 
 def _synthesize_activity_watch_paths() -> list[str]:
     return [
+        "fuzz/build_strategy.json",
         "fuzz/build.py",
         "fuzz/README.md",
         "fuzz/system_packages.txt",
@@ -1068,6 +1072,98 @@ def _synthesize_activity_watch_paths() -> list[str]:
         "fuzz/**/*.cxx",
         "fuzz/**/*.java",
     ]
+
+
+def _build_scaffold_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "build_strategy.json"
+
+
+def _load_build_strategy_doc(repo_root: Path) -> dict[str, Any]:
+    path = _build_scaffold_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _contains_forbidden_repo_fuzz_target_usage(text: str) -> bool:
+    lowered = (text or "").lower()
+    patterns = [
+        r"--target[^a-z0-9]*(?:[a-z0-9._-]*)(?:fuzz|fuzzer)[a-z0-9._-]*",
+        r"\b(?:make|gmake|ninja)[^a-z0-9]*(?:[a-z0-9._-]*)(?:fuzz|fuzzer)[a-z0-9._-]*",
+    ]
+    return any(re.search(pat, lowered, re.IGNORECASE) for pat in patterns)
+
+
+def _infer_fuzzer_entry_strategy(build_text: str) -> str:
+    lowered = (build_text or "").lower()
+    if "-fsanitize=fuzzer" in lowered:
+        return "sanitizer_fuzzer"
+    if "main.cc" in lowered or "fuzzer-common.h" in lowered:
+        return "repo_main_source"
+    return "custom_main_source"
+
+
+def _write_build_strategy_doc(repo_root: Path) -> tuple[str, dict[str, Any]]:
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_sh = fuzz_dir / "build.sh"
+    build_text = ""
+    if build_py.is_file():
+        build_text = build_py.read_text(encoding="utf-8", errors="replace")
+    elif build_sh.is_file():
+        build_text = build_sh.read_text(encoding="utf-8", errors="replace")
+    build_mode = "library_link"
+    reason = "default external harness/library-link strategy"
+    if not build_text.strip():
+        build_mode = "custom_script"
+        reason = "no readable build scaffold found"
+    elif _contains_forbidden_repo_fuzz_target_usage(build_text):
+        reason = "scaffold references repository fuzz targets; still recorded as external strategy for repair"
+    entry = _infer_fuzzer_entry_strategy(build_text)
+    doc: dict[str, Any] = {
+        "build_system": "unknown",
+        "build_mode": build_mode,
+        "library_targets": [],
+        "library_artifacts": [],
+        "include_dirs": [],
+        "extra_sources": [],
+        "fuzzer_entry_strategy": entry,
+        "reason": reason,
+        "evidence": [],
+    }
+    path = _build_scaffold_path(repo_root)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _build_scaffold_precheck(repo_root: Path) -> dict[str, Any]:
+    fuzz_dir = repo_root / "fuzz"
+    build_py = fuzz_dir / "build.py"
+    build_sh = fuzz_dir / "build.sh"
+    build_text = ""
+    if build_py.is_file():
+        build_text = build_py.read_text(encoding="utf-8", errors="replace")
+    elif build_sh.is_file():
+        build_text = build_sh.read_text(encoding="utf-8", errors="replace")
+    strategy = _load_build_strategy_doc(repo_root)
+    if _contains_forbidden_repo_fuzz_target_usage(build_text):
+        return {
+            "ok": False,
+            "code": "build_strategy_mismatch",
+            "reason": "build scaffold references repository fuzz targets",
+        }
+    if strategy and not str(strategy.get("fuzzer_entry_strategy") or "").strip():
+        return {
+            "ok": False,
+            "code": "missing_fuzzer_main",
+            "reason": "build strategy missing fuzzer entry strategy",
+        }
+    return {"ok": True, "code": "", "reason": ""}
 
 
 def _run_finalize_timeout_sec() -> int:
@@ -2314,6 +2410,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             build_py = gen.repo_root / "fuzz" / "build.py"
             if build_py.is_file():
                 parts.append("=== existing fuzz/build.py ===\n" + build_py.read_text(encoding="utf-8", errors="replace"))
+            build_strategy = gen.repo_root / "fuzz" / "build_strategy.json"
+            if build_strategy.is_file():
+                parts.append("=== existing fuzz/build_strategy.json ===\n" + build_strategy.read_text(encoding="utf-8", errors="replace"))
             build_sh = gen.repo_root / "fuzz" / "build.sh"
             if build_sh.is_file():
                 parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
@@ -2501,6 +2600,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     _run_readme_alignment_completion(remaining_for_readme, target_alignment)
                     readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
         observed_target_path = ""
+        build_strategy_path = ""
+        build_strategy_doc: dict[str, Any] = {}
         try:
             observed_target_path, _ = _write_observed_target_doc(
                 gen.repo_root,
@@ -2515,6 +2616,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             )
         except Exception:
             observed_target_path = ""
+        try:
+            build_strategy_path, build_strategy_doc = _write_build_strategy_doc(gen.repo_root)
+        except Exception:
+            build_strategy_path = ""
+            build_strategy_doc = {}
         out = {
             **state,
             "last_step": "synthesize",
@@ -2526,6 +2632,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "restart_to_plan_error_text": "",
             "restart_to_plan_report_path": "",
             "observed_target_path": observed_target_path,
+            "build_strategy_path": build_strategy_path,
+            "build_mode": str(build_strategy_doc.get("build_mode") or ""),
+            "build_target_source": "external_scaffold",
             "synthesize_selected_target_name": str(target_alignment.get("expected_target_name") or selected_target_name),
             "synthesize_selected_target_api": str(target_alignment.get("expected_api") or selected_target_api),
             "synthesize_observed_target_api": str(target_alignment.get("observed_api") or ""),
@@ -2685,6 +2794,36 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prev = build_env.get(key, "").strip()
             build_env[key] = f"{include_root}:{prev}" if prev else include_root
 
+        precheck = _build_scaffold_precheck(gen.repo_root)
+        if not bool(precheck.get("ok")):
+            reason = str(precheck.get("reason") or "invalid build scaffold")
+            code = str(precheck.get("code") or "build_strategy_mismatch")
+            next_state: FuzzWorkflowRuntimeState = {
+                **state,
+                "build_attempts": int(state.get("build_attempts") or 0),
+                "build_rc": 1,
+                "build_stdout_tail": "",
+                "build_stderr_tail": reason,
+                "build_full_log_path": str(build_full_log_path),
+                "last_step": "build",
+                "build_error_kind": "source",
+                "build_error_code": code,
+                "build_mode": str(state.get("build_mode") or ""),
+                "build_target_source": str(state.get("build_target_source") or "external_scaffold"),
+                "last_error": reason,
+                "message": "build scaffold precheck failed",
+            }
+            _append_build_full_log(
+                stage="precheck",
+                cmd=["precheck"],
+                cwd=build_cwd,
+                rc=1,
+                out="",
+                err=reason,
+            )
+            _wf_log(cast(dict[str, Any], next_state), f"<- build fail precheck code={code} dt={_fmt_dt(time.perf_counter()-t0)}")
+            return next_state
+
         retries_raw = os.environ.get("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "2")
         try:
             max_local_attempts = int(retries_raw)
@@ -2770,6 +2909,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "build_stderr_tail": _tail(final_err),
             "build_full_log_path": str(build_full_log_path),
             "last_step": "build",
+            "build_mode": str(state.get("build_mode") or ""),
+            "build_target_source": str(state.get("build_target_source") or "external_scaffold"),
         }
         build_error_kind, build_error_code = _classify_build_failure(
             str(next_state.get("last_error") or ""),
@@ -4004,6 +4145,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
     recent_history = history[-history_limit:] if history else []
+    build_strategy_doc = _load_build_strategy_doc(gen.repo_root)
 
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
@@ -4048,7 +4190,19 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "Do not use `-stdlib=libc++` in this environment.\n"
                 "If target sources define `main`, add a compile define such as `-Dmain=vuln_main` to avoid libFuzzer main conflicts.\n"
                 "If include/link flags are wrong, fix them from fuzz/build.py or fuzz harness code only.\n"
+                "Do not invoke repository-provided fuzz targets or guessed `--target ...fuzzer` build commands.\n"
+                "Always build the repository library/objects and link the generated harness externally.\n"
                 "Do not refactor production code or edit upstream source files."
+            )
+        if build_error_code == "build_strategy_mismatch":
+            codex_hint = (
+                codex_hint.strip()
+                + "\nThe current scaffold incorrectly depends on a repository fuzz target. Rewrite fuzz/build.py to avoid any repo fuzz target invocation and use external harness linking only."
+            )
+        if build_error_code == "missing_fuzzer_main":
+            codex_hint = (
+                codex_hint.strip()
+                + "\nThe current scaffold is missing a fuzzer main strategy. Add `-fsanitize=fuzzer` or explicitly compile a repo-provided main source as a normal source input."
             )
         if recent_history and any(str(x.get("outcome") or "") == "noop" for x in recent_history):
             codex_hint = (
@@ -4063,6 +4217,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
     if recent_history:
         context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
+    if build_strategy_doc:
+        context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
     if last_error:
         context_parts.append("=== last_error ===\n" + last_error)
     if stdout_tail:
