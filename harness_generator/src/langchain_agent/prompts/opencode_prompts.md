@@ -74,6 +74,10 @@ Target-selection policy:
 - The final target must be the actual external/library API exercised by the harness, not a local helper, checker, wrapper utility, or placeholder name.
 - Your harness, `fuzz/README.md`, and build scaffold must all agree on the same final observed target and harness filename.
 - If `fuzz/observed_target.json` already exists, treat it as the execution truth source and keep new outputs consistent with it unless the harness itself changes.
+- Do not invoke repository-provided fuzz targets or guessed target names such as `cmake --build --target <name>-fuzzer`, `make <name>_fuzzer`, or similar target-driven fuzz build paths.
+- Even if the repository contains `test/fuzzing`, `main.cc`, or `fuzzer-common.h`, treat them only as optional source inputs for external linking, never as the primary build entrypoint.
+- Create `fuzz/build_strategy.json` and keep it limited to these fields: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`.
+- `build_mode` must be `library_link` or `custom_script`; never invent or use a repository-native fuzz target mode.
 - `fuzz/README.md` MUST contain these exact fields with values that match the actual harness:
   - `Selected target: ...`
   - `Final target: ...`
@@ -109,6 +113,8 @@ Rules:
 - If `fuzz/observed_target.json` exists, treat it as the execution truth source and keep `README.md`, harness filenames, and build scaffold consistent with it.
 - Do not describe a local helper/checker/wrapper as the final target when the harness actually calls an external/library API.
 - Keep only real harness source files in `fuzz/build.py` / `fuzz/build.sh`; never reference missing scaffold files.
+- Do not add repository fuzz target invocations such as `--target xxx-fuzzer`, `make xxx_fuzzer`, or guessed target names to `fuzz/build.py`.
+- Keep `fuzz/build_strategy.json` aligned with an external scaffold strategy and record an explicit `fuzzer_entry_strategy`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, still create the missing required files immediately, then write `fuzz/out/` into `./done`.
 
@@ -138,6 +144,8 @@ Constraints:
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
+- Do not repair the build by switching to repository fuzz targets, guessed `--target ...fuzzer` names, or repository fuzz build entrypoints.
+- Keep `fuzz/build_strategy.json` aligned with `library_link` or `custom_script`, and ensure it records an explicit `fuzzer_entry_strategy`.
 - Full build output from the previous failed attempts is available in `{{build_log_file}}`.
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
 - If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.

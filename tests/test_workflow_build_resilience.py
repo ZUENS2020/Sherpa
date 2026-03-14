@@ -699,6 +699,30 @@ def test_classify_build_failure_missing_llvmfuzzer_entrypoint():
     assert code == "missing_llvmfuzzer_entrypoint"
 
 
+def test_classify_build_failure_build_strategy_mismatch():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "gmake: *** No rule to make target 'println-fuzzer'.  Stop.",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+    assert kind == "source"
+    assert code == "build_strategy_mismatch"
+
+
+def test_classify_build_failure_missing_fuzzer_main():
+    kind, code = workflow_graph._classify_build_failure(
+        "",
+        "",
+        "/usr/bin/ld: undefined reference to `main'",
+        build_rc=1,
+        has_fuzzer_binaries=False,
+    )
+    assert kind == "source"
+    assert code == "missing_fuzzer_main"
+
+
 def test_classify_build_failure_missing_link_library():
     kind, code = workflow_graph._classify_build_failure(
         "",
@@ -709,6 +733,29 @@ def test_classify_build_failure_missing_link_library():
     )
     assert kind == "source"
     assert code == "missing_link_library"
+
+
+def test_build_precheck_rejects_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text(
+        "subprocess.run(['cmake', '--build', 'build', '--target', 'println-fuzzer'])\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "build_strategy.json").write_text(
+        '{"build_system":"cmake","build_mode":"library_link","library_targets":[],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":[]}\n',
+        encoding="utf-8",
+    )
+
+    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "build_strategy_mismatch"
+    assert out["message"] == "build scaffold precheck failed"
+    assert not gen.commands
 
 
 def test_fix_build_rule_collapsed_include_flags_split(tmp_path: Path, monkeypatch):
