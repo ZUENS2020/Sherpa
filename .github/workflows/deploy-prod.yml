@@ -251,6 +251,10 @@ jobs:
           POSTGRES_USER: ${{ vars.POSTGRES_USER_PROD || 'sherpa' }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN_PROD }}
           CLOUDFLARE_PUBLIC_HOST: ${{ secrets.CLOUDFLARE_PUBLIC_HOST_PROD }}
+          RUNTIME_HTTP_PROXY: ${{ secrets.RUNTIME_HTTP_PROXY_PROD }}
+          RUNTIME_HTTPS_PROXY: ${{ secrets.RUNTIME_HTTPS_PROXY_PROD }}
+          RUNTIME_ALL_PROXY: ${{ secrets.RUNTIME_ALL_PROXY_PROD }}
+          RUNTIME_NO_PROXY: ${{ secrets.RUNTIME_NO_PROXY_PROD }}
         run: |
           set -euo pipefail
 
@@ -284,6 +288,37 @@ jobs:
             exit 1
           }
 
+          apply_optional_runtime_proxy_secret() {
+            local secret_name="sherpa-runtime-proxy"
+            local args=()
+            local http_proxy="${RUNTIME_HTTP_PROXY:-}"
+            local https_proxy="${RUNTIME_HTTPS_PROXY:-}"
+            local all_proxy="${RUNTIME_ALL_PROXY:-}"
+            local no_proxy="${RUNTIME_NO_PROXY:-}"
+
+            if [[ -n "$http_proxy" ]]; then
+              args+=(--from-literal=HTTP_PROXY="${http_proxy}" --from-literal=http_proxy="${http_proxy}")
+            fi
+            if [[ -n "$https_proxy" ]]; then
+              args+=(--from-literal=HTTPS_PROXY="${https_proxy}" --from-literal=https_proxy="${https_proxy}")
+            fi
+            if [[ -n "$all_proxy" ]]; then
+              args+=(--from-literal=ALL_PROXY="${all_proxy}" --from-literal=all_proxy="${all_proxy}")
+            fi
+            if [[ -n "$no_proxy" ]]; then
+              args+=(--from-literal=NO_PROXY="${no_proxy}" --from-literal=no_proxy="${no_proxy}")
+            fi
+
+            if [[ ${#args[@]} -eq 0 ]]; then
+              kubectl -n "${NAMESPACE}" delete secret "${secret_name}" --ignore-not-found=true
+              return 0
+            fi
+
+            kubectl -n "${NAMESPACE}" create secret generic "${secret_name}" \
+              "${args[@]}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          }
+
           require_non_empty MINIMAX_API_KEY sherpa-minimax MINIMAX_API_KEY
           require_non_empty POSTGRES_PASSWORD sherpa-postgres POSTGRES_PASSWORD
           require_non_empty CLOUDFLARE_TUNNEL_TOKEN cloudflare-tunnel token
@@ -315,6 +350,8 @@ jobs:
           kubectl -n "${NAMESPACE}" create secret generic cloudflare-public-host \
             --from-literal=host="${CLOUDFLARE_PUBLIC_HOST}" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+          apply_optional_runtime_proxy_secret
 
       - name: Prepare prod hostPath directories
         if: steps.kube_preflight.outputs.reachable == 'true'

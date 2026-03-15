@@ -95,7 +95,7 @@ def test_k8s_manifest_applies_default_worker_resources():
     assert resources["limits"]["memory"] == "128Gi"
 
 
-def test_k8s_manifest_injects_host_proxy_env():
+def test_k8s_manifest_uses_optional_proxy_secret_env_from():
     manifest_yaml = web_main._k8s_build_manifest(
         "job-test",
         {
@@ -106,17 +106,31 @@ def test_k8s_manifest_injects_host_proxy_env():
     )
     manifest = yaml.safe_load(manifest_yaml)
     env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
-    env_map = {item["name"]: item for item in env_items}
+    env_names = {item["name"] for item in env_items}
+    env_from = manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"]
 
-    assert env_map["SHERPA_NODE_IP"]["valueFrom"]["fieldRef"]["fieldPath"] == "status.hostIP"
-    assert env_map["HTTP_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert env_map["HTTPS_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert env_map["ALL_PROXY"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert env_map["http_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert env_map["https_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert env_map["all_proxy"]["value"] == "http://$(SHERPA_NODE_IP):6789"
-    assert ".cluster.local" in env_map["NO_PROXY"]["value"]
-    assert ".cluster.local" in env_map["no_proxy"]["value"]
+    assert "SHERPA_NODE_IP" not in env_names
+    assert "HTTP_PROXY" not in env_names
+    assert "HTTPS_PROXY" not in env_names
+    assert "ALL_PROXY" not in env_names
+    assert {"secretRef": {"name": "sherpa-runtime-proxy", "optional": True}} in env_from
+
+
+def test_k8s_manifest_allows_disabling_proxy_secret(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_PROXY_SECRET_NAME", "")
+
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_from = manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"]
+
+    assert {"secretRef": {"name": "sherpa-runtime-proxy", "optional": True}} not in env_from
 
 
 def test_k8s_manifest_explicitly_injects_git_mirrors(monkeypatch: pytest.MonkeyPatch):

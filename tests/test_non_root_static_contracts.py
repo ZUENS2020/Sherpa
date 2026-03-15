@@ -38,12 +38,14 @@ def test_compose_gateway_has_non_root_runtime_support():
 def test_k8s_web_deployment_initializes_shared_volumes_for_non_root():
     doc = yaml.safe_load((ROOT / "k8s" / "base" / "web-deployment.yaml").read_text(encoding="utf-8"))
     init_container = doc["spec"]["template"]["spec"]["initContainers"][0]
+    env_from = doc["spec"]["template"]["spec"]["containers"][0]["envFrom"]
 
     assert init_container["name"] == "runtime-permissions"
     assert init_container["securityContext"]["runAsUser"] == 0
     mounts = {item["mountPath"] for item in init_container["volumeMounts"]}
     assert "/app/config" in mounts
     assert "/shared/tmp" in mounts
+    assert {"secretRef": {"name": "sherpa-runtime-proxy", "optional": True}} in env_from
     command = "\n".join(init_container["command"])
     assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
     assert "chmod 0777 \"$d\"" in command
