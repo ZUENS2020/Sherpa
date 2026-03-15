@@ -382,26 +382,11 @@ def _k8s_result_paths(job_id: str, *, stage: str | None = None, seq: int | None 
     return (root / f"{prefix}.json", root / f"{prefix}.error.txt")
 
 
-def _k8s_proxy_env_items() -> list[dict[str, object]]:
-    no_proxy = (
-        os.environ.get("NO_PROXY")
-        or os.environ.get("no_proxy")
-        or "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc"
-    ).strip()
-    proxy_port = (os.environ.get("SHERPA_K8S_NODE_PROXY_PORT", "6789") or "6789").strip()
-    proxy_url = f"http://$(SHERPA_NODE_IP):{proxy_port}"
-    return [
-        {"name": "SHERPA_NODE_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}},
-        {"name": "SHERPA_K8S_NODE_PROXY_PORT", "value": proxy_port},
-        {"name": "HTTP_PROXY", "value": proxy_url},
-        {"name": "HTTPS_PROXY", "value": proxy_url},
-        {"name": "ALL_PROXY", "value": proxy_url},
-        {"name": "NO_PROXY", "value": no_proxy},
-        {"name": "http_proxy", "value": proxy_url},
-        {"name": "https_proxy", "value": proxy_url},
-        {"name": "all_proxy", "value": proxy_url},
-        {"name": "no_proxy", "value": no_proxy},
-    ]
+def _k8s_proxy_env_from_items() -> list[dict[str, object]]:
+    secret_name = (os.environ.get("SHERPA_K8S_PROXY_SECRET_NAME", "sherpa-runtime-proxy") or "").strip()
+    if not secret_name:
+        return []
+    return [{"secretRef": {"name": secret_name, "optional": True}}]
 
 
 def _k8s_git_env_items() -> list[dict[str, object]]:
@@ -516,8 +501,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                 {"name": "OPENAI_MODEL", "value": raw_model},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
                                 *_k8s_git_env_items(),
-                                *_k8s_proxy_env_items(),
                             ],
+                            "envFrom": [*_k8s_proxy_env_from_items()],
                             "volumeMounts": [
                                 {"name": "shared-tmp", "mountPath": "/shared/tmp"},
                                 {"name": "shared-output", "mountPath": "/shared/output"},
@@ -539,15 +524,14 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
         },
     }
 
-    env_from = []
+    env_from = [*_k8s_proxy_env_from_items()]
     if config_name:
         env_from.append({"configMapRef": {"name": config_name}})
     if minimax_secret:
         env_from.append({"secretRef": {"name": minimax_secret}})
     if pg_secret:
         env_from.append({"secretRef": {"name": pg_secret}})
-    if env_from:
-        manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
+    manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
     if worker_resources:
         manifest["spec"]["template"]["spec"]["containers"][0]["resources"] = worker_resources
 
