@@ -49,6 +49,25 @@ class _FakeGenerator:
         return self._bin_results.pop(0)
 
 
+def _write_repo_understanding(fuzz_dir: Path) -> None:
+    (fuzz_dir / "repo_understanding.json").write_text(
+        '{"build_system":"cmake","candidate_library_inputs":["demo"],"chosen_target_api":"demo::parse","chosen_target_reason":"public runtime api","extra_sources":[],"include_dirs":["include"],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["CMakeLists.txt"]}\n',
+        encoding="utf-8",
+    )
+
+
+def _write_repo_understanding_with_repo_target(fuzz_dir: Path, target: str = "println-fuzzer") -> None:
+    (fuzz_dir / "repo_understanding.json").write_text(
+        (
+            '{"build_system":"cmake","candidate_library_inputs":["demo"],"chosen_target_api":"demo::parse",'
+            '"chosen_target_reason":"repo target is grounded","extra_sources":[],"include_dirs":["include"],'
+            f'"fuzzer_entry_strategy":"repo_main_source","constraints":[],"evidence":["CMakeLists.txt","test/fuzzing/CMakeLists.txt"],'
+            f'"repo_fuzz_targets":["{target}"],"selected_repo_target":"{target}"}}\n'
+        ),
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def _no_sleep(monkeypatch):
     monkeypatch.setattr(workflow_graph.time, "sleep", lambda _: None)
@@ -58,6 +77,7 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
     (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
     fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
     fuzzer_bin.write_text("", encoding="utf-8")
@@ -85,6 +105,7 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('--clean')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
     (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
     fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
     fuzzer_bin.write_text("", encoding="utf-8")
@@ -112,6 +133,7 @@ def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: 
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
     (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
     build_dir = tmp_path / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +160,7 @@ def test_build_sh_uses_sh_when_bash_missing(tmp_path: Path, monkeypatch, _no_sle
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.sh").write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
     (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
     fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
     fuzzer_bin.write_text("", encoding="utf-8")
@@ -170,6 +193,7 @@ def test_build_retries_in_repo_root_cwd_for_hardcoded_fuzz_paths(tmp_path: Path,
         "print('legacy build script')\n",
         encoding="utf-8",
     )
+    _write_repo_understanding(fuzz_dir)
     (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
     fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
     fuzzer_bin.write_text("", encoding="utf-8")
@@ -202,6 +226,7 @@ def test_build_failure_classifies_infra_docker_daemon(tmp_path: Path, monkeypatc
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
 
     gen = _FakeGenerator(
         tmp_path,
@@ -406,6 +431,7 @@ def test_build_failure_infra_error_includes_recovery_hint(tmp_path: Path, monkey
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
 
     gen = _FakeGenerator(
         tmp_path,
@@ -756,6 +782,99 @@ def test_build_precheck_rejects_repo_fuzz_target_usage(tmp_path: Path, monkeypat
     assert out["build_error_code"] == "build_strategy_mismatch"
     assert out["message"] == "build scaffold precheck failed"
     assert not gen.commands
+
+
+def test_build_precheck_allows_documented_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    _write_repo_understanding_with_repo_target(fuzz_dir, "println-fuzzer")
+    (fuzz_dir / "build.py").write_text(
+        "subprocess.run(['cmake', '--build', 'build', '--target', 'println-fuzzer'])\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "build_strategy.json").write_text(
+        '{"build_system":"cmake","build_mode":"repo_target","library_targets":[],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"repo_main_source","reason":"documented repo target","evidence":["test/fuzzing/CMakeLists.txt"],"repo_fuzz_targets":["println-fuzzer"],"selected_repo_target":"println-fuzzer"}\n',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(tmp_path, run_results=[(0, "ok", "")], bin_results=[[fuzzer_bin]])
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["last_error"] == ""
+    assert out["build_rc"] == 0
+    assert len(gen.commands) == 1
+
+
+def test_build_precheck_rejects_undocumented_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    _write_repo_understanding_with_repo_target(fuzz_dir, "real-fuzzer")
+    (fuzz_dir / "build.py").write_text(
+        "subprocess.run(['cmake', '--build', 'build', '--target', 'guessed-fuzzer'])\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "build_strategy.json").write_text(
+        '{"build_system":"cmake","build_mode":"repo_target","library_targets":[],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"repo_main_source","reason":"documented repo target","evidence":["test/fuzzing/CMakeLists.txt"],"repo_fuzz_targets":["real-fuzzer"],"selected_repo_target":"real-fuzzer"}\n',
+        encoding="utf-8",
+    )
+
+    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "build_strategy_mismatch"
+    assert out["message"] == "build scaffold precheck failed"
+    assert not gen.commands
+
+
+def test_build_precheck_requires_repo_understanding(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+    (fuzz_dir / "build_strategy.json").write_text(
+        '{"build_system":"cmake","build_mode":"library_link","library_targets":["fmt"],"library_artifacts":[],"include_dirs":["include"],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["CMakeLists.txt"]}\n',
+        encoding="utf-8",
+    )
+
+    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "insufficient_repo_understanding"
+    assert out["message"] == "build scaffold precheck failed"
+    assert not gen.commands
+
+
+def test_write_build_strategy_doc_preserves_existing_grounded_fields(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+    (fuzz_dir / "repo_understanding.json").write_text(
+        '{"build_system":"cmake","candidate_library_inputs":["fmt"],"chosen_target_api":"fmt::println","chosen_target_reason":"public runtime api","extra_sources":["test/fuzzing/main.cc"],"include_dirs":["include"],"fuzzer_entry_strategy":"repo_main_source","constraints":["must link fmt"],"evidence":["CMakeLists.txt","test/fuzzing/main.cc"]}\n',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "build_strategy.json").write_text(
+        '{"build_system":"cmake","build_mode":"library_link","library_targets":["fmt"],"library_artifacts":["build/libfmt.a"],"include_dirs":["include"],"extra_sources":["test/fuzzing/main.cc"],"fuzzer_entry_strategy":"repo_main_source","reason":"grounded","evidence":["CMakeLists.txt"]}\n',
+        encoding="utf-8",
+    )
+
+    path, doc = workflow_graph._write_build_strategy_doc(tmp_path)
+
+    assert path.endswith("fuzz/build_strategy.json")
+    assert doc["build_system"] == "cmake"
+    assert doc["library_targets"] == ["fmt"]
+    assert doc["library_artifacts"] == ["build/libfmt.a"]
+    assert doc["fuzzer_entry_strategy"] == "repo_main_source"
+    assert doc["evidence"] == ["CMakeLists.txt"]
 
 
 def test_fix_build_rule_collapsed_include_flags_split(tmp_path: Path, monkeypatch):

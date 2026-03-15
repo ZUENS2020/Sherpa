@@ -56,8 +56,13 @@ def test_synthesize_prompts_require_observed_target_alignment():
     scaffold = workflow_common.render_opencode_prompt("synthesize_complete_scaffold", missing_items="- fuzz/build.py")
 
     assert "fuzz/observed_target.json" in synth
+    assert "fuzz/repo_understanding.json" in synth
     assert "The final target must be the actual external/library API" in synth
     assert "`Harness file: ...`" in synth
     assert "local helper, checker, wrapper utility" in synth
+    assert "Do not optimize for early artifact output" in synth
+    assert "First create minimal skeleton artifacts immediately" not in synth
+    assert "You may invoke a repository-provided fuzz target only if" in synth
     assert "fuzz/observed_target.json" in scaffold
+    assert "fuzz/repo_understanding.json" in scaffold
     assert "never reference missing scaffold files" in scaffold

@@ -54,14 +54,14 @@ Additional instruction from coordinator:
 You are coordinating a fuzz harness generation workflow.
 Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
 Execution strategy requirement:
-- Do not wait for a full design before writing files.
-- First create minimal skeleton artifacts immediately: one harness source file and `fuzz/build.py`.
-- Then iterate to improve content in place.
+- Do not optimize for early artifact output.
+- First read enough repository/build context to write `fuzz/repo_understanding.json` and a concrete `fuzz/build_strategy.json`.
+- Only after those understanding artifacts are grounded in repository facts should you create or update the harness and `fuzz/build.py`.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
-If progress stalls, still deliver minimal valid artifacts now: create at least one harness source file and `fuzz/build.py`, then write `fuzz/out/` into `./done`.
+If progress stalls, still deliver repository-understanding artifacts first, then the smallest scaffold consistent with them.
 
 If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
@@ -74,10 +74,14 @@ Target-selection policy:
 - The final target must be the actual external/library API exercised by the harness, not a local helper, checker, wrapper utility, or placeholder name.
 - Your harness, `fuzz/README.md`, and build scaffold must all agree on the same final observed target and harness filename.
 - If `fuzz/observed_target.json` already exists, treat it as the execution truth source and keep new outputs consistent with it unless the harness itself changes.
-- Do not invoke repository-provided fuzz targets or guessed target names such as `cmake --build --target <name>-fuzzer`, `make <name>_fuzzer`, or similar target-driven fuzz build paths.
-- Even if the repository contains `test/fuzzing`, `main.cc`, or `fuzzer-common.h`, treat them only as optional source inputs for external linking, never as the primary build entrypoint.
-- Create `fuzz/build_strategy.json` and keep it limited to these fields: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`.
-- `build_mode` must be `library_link` or `custom_script`; never invent or use a repository-native fuzz target mode.
+- You may invoke a repository-provided fuzz target only if you have first identified the exact real target name from repository files/build metadata and recorded it in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`.
+- Never guess target names such as `<name>-fuzzer`, `<name>_fuzzer`, or infer that `test/fuzzing`, `main.cc`, or `fuzzer-common.h` automatically means a buildable fuzz target exists.
+- Create `fuzz/repo_understanding.json` and keep it limited to these fields: `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`, `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`.
+- `fuzz/repo_understanding.json` must be grounded in actual repository files or build metadata; `evidence` must not be empty.
+- If you choose a repository-provided fuzz target, add these optional fields to `fuzz/repo_understanding.json`: `repo_fuzz_targets`, `selected_repo_target`.
+- Create `fuzz/build_strategy.json` and keep it limited to these fields: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`, `repo_fuzz_targets`, `selected_repo_target`.
+- `build_mode` must be `repo_target`, `library_link`, or `custom_script`.
+- `fuzz/build_strategy.json` must reflect the repository understanding above; do not leave `build_system` as `unknown` when repository facts support a more specific value.
 - `fuzz/README.md` MUST contain these exact fields with values that match the actual harness:
   - `Selected target: ...`
   - `Final target: ...`
@@ -113,10 +117,11 @@ Rules:
 - If `fuzz/observed_target.json` exists, treat it as the execution truth source and keep `README.md`, harness filenames, and build scaffold consistent with it.
 - Do not describe a local helper/checker/wrapper as the final target when the harness actually calls an external/library API.
 - Keep only real harness source files in `fuzz/build.py` / `fuzz/build.sh`; never reference missing scaffold files.
-- Do not add repository fuzz target invocations such as `--target xxx-fuzzer`, `make xxx_fuzzer`, or guessed target names to `fuzz/build.py`.
+- Do not add guessed repository fuzz target invocations such as `--target xxx-fuzzer` or `make xxx_fuzzer` unless that exact target is already documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`.
+- Ensure `fuzz/repo_understanding.json` exists and stays consistent with the actual external build path before considering the scaffold complete.
 - Keep `fuzz/build_strategy.json` aligned with an external scaffold strategy and record an explicit `fuzzer_entry_strategy`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
-- If progress stalls, still create the missing required files immediately, then write `fuzz/out/` into `./done`.
+- If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
 
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
@@ -144,7 +149,8 @@ Constraints:
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
-- Do not repair the build by switching to repository fuzz targets, guessed `--target ...fuzzer` names, or repository fuzz build entrypoints.
+- You may repair the build by switching to a repository-provided fuzz target only when the exact target is documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`; never guess target names.
+- If `fuzz/repo_understanding.json` is missing or weak, repair it first and make the build scaffold match that understanding.
 - Keep `fuzz/build_strategy.json` aligned with `library_link` or `custom_script`, and ensure it records an explicit `fuzzer_entry_strategy`.
 - Full build output from the previous failed attempts is available in `{{build_log_file}}`.
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
