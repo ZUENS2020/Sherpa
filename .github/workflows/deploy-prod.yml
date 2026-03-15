@@ -533,6 +533,16 @@ jobs:
           kubectl -n sherpa delete configmap cloudflared-dev-proxy-config --ignore-not-found=true
           kubectl -n sherpa delete secret cloudflare-tunnel-dev --ignore-not-found=true
 
+      - name: Cleanup legacy shared tunnel
+        if: steps.kube_preflight.outputs.reachable == 'true' && env.NAMESPACE != 'sherpa'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n sherpa delete deploy cloudflared --ignore-not-found=true
+          kubectl -n sherpa delete configmap cloudflared-proxy-config --ignore-not-found=true
+          kubectl -n sherpa delete secret cloudflare-tunnel --ignore-not-found=true
+          kubectl -n sherpa delete secret cloudflare-public-host --ignore-not-found=true
+
       - name: Deploy cloudflared tunnel
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
