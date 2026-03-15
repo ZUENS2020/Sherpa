@@ -67,21 +67,16 @@ If external system dependencies are required, write package names (one per line)
 Use package names only; no shell commands.
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
-Target-selection policy:
-- Treat `fuzz/selected_targets.json` as the preferred plan, but only use its first target if it is a viable runtime fuzz entrypoint.
-- Prefer a directly callable public/runtime API over compile-time, detail/helper, constexpr-only, or local utility functions.
-- If you must drift from the selected target, choose the nearest runtime-executable replacement target that exercises the same parsing/formatting/decoding path.
-- The final target must be the actual external/library API exercised by the harness, not a local helper, checker, wrapper utility, or placeholder name.
-- Your harness, `fuzz/README.md`, and build scaffold must all agree on the same final observed target and harness filename.
-- If `fuzz/observed_target.json` already exists, treat it as the execution truth source and keep new outputs consistent with it unless the harness itself changes.
-- You may invoke a repository-provided fuzz target only if you have first identified the exact real target name from repository files/build metadata and recorded it in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`.
-- Never guess target names such as `<name>-fuzzer`, `<name>_fuzzer`, or infer that `test/fuzzing`, `main.cc`, or `fuzzer-common.h` automatically means a buildable fuzz target exists.
-- Create `fuzz/repo_understanding.json` and keep it limited to these fields: `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`, `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`.
-- `fuzz/repo_understanding.json` must be grounded in actual repository files or build metadata; `evidence` must not be empty.
-- If you choose a repository-provided fuzz target, add these optional fields to `fuzz/repo_understanding.json`: `repo_fuzz_targets`, `selected_repo_target`.
-- Create `fuzz/build_strategy.json` and keep it limited to these fields: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`, `repo_fuzz_targets`, `selected_repo_target`.
-- `build_mode` must be `repo_target`, `library_link`, or `custom_script`.
-- `fuzz/build_strategy.json` must reflect the repository understanding above; do not leave `build_system` as `unknown` when repository facts support a more specific value.
+Hard requirements:
+- Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
+- The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
+- If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
+- If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
+- You may use a repository-provided fuzz target only when its exact real target name is documented in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`. Never guess names such as `<name>-fuzzer` or `<name>_fuzzer`.
+- `fuzz/repo_understanding.json` must stay limited to: `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`, `rejected_targets`, `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`, plus optional `repo_fuzz_targets`, `selected_repo_target`.
+- `fuzz/build_strategy.json` must stay limited to: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`, `repo_fuzz_targets`, `selected_repo_target`. `build_mode` must be `repo_target`, `library_link`, or `custom_script`.
+- `evidence` must not be empty. `chosen_target_reason` must explain why the chosen target is the best runtime entrypoint. `rejected_targets` must list the near-miss candidates and why they were rejected.
+- Seed design must be target-specific: in `fuzz/README.md`, enumerate at least 3 concrete seed families tied to target semantics, and each family must map to an actual corpus example or planned corpus file pattern.
 - `fuzz/README.md` MUST contain these exact fields with values that match the actual harness:
   - `Selected target: ...`
   - `Final target: ...`
@@ -105,20 +100,14 @@ Rules:
 - If a harness source file already exists, keep it and add/fix the missing build glue around it.
 - Prioritize creating `fuzz/build.py` first if it is missing.
 - `README.md` and `.options` files should be added after the harness and build script are in place.
-- Treat `fuzz/selected_targets.json` as a preferred plan, not an unconditional hard stop.
-- Prefer the selected target when it is runtime-executable.
-- If you switch to another target, prefer the nearest runtime-executable replacement target and record these exact fields in `fuzz/README.md`:
-  - `Selected target: ...`
-  - `Final target: ...`
-  - `Technical reason: ...`
-  - `Relation: ...`
-- Also record:
-  - `Harness file: ...`
+- Prefer the selected runtime target. If you switch, record the rejected original target and repository-grounded reason in `fuzz/repo_understanding.json`.
+- Keep these exact `fuzz/README.md` fields aligned with the actual harness: `Selected target: ...`, `Final target: ...`, `Technical reason: ...`, `Relation: ...`, `Harness file: ...`.
 - If `fuzz/observed_target.json` exists, treat it as the execution truth source and keep `README.md`, harness filenames, and build scaffold consistent with it.
 - Do not describe a local helper/checker/wrapper as the final target when the harness actually calls an external/library API.
 - Keep only real harness source files in `fuzz/build.py` / `fuzz/build.sh`; never reference missing scaffold files.
 - Do not add guessed repository fuzz target invocations such as `--target xxx-fuzzer` or `make xxx_fuzzer` unless that exact target is already documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`.
 - Ensure `fuzz/repo_understanding.json` exists and stays consistent with the actual external build path before considering the scaffold complete.
+- Ensure `fuzz/repo_understanding.json` explains both the chosen path and the rejected near-miss paths; avoid high-level repository summaries with no execution consequences.
 - Keep `fuzz/build_strategy.json` aligned with an external scaffold strategy and record an explicit `fuzzer_entry_strategy`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
@@ -150,8 +139,11 @@ Constraints:
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
 - You may repair the build by switching to a repository-provided fuzz target only when the exact target is documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`; never guess target names.
-- If `fuzz/repo_understanding.json` is missing or weak, repair it first and make the build scaffold match that understanding.
+- If `fuzz/repo_understanding.json` is missing or weak, repair it first.
+- If the selected target and observed target disagree, repair that mismatch before incremental build tweaks.
+- Keep `fuzz/repo_understanding.json` concrete: chosen target, rejected alternatives, required libraries/sources, exact fuzzer entry strategy.
 - Keep `fuzz/build_strategy.json` aligned with `library_link` or `custom_script`, and ensure it records an explicit `fuzzer_entry_strategy`.
+- If the current corpus/seed design is too generic, tighten `fuzz/README.md` so it names concrete seed families tied to target semantics.
 - Full build output from the previous failed attempts is available in `{{build_log_file}}`.
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
 - If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.
