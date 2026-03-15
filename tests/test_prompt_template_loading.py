@@ -57,12 +57,33 @@ def test_synthesize_prompts_require_observed_target_alignment():
 
     assert "fuzz/observed_target.json" in synth
     assert "fuzz/repo_understanding.json" in synth
-    assert "The final target must be the actual external/library API" in synth
+    assert "must agree on one final external/library API" in synth
     assert "`Harness file: ...`" in synth
-    assert "local helper, checker, wrapper utility" in synth
+    assert "local helper/checker/wrapper" in synth
     assert "Do not optimize for early artifact output" in synth
     assert "First create minimal skeleton artifacts immediately" not in synth
-    assert "You may invoke a repository-provided fuzz target only if" in synth
+    assert "You may use a repository-provided fuzz target only when" in synth
+    assert "drift only when repository facts prove it is not directly fuzzable" in synth
+    assert "`rejected_targets`" in synth
+    assert "near-miss candidates and why they were rejected" in synth
+    assert "enumerate at least 3 concrete seed families" in synth
+    assert "actual corpus example or planned corpus file pattern" in synth
     assert "fuzz/observed_target.json" in scaffold
     assert "fuzz/repo_understanding.json" in scaffold
     assert "never reference missing scaffold files" in scaffold
+    assert "record the rejected original target and repository-grounded reason" in scaffold
+    assert "avoid high-level repository summaries with no execution consequences" in scaffold
+
+
+def test_fix_build_prompt_prefers_target_alignment_and_concrete_seed_repairs():
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    out = workflow_common.render_opencode_prompt(
+        "fix_build_execute",
+        build_log_file="fuzz/build_full.log",
+        codex_hint="tighten scaffold",
+    )
+
+    assert "If the selected target and observed target disagree" in out
+    assert "repair that mismatch before incremental build tweaks" in out
+    assert "rejected alternatives" in out
+    assert "concrete seed families tied to target semantics" in out
