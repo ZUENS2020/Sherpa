@@ -2889,36 +2889,6 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prev = build_env.get(key, "").strip()
             build_env[key] = f"{include_root}:{prev}" if prev else include_root
 
-        precheck = _build_scaffold_precheck(gen.repo_root)
-        if not bool(precheck.get("ok")):
-            reason = str(precheck.get("reason") or "invalid build scaffold")
-            code = str(precheck.get("code") or "build_strategy_mismatch")
-            next_state: FuzzWorkflowRuntimeState = {
-                **state,
-                "build_attempts": int(state.get("build_attempts") or 0),
-                "build_rc": 1,
-                "build_stdout_tail": "",
-                "build_stderr_tail": reason,
-                "build_full_log_path": str(build_full_log_path),
-                "last_step": "build",
-                "build_error_kind": "source",
-                "build_error_code": code,
-                "build_mode": str(state.get("build_mode") or ""),
-                "build_target_source": str(state.get("build_target_source") or "external_scaffold"),
-                "last_error": reason,
-                "message": "build scaffold precheck failed",
-            }
-            _append_build_full_log(
-                stage="precheck",
-                cmd=["precheck"],
-                cwd=build_cwd,
-                rc=1,
-                out="",
-                err=reason,
-            )
-            _wf_log(cast(dict[str, Any], next_state), f"<- build fail precheck code={code} dt={_fmt_dt(time.perf_counter()-t0)}")
-            return next_state
-
         retries_raw = os.environ.get("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "2")
         try:
             max_local_attempts = int(retries_raw)

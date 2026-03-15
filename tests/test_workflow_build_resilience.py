@@ -761,7 +761,7 @@ def test_classify_build_failure_missing_link_library():
     assert code == "missing_link_library"
 
 
-def test_build_precheck_rejects_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_allows_repo_fuzz_target_usage_to_reach_real_build(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text(
@@ -773,18 +773,18 @@ def test_build_precheck_rejects_repo_fuzz_target_usage(tmp_path: Path, monkeypat
         encoding="utf-8",
     )
 
-    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    gen = _FakeGenerator(tmp_path, run_results=[(1, "", "gmake: *** No rule to make target 'println-fuzzer'.  Stop.")], bin_results=[[]])
     monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
 
     out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
 
     assert out["build_error_kind"] == "source"
     assert out["build_error_code"] == "build_strategy_mismatch"
-    assert out["message"] == "build scaffold precheck failed"
-    assert not gen.commands
+    assert out["message"].startswith("build failed")
+    assert len(gen.commands) == 1
 
 
-def test_build_precheck_allows_documented_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_allows_documented_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     _write_repo_understanding_with_repo_target(fuzz_dir, "println-fuzzer")
@@ -810,7 +810,7 @@ def test_build_precheck_allows_documented_repo_fuzz_target_usage(tmp_path: Path,
     assert len(gen.commands) == 1
 
 
-def test_build_precheck_rejects_undocumented_repo_fuzz_target_usage(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_allows_undocumented_repo_fuzz_target_usage_to_reach_real_build(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     _write_repo_understanding_with_repo_target(fuzz_dir, "real-fuzzer")
@@ -823,18 +823,18 @@ def test_build_precheck_rejects_undocumented_repo_fuzz_target_usage(tmp_path: Pa
         encoding="utf-8",
     )
 
-    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    gen = _FakeGenerator(tmp_path, run_results=[(1, "", "gmake: *** No rule to make target 'guessed-fuzzer'.  Stop.")], bin_results=[[]])
     monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
 
     out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
 
     assert out["build_error_kind"] == "source"
     assert out["build_error_code"] == "build_strategy_mismatch"
-    assert out["message"] == "build scaffold precheck failed"
-    assert not gen.commands
+    assert out["message"].startswith("build failed")
+    assert len(gen.commands) == 1
 
 
-def test_build_precheck_requires_repo_understanding(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_without_repo_understanding_reaches_real_build(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
@@ -843,15 +843,15 @@ def test_build_precheck_requires_repo_understanding(tmp_path: Path, monkeypatch,
         encoding="utf-8",
     )
 
-    gen = _FakeGenerator(tmp_path, run_results=[], bin_results=[])
+    gen = _FakeGenerator(tmp_path, run_results=[(1, "", "/usr/bin/ld: undefined reference to `main'")], bin_results=[[]])
     monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
 
     out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
 
     assert out["build_error_kind"] == "source"
-    assert out["build_error_code"] == "insufficient_repo_understanding"
-    assert out["message"] == "build scaffold precheck failed"
-    assert not gen.commands
+    assert out["build_error_code"] == "missing_fuzzer_main"
+    assert out["message"].startswith("build failed")
+    assert len(gen.commands) == 1
 
 
 def test_write_build_strategy_doc_preserves_existing_grounded_fields(tmp_path: Path):
