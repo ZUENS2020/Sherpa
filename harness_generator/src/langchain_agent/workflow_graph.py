@@ -77,6 +77,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
+    repo_understanding_path: str
     build_strategy_path: str
     build_mode: str
     build_target_source: str
@@ -1057,6 +1058,7 @@ def _synthesize_opencode_idle_timeout_sec() -> int:
 
 def _synthesize_activity_watch_paths() -> list[str]:
     return [
+        "fuzz/repo_understanding.json",
         "fuzz/build_strategy.json",
         "fuzz/build.py",
         "fuzz/README.md",
@@ -1076,6 +1078,35 @@ def _synthesize_activity_watch_paths() -> list[str]:
 
 def _build_scaffold_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_strategy.json"
+
+
+def _repo_understanding_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "repo_understanding.json"
+
+
+def _load_repo_understanding_doc(repo_root: Path) -> dict[str, Any]:
+    path = _repo_understanding_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _repo_understanding_is_complete(doc: dict[str, Any]) -> tuple[bool, str]:
+    if not doc:
+        return False, "missing fuzz/repo_understanding.json"
+    for key in ("build_system", "chosen_target_api", "chosen_target_reason", "fuzzer_entry_strategy"):
+        if not str(doc.get(key) or "").strip():
+            return False, f"repo understanding missing `{key}`"
+    if str(doc.get("build_system") or "").strip().lower() == "unknown":
+        return False, "repo understanding must identify a concrete build_system"
+    evidence = doc.get("evidence")
+    if not isinstance(evidence, list) or not any(str(item or "").strip() for item in evidence):
+        return False, "repo understanding must include non-empty evidence"
+    return True, ""
 
 
 def _load_build_strategy_doc(repo_root: Path) -> dict[str, Any]:
@@ -1098,6 +1129,31 @@ def _contains_forbidden_repo_fuzz_target_usage(text: str) -> bool:
     return any(re.search(pat, lowered, re.IGNORECASE) for pat in patterns)
 
 
+def _extract_repo_fuzz_target_usages(text: str) -> list[str]:
+    usages: list[str] = []
+    for match in re.finditer(r"--target\s+([A-Za-z0-9._+-]+)", text or "", re.IGNORECASE):
+        usages.append(str(match.group(1) or "").strip())
+    for match in re.finditer(r"['\"]--target['\"]\s*,\s*['\"]([A-Za-z0-9._+-]+)['\"]", text or "", re.IGNORECASE):
+        usages.append(str(match.group(1) or "").strip())
+    for match in re.finditer(r"\b(?:make|gmake|ninja)\s+([A-Za-z0-9._+-]+)", text or "", re.IGNORECASE):
+        usages.append(str(match.group(1) or "").strip())
+    return [u for u in usages if u]
+
+
+def _allowed_repo_fuzz_targets(repo_root: Path) -> set[str]:
+    allowed: set[str] = set()
+    repo_understanding = _load_repo_understanding_doc(repo_root)
+    build_strategy = _load_build_strategy_doc(repo_root)
+    for item in list(repo_understanding.get("repo_fuzz_targets") or []) + list(build_strategy.get("repo_fuzz_targets") or []):
+        target = str(item or "").strip()
+        if target:
+            allowed.add(target)
+    selected = str(build_strategy.get("selected_repo_target") or repo_understanding.get("selected_repo_target") or "").strip()
+    if selected:
+        allowed.add(selected)
+    return allowed
+
+
 def _infer_fuzzer_entry_strategy(build_text: str) -> str:
     lowered = (build_text or "").lower()
     if "-fsanitize=fuzzer" in lowered:
@@ -1117,26 +1173,32 @@ def _write_build_strategy_doc(repo_root: Path) -> tuple[str, dict[str, Any]]:
         build_text = build_py.read_text(encoding="utf-8", errors="replace")
     elif build_sh.is_file():
         build_text = build_sh.read_text(encoding="utf-8", errors="replace")
-    build_mode = "library_link"
-    reason = "default external harness/library-link strategy"
+    path = _build_scaffold_path(repo_root)
+    existing = _load_build_strategy_doc(repo_root)
+    repo_understanding = _load_repo_understanding_doc(repo_root)
+    build_mode = str(existing.get("build_mode") or "").strip() or "library_link"
+    if build_mode not in {"repo_target", "library_link", "custom_script"}:
+        build_mode = "library_link"
+    reason = str(existing.get("reason") or "").strip() or "default external harness/library-link strategy"
     if not build_text.strip():
         build_mode = "custom_script"
-        reason = "no readable build scaffold found"
+        reason = str(existing.get("reason") or "").strip() or "no readable build scaffold found"
     elif _contains_forbidden_repo_fuzz_target_usage(build_text):
-        reason = "scaffold references repository fuzz targets; still recorded as external strategy for repair"
-    entry = _infer_fuzzer_entry_strategy(build_text)
+        reason = str(existing.get("reason") or "").strip() or "scaffold references repository fuzz targets; still recorded as external strategy for repair"
+    entry = str(existing.get("fuzzer_entry_strategy") or "").strip() or _infer_fuzzer_entry_strategy(build_text)
     doc: dict[str, Any] = {
-        "build_system": "unknown",
+        "build_system": str(existing.get("build_system") or repo_understanding.get("build_system") or "unknown"),
         "build_mode": build_mode,
-        "library_targets": [],
-        "library_artifacts": [],
-        "include_dirs": [],
-        "extra_sources": [],
+        "library_targets": list(existing.get("library_targets") or []),
+        "library_artifacts": list(existing.get("library_artifacts") or []),
+        "include_dirs": list(existing.get("include_dirs") or repo_understanding.get("include_dirs") or []),
+        "extra_sources": list(existing.get("extra_sources") or repo_understanding.get("extra_sources") or []),
         "fuzzer_entry_strategy": entry,
         "reason": reason,
-        "evidence": [],
+        "evidence": list(existing.get("evidence") or repo_understanding.get("evidence") or []),
+        "repo_fuzz_targets": list(existing.get("repo_fuzz_targets") or repo_understanding.get("repo_fuzz_targets") or []),
+        "selected_repo_target": str(existing.get("selected_repo_target") or repo_understanding.get("selected_repo_target") or ""),
     }
-    path = _build_scaffold_path(repo_root)
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(path), doc
 
@@ -1151,11 +1213,23 @@ def _build_scaffold_precheck(repo_root: Path) -> dict[str, Any]:
     elif build_sh.is_file():
         build_text = build_sh.read_text(encoding="utf-8", errors="replace")
     strategy = _load_build_strategy_doc(repo_root)
-    if _contains_forbidden_repo_fuzz_target_usage(build_text):
+    usages = _extract_repo_fuzz_target_usages(build_text)
+    if usages:
+        allowed_targets = _allowed_repo_fuzz_targets(repo_root)
+        unknown = [u for u in usages if u not in allowed_targets]
+        if not allowed_targets or unknown:
+            return {
+                "ok": False,
+                "code": "build_strategy_mismatch",
+                "reason": "build scaffold references undocumented or guessed repository fuzz targets",
+            }
+    understanding = _load_repo_understanding_doc(repo_root)
+    understanding_ok, understanding_reason = _repo_understanding_is_complete(understanding)
+    if not understanding_ok:
         return {
             "ok": False,
-            "code": "build_strategy_mismatch",
-            "reason": "build scaffold references repository fuzz targets",
+            "code": "insufficient_repo_understanding",
+            "reason": understanding_reason,
         }
     if strategy and not str(strategy.get("fuzzer_entry_strategy") or "").strip():
         return {
@@ -2309,6 +2383,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         harnesses: list[str] = []
         has_build_script = False
         has_readme = False
+        has_repo_understanding = False
+        has_build_strategy = False
         try:
             for p in fuzz_dir.rglob("*"):
                 if not p.is_file():
@@ -2323,12 +2399,18 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     has_build_script = True
                 if rel_posix == "README.md":
                     has_readme = True
+                if rel_posix == "repo_understanding.json":
+                    has_repo_understanding = True
+                if rel_posix == "build_strategy.json":
+                    has_build_strategy = True
         except Exception:
             return {
                 "harnesses": [],
                 "has_harness": False,
                 "has_build_script": False,
                 "has_readme": False,
+                "has_repo_understanding": False,
+                "has_build_strategy": False,
                 "has_required": False,
                 "has_partial": False,
             }
@@ -2337,8 +2419,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_harness": bool(harnesses),
             "has_build_script": has_build_script,
             "has_readme": has_readme,
-            "has_required": bool(harnesses) and has_build_script,
-            "has_partial": bool(harnesses) or has_build_script or has_readme,
+            "has_repo_understanding": has_repo_understanding,
+            "has_build_strategy": has_build_strategy,
+            "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
+            "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
         }
 
     def _has_min_synthesis_outputs() -> bool:
@@ -2356,6 +2440,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             missing.append("`fuzz/build.py` or `fuzz/build.sh`")
         if not status.get("has_readme"):
             missing.append("`fuzz/README.md`")
+        if not status.get("has_repo_understanding"):
+            missing.append("`fuzz/repo_understanding.json`")
+        if not status.get("has_build_strategy"):
+            missing.append("`fuzz/build_strategy.json`")
         return missing
 
     def _synthesis_grace_wait(max_sec: int) -> bool:
@@ -2600,6 +2688,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     _run_readme_alignment_completion(remaining_for_readme, target_alignment)
                     readme_alignment = _readme_drift_status(gen.repo_root, target_alignment)
         observed_target_path = ""
+        repo_understanding_path = ""
         build_strategy_path = ""
         build_strategy_doc: dict[str, Any] = {}
         try:
@@ -2616,6 +2705,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             )
         except Exception:
             observed_target_path = ""
+        repo_understanding = _load_repo_understanding_doc(gen.repo_root)
+        repo_understanding_ok, repo_understanding_reason = _repo_understanding_is_complete(repo_understanding)
+        if not repo_understanding_ok:
+            raise HarnessGeneratorError(f"synthesize incomplete: {repo_understanding_reason}")
+        repo_understanding_path = str(_repo_understanding_path(gen.repo_root))
         try:
             build_strategy_path, build_strategy_doc = _write_build_strategy_doc(gen.repo_root)
         except Exception:
@@ -2631,6 +2725,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "restart_to_plan_stage": "",
             "restart_to_plan_error_text": "",
             "restart_to_plan_report_path": "",
+            "repo_understanding_path": repo_understanding_path,
             "observed_target_path": observed_target_path,
             "build_strategy_path": build_strategy_path,
             "build_mode": str(build_strategy_doc.get("build_mode") or ""),
@@ -4146,6 +4241,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
     recent_history = history[-history_limit:] if history else []
     build_strategy_doc = _load_build_strategy_doc(gen.repo_root)
+    repo_understanding_doc = _load_repo_understanding_doc(gen.repo_root)
 
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
@@ -4186,6 +4282,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 (f"First read `{build_log_file}` for the complete build logs, then apply the minimal fix.\n" if build_log_file else "")
                 +
                 "Fix the fuzz build so that running `(cd fuzz && python build.py)` succeeds and leaves at least one executable fuzzer under fuzz/out/.\n"
+                "Keep the scaffold grounded in `fuzz/repo_understanding.json`; repair that file first if the current build path is underspecified.\n"
                 "Only modify files under fuzz/. Any change outside fuzz/ (except ./done sentinel) will be rejected.\n"
                 "Do not use `-stdlib=libc++` in this environment.\n"
                 "If target sources define `main`, add a compile define such as `-Dmain=vuln_main` to avoid libFuzzer main conflicts.\n"
@@ -4204,6 +4301,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 codex_hint.strip()
                 + "\nThe current scaffold is missing a fuzzer main strategy. Add `-fsanitize=fuzzer` or explicitly compile a repo-provided main source as a normal source input."
             )
+        if build_error_code == "insufficient_repo_understanding":
+            codex_hint = (
+                codex_hint.strip()
+                + "\nThe current scaffold lacks grounded repository understanding. Repair `fuzz/repo_understanding.json` first with concrete build facts and evidence, then make `fuzz/build.py` match it."
+            )
         if recent_history and any(str(x.get("outcome") or "") == "noop" for x in recent_history):
             codex_hint = (
                 codex_hint.strip()
@@ -4219,6 +4321,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
     if build_strategy_doc:
         context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
+    if repo_understanding_doc:
+        context_parts.append("=== fuzz/repo_understanding.json ===\n" + json.dumps(repo_understanding_doc, ensure_ascii=False, indent=2))
     if last_error:
         context_parts.append("=== last_error ===\n" + last_error)
     if stdout_tail:

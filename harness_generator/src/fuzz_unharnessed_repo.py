@@ -1790,7 +1790,17 @@ class NonOssFuzzHarnessGenerator:
             f"""
             **Goal:** Create a *local* fuzzing scaffold for the chosen top target from `PLAN.md`.
 
+            Deep-understanding policy:
+            - Do not optimize for the fastest possible artifact output.
+            - First read enough repository/build context to explain the real link path.
+            - Before treating synthesis as complete, create `fuzz/repo_understanding.json` with grounded build facts.
+
             **Requirements (create under `{FUZZ_DIR}/`):**
+            - **`repo_understanding.json`**:
+                - Record only these fields:
+                  `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`,
+                  `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`.
+                - `evidence` must be a non-empty array of concrete repository/build references.
             - One harness:
               - **C/C++**: `<name>_fuzz.cc` implementing:
                 ```c++
@@ -1807,11 +1817,14 @@ class NonOssFuzzHarnessGenerator:
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
                             - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
                         - **`build_strategy.json`**:
-                            - Record only external build-scaffold strategy fields:
+                            - Record build-scaffold strategy fields:
                               `build_system`, `build_mode`, `library_targets`, `library_artifacts`,
-                              `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`.
-                            - `build_mode` MUST be `library_link` or `custom_script`.
-                            - Do NOT emit or rely on repository fuzz target fields such as existing/recommended fuzz targets.
+                              `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`,
+                              `repo_fuzz_targets`, `selected_repo_target`.
+                            - `build_mode` MUST be `repo_target`, `library_link`, or `custom_script`.
+                            - Only use `repo_target` if the exact target name is grounded in repository files/build metadata.
+                            - Keep it consistent with `repo_understanding.json`; do not leave `build_system` at `unknown`
+                              if repository files already reveal the concrete build system.
             - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
@@ -1828,10 +1841,12 @@ class NonOssFuzzHarnessGenerator:
                             if the selected target needs unavailable deps, choose a lower-dependency target instead.
             - Do not vendor large third-party code; use the repo as-is.
             - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
-            - Never invoke repository-provided fuzz targets or guessed targets such as `cmake --build --target <name>-fuzzer`.
-            - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` means a repository fuzz target should be built.
+            - You may invoke a repository-provided fuzz target only if the exact target name is first grounded in repository files/build metadata and recorded in both `repo_understanding.json` and `build_strategy.json`.
+            - Never invoke guessed targets such as `cmake --build --target <name>-fuzzer`.
+            - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` alone means a repository fuzz target should be built.
             - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
-            - Always prefer external harness linking: build repository library/objects, compile the generated harness, and link an explicit fuzzer entry strategy.
+            - Prefer external harness linking by default, but use a real repository fuzz target when that target is clearly identified and more faithful.
+            - Do not consider the task complete if you only produced a harness/build script without a grounded repository-understanding file.
 
             **Acceptance criteria:**
             - After `(cd {FUZZ_DIR} && python build.py)`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.

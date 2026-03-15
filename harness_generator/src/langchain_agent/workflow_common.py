@@ -264,6 +264,11 @@ def build_failure_recovery_advice(error_kind: str, error_code: str) -> str:
                 "Regenerate or repair fuzz/build.py to build the repository library/objects and "
                 "link the generated harness externally instead of invoking a guessed fuzz target."
             ),
+            "insufficient_repo_understanding": (
+                "Generated scaffold lacks grounded repository-understanding metadata. "
+                "Fill fuzz/repo_understanding.json with concrete build facts/evidence first, then "
+                "align fuzz/build.py and build_strategy.json to that understanding."
+            ),
             "missing_fuzzer_main": (
                 "Fuzzer main/entrypoint is missing. Add `-fsanitize=fuzzer` or explicitly link a "
                 "repo-provided main source as a normal source input, not as a repository fuzz target."
