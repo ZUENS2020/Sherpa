@@ -1008,7 +1008,7 @@ class NonOssFuzzHarnessGenerator:
         time_budget_per_target: int = 900,  # seconds for an initial run
         codex_dangerous: bool = False,
         codex_sandbox_mode: Optional[str] = None,
-        rss_limit_mb: int = 8192,
+        rss_limit_mb: int = 131072,
         max_len: int = 1024,
         max_build_retries: int = MAX_BUILD_RETRIES,
         docker_image: Optional[str] = None,
@@ -3043,6 +3043,7 @@ class NonOssFuzzHarnessGenerator:
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
             f"-max_len={self.max_len}",
+            f"-rss_limit_mb={self.rss_limit_mb}",
         ]
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")

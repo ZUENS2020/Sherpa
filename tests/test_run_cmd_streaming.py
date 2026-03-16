@@ -160,6 +160,7 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     gen.time_budget = 900
     gen.max_len = 1024
+    gen.rss_limit_mb = 32768
     gen.fuzz_out_dir = tmp_path / "fuzz" / "out"
     gen.fuzz_corpus_dir = tmp_path / "fuzz" / "corpus"
     gen.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +172,10 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     timeline = iter([0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0])
     monkeypatch.setattr(fur.time, "monotonic", lambda: next(timeline))
 
+    seen_cmd = {}
+
     def _fake_run_cmd(_cmd, **kwargs):
+        seen_cmd["cmd"] = list(_cmd)
         cb = kwargs.get("line_callback")
         lines = [
             "#1 NEW cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
@@ -206,6 +210,7 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     assert result.run_error_kind == ""
     assert result.plateau_detected is True
     assert result.terminal_reason == "coverage_plateau"
+    assert "-rss_limit_mb=32768" in seen_cmd["cmd"]
 
 
 def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_path: Path, monkeypatch):
