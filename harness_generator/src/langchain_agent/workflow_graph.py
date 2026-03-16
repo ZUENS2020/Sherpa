@@ -1299,6 +1299,14 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
+def _default_run_rss_limit_mb() -> int:
+    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "131072").strip()
+    try:
+        return max(256, int(raw))
+    except Exception:
+        return 131072
+
+
 def _antlr_assist_enabled() -> bool:
     raw = (os.environ.get("SHERPA_ANTLR_ASSIST_ENABLED") or "1").strip().lower()
     if not raw:
@@ -1825,6 +1833,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         ai_key_path=ai_key_path,
         max_len=max_len,
         time_budget_per_target=run_time_budget,
+        rss_limit_mb=_default_run_rss_limit_mb(),
         docker_image=docker_image,
         codex_cli=codex_cli,
     )

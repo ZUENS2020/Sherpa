@@ -152,3 +152,31 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert effectiveness["status"] == "ok"
     assert effectiveness["fuzz_inventory"]["fuzzer_count"] == 1
     assert effectiveness["run_details"][0]["final_cov"] == 123
+
+
+def test_write_run_summary_marks_run_resource_exhaustion_as_error(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    out_dir = repo_root / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    workflow_graph._write_run_summary(
+        {
+            "repo_url": "https://example.com/repo.git",
+            "repo_root": str(repo_root),
+            "last_step": "run",
+            "message": "Fuzzing run failed.",
+            "run_rc": 137,
+            "failed": False,
+            "last_error": "",
+            "crash_found": False,
+            "run_error_kind": "run_resource_exhaustion",
+            "error_kind": "resource",
+            "error_code": "oom_killed",
+        }
+    )
+
+    summary = json.loads((repo_root / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "error"
+    assert summary["run_error_kind"] == "run_resource_exhaustion"
+    assert summary["error_kind"] == "resource"
+    assert summary["error_code"] == "oom_killed"

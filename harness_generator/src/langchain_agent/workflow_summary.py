@@ -119,7 +119,14 @@ def write_run_summary(out: dict[str, Any]) -> None:
     crash_repro_ok = bool(out.get("crash_repro_ok"))
     last_error = str(out.get("last_error") or "").strip()
     failed = bool(out.get("failed"))
-    status = "error" if (failed or last_error or (crash_found and crash_repro_done and not crash_repro_ok)) else ("crash_found" if crash_found else "ok")
+    run_error_kind = str(out.get("run_error_kind") or "").strip()
+    error_kind = str(out.get("error_kind") or "").strip()
+    error_code = str(out.get("error_code") or "").strip()
+    status = (
+        "error"
+        if (failed or last_error or run_error_kind or error_kind or error_code or (crash_found and crash_repro_done and not crash_repro_ok))
+        else ("crash_found" if crash_found else "ok")
+    )
     harness_error = detect_harness_error(repo_root)
     run_details = out.get("run_details") or []
     fuzz_inventory = collect_fuzz_inventory(repo_root)
@@ -146,7 +153,9 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "last_error": last_error,
         "crash_found": crash_found,
         "crash_evidence": out.get("crash_evidence") or "none",
-        "run_error_kind": out.get("run_error_kind") or "",
+        "run_error_kind": run_error_kind,
+        "error_kind": error_kind,
+        "error_code": error_code,
         "crash_repro_done": crash_repro_done,
         "crash_repro_ok": crash_repro_ok,
         "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
