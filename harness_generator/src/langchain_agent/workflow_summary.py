@@ -174,7 +174,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "key_artifact_hashes": key_artifact_hashes,
         "plan_policy": {
             "fix_on_crash": bool(out.get("plan_fix_on_crash", True)),
-            "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 1),
+            "max_fix_rounds": int(out.get("plan_max_fix_rounds") or 0),
         },
         "plan_schema_guard": {
             "retry_reason": str(out.get("plan_retry_reason") or ""),
@@ -183,8 +183,12 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "used_fallback_targets": bool(out.get("plan_used_fallback_targets") or False),
         },
         "build_fix_policy": {
-            "max_fix_rounds": int(out.get("max_fix_rounds") or 3),
-            "same_error_max_retries": int(out.get("same_error_max_retries") or 1),
+            "max_fix_rounds": int(out.get("max_fix_rounds") if out.get("max_fix_rounds") is not None else 0),
+            "same_error_max_retries": int(
+                out.get("same_error_max_retries")
+                if out.get("same_error_max_retries") is not None
+                else 0
+            ),
             "fix_action_type": str(out.get("fix_action_type") or ""),
             "fix_effect": str(out.get("fix_effect") or ""),
             "final_build_error_code": str(out.get("build_error_code") or ""),
@@ -206,7 +210,11 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "re_run_json_path": str(out.get("re_run_json_path") or ""),
         },
         "coverage_loop": {
-            "max_rounds": int(out.get("coverage_loop_max_rounds") or 3),
+            "max_rounds": int(
+                out.get("coverage_loop_max_rounds")
+                if out.get("coverage_loop_max_rounds") is not None
+                else 0
+            ),
             "round": int(out.get("coverage_loop_round") or 0),
             "should_improve": bool(out.get("coverage_should_improve") or False),
             "reason": str(out.get("coverage_improve_reason") or ""),

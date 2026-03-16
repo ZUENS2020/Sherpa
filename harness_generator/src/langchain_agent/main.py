@@ -1721,9 +1721,6 @@ class fuzz_model(BaseModel):
     time_budget: int | None = None
     total_time_budget: int | None = None
     run_time_budget: int | None = None
-    coverage_loop_max_rounds: int = 3
-    max_fix_rounds: int | None = None
-    same_error_max_retries: int | None = None
     docker: bool | None = None
     docker_image: str | None = None
 
@@ -1820,16 +1817,6 @@ def put_config(request: WebPersistentConfig = Body(...)):
         raise HTTPException(
             status_code=400,
             detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
-        )
-    if int(request.max_fix_rounds) < 0:
-        raise HTTPException(
-            status_code=400,
-            detail="max_fix_rounds must be >= 0 (0 means disable fix_build retries).",
-        )
-    if int(request.same_error_max_retries) < 0:
-        raise HTTPException(
-            status_code=400,
-            detail="same_error_max_retries must be >= 0.",
         )
 
     current = _cfg_get()
@@ -2341,21 +2328,9 @@ def _run_fuzz_job(
                 raise RuntimeError("total_time_budget must be >= 0")
             if run_time_budget_value < 0:
                 raise RuntimeError("run_time_budget must be >= 0")
-            coverage_loop_raw = getattr(request, "coverage_loop_max_rounds", 3)
-            coverage_loop_max_rounds = int(coverage_loop_raw if coverage_loop_raw is not None else 3)
-            coverage_loop_max_rounds = max(0, coverage_loop_max_rounds)
-            max_fix_rounds = (
-                int(request.max_fix_rounds)
-                if request.max_fix_rounds is not None
-                else int(getattr(cfg, "max_fix_rounds", 3))
-            )
-            same_error_max_retries = (
-                int(request.same_error_max_retries)
-                if request.same_error_max_retries is not None
-                else int(getattr(cfg, "same_error_max_retries", 1))
-            )
-            max_fix_rounds = max(0, max_fix_rounds)
-            same_error_max_retries = max(0, same_error_max_retries)
+            coverage_loop_max_rounds = 0
+            max_fix_rounds = 0
+            same_error_max_retries = 0
             total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
             run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
             openai_key = (
@@ -2410,12 +2385,15 @@ def _run_fuzz_job(
                     current_stage = "build"
                 if current_stage not in _STAGED_WORKFLOW_STEPS:
                     current_stage = "plan"
-                max_stage_dispatches = 20
+                try:
+                    max_stage_dispatches = int((os.environ.get("SHERPA_STAGE_DISPATCH_MAX") or "0").strip())
+                except Exception:
+                    max_stage_dispatches = 0
                 dispatch_count = 0
                 while current_stage:
                     stage = current_stage
                     dispatch_count += 1
-                    if dispatch_count > max_stage_dispatches:
+                    if max_stage_dispatches > 0 and dispatch_count > max_stage_dispatches:
                         raise RuntimeError("staged_workflow_dispatch_limit_exceeded")
                     idx = dispatch_count
                     if _is_cancel_requested(job_id):
