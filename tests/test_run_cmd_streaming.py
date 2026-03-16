@@ -119,6 +119,9 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "seed_profile is `parser-structure`" in captured["instructions"]
     assert "anchors and aliases" in captured["instructions"]
     assert "Current corpus summary:" in captured["instructions"]
+    assert "seed_exploration_yaml_parser_parse_fuzz.json" in captured["instructions"]
+    assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
+    assert "fuzz/PLAN.md" in captured["instructions"]
 
 
 def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
@@ -233,6 +236,10 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
         def run_codex_command(self, _instructions: str, **_kwargs):
             corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
             (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
+            (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","required_families":["document_markers"],"missing_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                encoding="utf-8",
+            )
             return "seed-ok"
 
     orig_which = fur.which
@@ -251,6 +258,7 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
     assert meta["repo_examples_filtered"] is True
     assert meta["repo_examples_accepted_count"] == 1
     assert meta["repo_examples_rejected_count"] >= 0
+    assert meta["seed_exploration_path"] == "fuzz/seed_exploration_yaml_parser_parse_fuzz.json"
 
 
 def test_collect_repo_seed_examples_filters_source_files_for_generic_targets(tmp_path: Path):

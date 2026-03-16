@@ -2712,6 +2712,10 @@ class NonOssFuzzHarnessGenerator:
             gaps.append("missing truncated footer/directory and corrupted magic cases")
         return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
 
+    def _seed_exploration_path(self, fuzzer_name: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
+        return self.fuzz_dir / f"seed_exploration_{safe_name}.json"
+
     def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
         radamsa = which("radamsa")
         if not radamsa:
@@ -2823,6 +2827,7 @@ class NonOssFuzzHarnessGenerator:
         readme_text = read_text_safely(self.fuzz_dir / "README.md")
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        seed_exploration_path = self._seed_exploration_path(fuzzer_name)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
         observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
@@ -2852,8 +2857,8 @@ class NonOssFuzzHarnessGenerator:
 
         instructions = textwrap.dedent(
             f"""
-            Add or refine **warm-up seed files by family bucket** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and prioritize missing families.
+            First explore repository facts for the harness `{fuzzer_name}`, then add or refine **warm-up seed files by family bucket**
+            inside `{corpus_dir.relative_to(self.repo_root)}`. Reuse the existing corpus files as grounding and prioritize missing families.
             Use appropriate file extensions if known. If binary, you may write contents via hex bytes.
 
             {seed_guidance}
@@ -2875,6 +2880,11 @@ class NonOssFuzzHarnessGenerator:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
             Rules:
+            - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
+            - Write a concise exploration summary to `{seed_exploration_path.relative_to(self.repo_root)}` before or alongside seed creation.
+            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
+            - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
+            - Keep `sample_inputs_found` concrete. List real repo examples, existing corpus files, or note that none were found.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Prefer missing families over adding more variants to already-covered malformed cases.
@@ -2882,7 +2892,8 @@ class NonOssFuzzHarnessGenerator:
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
-            - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
+            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` (no code changes).
+            - When finished, write the path to one seed file into `./done`.
             """
         ).strip()
 
@@ -2894,11 +2905,17 @@ class NonOssFuzzHarnessGenerator:
         observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
         antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
+        plan_text = read_text_safely(self.fuzz_dir / "PLAN.md")
+        repo_understanding_text = read_text_safely(self.fuzz_dir / "repo_understanding.json")
+        build_strategy_text = read_text_safely(self.fuzz_dir / "build_strategy.json")
         additional_context_parts = [
             "=== fuzz/observed_target.json ===\n" + (observed_target_text or "(missing)"),
             "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
             "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
             "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
+            "=== fuzz/PLAN.md ===\n" + (plan_text or "(missing)"),
+            "=== fuzz/repo_understanding.json ===\n" + (repo_understanding_text or "(missing)"),
+            "=== fuzz/build_strategy.json ===\n" + (build_strategy_text or "(missing)"),
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
@@ -2953,7 +2970,10 @@ class NonOssFuzzHarnessGenerator:
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
+            "seed_exploration_path": str(seed_exploration_path.relative_to(self.repo_root)) if seed_exploration_path.is_file() else "",
         }
+        if not seed_exploration_path.is_file():
+            print(f"[warn] seed exploration summary missing for {fuzzer_name}: {seed_exploration_path.relative_to(self.repo_root)}")
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────
