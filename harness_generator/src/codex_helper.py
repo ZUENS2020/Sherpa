@@ -54,7 +54,6 @@ import queue
 import shutil
 import subprocess
 import tempfile
-import textwrap
 import threading
 import time
 from collections import deque
@@ -131,6 +130,57 @@ def _redact_cmd_for_log(cmd: Sequence[str], *, env: dict | None = None) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _opencode_context_max_lines() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_CONTEXT_MAX_LINES") or "50").strip()
+    try:
+        return max(10, min(int(raw), 500))
+    except Exception:
+        return 50
+
+
+def _opencode_context_max_chars() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_CONTEXT_MAX_CHARS") or "16000").strip()
+    try:
+        return max(512, min(int(raw), 200_000))
+    except Exception:
+        return 16_000
+
+
+def _compact_text_for_opencode(text: str, *, max_lines: int, max_chars: int) -> str:
+    src = str(text or "")
+    if not src:
+        return ""
+    lines = src.splitlines()
+    if len(lines) > max_lines:
+        keep_head = max(1, max_lines // 2)
+        keep_tail = max(1, max_lines - keep_head - 1)
+        dropped = max(0, len(lines) - keep_head - keep_tail)
+        marker = f"... [{dropped} lines omitted] ..."
+        lines = lines[:keep_head] + [marker] + lines[-keep_tail:]
+    out = "\n".join(lines).strip()
+    if len(out) > max_chars:
+        head = max(128, max_chars // 2)
+        tail = max(128, max_chars - head - 32)
+        out = f"{out[:head]}\n... [truncated] ...\n{out[-tail:]}"
+    return out.strip()
+
+
+def _write_opencode_materialized_text(
+    working_dir: Path,
+    *,
+    name: str,
+    text: str,
+    max_lines: int,
+    max_chars: int,
+) -> tuple[Path, str]:
+    compact = _compact_text_for_opencode(text, max_lines=max_lines, max_chars=max_chars)
+    out_dir = working_dir / ".git" / "sherpa-opencode"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / name
+    path.write_text(compact + ("\n" if compact else ""), encoding="utf-8")
+    return path, compact
 
 
 def _append_opencode_metadata(repo_root: Path, payload: dict) -> None:
@@ -948,11 +998,30 @@ class CodexHelper:
             rows.sort(key=lambda item: json.dumps(item, ensure_ascii=False, separators=(",", ":")))
             return _sha256_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
 
-        # Build prompt body once (mirrors original behaviour).
+        # Build prompt body once.
         if isinstance(instructions, (list, tuple)):
             tasks = "\n".join(str(i) for i in instructions)
         else:
             tasks = str(instructions)
+        max_ctx_lines = _opencode_context_max_lines()
+        max_ctx_chars = _opencode_context_max_chars()
+        task_path, compact_tasks = _write_opencode_materialized_text(
+            self.working_dir,
+            name="task.txt",
+            text=tasks,
+            max_lines=max_ctx_lines,
+            max_chars=max_ctx_chars,
+        )
+        context_path: Path | None = None
+        compact_context = ""
+        if additional_context:
+            context_path, compact_context = _write_opencode_materialized_text(
+                self.working_dir,
+                name="additional_context.txt",
+                text=additional_context,
+                max_lines=max_ctx_lines,
+                max_chars=max_ctx_chars,
+            )
 
         repo_root = str(self.working_dir.resolve())
         if _opencode_container_mode_enabled():
@@ -984,24 +1053,16 @@ class CodexHelper:
             "  2) Create/overwrite a file called 'done' in the repo root (./done).",
             "     Put the relative path to the single most relevant file you created or modified on the first line.",
             "     Example: `echo fuzz/build.py > done`",
-            f"## Tasks\n{tasks}",
+            "MANDATORY: Read these files before any edit:",
+            "  - ./.git/sherpa-opencode/task.txt",
         ]
 
-        if additional_context:
-            prompt_parts.append(
-                textwrap.dedent(
-                    f"""
-                    ---
-                    ### Additional context
-                    {additional_context.strip()}
-                    ---
-                    """
-                )
-            )
+        if context_path is not None:
+            prompt_parts.append("  - ./.git/sherpa-opencode/additional_context.txt")
 
         prompt = "\n".join(prompt_parts).strip()
         prompt_hash = _sha256_text(prompt)
-        context_hash = _sha256_text(additional_context or "")
+        context_hash = _sha256_text(compact_context)
 
         # ----------------------------------------------------------------
         # Outer loop – retry full patch attempt if no diff produced.
@@ -1030,6 +1091,8 @@ class CodexHelper:
                 "resolved_model": "",
                 "prompt_hash": prompt_hash,
                 "context_hash": context_hash,
+                "task_file": str(task_path),
+                "context_file": str(context_path) if context_path else "",
                 "working_dir": str(self.working_dir),
                 "status": "running",
                 "repo_root": str(self.working_dir),
