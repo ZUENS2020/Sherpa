@@ -77,9 +77,6 @@ class WebPersistentConfig(BaseModel):
     # Per-round cap (seconds) when both total/run budgets are unlimited (0).
     # 0 means fully unlimited.
     sherpa_run_unlimited_round_budget_sec: int = 7200
-    # Build/fix_build convergence guards.
-    max_fix_rounds: int = 3
-    same_error_max_retries: int = 1
     fuzz_use_docker: bool = False
     fuzz_docker_image: str = ""
 

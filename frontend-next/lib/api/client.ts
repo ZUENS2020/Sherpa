@@ -120,9 +120,6 @@ export interface SubmitTaskInput {
   totalTimeBudget: number;
   runTimeBudget: number;
   maxTokens: number;
-  coverageLoopMaxRounds?: number;
-  maxFixRounds?: number;
-  sameErrorMaxRetries?: number;
 }
 
 export async function submitTask(input: SubmitTaskInput): Promise<{ job_id: string; status: string }> {
@@ -139,9 +136,6 @@ export async function submitTask(input: SubmitTaskInput): Promise<{ job_id: stri
           time_budget: input.totalTimeBudget,
           total_time_budget: input.totalTimeBudget,
           run_time_budget: input.runTimeBudget,
-          coverage_loop_max_rounds: input.coverageLoopMaxRounds ?? 3,
-          max_fix_rounds: input.maxFixRounds ?? 3,
-          same_error_max_retries: input.sameErrorMaxRetries ?? 1,
         },
       ],
       auto_init: true,
