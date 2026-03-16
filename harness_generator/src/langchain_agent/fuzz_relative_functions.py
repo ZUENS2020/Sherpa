@@ -43,7 +43,7 @@ def _find_ai_key_path() -> Path:
 
 def fuzz_logic(
     repo_url: str,
-    max_len: int = 1024,
+    max_len: int = 0,
     time_budget: int | None = 900,
     run_time_budget: int | None = None,
     email: str | None = None,
@@ -60,6 +60,10 @@ def fuzz_logic(
     coverage_loop_max_rounds: int = 0,
     max_fix_rounds: int = 0,
     same_error_max_retries: int = 0,
+    restart_to_plan_reason: str | None = None,
+    restart_to_plan_stage: str | None = None,
+    restart_to_plan_error_text: str | None = None,
+    restart_to_plan_report_path: str | None = None,
 ) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
@@ -86,7 +90,7 @@ def fuzz_logic(
                 email=email,
                 time_budget=resolved_time_budget,
                 run_time_budget=resolved_run_time_budget,
-                max_len=int(max_len or 1024),
+                max_len=int(max_len),
                 docker_image=docker_image,
                 ai_key_path=(ai_key_path or _find_ai_key_path()),
                 model=model,
@@ -103,6 +107,10 @@ def fuzz_logic(
                 coverage_loop_max_rounds=0,
                 max_fix_rounds=0,
                 same_error_max_retries=0,
+                restart_to_plan_reason=(str(restart_to_plan_reason or "").strip()),
+                restart_to_plan_stage=(str(restart_to_plan_stage or "").strip()),
+                restart_to_plan_error_text=(str(restart_to_plan_error_text or "").strip()),
+                restart_to_plan_report_path=(str(restart_to_plan_report_path or "").strip()),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")
