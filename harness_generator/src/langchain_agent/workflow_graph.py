@@ -1080,6 +1080,10 @@ def _build_scaffold_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_strategy.json"
 
 
+def _build_runtime_facts_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "build_runtime_facts.json"
+
+
 def _repo_understanding_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "repo_understanding.json"
 
@@ -1111,6 +1115,17 @@ def _repo_understanding_is_complete(doc: dict[str, Any]) -> tuple[bool, str]:
 
 def _load_build_strategy_doc(repo_root: Path) -> dict[str, Any]:
     path = _build_scaffold_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _load_build_runtime_facts_doc(repo_root: Path) -> dict[str, Any]:
+    path = _build_runtime_facts_path(repo_root)
     if not path.is_file():
         return {}
     try:
@@ -2510,6 +2525,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             build_strategy = gen.repo_root / "fuzz" / "build_strategy.json"
             if build_strategy.is_file():
                 parts.append("=== existing fuzz/build_strategy.json ===\n" + build_strategy.read_text(encoding="utf-8", errors="replace"))
+            build_runtime_facts = gen.repo_root / "fuzz" / "build_runtime_facts.json"
+            if build_runtime_facts.is_file():
+                parts.append("=== existing fuzz/build_runtime_facts.json ===\n" + build_runtime_facts.read_text(encoding="utf-8", errors="replace"))
             build_sh = gen.repo_root / "fuzz" / "build.sh"
             if build_sh.is_file():
                 parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
@@ -4220,6 +4238,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
     recent_history = history[-history_limit:] if history else []
     build_strategy_doc = _load_build_strategy_doc(gen.repo_root)
+    build_runtime_facts_doc = _load_build_runtime_facts_doc(gen.repo_root)
     repo_understanding_doc = _load_repo_understanding_doc(gen.repo_root)
 
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
@@ -4300,6 +4319,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
     if build_strategy_doc:
         context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
+    if build_runtime_facts_doc:
+        context_parts.append("=== fuzz/build_runtime_facts.json ===\n" + json.dumps(build_runtime_facts_doc, ensure_ascii=False, indent=2))
     if repo_understanding_doc:
         context_parts.append("=== fuzz/repo_understanding.json ===\n" + json.dumps(repo_understanding_doc, ensure_ascii=False, indent=2))
     if last_error:

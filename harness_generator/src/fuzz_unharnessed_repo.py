@@ -2716,6 +2716,10 @@ class NonOssFuzzHarnessGenerator:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
         return self.fuzz_dir / f"seed_exploration_{safe_name}.json"
 
+    def _seed_check_path(self, fuzzer_name: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
+        return self.fuzz_dir / f"seed_check_{safe_name}.json"
+
     def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
         radamsa = which("radamsa")
         if not radamsa:
@@ -2828,6 +2832,7 @@ class NonOssFuzzHarnessGenerator:
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
         seed_exploration_path = self._seed_exploration_path(fuzzer_name)
+        seed_check_path = self._seed_check_path(fuzzer_name)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
         observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
@@ -2854,6 +2859,8 @@ class NonOssFuzzHarnessGenerator:
         )
         sources = list(repo_meta.get("sources") or [])
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
+        target_corpus_files = max(8, len(required_families) * 2)
+        per_family_target = 2 if required_families else 1
 
         instructions = textwrap.dedent(
             f"""
@@ -2876,6 +2883,10 @@ class NonOssFuzzHarnessGenerator:
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
             missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
 
+            Corpus size goal:
+            - Aim for at least {target_corpus_files} total seed files in `{corpus_dir.relative_to(self.repo_root)}` after your edits.
+            - Aim for at least {per_family_target} semantically different seed files for each required family where feasible.
+
             Coverage-oriented gap hints:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
@@ -2885,14 +2896,18 @@ class NonOssFuzzHarnessGenerator:
             - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
             - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
             - Keep `sample_inputs_found` concrete. List real repo examples, existing corpus files, or note that none were found.
+            - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
+            - Do not stop after creating only one tiny seed per family. Build a thicker warm-up corpus with multiple semantically different seeds per required family.
             - Prefer missing families over adding more variants to already-covered malformed cases.
             - Do not only generate malformed separator variants if structure families are missing.
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
-            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` (no code changes).
+            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - When finished, write the path to one seed file into `./done`.
             """
         ).strip()
@@ -2971,9 +2986,12 @@ class NonOssFuzzHarnessGenerator:
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
             "seed_exploration_path": str(seed_exploration_path.relative_to(self.repo_root)) if seed_exploration_path.is_file() else "",
+            "seed_check_path": str(seed_check_path.relative_to(self.repo_root)) if seed_check_path.is_file() else "",
         }
         if not seed_exploration_path.is_file():
             print(f"[warn] seed exploration summary missing for {fuzzer_name}: {seed_exploration_path.relative_to(self.repo_root)}")
+        if not seed_check_path.is_file():
+            print(f"[warn] seed self-check summary missing for {fuzzer_name}: {seed_check_path.relative_to(self.repo_root)}")
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────

@@ -57,6 +57,7 @@ def test_synthesize_prompts_require_observed_target_alignment():
 
     assert "fuzz/observed_target.json" in synth
     assert "fuzz/repo_understanding.json" in synth
+    assert "fuzz/build_runtime_facts.json" in synth
     assert "must agree on one final external/library API" in synth
     assert "`Harness file: ...`" in synth
     assert "local helper/checker/wrapper" in synth
@@ -68,8 +69,10 @@ def test_synthesize_prompts_require_observed_target_alignment():
     assert "near-miss candidates and why they were rejected" in synth
     assert "enumerate at least 3 concrete seed families" in synth
     assert "actual corpus example or planned corpus file pattern" in synth
+    assert "do not use `-lfuzzer`" in synth
     assert "fuzz/observed_target.json" in scaffold
     assert "fuzz/repo_understanding.json" in scaffold
+    assert "fuzz/build_runtime_facts.json" in scaffold
     assert "never reference missing scaffold files" in scaffold
     assert "record the rejected original target and repository-grounded reason" in scaffold
     assert "avoid high-level repository summaries with no execution consequences" in scaffold
@@ -87,3 +90,5 @@ def test_fix_build_prompt_prefers_target_alignment_and_concrete_seed_repairs():
     assert "repair that mismatch before incremental build tweaks" in out
     assert "rejected alternatives" in out
     assert "concrete seed families tied to target semantics" in out
+    assert "If `fuzz/build_runtime_facts.json` is missing or weak" in out
+    assert "forbidden link flags" in out
