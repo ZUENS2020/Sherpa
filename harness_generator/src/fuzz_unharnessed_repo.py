@@ -2719,7 +2719,6 @@ class NonOssFuzzHarnessGenerator:
     def _seed_check_path(self, fuzzer_name: str) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
         return self.fuzz_dir / f"seed_check_{safe_name}.json"
-
     def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
         radamsa = which("radamsa")
         if not radamsa:
@@ -2899,6 +2898,9 @@ class NonOssFuzzHarnessGenerator:
             - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
             - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
             - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Do not stop after creating only one tiny seed per family. Build a thicker warm-up corpus with multiple semantically different seeds per required family.
@@ -2907,6 +2909,7 @@ class NonOssFuzzHarnessGenerator:
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
+            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - When finished, write the path to one seed file into `./done`.
             """
