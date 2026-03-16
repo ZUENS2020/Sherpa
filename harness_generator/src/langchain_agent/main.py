@@ -265,7 +265,7 @@ def _k8s_worker_resources() -> dict[str, dict[str, str]] | None:
     request_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_REQUEST", "500m") or "").strip()
     limit_cpu = (os.environ.get("SHERPA_K8S_JOB_CPU_LIMIT", "2") or "").strip()
     request_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_REQUEST", "4Gi") or "").strip()
-    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "128Gi") or "").strip()
+    limit_memory = (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi") or "").strip()
 
     requests: dict[str, str] = {}
     limits: dict[str, str] = {}
@@ -2341,8 +2341,9 @@ def _run_fuzz_job(
                 raise RuntimeError("total_time_budget must be >= 0")
             if run_time_budget_value < 0:
                 raise RuntimeError("run_time_budget must be >= 0")
-            coverage_loop_max_rounds = int(getattr(request, "coverage_loop_max_rounds", 3) or 3)
-            coverage_loop_max_rounds = max(1, min(coverage_loop_max_rounds, 5))
+            coverage_loop_raw = getattr(request, "coverage_loop_max_rounds", 3)
+            coverage_loop_max_rounds = int(coverage_loop_raw if coverage_loop_raw is not None else 3)
+            coverage_loop_max_rounds = max(0, coverage_loop_max_rounds)
             max_fix_rounds = (
                 int(request.max_fix_rounds)
                 if request.max_fix_rounds is not None
@@ -2353,8 +2354,8 @@ def _run_fuzz_job(
                 if request.same_error_max_retries is not None
                 else int(getattr(cfg, "same_error_max_retries", 1))
             )
-            max_fix_rounds = max(0, min(max_fix_rounds, 20))
-            same_error_max_retries = max(0, min(same_error_max_retries, 10))
+            max_fix_rounds = max(0, max_fix_rounds)
+            same_error_max_retries = max(0, same_error_max_retries)
             total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
             run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
             openai_key = (

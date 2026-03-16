@@ -92,7 +92,7 @@ def test_k8s_manifest_applies_default_worker_resources():
     assert resources["requests"]["cpu"] == "500m"
     assert resources["requests"]["memory"] == "4Gi"
     assert resources["limits"]["cpu"] == "2"
-    assert resources["limits"]["memory"] == "128Gi"
+    assert resources["limits"]["memory"] == "64Gi"
 
 
 def test_k8s_manifest_uses_optional_proxy_secret_env_from():
