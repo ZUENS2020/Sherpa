@@ -1717,7 +1717,7 @@ class fuzz_model(BaseModel):
     model: str | None = None
     temperature: float = 0.5
     timeout: int = 10
-    max_tokens: int = 1000
+    max_tokens: int = 0
     time_budget: int | None = None
     total_time_budget: int | None = None
     run_time_budget: int | None = None
@@ -2377,9 +2377,11 @@ def _run_fuzz_job(
                     "last_fuzzer": "",
                     "last_crash_artifact": "",
                     "re_workspace_root": "",
+                    "restart_to_plan_reason": "",
+                    "restart_to_plan_stage": "",
+                    "restart_to_plan_error_text": "",
+                    "restart_to_plan_report_path": "",
                 }
-                env_rebuild_retries = 0
-                max_env_rebuild_retries = 1
                 current_stage = start_step
                 if current_stage in {"fix_build", "fix_crash"}:
                     current_stage = "build"
@@ -2440,6 +2442,10 @@ def _run_fuzz_job(
                         "last_fuzzer": (stage_ctx.get("last_fuzzer") or None),
                         "last_crash_artifact": (stage_ctx.get("last_crash_artifact") or None),
                         "re_workspace_root": (stage_ctx.get("re_workspace_root") or None),
+                        "restart_to_plan_reason": (stage_ctx.get("restart_to_plan_reason") or None),
+                        "restart_to_plan_stage": (stage_ctx.get("restart_to_plan_stage") or None),
+                        "restart_to_plan_error_text": (stage_ctx.get("restart_to_plan_error_text") or None),
+                        "restart_to_plan_report_path": (stage_ctx.get("restart_to_plan_report_path") or None),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -2449,14 +2455,53 @@ def _run_fuzz_job(
                         total_time_budget_sec=total_time_budget_value,
                         run_time_budget_sec=run_time_budget_value,
                     )
-                    stage_result, stage_node_name = _execute_k8s_job(
-                        job_id=job_id,
-                        job_name=job_name,
-                        payload=payload,
-                        result_path=result_path,
-                        error_path=error_path,
-                        wait_timeout=wait_timeout,
-                    )
+                    stage_result: object
+                    stage_node_name: str = ""
+                    stage_failed = False
+                    stage_fail_error = ""
+                    stage_fail_reason = ""
+                    try:
+                        stage_result, stage_node_name = _execute_k8s_job(
+                            job_id=job_id,
+                            job_name=job_name,
+                            payload=payload,
+                            result_path=result_path,
+                            error_path=error_path,
+                            wait_timeout=wait_timeout,
+                        )
+                    except _K8sJobFailure as e:
+                        stage_failed = True
+                        stage_fail_error = _redact_sensitive_text(str(e))
+                        failure_doc = dict(e.result or {})
+                        stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
+                        stage_result = {
+                            "message": f"stage {stage} failed in k8s worker; restarting from plan",
+                            "repo_root": current_repo_root,
+                            "workflow_last_step": stage,
+                            "workflow_recommended_next": "plan",
+                            "restart_to_plan": True,
+                            "restart_to_plan_reason": stage_fail_reason,
+                            "restart_to_plan_stage": stage,
+                            "restart_to_plan_error_text": stage_fail_error,
+                            "restart_to_plan_report_path": "",
+                            "error": stage_fail_error,
+                        }
+                    except Exception as e:
+                        stage_failed = True
+                        stage_fail_error = _redact_sensitive_text(str(e))
+                        stage_fail_reason = "stage_dispatch_exception"
+                        stage_result = {
+                            "message": f"stage {stage} dispatch failed; restarting from plan",
+                            "repo_root": current_repo_root,
+                            "workflow_last_step": stage,
+                            "workflow_recommended_next": "plan",
+                            "restart_to_plan": True,
+                            "restart_to_plan_reason": stage_fail_reason,
+                            "restart_to_plan_stage": stage,
+                            "restart_to_plan_error_text": stage_fail_error,
+                            "restart_to_plan_report_path": "",
+                            "error": stage_fail_error,
+                        }
                     if stage_node_name:
                         if current_node_name and stage_node_name != current_node_name:
                             print(
@@ -2470,15 +2515,28 @@ def _run_fuzz_job(
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
-                        for key in ("last_fuzzer", "last_crash_artifact", "re_workspace_root"):
+                        for key in (
+                            "last_fuzzer",
+                            "last_crash_artifact",
+                            "re_workspace_root",
+                            "restart_to_plan_reason",
+                            "restart_to_plan_stage",
+                            "restart_to_plan_error_text",
+                            "restart_to_plan_report_path",
+                        ):
                             v = str(stage_result.get(key) or "").strip()
                             if v:
                                 stage_ctx[key] = v
+                        if not bool(stage_result.get("restart_to_plan")):
+                            stage_ctx["restart_to_plan_reason"] = ""
+                            stage_ctx["restart_to_plan_stage"] = ""
+                            stage_ctx["restart_to_plan_error_text"] = ""
+                            stage_ctx["restart_to_plan_report_path"] = ""
                         stage_results.append(
                             {
                                 "stage": stage,
                                 "job_name": job_name,
-                                "ok": True,
+                                "ok": (not stage_failed),
                                 "repo_root": current_repo_root,
                                 "stage_ctx": dict(stage_ctx),
                                 "result": stage_result,
@@ -2499,21 +2557,23 @@ def _run_fuzz_job(
                         job_id,
                         workflow_last_step=stage,
                         workflow_active_step="",
-                        k8s_phase=f"{stage}:Succeeded",
+                        k8s_phase=(f"{stage}:Succeeded" if not stage_failed else f"{stage}:Failed->Plan"),
                     )
                     last_result = stage_result
-                    print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                    if stage_failed:
+                        print(
+                            f"[job {job_id}] stage {stage} failed ({stage_fail_reason}): "
+                            f"{stage_fail_error} -> fallback to plan"
+                        )
+                    else:
+                        print(f"[job {job_id}] stage {stage} completed via job {job_name}")
                     next_stage = ""
                     if isinstance(stage_result, dict):
                         terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
                         if stage == "build" and terminal_reason == "requires_env_rebuild":
-                            if env_rebuild_retries >= max_env_rebuild_retries:
-                                raise RuntimeError("fix_build_requires_env_rebuild_retry_exceeded")
-                            env_rebuild_retries += 1
                             next_stage = "build"
                             print(
-                                f"[job {job_id}] stage {stage} requested env rebuild; "
-                                f"dispatching fresh build job (attempt {env_rebuild_retries}/{max_env_rebuild_retries})"
+                                f"[job {job_id}] stage {stage} requested env rebuild; dispatching fresh build job"
                             )
                         else:
                             next_stage = _normalize_resume_step(stage_result.get("workflow_recommended_next"))

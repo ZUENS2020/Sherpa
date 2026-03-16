@@ -409,11 +409,11 @@ def test_node_run_marks_no_progress_for_execs_zero_with_warning(tmp_path: Path):
     assert "no measurable progress" in out["last_error"]
 
 
-def test_route_after_run_routes_recoverable_run_errors_to_fix_build():
+def test_route_after_run_routes_recoverable_run_errors_to_plan():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
     )
-    assert route == "fix_build"
+    assert route == "plan"
 
 
 def test_route_after_run_routes_crash_to_repro_stage():
@@ -430,18 +430,18 @@ def test_route_after_run_routes_clean_result_to_coverage_analysis():
     assert route == "coverage-analysis"
 
 
-def test_route_after_run_routes_idle_timeout_to_stop():
+def test_route_after_run_routes_idle_timeout_to_plan():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
-    assert route == "stop"
+    assert route == "plan"
 
 
-def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
+def test_route_after_run_routes_resource_exhaustion_to_plan():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "plan"
 
 
 def test_route_after_coverage_analysis_routes_to_improve_harness():
@@ -795,7 +795,7 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert out["run_error_kind"] == "run_timeout"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "stop"
+    assert route == "plan"
 
 
 def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
@@ -825,7 +825,7 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "coverage-analysis"
+    assert route == "plan"
 
 
 def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
@@ -868,7 +868,7 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
     )
 
     assert result["workflow_last_step"] == "run"
-    assert result["workflow_recommended_next"] == "coverage-analysis"
+    assert result["workflow_recommended_next"] == "plan"
 
 
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):

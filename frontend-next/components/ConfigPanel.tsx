@@ -44,7 +44,7 @@ export function ConfigPanel() {
   const [runBudget, setRunBudget] = useState('900');
   const [totalBudgetUnlimited, setTotalBudgetUnlimited] = useState(false);
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
-  const [maxTokens, setMaxTokens] = useState('1000');
+  const [maxTokens, setMaxTokens] = useState('0');
   const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
 
   const [statusText, setStatusText] = useState('');
@@ -107,7 +107,7 @@ export function ConfigPanel() {
     const total = parseBudgetSeconds(totalBudget, 900, totalBudgetUnlimited);
     const runFallback = total > 0 ? total : 900;
     const run = parseBudgetSeconds(runBudget, runFallback, runBudgetUnlimited);
-    const tokens = toPositiveInt(maxTokens, 1000);
+    const tokens = toNonNegativeInt(maxTokens, 0);
     try {
       setStatusType('info');
       setStatusText('正在提交任务...');
