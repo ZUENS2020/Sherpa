@@ -221,6 +221,7 @@ def test_k8s_manifest_build_stage_runs_worker_as_root_for_package_install():
     assert container_sc["runAsGroup"] == 0
     assert container_sc["allowPrivilegeEscalation"] is False
     assert container_sc["capabilities"]["drop"] == ["ALL"]
+    assert sorted(container_sc["capabilities"]["add"]) == ["SETGID", "SETUID"]
 
 
 def test_k8s_manifest_build_stage_root_can_be_disabled(monkeypatch: pytest.MonkeyPatch):
