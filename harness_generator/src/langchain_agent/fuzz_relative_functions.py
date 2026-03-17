@@ -43,7 +43,7 @@ def _find_ai_key_path() -> Path:
 
 def fuzz_logic(
     repo_url: str,
-    max_len: int = 1024,
+    max_len: int = 0,
     time_budget: int | None = 900,
     run_time_budget: int | None = None,
     email: str | None = None,
@@ -57,9 +57,13 @@ def fuzz_logic(
     last_fuzzer: str | None = None,
     last_crash_artifact: str | None = None,
     re_workspace_root: str | None = None,
-    coverage_loop_max_rounds: int = 3,
-    max_fix_rounds: int = 3,
-    same_error_max_retries: int = 1,
+    coverage_loop_max_rounds: int = 0,
+    max_fix_rounds: int = 0,
+    same_error_max_retries: int = 0,
+    restart_to_plan_reason: str | None = None,
+    restart_to_plan_stage: str | None = None,
+    restart_to_plan_error_text: str | None = None,
+    restart_to_plan_report_path: str | None = None,
 ) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
@@ -67,12 +71,11 @@ def fuzz_logic(
         raise ValueError("time_budget must be >= 0")
     if resolved_run_time_budget < 0:
         raise ValueError("run_time_budget must be >= 0")
-    resolved_max_fix_rounds = int(max_fix_rounds if max_fix_rounds is not None else 3)
-    resolved_max_fix_rounds = max(0, min(resolved_max_fix_rounds, 20))
-    resolved_same_error_max_retries = int(
-        same_error_max_retries if same_error_max_retries is not None else 1
-    )
-    resolved_same_error_max_retries = max(0, min(resolved_same_error_max_retries, 10))
+    # Round/retry limits are intentionally disabled; preserve parameters only
+    # for backward compatibility of call sites.
+    _ = coverage_loop_max_rounds
+    _ = max_fix_rounds
+    _ = same_error_max_retries
 
     # Set model in environment so OpenCode can pick it up
     if model and model.strip() and not os.environ.get("OPENCODE_MODEL"):
@@ -87,7 +90,7 @@ def fuzz_logic(
                 email=email,
                 time_budget=resolved_time_budget,
                 run_time_budget=resolved_run_time_budget,
-                max_len=int(max_len or 1024),
+                max_len=int(max_len),
                 docker_image=docker_image,
                 ai_key_path=(ai_key_path or _find_ai_key_path()),
                 model=model,
@@ -101,9 +104,13 @@ def fuzz_logic(
                 last_fuzzer=(str(last_fuzzer or "").strip() or None),
                 last_crash_artifact=(str(last_crash_artifact or "").strip() or None),
                 re_workspace_root=(str(re_workspace_root or "").strip() or None),
-                coverage_loop_max_rounds=max(1, min(int(coverage_loop_max_rounds or 3), 5)),
-                max_fix_rounds=resolved_max_fix_rounds,
-                same_error_max_retries=resolved_same_error_max_retries,
+                coverage_loop_max_rounds=0,
+                max_fix_rounds=0,
+                same_error_max_retries=0,
+                restart_to_plan_reason=(str(restart_to_plan_reason or "").strip()),
+                restart_to_plan_stage=(str(restart_to_plan_stage or "").strip()),
+                restart_to_plan_error_text=(str(restart_to_plan_error_text or "").strip()),
+                restart_to_plan_report_path=(str(restart_to_plan_report_path or "").strip()),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")

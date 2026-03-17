@@ -53,9 +53,18 @@ Additional instruction from coordinator:
 <!-- TEMPLATE: synthesize_with_hint -->
 You are coordinating a fuzz harness generation workflow.
 Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
+MANDATORY OUTPUT CHECKLIST (must be true before writing `./done`):
+- At least one harness source file under `fuzz/` (`*.c`/`*.cc`/`*.cpp`/`*.cxx`/`*.java`)
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+
+If blocked, still create minimal valid versions of the missing required files now; do not exit with partial scaffold.
 Execution strategy requirement:
 - Do not optimize for early artifact output.
 - First read enough repository/build context to write `fuzz/repo_understanding.json` and a concrete `fuzz/build_strategy.json`.
+- Also write a concise `fuzz/build_runtime_facts.json` that captures the actual fuzzer entry/link strategy for this environment.
 - Only after those understanding artifacts are grounded in repository facts should you create or update the harness and `fuzz/build.py`.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
@@ -69,13 +78,16 @@ Avoid forcing C++ standard library selection flags (for example: do not add `-st
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
 Hard requirements:
 - Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
+- Add an early input-size guard in the harness entrypoint before heavy parsing/work (for C/C++ style harnesses, prefer `if (size > 8192) return 0;` unless a smaller cap is clearly required).
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
 - You may use a repository-provided fuzz target only when its exact real target name is documented in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`. Never guess names such as `<name>-fuzzer` or `<name>_fuzzer`.
 - `fuzz/repo_understanding.json` must stay limited to: `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`, `rejected_targets`, `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`, plus optional `repo_fuzz_targets`, `selected_repo_target`.
 - `fuzz/build_strategy.json` must stay limited to: `build_system`, `build_mode`, `library_targets`, `library_artifacts`, `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`, `repo_fuzz_targets`, `selected_repo_target`. `build_mode` must be `repo_target`, `library_link`, or `custom_script`.
+- `fuzz/build_runtime_facts.json` must stay limited to: `compiler`, `fuzzer_entry_strategy`, `fuzzer_link_flags`, `forbidden_link_flags`, `sanitizers`, `reason`, `evidence`.
 - `evidence` must not be empty. `chosen_target_reason` must explain why the chosen target is the best runtime entrypoint. `rejected_targets` must list the near-miss candidates and why they were rejected.
+- Use `fuzz/build_runtime_facts.json` to record environment-specific facts such as “use `-fsanitize=fuzzer`” and “do not use `-lfuzzer`” when applicable.
 - Seed design must be target-specific: in `fuzz/README.md`, enumerate at least 3 concrete seed families tied to target semantics, and each family must map to an actual corpus example or planned corpus file pattern.
 - `fuzz/README.md` MUST contain these exact fields with values that match the actual harness:
   - `Selected target: ...`
@@ -95,6 +107,13 @@ There is already a partial scaffold under `fuzz/`. Do NOT restart from scratch.
 Task: complete the missing scaffold items only:
 {{missing_items}}
 
+MANDATORY OUTPUT CHECKLIST (must be true before writing `./done`):
+- At least one harness source file under `fuzz/`
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+
 Rules:
 - Preserve existing harness/build files unless a minimal fix is required.
 - If a harness source file already exists, keep it and add/fix the missing build glue around it.
@@ -109,8 +128,11 @@ Rules:
 - Ensure `fuzz/repo_understanding.json` exists and stays consistent with the actual external build path before considering the scaffold complete.
 - Ensure `fuzz/repo_understanding.json` explains both the chosen path and the rejected near-miss paths; avoid high-level repository summaries with no execution consequences.
 - Keep `fuzz/build_strategy.json` aligned with an external scaffold strategy and record an explicit `fuzzer_entry_strategy`.
+- Keep `fuzz/build_runtime_facts.json` aligned with the actual compiler/runtime assumptions used by `fuzz/build.py`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
+- If `fuzz/README.md` is missing, create it with required fields (`Selected target`, `Final target`, `Technical reason`, `Relation`, `Harness file`).
+- If `fuzz/build_strategy.json` is missing, create a minimal valid JSON strategy aligned with current harness/build path.
 
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
@@ -137,12 +159,14 @@ Constraints:
 - If you change `fuzz/system_packages.txt`, still finish all other necessary `fuzz/` edits in the same attempt. Do not stop after only declaring packages if `fuzz/build.py` or harness glue also needs changes.
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
+- Ensure the harness entrypoint contains an explicit early input-size guard (default 8192 bytes unless repository facts require stricter).
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
 - You may repair the build by switching to a repository-provided fuzz target only when the exact target is documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`; never guess target names.
 - If `fuzz/repo_understanding.json` is missing or weak, repair it first.
 - If the selected target and observed target disagree, repair that mismatch before incremental build tweaks.
 - Keep `fuzz/repo_understanding.json` concrete: chosen target, rejected alternatives, required libraries/sources, exact fuzzer entry strategy.
 - Keep `fuzz/build_strategy.json` aligned with `library_link` or `custom_script`, and ensure it records an explicit `fuzzer_entry_strategy`.
+- If `fuzz/build_runtime_facts.json` is missing or weak, repair it so it states the real fuzzer entry strategy, required link flags, forbidden link flags, and sanitizer set for this environment.
 - If the current corpus/seed design is too generic, tighten `fuzz/README.md` so it names concrete seed families tied to target semantics.
 - Full build output from the previous failed attempts is available in `{{build_log_file}}`.
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).

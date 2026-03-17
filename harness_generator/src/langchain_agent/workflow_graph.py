@@ -1003,17 +1003,17 @@ def _fix_build_max_noop_streak() -> int:
 
 
 def _fix_build_max_attempts() -> int:
-    raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_ATTEMPTS") or "8").strip()
+    raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_ATTEMPTS") or "0").strip()
     try:
-        return max(1, min(int(raw), 50))
+        return max(0, min(int(raw), 50_000))
     except Exception:
-        return 8
+        return 0
 
 
 def _effective_max_fix_rounds(state: FuzzWorkflowRuntimeState) -> int:
     configured = int(state.get("max_fix_rounds") or 0)
     if configured > 0:
-        return max(1, min(configured, 20))
+        return max(1, configured)
     return _fix_build_max_attempts()
 
 
@@ -1021,8 +1021,8 @@ def _effective_same_error_retry_limit(state: FuzzWorkflowRuntimeState) -> int:
     if "same_error_max_retries" in state:
         configured = int(state.get("same_error_max_retries") or 0)
     else:
-        configured = 1
-    return max(0, min(configured, 10))
+        configured = 0
+    return max(0, configured)
 
 
 def _fix_build_feedback_history_limit() -> int:
@@ -1080,6 +1080,10 @@ def _build_scaffold_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_strategy.json"
 
 
+def _build_runtime_facts_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "build_runtime_facts.json"
+
+
 def _repo_understanding_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "repo_understanding.json"
 
@@ -1111,6 +1115,17 @@ def _repo_understanding_is_complete(doc: dict[str, Any]) -> tuple[bool, str]:
 
 def _load_build_strategy_doc(repo_root: Path) -> dict[str, Any]:
     path = _build_scaffold_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _load_build_runtime_facts_doc(repo_root: Path) -> dict[str, Any]:
+    path = _build_runtime_facts_path(repo_root)
     if not path.is_file():
         return {}
     try:
@@ -1204,6 +1219,11 @@ def _write_build_strategy_doc(repo_root: Path) -> tuple[str, dict[str, Any]]:
 
 
 def _build_scaffold_precheck(repo_root: Path) -> dict[str, Any]:
+    # Precheck is intentionally disabled: build/fix loop should decide based on
+    # real build outcomes instead of fail-fast gating.
+    return {"ok": True, "code": "", "reason": "disabled"}
+
+    # Legacy logic retained below for reference (unreachable).
     fuzz_dir = repo_root / "fuzz"
     build_py = fuzz_dir / "build.py"
     build_sh = fuzz_dir / "build.sh"
@@ -1297,6 +1317,14 @@ def _load_opencode_prompt_templates() -> dict[str, str]:
 
 def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
+
+
+def _default_run_rss_limit_mb() -> int:
+    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "131072").strip()
+    try:
+        return max(256, int(raw))
+    except Exception:
+        return 131072
 
 
 def _antlr_assist_enabled() -> bool:
@@ -1782,9 +1810,13 @@ class FuzzWorkflowInput:
     last_fuzzer: Optional[str] = None
     last_crash_artifact: Optional[str] = None
     re_workspace_root: Optional[str] = None
-    coverage_loop_max_rounds: int = 3
-    max_fix_rounds: int = 3
-    same_error_max_retries: int = 1
+    coverage_loop_max_rounds: int = 0
+    max_fix_rounds: int = 0
+    same_error_max_retries: int = 0
+    restart_to_plan_reason: str = ""
+    restart_to_plan_stage: str = ""
+    restart_to_plan_error_text: str = ""
+    restart_to_plan_report_path: str = ""
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -1808,7 +1840,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         raise ValueError("time_budget must be >= 0")
     if run_time_budget < 0:
         raise ValueError("run_time_budget must be >= 0")
-    max_len = int(state.get("max_len") or 1024)
+    max_len_raw = state.get("max_len")
+    max_len = int(max_len_raw) if max_len_raw is not None else 0
     docker_image = (state.get("docker_image") or "").strip() or None
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
 
@@ -1825,6 +1858,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         ai_key_path=ai_key_path,
         max_len=max_len,
         time_budget_per_target=run_time_budget,
+        rss_limit_mb=_default_run_rss_limit_mb(),
         docker_image=docker_image,
         codex_cli=codex_cli,
     )
@@ -1843,7 +1877,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "plan_targets_schema_valid_after_retry": bool(state.get("plan_targets_schema_valid_after_retry") or False),
             "plan_used_fallback_targets": bool(state.get("plan_used_fallback_targets") or False),
             "step_count": int(state.get("step_count") or 0),
-            "max_steps": int(state.get("max_steps") or 10),
+            "max_steps": int(state.get("max_steps")) if state.get("max_steps") is not None else 0,
             "last_step": "init",
             "last_error": "",
             "build_rc": 0,
@@ -1854,13 +1888,23 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "build_error_signature_before": "",
             "build_error_signature_after": "",
             "same_build_error_repeats": 0,
-            "same_error_max_retries": max(0, min(int(state.get("same_error_max_retries") or 1), 10)),
+            "same_error_max_retries": max(
+                0,
+                int(
+                    state.get("same_error_max_retries")
+                    if state.get("same_error_max_retries") is not None
+                    else 0
+                ),
+            ),
             "build_error_kind": "",
             "build_error_code": "",
             "build_error_signature_short": "",
             "build_attempts": int(state.get("build_attempts") or 0),
             "fix_build_attempts": int(state.get("fix_build_attempts") or 0),
-            "max_fix_rounds": max(0, min(int(state.get("max_fix_rounds") or 3), 20)),
+            "max_fix_rounds": max(
+                0,
+                int(state.get("max_fix_rounds") if state.get("max_fix_rounds") is not None else 0),
+            ),
             "fix_build_noop_streak": int(state.get("fix_build_noop_streak") or 0),
             "fix_build_attempt_history": list(state.get("fix_build_attempt_history") or []),
             "fix_build_rule_hits": list(state.get("fix_build_rule_hits") or []),
@@ -1905,8 +1949,15 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "restart_to_plan_report_path": str(state.get("restart_to_plan_report_path") or ""),
             "restart_to_plan_count": int(state.get("restart_to_plan_count") or 0),
             "plan_fix_on_crash": True,
-            "plan_max_fix_rounds": 1,
-            "coverage_loop_max_rounds": max(1, min(int(state.get("coverage_loop_max_rounds") or 3), 5)),
+            "plan_max_fix_rounds": 0,
+            "coverage_loop_max_rounds": max(
+                0,
+                int(
+                    state.get("coverage_loop_max_rounds")
+                    if state.get("coverage_loop_max_rounds") is not None
+                    else 0
+                ),
+            ),
             "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
             "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
             "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
@@ -1958,8 +2009,16 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                     coverage_loop = doc.get("coverage_loop")
                     if isinstance(coverage_loop, dict):
                         out["coverage_loop_max_rounds"] = max(
-                            1,
-                            min(int(coverage_loop.get("max_rounds") or out.get("coverage_loop_max_rounds") or 3), 5),
+                            0,
+                            int(
+                                coverage_loop.get("max_rounds")
+                                if coverage_loop.get("max_rounds") is not None
+                                else (
+                                    out.get("coverage_loop_max_rounds")
+                                    if out.get("coverage_loop_max_rounds") is not None
+                                    else 0
+                                )
+                            ),
                         )
                         out["coverage_loop_round"] = int(coverage_loop.get("round") or out.get("coverage_loop_round") or 0)
                         out["coverage_should_improve"] = bool(
@@ -2019,24 +2078,12 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
                     plan_policy = doc.get("plan_policy")
                     if isinstance(plan_policy, dict):
                         out["plan_fix_on_crash"] = bool(plan_policy.get("fix_on_crash", out["plan_fix_on_crash"]))
-                        out["plan_max_fix_rounds"] = int(plan_policy.get("max_fix_rounds") or out["plan_max_fix_rounds"])
+                    out["plan_max_fix_rounds"] = 0
                     build_fix_policy = doc.get("build_fix_policy")
                     if isinstance(build_fix_policy, dict):
-                        out["max_fix_rounds"] = max(
-                            0,
-                            min(int(build_fix_policy.get("max_fix_rounds") or out.get("max_fix_rounds") or 3), 20),
-                        )
-                        out["same_error_max_retries"] = max(
-                            0,
-                            min(
-                                int(
-                                    build_fix_policy.get("same_error_max_retries")
-                                    or out.get("same_error_max_retries")
-                                    or 1
-                                ),
-                                10,
-                            ),
-                        )
+                        _ = build_fix_policy
+                    out["max_fix_rounds"] = 0
+                    out["same_error_max_retries"] = 0
                     re_stage = doc.get("re_stage")
                     if isinstance(re_stage, dict):
                         if not str(out.get("re_workspace_root") or "").strip():
@@ -2204,7 +2251,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
                     return out
 
-        fix_on_crash, max_fix_rounds = _derive_plan_policy(gen.repo_root)
+        fix_on_crash, _ = _derive_plan_policy(gen.repo_root)
         plan_hint = _make_plan_hint(gen.repo_root)
         if antlr_context_summary:
             plan_hint = (
@@ -2279,9 +2326,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             **state,
             "last_step": "plan",
             "last_error": "",
+            "failed": False,
             "codex_hint": plan_hint,
             "plan_fix_on_crash": fix_on_crash,
-            "plan_max_fix_rounds": max_fix_rounds,
+            "plan_max_fix_rounds": 0,
             "plan_retry_reason": plan_retry_reason,
             "plan_targets_schema_valid_before_retry": plan_targets_schema_valid_before_retry,
             "plan_targets_schema_valid_after_retry": plan_targets_schema_valid_after_retry,
@@ -2311,11 +2359,11 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_replan_reason": coverage_replan_reason,
             "replan_effective": replan_effective,
             "replan_stop_reason": replan_stop_reason,
-            "restart_to_plan": restart_to_plan,
-            "restart_to_plan_reason": restart_reason,
-            "restart_to_plan_stage": restart_stage,
-            "restart_to_plan_error_text": restart_error_text,
-            "restart_to_plan_report_path": restart_report_path,
+            "restart_to_plan": False,
+            "restart_to_plan_reason": "",
+            "restart_to_plan_stage": "",
+            "restart_to_plan_error_text": "",
+            "restart_to_plan_report_path": "",
             "message": "planned",
         }
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -2385,8 +2433,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         has_readme = False
         has_repo_understanding = False
         has_build_strategy = False
+        scan_errors: list[str] = []
         try:
-            for p in fuzz_dir.rglob("*"):
+            candidates = list(fuzz_dir.rglob("*"))
+        except Exception as e:
+            candidates = []
+            scan_errors.append(f"rglob_failed:{e}")
+        for p in candidates:
+            try:
                 if not p.is_file():
                     continue
                 rel = p.relative_to(fuzz_dir)
@@ -2403,17 +2457,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     has_repo_understanding = True
                 if rel_posix == "build_strategy.json":
                     has_build_strategy = True
-        except Exception:
-            return {
-                "harnesses": [],
-                "has_harness": False,
-                "has_build_script": False,
-                "has_readme": False,
-                "has_repo_understanding": False,
-                "has_build_strategy": False,
-                "has_required": False,
-                "has_partial": False,
-            }
+            except Exception as e:
+                scan_errors.append(f"scan_item_failed:{p}:{e}")
         return {
             "harnesses": harnesses,
             "has_harness": bool(harnesses),
@@ -2423,6 +2468,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_build_strategy": has_build_strategy,
             "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
             "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
+            "scan_errors": scan_errors[:8],
+            "scan_error_count": len(scan_errors),
         }
 
     def _has_min_synthesis_outputs() -> bool:
@@ -2455,6 +2502,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 return True
             time.sleep(1)
         return _has_min_synthesis_outputs()
+
+    def _required_synthesis_grace_wait(max_sec: int) -> bool:
+        if max_sec <= 0:
+            return _has_required_synthesis_outputs()
+        deadline = time.time() + max_sec
+        while time.time() < deadline:
+            if _has_required_synthesis_outputs():
+                return True
+            time.sleep(1)
+        return _has_required_synthesis_outputs()
 
     def _completion_context() -> str:
         plan = gen.repo_root / "fuzz" / "PLAN.md"
@@ -2501,6 +2558,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             build_strategy = gen.repo_root / "fuzz" / "build_strategy.json"
             if build_strategy.is_file():
                 parts.append("=== existing fuzz/build_strategy.json ===\n" + build_strategy.read_text(encoding="utf-8", errors="replace"))
+            build_runtime_facts = gen.repo_root / "fuzz" / "build_runtime_facts.json"
+            if build_runtime_facts.is_file():
+                parts.append("=== existing fuzz/build_runtime_facts.json ===\n" + build_runtime_facts.read_text(encoding="utf-8", errors="replace"))
             build_sh = gen.repo_root / "fuzz" / "build.sh"
             if build_sh.is_file():
                 parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
@@ -2514,6 +2574,37 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     def _run_synthesize_completion(timeout: int) -> None:
         missing_items = "\n".join(f"- {item}" for item in _missing_synthesis_items()) or "- no missing items detected"
         prompt = _render_opencode_prompt("synthesize_complete_scaffold", missing_items=missing_items)
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=_completion_context() or None,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
+        )
+
+    def _run_required_scaffold_repair(timeout: int) -> None:
+        missing_items = _missing_synthesis_items()
+        if not missing_items:
+            return
+        missing_txt = "\n".join(f"- {item}" for item in missing_items)
+        prompt = textwrap.dedent(
+            f"""
+            Complete required scaffold files only. Do not rewrite unrelated files.
+
+            Missing required items:
+            {missing_txt}
+
+            Rules:
+            - Keep existing harness/build files unchanged unless needed to satisfy required items.
+            - If README is missing, create `fuzz/README.md` with required fields:
+              Selected target, Final target, Technical reason, Relation, Harness file.
+            - If strategy is missing, create a valid `fuzz/build_strategy.json` matching the current harness/build path.
+            - Do NOT run commands.
+            - Write `fuzz/out/` into `./done` before exit.
+            """
+        ).strip()
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
@@ -2662,8 +2753,40 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
             raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
         if not _has_required_synthesis_outputs():
-            missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
-            raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
+            try:
+                required_grace_sec = max(0, min(int((os.environ.get("SHERPA_SYNTHESIZE_REQUIRED_GRACE_SEC") or "8").strip()), 60))
+            except Exception:
+                required_grace_sec = 8
+            if required_grace_sec > 0 and _required_synthesis_grace_wait(required_grace_sec):
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    f"synthesize: required scaffold became complete during grace wait ({required_grace_sec}s)",
+                )
+            else:
+                required_status_before = _synthesis_output_status()
+                if required_status_before.get("scan_error_count"):
+                    _wf_log(
+                        cast(dict[str, Any], state),
+                        "synthesize: required scaffold check saw scan errors: "
+                        + ", ".join(str(x) for x in (required_status_before.get("scan_errors") or [])[:3]),
+                    )
+            remaining_for_required = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_for_required > 0 and not _has_required_synthesis_outputs():
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: required scaffold still missing; running forced required-scaffold repair",
+                )
+                _run_required_scaffold_repair(remaining_for_required)
+            if not _has_required_synthesis_outputs():
+                missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
+                diag = _synthesis_output_status()
+                diag_bits: list[str] = []
+                if int(diag.get("scan_error_count") or 0) > 0:
+                    diag_bits.append(f"scan_errors={int(diag.get('scan_error_count') or 0)}")
+                harness_count = len(list(diag.get("harnesses") or []))
+                diag_bits.append(f"harnesses={harness_count}")
+                diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
+                raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
@@ -3011,13 +3134,18 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             next_state["build_error_kind"] = build_error_kind
             next_state["build_error_code"] = build_error_code
             advice = _build_failure_recovery_advice(build_error_kind, build_error_code)
-            if repeats >= max_same_repeats:
-                next_state["failed"] = True
-                next_state["last_error"] = (
+            if max_same_repeats > 0 and repeats >= max_same_repeats:
+                repeated_err = (
                     "build failed with the same error signature repeatedly "
                     f"(repeats={repeats + 1}, threshold={max_same_repeats + 1})"
                 )
-                next_state["message"] = "build failed repeatedly (same error)"
+                next_state["failed"] = False
+                next_state["last_error"] = repeated_err
+                next_state["message"] = "build failed repeatedly (same error), restarting from plan"
+                next_state["restart_to_plan"] = True
+                next_state["restart_to_plan_reason"] = "build_same_error_repeated"
+                next_state["restart_to_plan_stage"] = "build"
+                next_state["restart_to_plan_error_text"] = repeated_err
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-error "
@@ -3031,6 +3159,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if advice:
                 next_state["last_error"] += f"\nrecovery: {advice}"
             next_state["message"] = "build failed"
+            next_state["restart_to_plan"] = True
+            next_state["restart_to_plan_reason"] = "build_failed"
+            next_state["restart_to_plan_stage"] = "build"
+            next_state["restart_to_plan_error_text"] = str(next_state["last_error"])
             _wf_log(
                 cast(dict[str, Any], next_state),
                 "<- build fail "
@@ -3053,13 +3185,18 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             next_state["same_build_error_repeats"] = repeats
             next_state["build_error_kind"] = build_error_kind
             next_state["build_error_code"] = build_error_code
-            if repeats >= max_same_repeats:
-                next_state["failed"] = True
-                next_state["last_error"] = (
+            if max_same_repeats > 0 and repeats >= max_same_repeats:
+                repeated_err = (
                     "build produced no fuzzers with the same diagnostics repeatedly "
                     f"(repeats={repeats + 1}, threshold={max_same_repeats + 1})"
                 )
-                next_state["message"] = "build failed repeatedly (no fuzzers)"
+                next_state["failed"] = False
+                next_state["last_error"] = repeated_err
+                next_state["message"] = "build failed repeatedly (no fuzzers), restarting from plan"
+                next_state["restart_to_plan"] = True
+                next_state["restart_to_plan_reason"] = "build_no_fuzzer_repeated"
+                next_state["restart_to_plan_stage"] = "build"
+                next_state["restart_to_plan_error_text"] = repeated_err
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-no-fuzzer "
@@ -3071,6 +3208,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 return next_state
             next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
             next_state["message"] = "build produced no fuzzers"
+            next_state["restart_to_plan"] = True
+            next_state["restart_to_plan_reason"] = "build_no_fuzzers"
+            next_state["restart_to_plan_stage"] = "build"
+            next_state["restart_to_plan_error_text"] = str(next_state["last_error"])
             _wf_log(
                 cast(dict[str, Any], next_state),
                 "<- build fail no-fuzzers "
@@ -3107,6 +3248,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "message": "build failed",
             "build_error_kind": "unknown",
             "build_error_code": "build_node_exception",
+            "restart_to_plan": True,
+            "restart_to_plan_reason": "build_node_exception",
+            "restart_to_plan_stage": "build",
+            "restart_to_plan_error_text": str(e),
         }
         if "build_full_log_path" in locals():
             out["build_full_log_path"] = str(build_full_log_path)
@@ -3144,14 +3289,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     if not error_sig:
         error_sig = _sha256_text("\n".join([last_error, stdout_tail, stderr_tail]))[:12]
 
-    if fix_attempts > max_fix_attempts:
+    if max_fix_attempts > 0 and fix_attempts > max_fix_attempts:
         out = {
             **state,
             "last_step": "fix_build",
-            "failed": True,
+            "failed": False,
             "fix_build_terminal_reason": "fix_build_max_attempts_exceeded",
-            "last_error": f"fix_build stopped: max attempts exceeded ({max_fix_attempts})",
-            "message": "fix_build stopped (max attempts exceeded)",
+            "last_error": f"fix_build max attempts exceeded ({max_fix_attempts}); restart from plan",
+            "message": "fix_build max attempts exceeded; restarting from plan",
+            "restart_to_plan": True,
+            "restart_to_plan_reason": "fix_build_max_attempts_exceeded",
+            "restart_to_plan_stage": "fix_build",
+            "restart_to_plan_error_text": str(last_error or "").strip(),
             "fix_action_type": "none",
             "fix_effect": "stalled",
         }
@@ -3178,11 +3327,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return updated_history, updated_rule_hits
 
     def _fix_build_quick_check_timeout_sec() -> int:
-        raw = (os.environ.get("SHERPA_FIX_BUILD_QUICK_CHECK_TIMEOUT_SEC") or "45").strip()
+        raw = (os.environ.get("SHERPA_FIX_BUILD_QUICK_CHECK_TIMEOUT_SEC") or "0").strip()
         try:
             return max(0, min(int(raw), 300))
         except Exception:
-            return 45
+            return 0
 
     def _run_fix_build_quick_probe() -> tuple[bool, dict[str, Any]]:
         def _tail_local(s: str, n: int = 120) -> str:
@@ -3328,10 +3477,14 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             out["message"] = "fix_build changed files but quick-check failed"
             out["fix_effect"] = "stalled" if same_signature else "advanced"
             if same_signature and next_noop_streak >= max_noop_streak:
-                out["failed"] = True
+                out["failed"] = False
                 out["fix_build_terminal_reason"] = "fix_build_noop_streak_exceeded"
-                out["last_error"] = f"fix_build stopped: no-op streak exceeded ({max_noop_streak})"
-                out["message"] = "fix_build stopped (no-op streak exceeded)"
+                out["last_error"] = f"fix_build no-op streak exceeded ({max_noop_streak}); restart from plan"
+                out["message"] = "fix_build no-op streak exceeded; restarting from plan"
+                out["restart_to_plan"] = True
+                out["restart_to_plan_reason"] = "fix_build_noop_streak_exceeded"
+                out["restart_to_plan_stage"] = "fix_build"
+                out["restart_to_plan_error_text"] = str(out.get("last_error") or "")
         else:
             _wf_log(cast(dict[str, Any], state), f"fix_build: quick-check skipped ({probe.get('reason')})")
         return out
@@ -3380,7 +3533,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return ""
 
     stop_on_infra_raw = (os.environ.get("SHERPA_WORKFLOW_STOP_ON_INFRA_BUILD_ERROR") or "").strip().lower()
-    stop_on_infra = stop_on_infra_raw not in {"0", "false", "no", "off"}
+    stop_on_infra = stop_on_infra_raw in {"1", "true", "yes", "on"}
     non_source_reason = ""
     if build_error_kind == "infra":
         non_source_reason = build_error_code or _detect_non_source_build_blocker(diag_text) or "infra_build_failure"
@@ -3395,14 +3548,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         out = {
             **state,
             "last_step": "fix_build",
-            "failed": True,
+            "failed": False,
             "build_error_kind": "infra",
             "build_error_code": non_source_reason,
             "fix_build_terminal_reason": "fix_build_infra_blocked",
             "fix_build_attempt_history": updated_history,
             "fix_build_rule_hits": updated_rule_hits,
-            "last_error": f"non-source build blocker detected: {non_source_reason}",
-            "message": "fix_build skipped (environment/infrastructure issue)",
+            "last_error": f"non-source build blocker detected: {non_source_reason}; restart from plan",
+            "message": "fix_build skipped (environment/infrastructure issue), restarting from plan",
+            "restart_to_plan": True,
+            "restart_to_plan_reason": f"infra:{non_source_reason}",
+            "restart_to_plan_stage": "fix_build",
+            "restart_to_plan_error_text": str(last_error or "").strip(),
             "fix_action_type": "none",
             "fix_effect": "stalled",
         }
@@ -4211,6 +4368,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
     recent_history = history[-history_limit:] if history else []
     build_strategy_doc = _load_build_strategy_doc(gen.repo_root)
+    build_runtime_facts_doc = _load_build_runtime_facts_doc(gen.repo_root)
     repo_understanding_doc = _load_repo_understanding_doc(gen.repo_root)
 
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
@@ -4291,6 +4449,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
     if build_strategy_doc:
         context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
+    if build_runtime_facts_doc:
+        context_parts.append("=== fuzz/build_runtime_facts.json ===\n" + json.dumps(build_runtime_facts_doc, ensure_ascii=False, indent=2))
     if repo_understanding_doc:
         context_parts.append("=== fuzz/repo_understanding.json ===\n" + json.dumps(repo_understanding_doc, ensure_ascii=False, indent=2))
     if last_error:
@@ -4316,7 +4476,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
         )
-        post_fix_hashes = _collect_fix_relevant_hashes()
         post_step_hashes = _collect_fix_step_hashes()
         changed_paths = sorted(
             p
@@ -4324,70 +4483,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             if baseline_step_hashes.get(p) != post_step_hashes.get(p)
         )
         changed_paths_count = len(changed_paths)
-        disallowed_paths = [p for p in changed_paths if not _is_fix_build_allowed_path(p)]
-        if disallowed_paths:
-            preview = ", ".join(disallowed_paths[:5])
-            suffix = ""
-            if len(disallowed_paths) > 5:
-                suffix = f" (+{len(disallowed_paths) - 5} more)"
-            err = (
-                "opencode fix_build touched disallowed path(s): "
-                f"{preview}{suffix}. Only `fuzz/` and `done` are allowed"
-            )
-            updated_history, updated_rule_hits = _append_attempt(
-                "disallowed_paths",
-                rejection_reason="disallowed_paths",
-                changed_paths_count=changed_paths_count,
-            )
-            out = {
-                **state,
-                "last_step": "fix_build",
-                "last_error": err,
-                "message": "opencode fix_build touched disallowed files",
-                "fix_build_noop_streak": 0,
-                "fix_build_attempt_history": updated_history,
-                "fix_build_rule_hits": updated_rule_hits,
-                "fix_build_last_diff_paths": changed_paths,
-                "fix_action_type": "opencode",
-                "fix_effect": "regressed",
-            }
-            _wf_log(
-                cast(dict[str, Any], out),
-                f"<- fix_build err=disallowed paths={len(disallowed_paths)} dt={_fmt_dt(time.perf_counter()-t0)}",
-            )
-            return out
-        if post_fix_hashes == baseline_fix_hashes:
-            updated_noop_streak = prev_noop_streak + 1
-            updated_history, updated_rule_hits = _append_attempt(
-                "noop",
-                rejection_reason="no_relevant_file_changes",
-                changed_paths_count=changed_paths_count,
-            )
-            terminal_reason = ""
-            failed = False
-            msg = "opencode fix_build no-op"
-            err = "opencode fix_build made no relevant file changes"
-            if updated_noop_streak >= max_noop_streak:
-                failed = True
-                terminal_reason = "fix_build_noop_streak_exceeded"
-                msg = "fix_build stopped (no-op streak exceeded)"
-                err = f"fix_build stopped: no-op streak exceeded ({max_noop_streak})"
-            out = {
-                **state,
-                "last_step": "fix_build",
-                "last_error": err,
-                "message": msg,
-                "failed": failed,
-                "fix_build_terminal_reason": terminal_reason,
-                "fix_build_noop_streak": updated_noop_streak,
-                "fix_build_attempt_history": updated_history,
-                "fix_build_rule_hits": updated_rule_hits,
-                "fix_build_last_diff_paths": changed_paths,
-                "fix_action_type": "opencode",
-                "fix_effect": "stalled",
-            }
-            _wf_log(cast(dict[str, Any], out), f"<- fix_build err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
-            return out
         updated_history, updated_rule_hits = _append_attempt(
             "llm_fixed",
             changed_paths_count=changed_paths_count,
@@ -5119,8 +5214,16 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> coverage-analysis")
     try:
-        max_rounds = max(1, min(int(state.get("coverage_loop_max_rounds") or 3), 5))
+        max_rounds = max(
+            0,
+            int(
+                state.get("coverage_loop_max_rounds")
+                if state.get("coverage_loop_max_rounds") is not None
+                else 0
+            ),
+        )
         current_round = max(0, int(state.get("coverage_loop_round") or 0))
+        unlimited_rounds = max_rounds == 0
         run_details = list(state.get("run_details") or [])
         history = list(state.get("coverage_history") or [])
         current_cov = _max_cov_from_run_details(run_details)
@@ -5162,8 +5265,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         )
         replan_reason = ""
         improve_mode = ""
-        can_in_place = current_round < max_rounds
-        can_replan = (current_round + 1) < max_rounds
+        can_in_place = unlimited_rounds or (current_round < max_rounds)
+        can_replan = unlimited_rounds or ((current_round + 1) < max_rounds)
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
@@ -5213,14 +5316,16 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         reason = "skip coverage loop"
         if should_improve:
             if plateau_detected:
+                round_budget_text = "unlimited" if unlimited_rounds else str(max_rounds)
                 reason = (
-                    f"coverage plateau detected; mode={improve_mode}; round={next_round}/{max_rounds}, "
+                    f"coverage plateau detected; mode={improve_mode}; round={next_round}/{round_budget_text}, "
                     f"max_cov={current_cov}, prev_cov={prev_cov}, max_ft={current_ft}, prev_ft={prev_ft}, "
                     f"plateau_streak={plateau_streak}, idle_no_growth={plateau_idle_seconds}s"
                 )
             else:
+                round_budget_text = "unlimited" if unlimited_rounds else str(max_rounds)
                 reason = (
-                    f"mode=in_place; round={next_round}/{max_rounds}, max_cov={current_cov}, prev_cov={prev_cov}, "
+                    f"mode=in_place; round={next_round}/{round_budget_text}, max_cov={current_cov}, prev_cov={prev_cov}, "
                     f"max_ft={current_ft}, prev_ft={prev_ft}"
                 )
             if seed_quality_issue:
@@ -5229,12 +5334,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             if requested_replan:
                 reason = (
                     f"coverage plateau detected but replan budget exhausted; "
-                    f"round={current_round}/{max_rounds}, max_cov={current_cov}, max_ft={current_ft}, "
+                    f"round={current_round}/{max_rounds if not unlimited_rounds else 'unlimited'}, max_cov={current_cov}, max_ft={current_ft}, "
                     f"plateau_streak={plateau_streak}"
                 )
             else:
                 reason = (
-                    f"coverage loop budget exhausted; round={current_round}/{max_rounds}, "
+                    f"coverage loop budget exhausted; round={current_round}/{max_rounds if not unlimited_rounds else 'unlimited'}, "
                     f"max_cov={current_cov}, max_ft={current_ft}"
                 )
         history.append(
@@ -6044,31 +6149,21 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
 
 
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
-        return "stop"
+    if bool(state.get("restart_to_plan")):
+        return "plan"
     if not (state.get("last_error") or "").strip():
         return "run"
     if (state.get("build_error_kind") or "").strip().lower() == "infra":
-        return "stop"
+        return "plan"
     return "fix_build"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
-        return "stop"
+    if bool(state.get("restart_to_plan")):
+        return "plan"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
-    if run_error_kind in {
-        "run_no_progress",
-        "nonzero_exit_without_crash",
-        "run_exception",
-    }:
-        return "fix_build"
-    if run_error_kind in {"run_idle_timeout", "run_timeout", "run_finalize_timeout"}:
-        return "stop"
-    if run_error_kind in {"run_resource_exhaustion"}:
-        return "coverage-analysis"
     if run_error_kind:
-        return "stop"
+        return "plan"
     if bool(state.get("crash_found")):
         return "re-build"
     return "coverage-analysis"
@@ -6115,12 +6210,12 @@ def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_fix_build_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
-        return "stop"
+    if bool(state.get("restart_to_plan")):
+        return "plan"
     if (state.get("fix_build_terminal_reason") or "").strip():
-        return "stop"
+        return "plan"
     if (state.get("last_error") or "").strip():
-        return "stop"
+        return "plan"
     return "build"
 
 
@@ -6166,9 +6261,9 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
         return "stop"
     fix_on_crash = bool(state.get("plan_fix_on_crash", True))
-    max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 1))
+    max_fix_rounds = max(0, int(state.get("plan_max_fix_rounds") or 0))
     attempts = int(state.get("crash_fix_attempts") or 0)
-    if fix_on_crash and attempts < max_fix_rounds:
+    if fix_on_crash and (max_fix_rounds <= 0 or attempts < max_fix_rounds):
         return "fix_crash"
     return "stop"
 
@@ -6256,32 +6351,30 @@ def build_fuzz_workflow() -> StateGraph:
     graph.set_entry_point("init")
 
     def _route_after_plan(state: FuzzWorkflowRuntimeState) -> str:
-        if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+        if (state.get("last_error") or "").strip():
             return "stop"
         if _should_stage_stop(state, "plan"):
             return "stop"
         return "synthesize"
 
     def _route_after_synthesize(state: FuzzWorkflowRuntimeState) -> str:
-        if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+        if (state.get("last_error") or "").strip():
             return "stop"
         if _should_stage_stop(state, "synthesize"):
             return "stop"
         return "build"
 
     def _route_after_build(state: FuzzWorkflowRuntimeState) -> str:
-        if not bool(state.get("failed")) and not (state.get("last_error") or "").strip():
+        if not (state.get("last_error") or "").strip():
             if _should_stage_stop(state, "build"):
                 return "stop"
         return _route_after_build_state(state)
 
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
-        if bool(state.get("failed")):
-            return "stop"
-        if (state.get("fix_build_terminal_reason") or "").strip():
-            return "stop"
-        if (state.get("last_error") or "").strip():
-            return "stop"
+        if bool(state.get("restart_to_plan")):
+            return "plan"
+        if (state.get("fix_build_terminal_reason") or "").strip() or (state.get("last_error") or "").strip():
+            return "plan"
         if _should_stage_stop(state, "fix_build"):
             return "stop"
         return "build"
@@ -6335,8 +6428,16 @@ def build_fuzz_workflow() -> StateGraph:
     )
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
-    graph.add_conditional_edges("build", _route_after_build, {"run": "run", "fix_build": "fix_build", "stop": END})
-    graph.add_conditional_edges("fix_build", _route_after_fix_build, {"build": "build", "stop": END})
+    graph.add_conditional_edges(
+        "build",
+        _route_after_build,
+        {"run": "run", "fix_build": "fix_build", "plan": "plan", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "fix_build",
+        _route_after_fix_build,
+        {"build": "build", "plan": "plan", "stop": END},
+    )
     graph.add_conditional_edges(
         "run",
         _route_after_run,
@@ -6345,6 +6446,7 @@ def build_fuzz_workflow() -> StateGraph:
             "re-build": "re-build",
             "fix_crash": "fix_crash",
             "fix_build": "fix_build",
+            "plan": "plan",
             "stop": END,
         },
     )
@@ -6404,10 +6506,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     )
     t0 = time.perf_counter()
     try:
-        max_steps_env = int(os.environ.get("SHERPA_WORKFLOW_MAX_STEPS", "20"))
+        max_steps_env = int(os.environ.get("SHERPA_WORKFLOW_MAX_STEPS", "0"))
     except Exception:
-        max_steps_env = 20
-    max_steps = max(3, min(max_steps_env, 100))
+        max_steps_env = 0
+    # max_steps <= 0 means unlimited workflow steps.
+    max_steps = 0 if max_steps_env <= 0 else max(3, max_steps_env)
     wf = build_fuzz_workflow().compile()
     raw: Any = wf.invoke(
         {
@@ -6422,9 +6525,27 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "resume_from_step": resume_step,
             "resume_repo_root": str(inp.resume_repo_root or ""),
             "stop_after_step": stop_after_step,
-            "coverage_loop_max_rounds": max(1, min(int(inp.coverage_loop_max_rounds or 3), 5)),
-            "max_fix_rounds": max(0, min(int(inp.max_fix_rounds or 3), 20)),
-            "same_error_max_retries": max(0, min(int(inp.same_error_max_retries or 1), 10)),
+            "coverage_loop_max_rounds": max(
+                0,
+                int(inp.coverage_loop_max_rounds if inp.coverage_loop_max_rounds is not None else 0),
+            ),
+            "max_fix_rounds": max(
+                0,
+                int(inp.max_fix_rounds if inp.max_fix_rounds is not None else 0),
+            ),
+            "same_error_max_retries": max(
+                0,
+                int(inp.same_error_max_retries if inp.same_error_max_retries is not None else 0),
+            ),
+            "restart_to_plan": bool(
+                str(inp.restart_to_plan_reason or "").strip()
+                or str(inp.restart_to_plan_error_text or "").strip()
+                or str(inp.restart_to_plan_stage or "").strip()
+            ),
+            "restart_to_plan_reason": str(inp.restart_to_plan_reason or ""),
+            "restart_to_plan_stage": str(inp.restart_to_plan_stage or ""),
+            "restart_to_plan_error_text": str(inp.restart_to_plan_error_text or ""),
+            "restart_to_plan_report_path": str(inp.restart_to_plan_report_path or ""),
             "last_fuzzer": str(inp.last_fuzzer or ""),
             "last_crash_artifact": str(inp.last_crash_artifact or ""),
             "re_workspace_root": str(inp.re_workspace_root or ""),
@@ -6478,7 +6599,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "run_terminal_reason": str(out.get("run_terminal_reason") or ""),
         "run_idle_seconds": int(out.get("run_idle_seconds") or 0),
         "run_children_exit_count": int(out.get("run_children_exit_count") or 0),
-        "coverage_loop_max_rounds": int(out.get("coverage_loop_max_rounds") or 3),
+        "coverage_loop_max_rounds": int(
+            out.get("coverage_loop_max_rounds")
+            if out.get("coverage_loop_max_rounds") is not None
+            else 0
+        ),
         "coverage_loop_round": int(out.get("coverage_loop_round") or 0),
         "coverage_should_improve": bool(out.get("coverage_should_improve") or False),
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
@@ -6487,8 +6612,12 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "plan_targets_schema_valid_before_retry": bool(out.get("plan_targets_schema_valid_before_retry") or False),
         "plan_targets_schema_valid_after_retry": bool(out.get("plan_targets_schema_valid_after_retry") or False),
         "plan_used_fallback_targets": bool(out.get("plan_used_fallback_targets") or False),
-        "max_fix_rounds": int(out.get("max_fix_rounds") or 3),
-        "same_error_max_retries": int(out.get("same_error_max_retries") or 1),
+        "max_fix_rounds": int(out.get("max_fix_rounds") if out.get("max_fix_rounds") is not None else 0),
+        "same_error_max_retries": int(
+            out.get("same_error_max_retries")
+            if out.get("same_error_max_retries") is not None
+            else 0
+        ),
         "fix_action_type": str(out.get("fix_action_type") or ""),
         "fix_effect": str(out.get("fix_effect") or ""),
         "build_error_signature_before": str(out.get("build_error_signature_before") or ""),

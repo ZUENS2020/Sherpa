@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -131,6 +133,15 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
             # Produce minimal synth outputs to satisfy guard.
             (fuzz_dir / "harness.cc").write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n", encoding="utf-8")
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["a"],"chosen_target_api":"a","chosen_target_reason":"runtime","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["demo"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             return None
 
     gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
@@ -186,6 +197,14 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
                 "Final target: yaml_parser_load_document\n"
                 "Technical reason: runtime parser entrypoint is deeper.\n"
                 "Relation: final target is a runtime replacement for the selected parser API.\n",
+                encoding="utf-8",
+            )
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["yaml_parser_load_document"],"chosen_target_api":"yaml_parser_load_document","chosen_target_reason":"runtime entrypoint","rejected_targets":[{"api":"yaml_parser_parse","reason":"not runtime-executable"}],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["yaml"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
                 encoding="utf-8",
             )
             return None
@@ -258,6 +277,14 @@ def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeyp
                 encoding="utf-8",
             )
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["fmt::println"],"chosen_target_api":"fmt::println","chosen_target_reason":"runtime entrypoint","rejected_targets":[{"api":"parse_replacement_field_then_tail","reason":"not runtime-executable"}],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["fmt"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             if len(prompts) == 1:
                 (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
             else:
@@ -311,6 +338,14 @@ def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_outp
                 return None
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
             (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["yaml_parser_parse"],"chosen_target_api":"yaml_parser_parse","chosen_target_reason":"test scaffold","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["yaml"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             return None
 
     gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
@@ -330,6 +365,49 @@ def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_outp
     assert len(calls) == 2
     assert "partial scaffold under `fuzz/`" in calls[1]
     assert (fuzz_dir / "build.py").is_file()
+
+
+def test_node_synthesize_waits_required_grace_for_late_scaffold_files(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"late","api":"late","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+
+    def _pass_synthesize_harness(*, timeout: int) -> None:
+        (fuzz_dir / "late_fuzz.cc").write_text(
+            "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n",
+            encoding="utf-8",
+        )
+        (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def _late_write() -> None:
+            time.sleep(0.2)
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["late"],"chosen_target_api":"late","chosen_target_reason":"runtime","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["late"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"late","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+
+        threading.Thread(target=_late_write, daemon=True).start()
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=_pass_synthesize_harness)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_REQUIRED_GRACE_SEC", "2")
+
+    out = workflow_graph._node_synthesize({"generator": gen, "codex_hint": ""})
+    assert out["last_error"] == ""
 
 
 def test_node_plan_clears_stale_done_before_schema_retry(tmp_path: Path, monkeypatch):

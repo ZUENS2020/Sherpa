@@ -1008,7 +1008,7 @@ class NonOssFuzzHarnessGenerator:
         time_budget_per_target: int = 900,  # seconds for an initial run
         codex_dangerous: bool = False,
         codex_sandbox_mode: Optional[str] = None,
-        rss_limit_mb: int = 8192,
+        rss_limit_mb: int = 131072,
         max_len: int = 1024,
         max_build_retries: int = MAX_BUILD_RETRIES,
         docker_image: Optional[str] = None,
@@ -2515,6 +2515,7 @@ class NonOssFuzzHarnessGenerator:
         lowered_name = fuzzer_name.lower()
         family_limits: dict[str, int] = {}
         required_set = set(required_families or [])
+        max_seed_file = self._seed_max_file_bytes()
 
         def _under_sample_dir(path: Path) -> bool:
             parts = [part.lower() for part in path.parts]
@@ -2524,7 +2525,7 @@ class NonOssFuzzHarnessGenerator:
             suffix = path.suffix.lower()
             if suffix not in {".yaml", ".yml", ".txt", ".in"}:
                 return False
-            if size > 32768:
+            if size > max_seed_file:
                 return False
             try:
                 snippet = path.read_text(encoding="utf-8", errors="replace")[:512].lower()
@@ -2601,7 +2602,7 @@ class NonOssFuzzHarnessGenerator:
                 if not under_sample:
                     rejected += 1
                     return False
-                if size > 8192:
+                if size > max_seed_file:
                     rejected += 1
                     return False
                 if suffix and suffix in source_blacklist:
@@ -2625,7 +2626,7 @@ class NonOssFuzzHarnessGenerator:
                 except Exception:
                     rejected += 1
                     continue
-                if size <= 0 or size > 131072:
+                if size <= 0 or size > max_seed_file:
                     rejected += 1
                     continue
                 if not _allow_path(path, size):
@@ -2712,6 +2713,37 @@ class NonOssFuzzHarnessGenerator:
             gaps.append("missing truncated footer/directory and corrupted magic cases")
         return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
 
+    def _seed_exploration_path(self, fuzzer_name: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
+        return self.fuzz_dir / f"seed_exploration_{safe_name}.json"
+
+    def _seed_check_path(self, fuzzer_name: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
+        return self.fuzz_dir / f"seed_check_{safe_name}.json"
+
+    def _seed_max_file_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_SEED_MAX_FILE_BYTES") or "8192").strip()
+        try:
+            return max(512, min(int(raw), 262144))
+        except Exception:
+            return 8192
+
+    def _seed_radamsa_max_file_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_RADAMSA_MAX_FILE_BYTES") or "").strip()
+        if not raw:
+            return self._seed_max_file_bytes()
+        try:
+            return max(512, min(int(raw), 262144))
+        except Exception:
+            return self._seed_max_file_bytes()
+
+    def _seed_max_total_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_SEED_MAX_TOTAL_BYTES") or "524288").strip()
+        try:
+            return max(16384, min(int(raw), 8 * 1024 * 1024))
+        except Exception:
+            return 524288
+
     def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
         radamsa = which("radamsa")
         if not radamsa:
@@ -2722,7 +2754,8 @@ class NonOssFuzzHarnessGenerator:
             return 0
         created = 0
         total_bytes = sum((p.stat().st_size for p in corpus_dir.iterdir() if p.is_file()), 0)
-        max_total = 512 * 1024
+        max_total = self._seed_max_total_bytes()
+        max_file = self._seed_radamsa_max_file_bytes()
         for path in base_files:
             for variant in range(2):
                 if created >= 24 or total_bytes >= max_total:
@@ -2731,7 +2764,9 @@ class NonOssFuzzHarnessGenerator:
                 proc = subprocess.run([radamsa, str(path)], capture_output=True)
                 if proc.returncode != 0 or not proc.stdout:
                     continue
-                data = proc.stdout[: min(len(proc.stdout), 32768)]
+                data = proc.stdout[: min(len(proc.stdout), max_file)]
+                if not data:
+                    continue
                 if total_bytes + len(data) > max_total:
                     return created
                 dest.write_bytes(data)
@@ -2758,17 +2793,36 @@ class NonOssFuzzHarnessGenerator:
                 raw_counts["ai"] += 1
         filtered_counts = dict(raw_counts)
         noise_rejected = 0
+        oversized_rejected = 0
+        total_pruned_count = 0
+        total_pruned_bytes = 0
         family_caps: dict[str, int] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
         textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        max_file = self._seed_max_file_bytes()
+        max_radamsa_file = self._seed_radamsa_max_file_bytes()
+        max_total = self._seed_max_total_bytes()
         kept: list[Path] = []
         for path in files:
             reject = False
             try:
+                size = int(path.stat().st_size)
+            except Exception:
+                size = 0
+            try:
                 data = path.read_bytes()
             except Exception:
                 data = b""
+            if size <= 0:
+                reject = True
+                oversized_rejected += 1
+            if not reject and size > max_file:
+                reject = True
+                oversized_rejected += 1
+            if not reject and path.name.startswith("radamsa_") and size > max_radamsa_file:
+                reject = True
+                oversized_rejected += 1
             if textual_mode and not _looks_textual_seed(path):
                 reject = True
                 noise_rejected += 1
@@ -2810,10 +2864,55 @@ class NonOssFuzzHarnessGenerator:
             kept.append(path)
             for family in families:
                 family_caps[family] = family_caps.get(family, 0) + 1
+        if kept:
+            total_bytes = 0
+            sized: list[tuple[Path, int]] = []
+            for path in kept:
+                try:
+                    sz = int(path.stat().st_size)
+                except Exception:
+                    sz = 0
+                total_bytes += max(0, sz)
+                sized.append((path, max(0, sz)))
+            if total_bytes > max_total:
+                # Prune least-useful large seeds first: radamsa > ai > repo examples.
+                def _priority(item: tuple[Path, int]) -> tuple[int, int]:
+                    p, sz = item
+                    if p.name.startswith("radamsa_"):
+                        prio = 0
+                    elif p.name.startswith("repo_"):
+                        prio = 2
+                    else:
+                        prio = 1
+                    return (prio, -sz)
+
+                for path, sz in sorted(sized, key=_priority):
+                    if total_bytes <= max_total:
+                        break
+                    try:
+                        path.unlink()
+                    except Exception:
+                        continue
+                    total_bytes = max(0, total_bytes - sz)
+                    total_pruned_count += 1
+                    total_pruned_bytes += sz
+                    if path.name.startswith("repo_"):
+                        filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
+                    elif path.name.startswith("radamsa_"):
+                        filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                    else:
+                        filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
+                    filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
         return {
             "seed_counts_raw": raw_counts,
             "seed_counts_filtered": filtered_counts,
             "seed_noise_rejected_count": noise_rejected,
+            "seed_oversized_rejected_count": oversized_rejected,
+            "seed_total_pruned_count": total_pruned_count,
+            "seed_total_pruned_bytes": total_pruned_bytes,
+            "seed_max_file_bytes": max_file,
+            "seed_radamsa_max_file_bytes": max_radamsa_file,
+            "seed_max_total_bytes": max_total,
             "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
         }
 
@@ -2823,6 +2922,8 @@ class NonOssFuzzHarnessGenerator:
         readme_text = read_text_safely(self.fuzz_dir / "README.md")
         corpus_dir = self.fuzz_corpus_dir / fuzzer_name
         corpus_dir.mkdir(parents=True, exist_ok=True)
+        seed_exploration_path = self._seed_exploration_path(fuzzer_name)
+        seed_check_path = self._seed_check_path(fuzzer_name)
         target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
         observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
@@ -2849,11 +2950,13 @@ class NonOssFuzzHarnessGenerator:
         )
         sources = list(repo_meta.get("sources") or [])
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
+        target_corpus_files = max(8, len(required_families) * 2)
+        per_family_target = 2 if required_families else 1
 
         instructions = textwrap.dedent(
             f"""
-            Add or refine **warm-up seed files by family bucket** inside `{corpus_dir.relative_to(self.repo_root)}` for the
-            harness `{fuzzer_name}`. Reuse the existing corpus files as grounding and prioritize missing families.
+            First explore repository facts for the harness `{fuzzer_name}`, then add or refine **warm-up seed files by family bucket**
+            inside `{corpus_dir.relative_to(self.repo_root)}`. Reuse the existing corpus files as grounding and prioritize missing families.
             Use appropriate file extensions if known. If binary, you may write contents via hex bytes.
 
             {seed_guidance}
@@ -2871,18 +2974,37 @@ class NonOssFuzzHarnessGenerator:
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
             missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
 
+            Corpus size goal:
+            - Aim for at least {target_corpus_files} total seed files in `{corpus_dir.relative_to(self.repo_root)}` after your edits.
+            - Aim for at least {per_family_target} semantically different seed files for each required family where feasible.
+
             Coverage-oriented gap hints:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
             Rules:
+            - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
+            - Write a concise exploration summary to `{seed_exploration_path.relative_to(self.repo_root)}` before or alongside seed creation.
+            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
+            - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
+            - Keep `sample_inputs_found` concrete. List real repo examples, existing corpus files, or note that none were found.
+            - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
+            - Do not stop after creating only one tiny seed per family. Build a thicker warm-up corpus with multiple semantically different seeds per required family.
             - Prefer missing families over adding more variants to already-covered malformed cases.
             - Do not only generate malformed separator variants if structure families are missing.
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
-            - Only create seed files (no code changes). When finished, write the path to one seed file into `./done`.
+            - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
+            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
+            - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
+            - When finished, write the path to one seed file into `./done`.
             """
         ).strip()
 
@@ -2894,11 +3016,17 @@ class NonOssFuzzHarnessGenerator:
         observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
         antlr_text = read_text_safely(self.fuzz_dir / "antlr_plan_context.json")
+        plan_text = read_text_safely(self.fuzz_dir / "PLAN.md")
+        repo_understanding_text = read_text_safely(self.fuzz_dir / "repo_understanding.json")
+        build_strategy_text = read_text_safely(self.fuzz_dir / "build_strategy.json")
         additional_context_parts = [
             "=== fuzz/observed_target.json ===\n" + (observed_target_text or "(missing)"),
             "=== fuzz/selected_targets.json ===\n" + (selected_targets_text or "(missing)"),
             "=== fuzz/target_analysis.json ===\n" + (target_analysis_text or "(missing)"),
             "=== fuzz/antlr_plan_context.json ===\n" + (antlr_text or "(missing)"),
+            "=== fuzz/PLAN.md ===\n" + (plan_text or "(missing)"),
+            "=== fuzz/repo_understanding.json ===\n" + (repo_understanding_text or "(missing)"),
+            "=== fuzz/build_strategy.json ===\n" + (build_strategy_text or "(missing)"),
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
@@ -2950,10 +3078,22 @@ class NonOssFuzzHarnessGenerator:
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "seed_total_pruned_count": int(filtered_meta.get("seed_total_pruned_count") or 0),
+            "seed_total_pruned_bytes": int(filtered_meta.get("seed_total_pruned_bytes") or 0),
+            "seed_max_file_bytes": int(filtered_meta.get("seed_max_file_bytes") or self._seed_max_file_bytes()),
+            "seed_radamsa_max_file_bytes": int(filtered_meta.get("seed_radamsa_max_file_bytes") or self._seed_radamsa_max_file_bytes()),
+            "seed_max_total_bytes": int(filtered_meta.get("seed_max_total_bytes") or self._seed_max_total_bytes()),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
+            "seed_exploration_path": str(seed_exploration_path.relative_to(self.repo_root)) if seed_exploration_path.is_file() else "",
+            "seed_check_path": str(seed_check_path.relative_to(self.repo_root)) if seed_check_path.is_file() else "",
         }
+        if not seed_exploration_path.is_file():
+            print(f"[warn] seed exploration summary missing for {fuzzer_name}: {seed_exploration_path.relative_to(self.repo_root)}")
+        if not seed_check_path.is_file():
+            print(f"[warn] seed self-check summary missing for {fuzzer_name}: {seed_check_path.relative_to(self.repo_root)}")
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────
@@ -3043,6 +3183,7 @@ class NonOssFuzzHarnessGenerator:
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
             f"-max_len={self.max_len}",
+            f"-rss_limit_mb={self.rss_limit_mb}",
         ]
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")

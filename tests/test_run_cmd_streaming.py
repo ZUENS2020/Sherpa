@@ -119,6 +119,21 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "seed_profile is `parser-structure`" in captured["instructions"]
     assert "anchors and aliases" in captured["instructions"]
     assert "Current corpus summary:" in captured["instructions"]
+    assert "seed_exploration_yaml_parser_parse_fuzz.json" in captured["instructions"]
+    assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
+    assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
+    assert "fuzz/PLAN.md" in captured["instructions"]
+    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "Aim for at least" in captured["instructions"]
+    assert "total seed files" in captured["instructions"]
+    assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
+    assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
+    assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
+    assert "fuzz/PLAN.md" in captured["instructions"]
+    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "Aim for at least" in captured["instructions"]
+    assert "total seed files" in captured["instructions"]
+    assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
 
 
 def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
@@ -160,6 +175,7 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     gen.time_budget = 900
     gen.max_len = 1024
+    gen.rss_limit_mb = 32768
     gen.fuzz_out_dir = tmp_path / "fuzz" / "out"
     gen.fuzz_corpus_dir = tmp_path / "fuzz" / "corpus"
     gen.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +187,10 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     timeline = iter([0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0])
     monkeypatch.setattr(fur.time, "monotonic", lambda: next(timeline))
 
+    seen_cmd = {}
+
     def _fake_run_cmd(_cmd, **kwargs):
+        seen_cmd["cmd"] = list(_cmd)
         cb = kwargs.get("line_callback")
         lines = [
             "#1 NEW cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
@@ -206,6 +225,7 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     assert result.run_error_kind == ""
     assert result.plateau_detected is True
     assert result.terminal_reason == "coverage_plateau"
+    assert "-rss_limit_mb=32768" in seen_cmd["cmd"]
 
 
 def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_path: Path, monkeypatch):
@@ -228,6 +248,18 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
         def run_codex_command(self, _instructions: str, **_kwargs):
             corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
             (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
+            (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","required_families":["document_markers"],"missing_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                encoding="utf-8",
+            )
+            (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
+                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                encoding="utf-8",
+            )
+            (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
+                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                encoding="utf-8",
+            )
             return "seed-ok"
 
     orig_which = fur.which
@@ -246,6 +278,9 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
     assert meta["repo_examples_filtered"] is True
     assert meta["repo_examples_accepted_count"] == 1
     assert meta["repo_examples_rejected_count"] >= 0
+    assert meta["seed_exploration_path"] == "fuzz/seed_exploration_yaml_parser_parse_fuzz.json"
+    assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
+    assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
 
 
 def test_collect_repo_seed_examples_filters_source_files_for_generic_targets(tmp_path: Path):

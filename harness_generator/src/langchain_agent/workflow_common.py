@@ -393,9 +393,11 @@ def enter_step(state: dict[str, Any], step_name: str) -> tuple[dict[str, Any], b
         return out, True
 
     step_count = int(state.get("step_count") or 0) + 1
-    max_steps = int(state.get("max_steps") or 10)
+    raw_max_steps = state.get("max_steps")
+    max_steps = int(raw_max_steps) if raw_max_steps is not None else 0
     next_state = {**state, "step_count": step_count}
-    if step_count >= max_steps:
+    # max_steps <= 0 means unlimited workflow steps.
+    if max_steps > 0 and step_count >= max_steps:
         failed = bool(next_state.get("last_error")) and not bool(next_state.get("crash_found"))
         out = {
             **next_state,
@@ -495,7 +497,7 @@ def derive_plan_policy(repo_root: Path) -> tuple[bool, int]:
     m_rounds = re.search(r"max\s*fix\s*rounds\s*:\s*(\d+)", text, re.IGNORECASE)
     if m_rounds:
         try:
-            max_fix_rounds = max(0, min(int(m_rounds.group(1)), 20))
+            max_fix_rounds = max(0, int(m_rounds.group(1)))
         except Exception:
             pass
 

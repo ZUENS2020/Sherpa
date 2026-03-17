@@ -60,7 +60,7 @@ def main() -> int:
 
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),
-            max_len=_parse_int_keep_zero(payload.get("max_len"), 1024),
+            max_len=_parse_int_keep_zero(payload.get("max_len"), 0),
             time_budget=_parse_int_keep_zero(payload.get("time_budget"), 900),
             run_time_budget=_parse_int_keep_zero(payload.get("run_time_budget"), 900),
             email=(str(payload.get("email") or "").strip() or None),
@@ -74,9 +74,13 @@ def main() -> int:
             last_fuzzer=(str(payload.get("last_fuzzer") or "").strip() or None),
             last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
             re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
-            coverage_loop_max_rounds=_parse_int_keep_zero(payload.get("coverage_loop_max_rounds"), 3),
-            max_fix_rounds=_parse_int_keep_zero(payload.get("max_fix_rounds"), 3),
-            same_error_max_retries=_parse_int_keep_zero(payload.get("same_error_max_retries"), 1),
+            coverage_loop_max_rounds=0,
+            max_fix_rounds=0,
+            same_error_max_retries=0,
+            restart_to_plan_reason=(str(payload.get("restart_to_plan_reason") or "").strip() or None),
+            restart_to_plan_stage=(str(payload.get("restart_to_plan_stage") or "").strip() or None),
+            restart_to_plan_error_text=(str(payload.get("restart_to_plan_error_text") or "").strip() or None),
+            restart_to_plan_report_path=(str(payload.get("restart_to_plan_report_path") or "").strip() or None),
         )
         out = {
             "ok": True,
