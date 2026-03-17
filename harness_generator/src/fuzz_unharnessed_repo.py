@@ -2924,9 +2924,22 @@ class NonOssFuzzHarnessGenerator:
         corpus_dir.mkdir(parents=True, exist_ok=True)
         seed_exploration_path = self._seed_exploration_path(fuzzer_name)
         seed_check_path = self._seed_check_path(fuzzer_name)
-        target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
         selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
         observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
+        target_type = ""
+        seed_profile = ""
+        seed_profile_source = "fallback"
+        if selected_target:
+            selected_type = str(selected_target.get("target_type") or "").strip().lower()
+            selected_profile = str(selected_target.get("seed_profile") or "").strip().lower()
+            if selected_type in ALLOWED_TARGET_TYPES and selected_profile in ALLOWED_SEED_PROFILES:
+                target_type = selected_type
+                seed_profile = selected_profile
+                seed_profile_source = "selected_targets"
+        if not target_type or not seed_profile:
+            target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+            if observed_target:
+                seed_profile_source = "observed_or_inferred"
         execution_target = dict(observed_target or selected_target)
         if selected_target:
             self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
@@ -2969,6 +2982,11 @@ class NonOssFuzzHarnessGenerator:
 
             Current corpus summary:
             {self._summarize_seed_corpus(corpus_dir)}
+
+            Target metadata source:
+            - target_type/seed_profile source: {seed_profile_source}
+            - selected seed_profile from `fuzz/selected_targets.json`: {str(selected_target.get("seed_profile") or "(missing)") if selected_target else "(missing)"}
+            - active seed_profile for this run: {seed_profile}
 
             Current seed family coverage:
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
@@ -3069,6 +3087,7 @@ class NonOssFuzzHarnessGenerator:
             },
             "sources": sorted(set(sources)),
             "seed_profile": seed_profile,
+            "seed_profile_source": seed_profile_source,
             "target_type": target_type,
             "selected_target": dict(selected_target),
             "observed_target": dict(observed_target),

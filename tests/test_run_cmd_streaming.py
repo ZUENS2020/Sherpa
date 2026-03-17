@@ -19,6 +19,7 @@ def _fake_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     gen.docker_image = None
     gen.last_seed_profile_by_fuzzer = {}
     gen.last_seed_bootstrap_by_fuzzer = {}
+    gen.last_selected_target_by_fuzzer = {}
     return gen
 
 
@@ -169,6 +170,42 @@ def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
     assert "leading zeros" in captured["instructions"]
     assert "separator-boundary tokens" in captured["instructions"]
     assert "Coverage-oriented gap hints" in captured["instructions"]
+
+
+def test_pass_generate_seeds_prefers_selected_seed_profile_over_observed(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        '[{"target_name":"demo_parse","api":"demo_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+    (gen.fuzz_dir / "observed_target.json").write_text(
+        '{"selected_target_api":"demo_parse","observed_target_api":"fmt::println","target_type":"parser","seed_profile":"parser-format","observed_harness":"demo_parse_fuzz.cc"}',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "demo_parse_fuzz.cc"
+    harness.write_text(
+        'int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) { fmt::println("{}", (const char*)data); return 0; }\n',
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+    gen._pass_generate_seeds("demo_parse_fuzz")
+
+    assert "seed_profile is `parser-structure`" in captured["instructions"]
+    meta = dict(gen.last_seed_bootstrap_by_fuzzer.get("demo_parse_fuzz") or {})
+    assert meta.get("seed_profile") == "parser-structure"
+    assert meta.get("seed_profile_source") == "selected_targets"
 
 
 def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
