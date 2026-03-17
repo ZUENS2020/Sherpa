@@ -214,10 +214,13 @@ def test_repair_shared_permissions_runs_when_root(monkeypatch):
     monkeypatch.setattr(k8s_job_worker.os, "geteuid", lambda: 0)
     monkeypatch.setattr(k8s_job_worker.subprocess, "run", _fake_run)
 
-    k8s_job_worker._repair_shared_permissions()
+    k8s_job_worker._repair_shared_permissions(
+        {"resume_repo_root": "/shared/output/libarchive-17d00079"}
+    )
     assert calls
     assert calls[0][0:2] == ["sh", "-lc"]
     assert "chown -R 10001:10001 \"/shared/output/_k8s_jobs\"" in calls[0][2]
+    assert "chown -R 10001:10001 \"/shared/output/libarchive-17d00079/.git/sherpa-opencode\"" in calls[0][2]
 
 
 def test_write_error_resilient_after_permission_error(tmp_path: Path, monkeypatch):
