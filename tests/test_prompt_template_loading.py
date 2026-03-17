@@ -62,6 +62,8 @@ def test_synthesize_prompts_require_observed_target_alignment():
     assert "`Harness file: ...`" in synth
     assert "local helper/checker/wrapper" in synth
     assert "Do not optimize for early artifact output" in synth
+    assert "MANDATORY OUTPUT CHECKLIST" in synth
+    assert "If blocked, still create minimal valid versions" in synth
     assert "First create minimal skeleton artifacts immediately" not in synth
     assert "You may use a repository-provided fuzz target only when" in synth
     assert "drift only when repository facts prove it is not directly fuzzable" in synth
@@ -73,6 +75,8 @@ def test_synthesize_prompts_require_observed_target_alignment():
     assert "fuzz/observed_target.json" in scaffold
     assert "fuzz/repo_understanding.json" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
+    assert "MANDATORY OUTPUT CHECKLIST" in scaffold
+    assert "If `fuzz/build_strategy.json` is missing" in scaffold
     assert "never reference missing scaffold files" in scaffold
     assert "record the rejected original target and repository-grounded reason" in scaffold
     assert "avoid high-level repository summaries with no execution consequences" in scaffold

@@ -2575,6 +2575,37 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
 
+    def _run_required_scaffold_repair(timeout: int) -> None:
+        missing_items = _missing_synthesis_items()
+        if not missing_items:
+            return
+        missing_txt = "\n".join(f"- {item}" for item in missing_items)
+        prompt = textwrap.dedent(
+            f"""
+            Complete required scaffold files only. Do not rewrite unrelated files.
+
+            Missing required items:
+            {missing_txt}
+
+            Rules:
+            - Keep existing harness/build files unchanged unless needed to satisfy required items.
+            - If README is missing, create `fuzz/README.md` with required fields:
+              Selected target, Final target, Technical reason, Relation, Harness file.
+            - If strategy is missing, create a valid `fuzz/build_strategy.json` matching the current harness/build path.
+            - Do NOT run commands.
+            - Write `fuzz/out/` into `./done` before exit.
+            """
+        ).strip()
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=_completion_context() or None,
+            timeout=timeout,
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+            activity_watch_paths=_synthesize_activity_watch_paths(),
+        )
+
     def _run_readme_alignment_completion(timeout: int, alignment: dict[str, Any]) -> None:
         selected_label = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip() or "unknown"
         observed_label = str(alignment.get("observed_api") or "").strip() or "unknown"
@@ -2713,8 +2744,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
             raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
         if not _has_required_synthesis_outputs():
-            missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
-            raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
+            remaining_for_required = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_for_required > 0:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: required scaffold still missing; running forced required-scaffold repair",
+                )
+                _run_required_scaffold_repair(remaining_for_required)
+            if not _has_required_synthesis_outputs():
+                missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
+                raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
