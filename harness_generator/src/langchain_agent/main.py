@@ -487,6 +487,9 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                     "  find \"$d\" -mindepth 1 -exec chown 10001:10001 {} + || true\n"
                                     "  find \"$d\" -mindepth 1 -exec chmod a+rwX {} + || true\n"
                                     "done\n"
+                                    "mkdir -p /shared/output/_k8s_jobs /shared/output/.opencode-home\n"
+                                    "chown -R 10001:10001 /shared/output/_k8s_jobs /shared/output/.opencode-home || true\n"
+                                    "chmod -R a+rwX /shared/output/_k8s_jobs /shared/output/.opencode-home || true\n"
                                 ),
                             ],
                             "securityContext": {

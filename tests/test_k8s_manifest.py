@@ -264,3 +264,5 @@ def test_k8s_manifest_initializes_runtime_volume_permissions():
     assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
     assert "chmod 0777 \"$d\"" in command
     assert "find \"$d\" -mindepth 1 -exec chmod a+rwX {} +" in command
+    assert "mkdir -p /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
+    assert "chown -R 10001:10001 /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
