@@ -438,7 +438,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
             "runAsNonRoot": False,
             "runAsUser": 0,
             "runAsGroup": 0,
-            "capabilities": {"drop": ["ALL"]},
+            "capabilities": {"drop": ["ALL"], "add": ["SETUID", "SETGID"]},
         }
 
     manifest = {
