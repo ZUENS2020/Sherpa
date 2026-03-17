@@ -389,6 +389,11 @@ def _k8s_proxy_env_from_items() -> list[dict[str, object]]:
     return [{"secretRef": {"name": secret_name, "optional": True}}]
 
 
+def _k8s_build_stage_runs_as_root() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_BUILD_RUN_AS_ROOT", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _k8s_git_env_items() -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for name in ("SHERPA_GIT_MIRRORS", "SHERPA_GITHUB_MIRROR"):
@@ -401,6 +406,7 @@ def _k8s_git_env_items() -> list[dict[str, object]]:
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
+    stage_name = str(payload.get("stop_after_step") or payload.get("resume_from_step") or "").strip().lower()
     raw_model = str(payload.get("model") or "").strip()
     normalized_model = _normalized_opencode_model_value(raw_model)
     ttl = _k8s_job_ttl_seconds()
@@ -417,6 +423,22 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
     target_node_name = str(payload.get("target_node_name") or "").strip()
     worker_resources = _k8s_worker_resources()
+    run_build_as_root = stage_name == "build" and _k8s_build_stage_runs_as_root()
+    worker_security_context: dict[str, object] = {
+        "allowPrivilegeEscalation": False,
+        "runAsNonRoot": True,
+        "runAsUser": 10001,
+        "runAsGroup": 10001,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    if run_build_as_root:
+        worker_security_context = {
+            "allowPrivilegeEscalation": False,
+            "runAsNonRoot": False,
+            "runAsUser": 0,
+            "runAsGroup": 0,
+            "capabilities": {"drop": ["ALL"]},
+        }
 
     manifest = {
         "apiVersion": "batch/v1",
@@ -488,13 +510,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "image": _k8s_worker_image(),
                             "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
                             "command": ["python", "/app/harness_generator/src/langchain_agent/k8s_job_worker.py"],
-                            "securityContext": {
-                                "allowPrivilegeEscalation": False,
-                                "runAsNonRoot": True,
-                                "runAsUser": 10001,
-                                "runAsGroup": 10001,
-                                "capabilities": {"drop": ["ALL"]},
-                            },
+                            "securityContext": worker_security_context,
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
                                 {"name": "OPENCODE_MODEL", "value": normalized_model},

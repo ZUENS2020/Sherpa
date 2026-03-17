@@ -203,6 +203,45 @@ def test_k8s_manifest_applies_non_root_security_context():
     assert container_sc["capabilities"]["drop"] == ["ALL"]
 
 
+def test_k8s_manifest_build_stage_runs_worker_as_root_for_package_install():
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test-build",
+        {
+            "job_id": "job-test-build",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+            "stop_after_step": "build",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+
+    assert container_sc["runAsNonRoot"] is False
+    assert container_sc["runAsUser"] == 0
+    assert container_sc["runAsGroup"] == 0
+    assert container_sc["allowPrivilegeEscalation"] is False
+    assert container_sc["capabilities"]["drop"] == ["ALL"]
+
+
+def test_k8s_manifest_build_stage_root_can_be_disabled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_BUILD_RUN_AS_ROOT", "0")
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test-build-non-root",
+        {
+            "job_id": "job-test-build-non-root",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "MiniMax-M2.5",
+            "stop_after_step": "build",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
+
+    assert container_sc["runAsNonRoot"] is True
+    assert container_sc["runAsUser"] == 10001
+    assert container_sc["runAsGroup"] == 10001
+
+
 def test_k8s_manifest_initializes_runtime_volume_permissions():
     manifest_yaml = web_main._k8s_build_manifest(
         "job-test",
