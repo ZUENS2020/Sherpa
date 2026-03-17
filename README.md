@@ -6,8 +6,6 @@
 
 Sherpa 是一个面向 C/C++ 仓库的自动化 fuzz 编排系统。用户输入仓库地址后，系统会通过 `FastAPI + Postgres + Kubernetes stage jobs` 执行完整的 fuzz 生命周期：目标规划、harness 生成、构建修复、seed bootstrap、fuzz 运行、覆盖率驱动改进，以及 crash 复现。
 
-本文档只基于当前代码实现整理，不沿用历史 README 的叙述。
-
 ## 系统定位
 
 Sherpa 解决的不是“生成一个 harness”这一件事，而是把 fuzz 工程中的高重复步骤串成一个可恢复、可观测、可迭代的自动化流水线：
