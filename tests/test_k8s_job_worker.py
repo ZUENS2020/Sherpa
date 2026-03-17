@@ -184,6 +184,10 @@ def test_worker_configures_git_safe_directory_entries(tmp_path: Path, monkeypatc
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+    for i in range(0, 16):
+        monkeypatch.delenv(f"GIT_CONFIG_KEY_{i}", raising=False)
+        monkeypatch.delenv(f"GIT_CONFIG_VALUE_{i}", raising=False)
     monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
     monkeypatch.setattr(k8s_job_worker.subprocess, "run", _fake_run)
     monkeypatch.setattr(k8s_job_worker.os, "geteuid", lambda: 10001)
