@@ -4,7 +4,8 @@
 
 # Sherpa
 
-Sherpa 是一个面向开源仓库的自动化模糊测试平台。系统由 Next.js 前端、FastAPI 服务和 Postgres 组成，后端把任务拆分为 Kubernetes Job 阶段执行：`plan`、`synthesize`、`build`、`fix_build`、`run`、`coverage-analysis`、`improve-harness`、`re-build`、`re-run`、`fix_crash`。它会自动分析目标、生成并修复 harness 与构建脚本、准备 seed 语料、运行 libFuzzer/Jazzer，并输出覆盖率、崩溃复现与运行摘要，帮助团队把 fuzz 从一次性实验变成可恢复、可追踪的流水线。
+Sherpa 是一个面向开源仓库的自动化模糊测试平台。系统由 Next.js 前端、FastAPI 服务和 Postgres 组成，后端把任务拆分为 Kubernetes Job 阶段执行：`plan`、`synthesize`、`build`、`fix_build`、`run`、`coverage-analysis`、`improve-harness`、`re-build`、`re-run`、`fix_crash`。  
+它会自动分析目标、生成并修复 harness 与构建脚本、准备 seed 语料、运行 libFuzzer/Jazzer，并输出覆盖率、崩溃复现与运行摘要，帮助团队把 fuzz 从一次性实验变成可恢复、可追踪的流水线。
 
 ## 系统定位
 
