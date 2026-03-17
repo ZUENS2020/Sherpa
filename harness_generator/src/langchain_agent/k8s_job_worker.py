@@ -109,7 +109,7 @@ def _configure_git_safe_directory(payload: dict) -> None:
             continue
 
 
-def _repair_shared_permissions() -> None:
+def _repair_shared_permissions(payload: dict | None = None) -> None:
     if os.geteuid() != 0:
         return
     raw_targets = (
@@ -120,6 +120,27 @@ def _repair_shared_permissions() -> None:
         or ""
     ).strip()
     targets = [x.strip() for x in raw_targets.split(",") if x.strip()]
+
+    resume_repo_root = str((payload or {}).get("resume_repo_root") or "").strip()
+    if resume_repo_root:
+        targets.extend(
+            [
+                resume_repo_root,
+                f"{resume_repo_root}/.git",
+                f"{resume_repo_root}/.git/sherpa-opencode",
+            ]
+        )
+
+    # Keep ordering stable while removing duplicates.
+    deduped_targets: list[str] = []
+    seen: set[str] = set()
+    for t in targets:
+        if t in seen:
+            continue
+        seen.add(t)
+        deduped_targets.append(t)
+    targets = deduped_targets
+
     if not targets:
         return
     script = ["set -eu"]
@@ -221,7 +242,7 @@ def main() -> int:
         print(f"[k8s-worker] failed job_id={job_id}: {e}")
         return 1
     finally:
-        _repair_shared_permissions()
+        _repair_shared_permissions(payload)
 
 
 if __name__ == "__main__":
