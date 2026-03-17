@@ -1511,6 +1511,8 @@ class NonOssFuzzHarnessGenerator:
             "docker",
             "run",
             "--rm",
+            "--user",
+            "root",
             "--name",
             _docker_container_name(mount_src, cmd),
             "--label",
@@ -1589,18 +1591,26 @@ class NonOssFuzzHarnessGenerator:
                                 echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
                             elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
+                            else
+                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v dnf >/dev/null 2>&1; then
                             if ! dnf install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
+                            else
+                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v yum >/dev/null 2>&1; then
                             if ! yum install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
+                            else
+                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v apk >/dev/null 2>&1; then
                             if ! apk add --no-cache $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
+                            else
+                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         else
                             echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
