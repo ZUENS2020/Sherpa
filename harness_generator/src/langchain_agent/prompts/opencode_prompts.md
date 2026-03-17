@@ -78,6 +78,7 @@ Avoid forcing C++ standard library selection flags (for example: do not add `-st
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
 Hard requirements:
 - Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
+- Add an early input-size guard in the harness entrypoint before heavy parsing/work (for C/C++ style harnesses, prefer `if (size > 8192) return 0;` unless a smaller cap is clearly required).
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
@@ -158,6 +159,7 @@ Constraints:
 - If you change `fuzz/system_packages.txt`, still finish all other necessary `fuzz/` edits in the same attempt. Do not stop after only declaring packages if `fuzz/build.py` or harness glue also needs changes.
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
+- Ensure the harness entrypoint contains an explicit early input-size guard (default 8192 bytes unless repository facts require stricter).
 - If target sources define `main`, resolve libFuzzer main conflict (for example add `-Dmain=vuln_main` in compile flags).
 - You may repair the build by switching to a repository-provided fuzz target only when the exact target is documented as real in `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`; never guess target names.
 - If `fuzz/repo_understanding.json` is missing or weak, repair it first.

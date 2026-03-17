@@ -62,6 +62,28 @@ def test_collect_repo_seed_examples_accepts_yaml_samples_for_parser_token(tmp_pa
     assert meta["accepted_count"] >= 1
 
 
+def test_collect_repo_seed_examples_respects_seed_max_file_bytes(tmp_path: Path, monkeypatch):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "small.yaml").write_text("---\nk: v\n", encoding="utf-8")
+    (tests_dir / "large.yaml").write_text("a" * 6000, encoding="utf-8")
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "yaml_parser_fuzz"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SHERPA_SEED_MAX_FILE_BYTES", "4096")
+    gen = _make_generator(tmp_path)
+
+    selected, meta = gen._collect_repo_seed_examples(
+        "parser-token",
+        "yaml_parser_fuzz",
+        corpus_dir,
+        required_families=["document_markers"],
+    )
+
+    assert len(selected) == 1
+    assert selected[0].name.endswith(".yaml")
+    assert meta["accepted_count"] == 1
+
+
 def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -204,3 +226,51 @@ def test_filter_seed_corpus_rejects_noisy_fmt_binary_variants(tmp_path: Path):
     assert "seed_b.txt" not in kept_files
     covered = _classify_seed_family(corpus_dir / "seed_a.txt")
     assert "format_specifiers" in covered
+
+
+def test_filter_seed_corpus_rejects_oversized_and_radamsa_big_files(tmp_path: Path, monkeypatch):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "demo_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    (corpus_dir / "repo_01.txt").write_text("{}\n", encoding="utf-8")
+    (corpus_dir / "radamsa_01.bin").write_bytes(b"A" * 7000)
+    (corpus_dir / "seed_big.bin").write_bytes(b"B" * 9000)
+    monkeypatch.setenv("SHERPA_SEED_MAX_FILE_BYTES", "8192")
+    monkeypatch.setenv("SHERPA_RADAMSA_MAX_FILE_BYTES", "4096")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="generic",
+        required_families=[],
+        target_markers=["demo"],
+    )
+
+    kept_files = {p.name for p in corpus_dir.iterdir() if p.is_file()}
+    assert "repo_01.txt" in kept_files
+    assert "radamsa_01.bin" not in kept_files
+    assert "seed_big.bin" not in kept_files
+    assert int(filtered["seed_oversized_rejected_count"]) >= 2
+
+
+def test_filter_seed_corpus_prunes_total_bytes_preferring_radamsa(tmp_path: Path, monkeypatch):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "demo_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    (corpus_dir / "repo_01.txt").write_bytes(b"R" * 7000)
+    (corpus_dir / "seed_01.txt").write_bytes(b"S" * 7000)
+    (corpus_dir / "radamsa_01.txt").write_bytes(b"X" * 7000)
+    monkeypatch.setenv("SHERPA_SEED_MAX_FILE_BYTES", "8192")
+    monkeypatch.setenv("SHERPA_RADAMSA_MAX_FILE_BYTES", "8192")
+    monkeypatch.setenv("SHERPA_SEED_MAX_TOTAL_BYTES", "16384")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="generic",
+        required_families=[],
+        target_markers=["demo"],
+    )
+
+    kept_files = {p.name for p in corpus_dir.iterdir() if p.is_file()}
+    assert "repo_01.txt" in kept_files
+    assert "radamsa_01.txt" not in kept_files
+    assert int(filtered["seed_total_pruned_count"]) >= 1
