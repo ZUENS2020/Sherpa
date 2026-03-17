@@ -53,6 +53,14 @@ Additional instruction from coordinator:
 <!-- TEMPLATE: synthesize_with_hint -->
 You are coordinating a fuzz harness generation workflow.
 Perform the synthesis step: create harness + fuzz/build.py + build glue under fuzz/.
+MANDATORY OUTPUT CHECKLIST (must be true before writing `./done`):
+- At least one harness source file under `fuzz/` (`*.c`/`*.cc`/`*.cpp`/`*.cxx`/`*.java`)
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+
+If blocked, still create minimal valid versions of the missing required files now; do not exit with partial scaffold.
 Execution strategy requirement:
 - Do not optimize for early artifact output.
 - First read enough repository/build context to write `fuzz/repo_understanding.json` and a concrete `fuzz/build_strategy.json`.
@@ -98,6 +106,13 @@ There is already a partial scaffold under `fuzz/`. Do NOT restart from scratch.
 Task: complete the missing scaffold items only:
 {{missing_items}}
 
+MANDATORY OUTPUT CHECKLIST (must be true before writing `./done`):
+- At least one harness source file under `fuzz/`
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+
 Rules:
 - Preserve existing harness/build files unless a minimal fix is required.
 - If a harness source file already exists, keep it and add/fix the missing build glue around it.
@@ -115,6 +130,8 @@ Rules:
 - Keep `fuzz/build_runtime_facts.json` aligned with the actual compiler/runtime assumptions used by `fuzz/build.py`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
 - If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
+- If `fuzz/README.md` is missing, create it with required fields (`Selected target`, `Final target`, `Technical reason`, `Relation`, `Harness file`).
+- If `fuzz/build_strategy.json` is missing, create a minimal valid JSON strategy aligned with current harness/build path.
 
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.

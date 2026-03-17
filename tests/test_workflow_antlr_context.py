@@ -131,6 +131,15 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
             # Produce minimal synth outputs to satisfy guard.
             (fuzz_dir / "harness.cc").write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n", encoding="utf-8")
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["a"],"chosen_target_api":"a","chosen_target_reason":"runtime","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["demo"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             return None
 
     gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
@@ -186,6 +195,14 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
                 "Final target: yaml_parser_load_document\n"
                 "Technical reason: runtime parser entrypoint is deeper.\n"
                 "Relation: final target is a runtime replacement for the selected parser API.\n",
+                encoding="utf-8",
+            )
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["yaml_parser_load_document"],"chosen_target_api":"yaml_parser_load_document","chosen_target_reason":"runtime entrypoint","rejected_targets":[{"api":"yaml_parser_parse","reason":"not runtime-executable"}],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["yaml"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
                 encoding="utf-8",
             )
             return None
@@ -258,6 +275,14 @@ def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeyp
                 encoding="utf-8",
             )
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["fmt::println"],"chosen_target_api":"fmt::println","chosen_target_reason":"runtime entrypoint","rejected_targets":[{"api":"parse_replacement_field_then_tail","reason":"not runtime-executable"}],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["fmt"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             if len(prompts) == 1:
                 (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
             else:
@@ -311,6 +336,14 @@ def test_node_synthesize_completes_partial_scaffold_after_idle_like_partial_outp
                 return None
             (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
             (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["yaml_parser_parse"],"chosen_target_api":"yaml_parser_parse","chosen_target_reason":"test scaffold","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["yaml"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
             return None
 
     gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
