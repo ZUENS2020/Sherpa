@@ -2515,6 +2515,7 @@ class NonOssFuzzHarnessGenerator:
         lowered_name = fuzzer_name.lower()
         family_limits: dict[str, int] = {}
         required_set = set(required_families or [])
+        max_seed_file = self._seed_max_file_bytes()
 
         def _under_sample_dir(path: Path) -> bool:
             parts = [part.lower() for part in path.parts]
@@ -2524,7 +2525,7 @@ class NonOssFuzzHarnessGenerator:
             suffix = path.suffix.lower()
             if suffix not in {".yaml", ".yml", ".txt", ".in"}:
                 return False
-            if size > 32768:
+            if size > max_seed_file:
                 return False
             try:
                 snippet = path.read_text(encoding="utf-8", errors="replace")[:512].lower()
@@ -2601,7 +2602,7 @@ class NonOssFuzzHarnessGenerator:
                 if not under_sample:
                     rejected += 1
                     return False
-                if size > 8192:
+                if size > max_seed_file:
                     rejected += 1
                     return False
                 if suffix and suffix in source_blacklist:
@@ -2625,7 +2626,7 @@ class NonOssFuzzHarnessGenerator:
                 except Exception:
                     rejected += 1
                     continue
-                if size <= 0 or size > 131072:
+                if size <= 0 or size > max_seed_file:
                     rejected += 1
                     continue
                 if not _allow_path(path, size):
@@ -2719,6 +2720,30 @@ class NonOssFuzzHarnessGenerator:
     def _seed_check_path(self, fuzzer_name: str) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
         return self.fuzz_dir / f"seed_check_{safe_name}.json"
+
+    def _seed_max_file_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_SEED_MAX_FILE_BYTES") or "8192").strip()
+        try:
+            return max(512, min(int(raw), 262144))
+        except Exception:
+            return 8192
+
+    def _seed_radamsa_max_file_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_RADAMSA_MAX_FILE_BYTES") or "").strip()
+        if not raw:
+            return self._seed_max_file_bytes()
+        try:
+            return max(512, min(int(raw), 262144))
+        except Exception:
+            return self._seed_max_file_bytes()
+
+    def _seed_max_total_bytes(self) -> int:
+        raw = (os.environ.get("SHERPA_SEED_MAX_TOTAL_BYTES") or "524288").strip()
+        try:
+            return max(16384, min(int(raw), 8 * 1024 * 1024))
+        except Exception:
+            return 524288
+
     def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
         radamsa = which("radamsa")
         if not radamsa:
@@ -2729,7 +2754,8 @@ class NonOssFuzzHarnessGenerator:
             return 0
         created = 0
         total_bytes = sum((p.stat().st_size for p in corpus_dir.iterdir() if p.is_file()), 0)
-        max_total = 512 * 1024
+        max_total = self._seed_max_total_bytes()
+        max_file = self._seed_radamsa_max_file_bytes()
         for path in base_files:
             for variant in range(2):
                 if created >= 24 or total_bytes >= max_total:
@@ -2738,7 +2764,9 @@ class NonOssFuzzHarnessGenerator:
                 proc = subprocess.run([radamsa, str(path)], capture_output=True)
                 if proc.returncode != 0 or not proc.stdout:
                     continue
-                data = proc.stdout[: min(len(proc.stdout), 32768)]
+                data = proc.stdout[: min(len(proc.stdout), max_file)]
+                if not data:
+                    continue
                 if total_bytes + len(data) > max_total:
                     return created
                 dest.write_bytes(data)
@@ -2765,17 +2793,36 @@ class NonOssFuzzHarnessGenerator:
                 raw_counts["ai"] += 1
         filtered_counts = dict(raw_counts)
         noise_rejected = 0
+        oversized_rejected = 0
+        total_pruned_count = 0
+        total_pruned_bytes = 0
         family_caps: dict[str, int] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
         textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        max_file = self._seed_max_file_bytes()
+        max_radamsa_file = self._seed_radamsa_max_file_bytes()
+        max_total = self._seed_max_total_bytes()
         kept: list[Path] = []
         for path in files:
             reject = False
             try:
+                size = int(path.stat().st_size)
+            except Exception:
+                size = 0
+            try:
                 data = path.read_bytes()
             except Exception:
                 data = b""
+            if size <= 0:
+                reject = True
+                oversized_rejected += 1
+            if not reject and size > max_file:
+                reject = True
+                oversized_rejected += 1
+            if not reject and path.name.startswith("radamsa_") and size > max_radamsa_file:
+                reject = True
+                oversized_rejected += 1
             if textual_mode and not _looks_textual_seed(path):
                 reject = True
                 noise_rejected += 1
@@ -2817,10 +2864,55 @@ class NonOssFuzzHarnessGenerator:
             kept.append(path)
             for family in families:
                 family_caps[family] = family_caps.get(family, 0) + 1
+        if kept:
+            total_bytes = 0
+            sized: list[tuple[Path, int]] = []
+            for path in kept:
+                try:
+                    sz = int(path.stat().st_size)
+                except Exception:
+                    sz = 0
+                total_bytes += max(0, sz)
+                sized.append((path, max(0, sz)))
+            if total_bytes > max_total:
+                # Prune least-useful large seeds first: radamsa > ai > repo examples.
+                def _priority(item: tuple[Path, int]) -> tuple[int, int]:
+                    p, sz = item
+                    if p.name.startswith("radamsa_"):
+                        prio = 0
+                    elif p.name.startswith("repo_"):
+                        prio = 2
+                    else:
+                        prio = 1
+                    return (prio, -sz)
+
+                for path, sz in sorted(sized, key=_priority):
+                    if total_bytes <= max_total:
+                        break
+                    try:
+                        path.unlink()
+                    except Exception:
+                        continue
+                    total_bytes = max(0, total_bytes - sz)
+                    total_pruned_count += 1
+                    total_pruned_bytes += sz
+                    if path.name.startswith("repo_"):
+                        filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
+                    elif path.name.startswith("radamsa_"):
+                        filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                    else:
+                        filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
+                    filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
         return {
             "seed_counts_raw": raw_counts,
             "seed_counts_filtered": filtered_counts,
             "seed_noise_rejected_count": noise_rejected,
+            "seed_oversized_rejected_count": oversized_rejected,
+            "seed_total_pruned_count": total_pruned_count,
+            "seed_total_pruned_bytes": total_pruned_bytes,
+            "seed_max_file_bytes": max_file,
+            "seed_radamsa_max_file_bytes": max_radamsa_file,
+            "seed_max_total_bytes": max_total,
             "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
         }
 
@@ -2909,6 +3001,7 @@ class NonOssFuzzHarnessGenerator:
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
+            - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - When finished, write the path to one seed file into `./done`.
@@ -2985,6 +3078,12 @@ class NonOssFuzzHarnessGenerator:
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "seed_total_pruned_count": int(filtered_meta.get("seed_total_pruned_count") or 0),
+            "seed_total_pruned_bytes": int(filtered_meta.get("seed_total_pruned_bytes") or 0),
+            "seed_max_file_bytes": int(filtered_meta.get("seed_max_file_bytes") or self._seed_max_file_bytes()),
+            "seed_radamsa_max_file_bytes": int(filtered_meta.get("seed_radamsa_max_file_bytes") or self._seed_radamsa_max_file_bytes()),
+            "seed_max_total_bytes": int(filtered_meta.get("seed_max_total_bytes") or self._seed_max_total_bytes()),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
