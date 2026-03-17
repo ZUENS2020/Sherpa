@@ -44,6 +44,7 @@ RUN apt-get update -o Acquire::Retries=5 -o Acquire::ForceIPv4=true \
     libtool \
     unzip \
     zip \
+    sudo \
   && true
 
 RUN groupadd -g 10001 fuzzer \

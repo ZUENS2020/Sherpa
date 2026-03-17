@@ -1557,6 +1557,18 @@ class NonOssFuzzHarnessGenerator:
     def _build_system_dep_setup(self, dep_file: str, *, log_prefix: str) -> str:
         return textwrap.dedent(
             f"""
+            # Use sudo for package installation if running as non-root without passwordless sudo
+            # In Docker/K8s containers, check if sudo is available and we can use it without password
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+                if command -v sudo >/dev/null 2>&1; then
+                    # Check if sudo works without password (e.g., in Docker/K8s containers)
+                    if sudo -n true 2>/dev/null; then
+                        SUDO="sudo"
+                    fi
+                fi
+            fi
+
             dep_file={shlex.quote(dep_file)}
             if [ -f "$dep_file" ]; then
                 pkgs=""
@@ -1587,30 +1599,30 @@ class NonOssFuzzHarnessGenerator:
                     else
                         echo "[*] ({log_prefix}) installing from $dep_file:$missing_pkgs"
                         if command -v apt-get >/dev/null 2>&1; then
-                            if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
+                            if ! $SUDO apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
                                 echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
-                            elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
+                            elif ! $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
                             else
-                                chown -R 10001:10001 /work 2>/dev/null || true
+                                $SUDO chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v dnf >/dev/null 2>&1; then
-                            if ! dnf install -y $missing_pkgs; then
+                            if ! $SUDO dnf install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
                             else
-                                chown -R 10001:10001 /work 2>/dev/null || true
+                                $SUDO chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v yum >/dev/null 2>&1; then
-                            if ! yum install -y $missing_pkgs; then
+                            if ! $SUDO yum install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
                             else
-                                chown -R 10001:10001 /work 2>/dev/null || true
+                                $SUDO chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v apk >/dev/null 2>&1; then
-                            if ! apk add --no-cache $missing_pkgs; then
+                            if ! $SUDO apk add --no-cache $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
                             else
-                                chown -R 10001:10001 /work 2>/dev/null || true
+                                $SUDO chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         else
                             echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
