@@ -73,6 +73,15 @@ Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step 
 If progress stalls, still deliver repository-understanding artifacts first, then the smallest scaffold consistent with them.
 
 If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
+Also predict and write likely missing libraries to fuzz/missing_libraries.json in this format:
+```json
+{
+  "predicted_libraries": [
+    {"name": "zlib1g-dev", "reason": "library uses gzip compression", "detected_from": "includes zlib.h"},
+    {"name": "libssl-dev", "reason": "uses OpenSSL for TLS", "detected_from": "includes openssl/*.h"}
+  ]
+}
+```
 Use package names only; no shell commands.
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
@@ -133,6 +142,7 @@ Rules:
 - If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
 - If `fuzz/README.md` is missing, create it with required fields (`Selected target`, `Final target`, `Technical reason`, `Relation`, `Harness file`).
 - If `fuzz/build_strategy.json` is missing, create a minimal valid JSON strategy aligned with current harness/build path.
+- If `fuzz/missing_libraries.json` does not exist, create it with predicted missing libraries based on the harness includes and build requirements.
 
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.

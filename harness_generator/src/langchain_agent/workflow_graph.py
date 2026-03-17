@@ -2433,6 +2433,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         has_readme = False
         has_repo_understanding = False
         has_build_strategy = False
+        has_missing_libraries = False
         scan_errors: list[str] = []
         try:
             candidates = list(fuzz_dir.rglob("*"))
@@ -2457,6 +2458,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     has_repo_understanding = True
                 if rel_posix == "build_strategy.json":
                     has_build_strategy = True
+                if rel_posix == "missing_libraries.json":
+                    has_missing_libraries = True
             except Exception as e:
                 scan_errors.append(f"scan_item_failed:{p}:{e}")
         return {
@@ -2466,6 +2469,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_readme": has_readme,
             "has_repo_understanding": has_repo_understanding,
             "has_build_strategy": has_build_strategy,
+            "has_missing_libraries": has_missing_libraries,
             "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
             "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
             "scan_errors": scan_errors[:8],
@@ -4185,7 +4189,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     def _try_hotfix_missing_system_packages() -> bool:
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         if "cannot find -lz" in diag or "undefined reference to `gz" in diag or "undefined reference to `inflate" in diag:
-            # Prefer dedicated link-fix rule for zlib linker failures.
             return False
         pkg_signals: list[tuple[list[str], str]] = [
             (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib1g-dev"),
@@ -4204,6 +4207,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         for needles, pkg in pkg_signals:
             if any(n in diag for n in needles):
                 need_pkgs.append(pkg)
+        missing_lib_file = gen.repo_root / "fuzz" / "missing_libraries.json"
+        if missing_lib_file.is_file():
+            try:
+                import json
+                lib_data = json.loads(missing_lib_file.read_text(encoding="utf-8", errors="replace"))
+                predicted = lib_data.get("predicted_libraries", [])
+                for pred in predicted:
+                    pkg_name = pred.get("name", "")
+                    if pkg_name and pkg_name not in need_pkgs:
+                        need_pkgs.append(pkg_name)
+            except Exception:
+                pass
         if not need_pkgs:
             return False
         dep_file = gen.repo_root / "fuzz" / "system_packages.txt"
