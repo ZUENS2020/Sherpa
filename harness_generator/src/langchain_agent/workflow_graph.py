@@ -2433,8 +2433,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         has_readme = False
         has_repo_understanding = False
         has_build_strategy = False
+        scan_errors: list[str] = []
         try:
-            for p in fuzz_dir.rglob("*"):
+            candidates = list(fuzz_dir.rglob("*"))
+        except Exception as e:
+            candidates = []
+            scan_errors.append(f"rglob_failed:{e}")
+        for p in candidates:
+            try:
                 if not p.is_file():
                     continue
                 rel = p.relative_to(fuzz_dir)
@@ -2451,17 +2457,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     has_repo_understanding = True
                 if rel_posix == "build_strategy.json":
                     has_build_strategy = True
-        except Exception:
-            return {
-                "harnesses": [],
-                "has_harness": False,
-                "has_build_script": False,
-                "has_readme": False,
-                "has_repo_understanding": False,
-                "has_build_strategy": False,
-                "has_required": False,
-                "has_partial": False,
-            }
+            except Exception as e:
+                scan_errors.append(f"scan_item_failed:{p}:{e}")
         return {
             "harnesses": harnesses,
             "has_harness": bool(harnesses),
@@ -2471,6 +2468,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_build_strategy": has_build_strategy,
             "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
             "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
+            "scan_errors": scan_errors[:8],
+            "scan_error_count": len(scan_errors),
         }
 
     def _has_min_synthesis_outputs() -> bool:
@@ -2503,6 +2502,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 return True
             time.sleep(1)
         return _has_min_synthesis_outputs()
+
+    def _required_synthesis_grace_wait(max_sec: int) -> bool:
+        if max_sec <= 0:
+            return _has_required_synthesis_outputs()
+        deadline = time.time() + max_sec
+        while time.time() < deadline:
+            if _has_required_synthesis_outputs():
+                return True
+            time.sleep(1)
+        return _has_required_synthesis_outputs()
 
     def _completion_context() -> str:
         plan = gen.repo_root / "fuzz" / "PLAN.md"
@@ -2744,8 +2753,25 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
             raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
         if not _has_required_synthesis_outputs():
+            try:
+                required_grace_sec = max(0, min(int((os.environ.get("SHERPA_SYNTHESIZE_REQUIRED_GRACE_SEC") or "8").strip()), 60))
+            except Exception:
+                required_grace_sec = 8
+            if required_grace_sec > 0 and _required_synthesis_grace_wait(required_grace_sec):
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    f"synthesize: required scaffold became complete during grace wait ({required_grace_sec}s)",
+                )
+            else:
+                required_status_before = _synthesis_output_status()
+                if required_status_before.get("scan_error_count"):
+                    _wf_log(
+                        cast(dict[str, Any], state),
+                        "synthesize: required scaffold check saw scan errors: "
+                        + ", ".join(str(x) for x in (required_status_before.get("scan_errors") or [])[:3]),
+                    )
             remaining_for_required = _remaining_time_budget_sec(state, min_timeout=0)
-            if remaining_for_required > 0:
+            if remaining_for_required > 0 and not _has_required_synthesis_outputs():
                 _wf_log(
                     cast(dict[str, Any], state),
                     "synthesize: required scaffold still missing; running forced required-scaffold repair",
@@ -2753,7 +2779,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 _run_required_scaffold_repair(remaining_for_required)
             if not _has_required_synthesis_outputs():
                 missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
-                raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}")
+                diag = _synthesis_output_status()
+                diag_bits: list[str] = []
+                if int(diag.get("scan_error_count") or 0) > 0:
+                    diag_bits.append(f"scan_errors={int(diag.get('scan_error_count') or 0)}")
+                harness_count = len(list(diag.get("harnesses") or []))
+                diag_bits.append(f"harnesses={harness_count}")
+                diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
+                raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
