@@ -424,6 +424,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     target_node_name = str(payload.get("target_node_name") or "").strip()
     worker_resources = _k8s_worker_resources()
     run_build_as_root = stage_name == "build" and _k8s_build_stage_runs_as_root()
+    resume_repo_root = str(payload.get("resume_repo_root") or "").strip()
     worker_security_context: dict[str, object] = {
         "allowPrivilegeEscalation": False,
         "runAsNonRoot": True,
@@ -490,7 +491,14 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                     "mkdir -p /shared/output/_k8s_jobs /shared/output/.opencode-home\n"
                                     "chown -R 10001:10001 /shared/output/_k8s_jobs /shared/output/.opencode-home || true\n"
                                     "chmod -R a+rwX /shared/output/_k8s_jobs /shared/output/.opencode-home || true\n"
+                                    "if [ -n \"${SHERPA_RESUME_REPO_ROOT:-}\" ] && [ -d \"${SHERPA_RESUME_REPO_ROOT}\" ]; then\n"
+                                    "  chown -R 10001:10001 \"${SHERPA_RESUME_REPO_ROOT}\" || true\n"
+                                    "  chmod -R a+rwX \"${SHERPA_RESUME_REPO_ROOT}\" || true\n"
+                                    "fi\n"
                                 ),
+                            ],
+                            "env": [
+                                {"name": "SHERPA_RESUME_REPO_ROOT", "value": resume_repo_root},
                             ],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
