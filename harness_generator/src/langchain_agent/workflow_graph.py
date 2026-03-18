@@ -4260,6 +4260,60 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         except Exception:
             return False
 
+    def _try_hotfix_source_build_dir_collision() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        collision_signals = [
+            "build/version",
+            "build/cmake",
+            "cmakelists.txt: could not find requested file",
+            "include(cmake/checkfileoffsetbits.cmake)",
+        ]
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        uses_repo_build = (
+            "BUILD_DIR = REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR=REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR = REPO_ROOT/'build'" in text
+        )
+        destructive_clean = ("shutil.rmtree(BUILD_DIR" in text or "rm -rf \"$BUILD_DIR\"" in text)
+        if not ((any(sig in diag for sig in collision_signals) or uses_repo_build) and uses_repo_build and destructive_clean):
+            return False
+
+        new_text = text
+        changed = False
+        if "BUILD_DIR = REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT / \"build\"",
+                "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+            changed = True
+        if "BUILD_DIR=REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR=REPO_ROOT / \"build\"",
+                "BUILD_DIR=REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+            changed = True
+        if "BUILD_DIR = REPO_ROOT/'build'" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT/'build'",
+                "BUILD_DIR = REPO_ROOT/'fuzz'/'build-work'",
+            )
+            changed = True
+
+        if new_text == text or not changed:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for source_build_dir_collision")
+            return True
+        except Exception:
+            return False
+
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():
             out = _success_out(
@@ -4302,6 +4356,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for fuzz_out_path_mismatch applied",
                 outcome="rule_fixed",
                 rule_hit="fuzz_out_path_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_source_build_dir_collision():
+            out = _success_out(
+                "local hotfix for source_build_dir_collision applied",
+                outcome="rule_fixed",
+                rule_hit="source_build_dir_collision",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out

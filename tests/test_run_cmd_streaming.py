@@ -91,6 +91,72 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert "zlib" in log_text
 
 
+def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"build\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n"
+        "print('preflight-ok')\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "0"
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "preflight-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
+
+
+def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n"
+        "print('safe-ok')\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "0"
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "safe-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert txt.count('BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"') == 1
+
+
 def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     gen.fuzz_dir = tmp_path / "fuzz"
