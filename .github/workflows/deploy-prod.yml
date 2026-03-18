@@ -245,7 +245,7 @@ jobs:
         shell: bash
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_PROD }}
-          MINIMAX_MODEL: ${{ vars.MINIMAX_MODEL_PROD || 'MiniMax-M2.5' }}
+          MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL_PROD || vars.MINIMAX_MODEL_PROD || 'MiniMax-M2.7-highspeed' }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_PROD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB_PROD || 'sherpa' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER_PROD || 'sherpa' }}
