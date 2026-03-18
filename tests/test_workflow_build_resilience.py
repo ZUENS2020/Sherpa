@@ -977,6 +977,36 @@ def test_fix_build_rule_missing_system_packages_declared(tmp_path: Path, monkeyp
     assert "bzip2" in dep_text
 
 
+def test_fix_build_rule_source_build_dir_collision(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"build\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "CMake Error at CMakeLists.txt:97 (include): include could not find requested file: cmake/CheckFileOffsetBits.cmake",
+            "build_stdout_tail": "CMake Error at build/version:1 (file): file failed to open for reading",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "source_build_dir_collision" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
+    assert "shutil.rmtree(BUILD_DIR)" in txt
+
+
 def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

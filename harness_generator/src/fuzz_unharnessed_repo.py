@@ -1562,6 +1562,59 @@ class NonOssFuzzHarnessGenerator:
             return True
         return norm.endswith("/build.py") or norm.endswith("/build.sh")
 
+    def _sanitize_build_py_for_source_build_collision(self) -> bool:
+        """Prevent generated build scripts from deleting source-controlled build/ trees.
+
+        Some upstream repos keep real files under REPO_ROOT/build/ (for example,
+        build/version and build/cmake/*). If fuzz/build.py reuses REPO_ROOT/build as
+        a scratch dir and cleans it, it destroys tracked source files before CMake runs.
+        We proactively rewrite that pattern to an isolated fuzz/build-work directory.
+        """
+
+        fuzz_dir = Path(getattr(self, "fuzz_dir", self.repo_root / FUZZ_DIR))
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        uses_repo_build = (
+            "BUILD_DIR = REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR=REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR = REPO_ROOT/'build'" in text
+        )
+        destructive_clean = ("shutil.rmtree(BUILD_DIR" in text or "rm -rf \"$BUILD_DIR\"" in text)
+        if not (uses_repo_build and destructive_clean):
+            return False
+
+        new_text = text
+        if "BUILD_DIR = REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT / \"build\"",
+                "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+        if "BUILD_DIR=REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR=REPO_ROOT / \"build\"",
+                "BUILD_DIR=REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+        if "BUILD_DIR = REPO_ROOT/'build'" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT/'build'",
+                "BUILD_DIR = REPO_ROOT/'fuzz'/'build-work'",
+            )
+
+        if new_text == text:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            print("[*] build preflight: rewrote BUILD_DIR to fuzz/build-work to avoid source build/ collision")
+            return True
+        except Exception:
+            return False
+
     @staticmethod
     def _vcpkg_triplet() -> str:
         raw = (os.environ.get("SHERPA_VCPKG_TRIPLET") or "").strip()
@@ -4277,6 +4330,8 @@ class NonOssFuzzHarnessGenerator:
 
         effective_env = env or os.environ.copy()
         exec_args = list(cmd)
+        if any(self._is_build_entry_arg(str(a)) for a in exec_args):
+            self._sanitize_build_py_for_source_build_collision()
         dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
         if self.docker_image:
             actual_cmd = self._dockerize_cmd(exec_args, cwd=cwd, env=effective_env)
