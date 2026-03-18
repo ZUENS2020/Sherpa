@@ -91,7 +91,7 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert "zlib" in log_text
 
 
-def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path):
+def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -107,13 +107,12 @@ def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path):
         encoding="utf-8",
     )
 
-    env = os.environ.copy()
-    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "0"
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
 
     rc, out, err = gen._run_cmd(
         [sys.executable, "build.py"],
         cwd=fuzz_dir,
-        env=env,
+        env=os.environ.copy(),
         timeout=10,
         idle_timeout=0,
     )
@@ -124,7 +123,7 @@ def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path):
     assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
 
 
-def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path):
+def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -140,13 +139,12 @@ def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path):
         encoding="utf-8",
     )
 
-    env = os.environ.copy()
-    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "0"
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
 
     rc, out, err = gen._run_cmd(
         [sys.executable, "build.py"],
         cwd=fuzz_dir,
-        env=env,
+        env=os.environ.copy(),
         timeout=10,
         idle_timeout=0,
     )
