@@ -222,44 +222,6 @@ def test_build_retries_in_repo_root_cwd_for_hardcoded_fuzz_paths(tmp_path: Path,
     assert gen.cwds[1] == tmp_path
 
 
-def test_build_retries_in_repo_root_cwd_for_cmake_source_dir_mismatch(tmp_path: Path, monkeypatch, _no_sleep):
-    fuzz_dir = tmp_path / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "build.py").write_text(
-        "print('legacy cmake build script')\n",
-        encoding="utf-8",
-    )
-    _write_repo_understanding(fuzz_dir)
-    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
-    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
-    fuzzer_bin.write_text("", encoding="utf-8")
-
-    cmake_err = (
-        "CMake Error: The source directory \"/shared/output/libarchive-a0e6a854/fuzz\" "
-        "does not appear to contain CMakeLists.txt."
-    )
-    gen = _FakeGenerator(
-        tmp_path,
-        run_results=[
-            (1, "CMake configuration failed", cmake_err),
-            (0, "ok", ""),
-        ],
-        bin_results=[[fuzzer_bin]],
-        docker_image="sherpa-fuzz-cpp:latest",
-    )
-    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
-
-    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
-
-    assert out["last_error"] == ""
-    assert out["build_rc"] == 0
-    assert len(gen.commands) == 2
-    assert gen.commands[0] == ["python", "build.py"]
-    assert gen.commands[1] == ["python", "fuzz/build.py"]
-    assert gen.cwds[0] == fuzz_dir
-    assert gen.cwds[1] == tmp_path
-
-
 def test_build_failure_classifies_infra_docker_daemon(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

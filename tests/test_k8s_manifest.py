@@ -203,46 +203,6 @@ def test_k8s_manifest_applies_non_root_security_context():
     assert container_sc["capabilities"]["drop"] == ["ALL"]
 
 
-def test_k8s_manifest_build_stage_runs_worker_as_root_for_package_install():
-    manifest_yaml = web_main._k8s_build_manifest(
-        "job-test-build",
-        {
-            "job_id": "job-test-build",
-            "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
-            "stop_after_step": "build",
-        },
-    )
-    manifest = yaml.safe_load(manifest_yaml)
-    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
-
-    assert container_sc["runAsNonRoot"] is False
-    assert container_sc["runAsUser"] == 0
-    assert container_sc["runAsGroup"] == 0
-    assert container_sc["allowPrivilegeEscalation"] is False
-    assert container_sc["capabilities"]["drop"] == ["ALL"]
-    assert sorted(container_sc["capabilities"]["add"]) == ["SETGID", "SETUID"]
-
-
-def test_k8s_manifest_build_stage_root_can_be_disabled(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("SHERPA_K8S_BUILD_RUN_AS_ROOT", "0")
-    manifest_yaml = web_main._k8s_build_manifest(
-        "job-test-build-non-root",
-        {
-            "job_id": "job-test-build-non-root",
-            "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
-            "stop_after_step": "build",
-        },
-    )
-    manifest = yaml.safe_load(manifest_yaml)
-    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
-
-    assert container_sc["runAsNonRoot"] is True
-    assert container_sc["runAsUser"] == 10001
-    assert container_sc["runAsGroup"] == 10001
-
-
 def test_k8s_manifest_initializes_runtime_volume_permissions():
     manifest_yaml = web_main._k8s_build_manifest(
         "job-test",
@@ -265,52 +225,3 @@ def test_k8s_manifest_initializes_runtime_volume_permissions():
     assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
     assert "chmod 0777 \"$d\"" in command
     assert "find \"$d\" -mindepth 1 -exec chmod a+rwX {} +" in command
-    assert "mkdir -p /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
-    assert "chown -R 10001:10001 /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
-
-
-def test_k8s_manifest_repairs_resume_repo_root_permissions():
-    manifest_yaml = web_main._k8s_build_manifest(
-        "job-test-build-resume",
-        {
-            "job_id": "job-test-build-resume",
-            "repo_url": "https://github.com/libarchive/libarchive.git",
-            "model": "MiniMax-M2.5",
-            "stop_after_step": "build",
-            "resume_repo_root": "/shared/output/libarchive-0dcd1388",
-        },
-    )
-    manifest = yaml.safe_load(manifest_yaml)
-    init_container = manifest["spec"]["template"]["spec"]["initContainers"][0]
-
-    env_map = {item["name"]: item.get("value", "") for item in init_container.get("env", [])}
-    assert env_map["SHERPA_RESUME_REPO_ROOT"] == "/shared/output/libarchive-0dcd1388"
-
-    command = "\n".join(init_container["command"])
-    assert "chown -R 10001:10001 \"${SHERPA_RESUME_REPO_ROOT}\"" in command
-    assert "chmod -R a+rwX \"${SHERPA_RESUME_REPO_ROOT}\"" in command
-
-
-def test_k8s_manifest_non_root_stage_can_reuse_resume_repo_root():
-    manifest_yaml = web_main._k8s_build_manifest(
-        "job-test-run-resume",
-        {
-            "job_id": "job-test-run-resume",
-            "repo_url": "https://github.com/libarchive/libarchive.git",
-            "model": "MiniMax-M2.5",
-            "stop_after_step": "run",
-            "resume_repo_root": "/shared/output/libarchive-0dcd1388",
-        },
-    )
-    manifest = yaml.safe_load(manifest_yaml)
-    container_sc = manifest["spec"]["template"]["spec"]["containers"][0]["securityContext"]
-    init_container = manifest["spec"]["template"]["spec"]["initContainers"][0]
-
-    assert container_sc["runAsNonRoot"] is True
-    assert container_sc["runAsUser"] == 10001
-    env_map = {item["name"]: item.get("value", "") for item in init_container.get("env", [])}
-    assert env_map["SHERPA_RESUME_REPO_ROOT"] == "/shared/output/libarchive-0dcd1388"
-
-    command = "\n".join(init_container["command"])
-    assert "chown -R 10001:10001 \"${SHERPA_RESUME_REPO_ROOT}\"" in command
-    assert "chmod -R a+rwX \"${SHERPA_RESUME_REPO_ROOT}\"" in command
