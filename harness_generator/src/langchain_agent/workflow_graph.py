@@ -4275,6 +4275,46 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             text = build_py.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return False
+
+    def _try_hotfix_missing_cmake_archive_target() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        target_miss_signals = [
+            "no rule to make target 'archive'",
+            'no rule to make target "archive"',
+            "unknown target archive",
+        ]
+        if not any(sig in diag for sig in target_miss_signals):
+            return False
+
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        new_text = text
+        changed = False
+        replacements = [
+            ("'--target', 'archive'", "'--target', 'all'"),
+            ('"--target", "archive"', '"--target", "all"'),
+            ("'--target','archive'", "'--target','all'"),
+            ('"--target","archive"', '"--target","all"'),
+        ]
+        for old, new in replacements:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+                changed = True
+
+        if not changed or new_text == text:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: replaced cmake --target archive with --target all")
+            return True
+        except Exception:
+            return False
         uses_repo_build = (
             "BUILD_DIR = REPO_ROOT / \"build\"" in text
             or "BUILD_DIR=REPO_ROOT / \"build\"" in text
@@ -4365,6 +4405,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for source_build_dir_collision applied",
                 outcome="rule_fixed",
                 rule_hit="source_build_dir_collision",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_cmake_archive_target():
+            out = _success_out(
+                "local hotfix for missing_cmake_archive_target applied",
+                outcome="rule_fixed",
+                rule_hit="missing_cmake_archive_target",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
