@@ -80,6 +80,8 @@ Hard requirements:
 - Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
 - Add an early input-size guard in the harness entrypoint before heavy parsing/work (for C/C++ style harnesses, prefer `if (size > 8192) return 0;` unless a smaller cap is clearly required).
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
+- In `fuzz/build.py`, do not hardcode a single top-level library artifact path. Resolve artifacts using multiple concrete candidates plus recursive fallback under the build directory (for example handle `build/libfoo.a`, `build/lib/libfoo.a`, `build/**/libfoo.so`, `build/**/libfoo.so.*`).
+- After repository build commands complete, `fuzz/build.py` must verify that the chosen library artifact path actually exists before compiling fuzzers, and fail only after trying the documented fallback candidates.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
 - You may use a repository-provided fuzz target only when its exact real target name is documented in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`. Never guess names such as `<name>-fuzzer` or `<name>_fuzzer`.
@@ -172,6 +174,8 @@ Constraints:
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
 - If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
+- If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
+- Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
 - If the failure is due to missing tools/packages (for example `aclocal`, `autoconf`, `automake`, `libtool`, missing `-dev` packages), prefer:
   1. declare the required vcpkg ports in `fuzz/system_packages.txt`
   2. make any matching `fuzz/build.py` adjustments needed for the new environment

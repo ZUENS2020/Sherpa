@@ -290,7 +290,7 @@ jobs:
         shell: bash
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_DEV }}
-          MINIMAX_MODEL: ${{ vars.MINIMAX_MODEL_DEV || 'MiniMax-M2.5' }}
+          MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL_DEV || vars.MINIMAX_MODEL_DEV || 'MiniMax-M2.7-highspeed' }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_DEV }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB_DEV || 'sherpa' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER_DEV || 'sherpa' }}
