@@ -1076,7 +1076,7 @@ def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch
     def _python_runner():
         return "python3"
 
-    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None, env=None):
         cmd_list = [str(x) for x in cmd]
         if cmd_list[:2] == ["python3", "build.py"]:
             out_dir = Path(cwd) / "out"

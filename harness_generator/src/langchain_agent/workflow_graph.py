@@ -4188,17 +4188,14 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             # Prefer dedicated link-fix rule for zlib linker failures.
             return False
         pkg_signals: list[tuple[list[str], str]] = [
-            (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib1g-dev"),
-            (["bzlib.h", "could not find bzip2"], "libbz2-dev"),
-            (["lzma.h", "could not find liblzma"], "liblzma-dev"),
-            (["zstd.h", "could not find zstd", "one of the modules 'libzstd'"], "libzstd-dev"),
-            (["lz4.h", "could not find lz4"], "liblz4-dev"),
-            (["openssl/", "could not find openssl"], "libssl-dev"),
-            (["expat.h", "could not find expat"], "libexpat1-dev"),
-            (["libxml/parser.h", "could not find libxml2"], "libxml2-dev"),
-            (["aclocal: not found", "automake: not found", "missing tools: automake"], "automake"),
-            (["autoconf: not found", "missing tools: autoconf"], "autoconf"),
-            (["libtool: not found", "libtoolize: not found", "missing tools: libtool"], "libtool"),
+            (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib"),
+            (["bzlib.h", "could not find bzip2"], "bzip2"),
+            (["lzma.h", "could not find liblzma"], "liblzma"),
+            (["zstd.h", "could not find zstd", "one of the modules 'libzstd'"], "zstd"),
+            (["lz4.h", "could not find lz4"], "lz4"),
+            (["openssl/", "could not find openssl"], "openssl"),
+            (["expat.h", "could not find expat"], "expat"),
+            (["libxml/parser.h", "could not find libxml2"], "libxml2"),
         ]
         need_pkgs: list[str] = []
         for needles, pkg in pkg_signals:
@@ -4223,7 +4220,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         dep_file.parent.mkdir(parents=True, exist_ok=True)
         body = (
             "# Auto-maintained by fix_build hotfix rules.\n"
-            "# Package names are Debian/Ubuntu apt identifiers.\n"
+            "# Package names are vcpkg ports (not apt package names).\n"
             + "\n".join(merged)
             + "\n"
         )
@@ -5730,19 +5727,41 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         build_timeout = max(30, min(rem, 600))
-        build = subprocess.run(
-            build_cmd,
-            cwd=build_cwd,
-            capture_output=True,
-            text=True,
-            timeout=build_timeout,
-        )
-        payload["build_rc"] = int(build.returncode)
-        payload["build_ok"] = build.returncode == 0
-        if build.returncode != 0:
-            payload["stdout_tail"] = (build.stdout or "")[-4000:]
-            payload["stderr_tail"] = (build.stderr or "")[-4000:]
-            raise HarnessGeneratorError(f"re-build build failed (rc={build.returncode})")
+        build_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                build_cmd,
+                cwd=build_cwd,
+                env=build_env,
+                timeout=build_timeout,
+                idle_timeout=0,
+            )
+            payload["build_rc"] = int(rc)
+            payload["build_ok"] = int(rc) == 0
+            if int(rc) != 0:
+                payload["stdout_tail"] = (out or "")[-4000:]
+                payload["stderr_tail"] = (err or "")[-4000:]
+                raise HarnessGeneratorError(f"re-build build failed (rc={rc})")
+        else:
+            build = subprocess.run(
+                build_cmd,
+                cwd=build_cwd,
+                capture_output=True,
+                text=True,
+                timeout=build_timeout,
+                env=build_env,
+            )
+            payload["build_rc"] = int(build.returncode)
+            payload["build_ok"] = build.returncode == 0
+            if build.returncode != 0:
+                payload["stdout_tail"] = (build.stdout or "")[-4000:]
+                payload["stderr_tail"] = (build.stderr or "")[-4000:]
+                raise HarnessGeneratorError(f"re-build build failed (rc={build.returncode})")
     except Exception as e:
         payload["error"] = str(e)
 
@@ -5918,16 +5937,35 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in re-run workspace rebuild")
 
         build_timeout = max(30, min(rem, 600))
-        build = subprocess.run(
-            build_cmd,
-            cwd=build_cwd,
-            capture_output=True,
-            text=True,
-            timeout=build_timeout,
-        )
-        if build.returncode != 0:
-            err_tail = ((build.stderr or "") + "\n" + (build.stdout or ""))[-1200:]
-            raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={build.returncode}): {err_tail}")
+        build_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                build_cmd,
+                cwd=build_cwd,
+                env=build_env,
+                timeout=build_timeout,
+                idle_timeout=0,
+            )
+            if int(rc) != 0:
+                err_tail = ((err or "") + "\n" + (out or ""))[-1200:]
+                raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={rc}): {err_tail}")
+        else:
+            build = subprocess.run(
+                build_cmd,
+                cwd=build_cwd,
+                capture_output=True,
+                text=True,
+                timeout=build_timeout,
+                env=build_env,
+            )
+            if build.returncode != 0:
+                err_tail = ((build.stderr or "") + "\n" + (build.stdout or ""))[-1200:]
+                raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={build.returncode}): {err_tail}")
         return clone_root
 
     def _guess_fuzzer_from_workspace(workdir: Path) -> str:
@@ -6050,12 +6088,19 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 raise HarnessGeneratorError(f"re-run fuzzer binary not found after workspace rebuild: {fuzzer_bin}")
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         repro_timeout = max(20, min(rem, 180))
+        repro_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                repro_env = gen._compose_vcpkg_runtime_env(repro_env, repo_root=workdir)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         repro = subprocess.run(
             [str(fuzzer_bin), "-runs=1", str(artifact_path)],
             cwd=workdir,
             capture_output=True,
             text=True,
             timeout=repro_timeout,
+            env=repro_env,
         )
         payload["reproduce_rc"] = int(repro.returncode)
         payload["reproduce_ok"] = repro.returncode != 0
