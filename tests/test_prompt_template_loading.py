@@ -74,6 +74,9 @@ def test_synthesize_prompts_require_observed_target_alignment():
     assert "do not use `-lfuzzer`" in synth
     assert "input-size guard" in synth
     assert "if (size > 8192) return 0;" in synth
+    assert "FIRST-PASS QUALITY GATE" in synth
+    assert "you MUST declare matching vcpkg ports" in synth
+    assert "Never keep contradictory \"feature disabled but still linked\" states" in synth
     assert "fuzz/observed_target.json" in scaffold
     assert "fuzz/repo_understanding.json" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
@@ -99,3 +102,6 @@ def test_fix_build_prompt_prefers_target_alignment_and_concrete_seed_repairs():
     assert "If `fuzz/build_runtime_facts.json` is missing or weak" in out
     assert "forbidden link flags" in out
     assert "input-size guard" in out
+    assert "cannot find -l..." in out
+    assert "MUST create or update `fuzz/system_packages.txt` in the same attempt" in out
+    assert "First repair pass must be build-ready" in out

@@ -98,6 +98,9 @@ Hard requirements:
   - `Technical reason: ...`
   - `Relation: ...`
   - `Harness file: ...`
+- FIRST-PASS QUALITY GATE (non-optional): before writing `./done`, verify `fuzz/build.py`, `fuzz/build_strategy.json`, and `fuzz/system_packages.txt` are internally consistent for the first build attempt.
+- If `fuzz/build.py` links any of `-lz`, `-lbz2`, `-llzma`, `-llz4`, `-lzstd`, `-lcrypto`, `-lssl`, `-lxml2`, or `-lexpat`, you MUST declare matching vcpkg ports in `fuzz/system_packages.txt` in the same attempt.
+- If the build strategy intentionally disables those features, remove their matching link flags from `fuzz/build.py` in the same attempt. Never keep contradictory "feature disabled but still linked" states.
 
 Additional instruction from coordinator:
 {{hint}}
@@ -178,6 +181,8 @@ Constraints:
 - If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
 - Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
 - If logs show `Could NOT find ...` for key optional libraries, do not treat that as acceptable completion; update `fuzz/system_packages.txt` with the matching vcpkg ports and make the build script consume them.
+- If logs show linker errors like `cannot find -l...`, you MUST create or update `fuzz/system_packages.txt` in the same attempt (port mapping examples: `-lz`→`zlib`, `-lbz2`→`bzip2`, `-llzma`→`liblzma`, `-llz4`→`lz4`, `-lcrypto/-lssl`→`openssl`, `-lxml2`→`libxml2`, `-lexpat`→`expat`).
+- First repair pass must be build-ready: do not defer dependency declaration to a later round when the current log already names missing link libraries.
 - If the failure is due to missing tools/packages (for example `aclocal`, `autoconf`, `automake`, `libtool`, missing `-dev` packages), prefer:
   1. declare the required vcpkg ports in `fuzz/system_packages.txt`
   2. make any matching `fuzz/build.py` adjustments needed for the new environment
