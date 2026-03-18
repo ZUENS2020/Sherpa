@@ -2971,6 +2971,39 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 return default
             return raw in {"1", "true", "yes", "on"}
 
+        def _read_declared_system_packages(dep_file: Path) -> set[str]:
+            if not dep_file.is_file():
+                return set()
+            declared: set[str] = set()
+            try:
+                for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw_line.split("#", 1)[0].strip().lower()
+                    if not line:
+                        continue
+                    if re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", line):
+                        declared.add(line)
+            except Exception:
+                return set()
+            return declared
+
+        def _detect_missing_optional_ports(stdout_text: str, stderr_text: str) -> list[str]:
+            combined = ((stdout_text or "") + "\n" + (stderr_text or "")).lower()
+            signal_to_port: list[tuple[list[str], str]] = [
+                (["could not find zlib", "zlib_library", "zlib_include_dir"], "zlib"),
+                (["could not find bzip2", "bzip2_libraries", "bzip2_include_dir"], "bzip2"),
+                (["could not find liblzma", "liblzma_library", "liblzma_include_dir"], "liblzma"),
+                (["could not find lz4", "lz4_library", "lz4_include_dir"], "lz4"),
+                (["could not find zstd", "zstd_library", "zstd_include_dir"], "zstd"),
+                (["could not find openssl", "openssl_crypto_library", "openssl_include_dir"], "openssl"),
+                (["could not find libxml2", "libxml2_library", "libxml2_include_dir"], "libxml2"),
+                (["could not find expat", "expat_library", "expat_include_dir"], "expat"),
+            ]
+            missing: list[str] = []
+            for needles, port in signal_to_port:
+                if any(n in combined for n in needles) and port not in missing:
+                    missing.append(port)
+            return missing
+
         def _list_static_libs_for_diagnostics() -> str:
             build_dir = gen.repo_root / "build"
             if not build_dir.exists():
@@ -3264,6 +3297,36 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         next_state["fix_action_type"] = ""
         next_state["fix_effect"] = ""
         next_state["last_error"] = ""
+
+        enforce_declared_optional_deps = _env_bool("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", True)
+        if enforce_declared_optional_deps:
+            dep_file = fuzz_dir / "system_packages.txt"
+            declared_ports = _read_declared_system_packages(dep_file)
+            missing_ports = [
+                p for p in _detect_missing_optional_ports(final_out, final_err)
+                if p not in declared_ports
+            ]
+            if missing_ports:
+                next_state["last_error"] = (
+                    "build succeeded with missing optional libraries but "
+                    "fuzz/system_packages.txt does not declare required vcpkg ports: "
+                    + ", ".join(missing_ports)
+                )
+                next_state["message"] = "build missing declared optional deps"
+                next_state["build_error_kind"] = "source"
+                next_state["build_error_code"] = "missing_system_packages_declared"
+                next_state["restart_to_plan"] = False
+                next_state["restart_to_plan_reason"] = ""
+                next_state["restart_to_plan_stage"] = ""
+                next_state["restart_to_plan_error_text"] = ""
+                next_state["restart_to_plan_report_path"] = ""
+                _wf_log(
+                    cast(dict[str, Any], next_state),
+                    "<- build gate missing-optional-deps "
+                    f"ports={','.join(missing_ports)} dt={_fmt_dt(time.perf_counter()-t0)}",
+                )
+                return next_state
+
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
