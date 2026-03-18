@@ -82,6 +82,7 @@ Hard requirements:
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
 - In `fuzz/build.py`, do not hardcode a single top-level library artifact path. Resolve artifacts using multiple concrete candidates plus recursive fallback under the build directory (for example handle `build/libfoo.a`, `build/lib/libfoo.a`, `build/**/libfoo.so`, `build/**/libfoo.so.*`).
 - After repository build commands complete, `fuzz/build.py` must verify that the chosen library artifact path actually exists before compiling fuzzers, and fail only after trying the documented fallback candidates.
+- Do not silently accept optional dependency downgrades. When CMake/build output indicates missing key libraries (for example zlib/bzip2/lzma/lz4/zstd/openssl/libxml2/expat), declare matching vcpkg ports in `fuzz/system_packages.txt` and keep build configuration aligned with those dependencies.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
 - You may use a repository-provided fuzz target only when its exact real target name is documented in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`. Never guess names such as `<name>-fuzzer` or `<name>_fuzzer`.
@@ -176,6 +177,7 @@ Constraints:
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
 - If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
 - Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
+- If logs show `Could NOT find ...` for key optional libraries, do not treat that as acceptable completion; update `fuzz/system_packages.txt` with the matching vcpkg ports and make the build script consume them.
 - If the failure is due to missing tools/packages (for example `aclocal`, `autoconf`, `automake`, `libtool`, missing `-dev` packages), prefer:
   1. declare the required vcpkg ports in `fuzz/system_packages.txt`
   2. make any matching `fuzz/build.py` adjustments needed for the new environment

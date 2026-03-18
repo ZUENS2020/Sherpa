@@ -129,6 +129,71 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert gen.commands[1][-1] == "--clean"
 
 
+def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (
+                0,
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n",
+                "",
+            )
+        ],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 0
+    assert out["message"] == "build missing declared optional deps"
+    assert "system_packages.txt" in out["last_error"]
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "missing_system_packages_declared"
+    assert workflow_graph._route_after_build_state(out) == "fix_build"
+
+
+def test_build_gate_allows_declared_optional_ports(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (
+                0,
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n",
+                "",
+            )
+        ],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["last_error"] == ""
+    assert out["message"].startswith("built (")
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
