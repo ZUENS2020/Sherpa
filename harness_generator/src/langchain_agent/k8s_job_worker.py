@@ -3,9 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-import subprocess
 import traceback
-import tempfile
 from pathlib import Path
 
 from fuzz_relative_functions import fuzz_logic
@@ -24,141 +22,13 @@ def _decode_payload() -> dict:
 
 
 def _write_json(path: Path, payload: dict) -> None:
-    body = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    _write_text_resilient(path, body)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_error(path: Path, text: str) -> None:
-    _write_text_resilient(path, (text or "").strip() + "\n")
-
-
-def _write_text_resilient(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(body, encoding="utf-8")
-        return
-    except PermissionError:
-        # Root-owned stale files may exist from previous runs; if directory is
-        # writable, removing the old inode allows a clean write.
-        try:
-            if path.exists():
-                path.unlink()
-            path.write_text(body, encoding="utf-8")
-            return
-        except Exception:
-            pass
-
-    fallback = Path(tempfile.gettempdir()) / "sherpa-k8s-worker-write-fallback.log"
-    try:
-        fallback.write_text(body, encoding="utf-8")
-    except Exception:
-        pass
-    print(f"[k8s-worker] warn: failed to write {path}; wrote fallback={fallback}")
-
-
-def _append_git_safe_directory_env(path_value: str) -> None:
-    key = "safe.directory"
-    val = (path_value or "").strip()
-    if not val:
-        return
-    try:
-        idx = int((os.environ.get("GIT_CONFIG_COUNT") or "0").strip())
-        if idx < 0:
-            idx = 0
-    except Exception:
-        idx = 0
-    os.environ[f"GIT_CONFIG_KEY_{idx}"] = key
-    os.environ[f"GIT_CONFIG_VALUE_{idx}"] = val
-    os.environ["GIT_CONFIG_COUNT"] = str(idx + 1)
-
-
-def _configure_git_safe_directory(payload: dict) -> None:
-    # Apply both env-based and git-config based safe.directory so git subprocess
-    # calls remain robust even when previous stages created root-owned repos.
-    values: list[str] = ["*", "/shared/output"]
-    for k in ("resume_repo_root", "re_workspace_root"):
-        v = str(payload.get(k) or "").strip()
-        if v:
-            values.append(v)
-
-    raw_extra = (os.environ.get("SHERPA_GIT_SAFE_DIRECTORY_EXTRA") or "").strip()
-    if raw_extra:
-        values.extend([x.strip() for x in raw_extra.split(",") if x.strip()])
-
-    unique_values: list[str] = []
-    seen: set[str] = set()
-    for v in values:
-        if v in seen:
-            continue
-        seen.add(v)
-        unique_values.append(v)
-
-    for v in unique_values:
-        _append_git_safe_directory_env(v)
-
-    for v in unique_values:
-        try:
-            subprocess.run(
-                ["git", "config", "--global", "--add", "safe.directory", v],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except Exception:
-            continue
-
-
-def _repair_shared_permissions(payload: dict | None = None) -> None:
-    if os.geteuid() != 0:
-        return
-    raw_targets = (
-        os.environ.get(
-            "SHERPA_K8S_PERMISSION_REPAIR_TARGETS",
-            "/shared/output/_k8s_jobs,/shared/output/.opencode-home",
-        )
-        or ""
-    ).strip()
-    targets = [x.strip() for x in raw_targets.split(",") if x.strip()]
-
-    resume_repo_root = str((payload or {}).get("resume_repo_root") or "").strip()
-    if resume_repo_root:
-        targets.extend(
-            [
-                resume_repo_root,
-                f"{resume_repo_root}/.git",
-                f"{resume_repo_root}/.git/sherpa-opencode",
-            ]
-        )
-
-    # Keep ordering stable while removing duplicates.
-    deduped_targets: list[str] = []
-    seen: set[str] = set()
-    for t in targets:
-        if t in seen:
-            continue
-        seen.add(t)
-        deduped_targets.append(t)
-    targets = deduped_targets
-
-    if not targets:
-        return
-    script = ["set -eu"]
-    for t in targets:
-        script.append(f'if [ -e "{t}" ]; then')
-        script.append(f'  chown -R 10001:10001 "{t}" || true')
-        script.append(f'  chmod -R a+rwX "{t}" || true')
-        script.append("fi")
-    try:
-        subprocess.run(
-            ["sh", "-lc", "\n".join(script)],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except Exception:
-        pass
+    path.write_text((text or "").strip() + "\n", encoding="utf-8")
 
 
 def _parse_int_keep_zero(value: object, default: int) -> int:
@@ -177,7 +47,6 @@ def main() -> int:
     job_id = str(payload.get("job_id") or "")
     result_path = Path(str(payload.get("result_path") or f"/shared/output/_k8s_jobs/{job_id}/result.json")).expanduser()
     error_path = Path(str(payload.get("error_path") or f"/shared/output/_k8s_jobs/{job_id}/error.txt")).expanduser()
-    _configure_git_safe_directory(payload)
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
@@ -224,25 +93,17 @@ def main() -> int:
     except Exception as e:
         tb = traceback.format_exc()
         msg = f"{e}\n{tb}"
-        try:
-            _write_error(error_path, msg)
-        except Exception:
-            pass
-        try:
-            _write_json(
-                result_path,
-                {
-                    "ok": False,
-                    "job_id": job_id,
-                    "error": str(e),
-                },
-            )
-        except Exception:
-            pass
+        _write_error(error_path, msg)
+        _write_json(
+            result_path,
+            {
+                "ok": False,
+                "job_id": job_id,
+                "error": str(e),
+            },
+        )
         print(f"[k8s-worker] failed job_id={job_id}: {e}")
         return 1
-    finally:
-        _repair_shared_permissions(payload)
 
 
 if __name__ == "__main__":

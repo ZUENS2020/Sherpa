@@ -3032,10 +3032,6 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 ("no such file or directory" in combined and "fuzz/" in combined)
                 or "can't open file '/work/fuzz/fuzz/" in combined
                 or "can't open file 'fuzz/" in combined
-                or (
-                    "does not appear to contain cmakelists.txt" in combined
-                    and "/fuzz" in combined
-                )
             )
 
         for attempt in range(1, max_local_attempts + 1):

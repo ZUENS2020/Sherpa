@@ -1511,8 +1511,6 @@ class NonOssFuzzHarnessGenerator:
             "docker",
             "run",
             "--rm",
-            "--user",
-            "root",
             "--name",
             _docker_container_name(mount_src, cmd),
             "--label",
@@ -1591,26 +1589,18 @@ class NonOssFuzzHarnessGenerator:
                                 echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
                             elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
-                            else
-                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v dnf >/dev/null 2>&1; then
                             if ! dnf install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
-                            else
-                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v yum >/dev/null 2>&1; then
                             if ! yum install -y $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
-                            else
-                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         elif command -v apk >/dev/null 2>&1; then
                             if ! apk add --no-cache $missing_pkgs; then
                                 echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
-                            else
-                                chown -R 10001:10001 /work 2>/dev/null || true
                             fi
                         else
                             echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
@@ -1648,31 +1638,6 @@ class NonOssFuzzHarnessGenerator:
             shell_parts.append(f"mkdir -p {shlex.quote(artifacts_path)}")
         if dep_setup:
             shell_parts.append(dep_setup)
-
-        if should_autoinstall and _is_truthy_env("SHERPA_BUILD_EXEC_DROP_PRIVILEGES", True):
-            run_uid = str((os.environ.get("SHERPA_BUILD_EXEC_UID") or "10001").strip() or "10001")
-            run_gid = str((os.environ.get("SHERPA_BUILD_EXEC_GID") or run_uid).strip() or run_uid)
-            py_drop_code = (
-                "import os,sys; "
-                "uid=int(sys.argv[1]); gid=int(sys.argv[2]); "
-                "os.setgid(gid); os.setuid(uid); "
-                "os.execvp(sys.argv[3], sys.argv[3:])"
-            )
-            shell_parts.append(f"_sherpa_exec_cmd={shlex.quote(exec_cmd)}")
-            shell_parts.append(
-                "if [ \"$(id -u)\" = \"0\" ]; then\n"
-                "  _sherpa_py=\"\"\n"
-                "  if command -v python3 >/dev/null 2>&1; then\n"
-                "    _sherpa_py=\"$(command -v python3)\"\n"
-                "  elif command -v python >/dev/null 2>&1; then\n"
-                "    _sherpa_py=\"$(command -v python)\"\n"
-                "  fi\n"
-                "  if [ -n \"$_sherpa_py\" ]; then\n"
-                f"    exec \"$_sherpa_py\" -c {shlex.quote(py_drop_code)} {shlex.quote(run_uid)} {shlex.quote(run_gid)} sh -lc \"$_sherpa_exec_cmd\"\n"
-                "  fi\n"
-                "  echo \"[warn] (native/deps) running as root: no python interpreter available for uid drop\"\n"
-                "fi"
-            )
         shell_parts.append(f"exec {exec_cmd}")
         return ["sh", "-lc", "\n".join(shell_parts)]
 

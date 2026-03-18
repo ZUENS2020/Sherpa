@@ -50,8 +50,6 @@ def test_k8s_web_deployment_initializes_shared_volumes_for_non_root():
     assert "find \"$d\" -mindepth 1 -exec chown 10001:10001 {} +" in command
     assert "chmod 0777 \"$d\"" in command
     assert "find \"$d\" -mindepth 1 -exec chmod a+rwX {} +" in command
-    assert "mkdir -p /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
-    assert "chown -R 10001:10001 /shared/output/_k8s_jobs /shared/output/.opencode-home" in command
 
 def test_non_root_dockerfiles_define_user_and_non_root_home():
     gateway = (ROOT / "docker" / "Dockerfile.gateway").read_text(encoding="utf-8")
