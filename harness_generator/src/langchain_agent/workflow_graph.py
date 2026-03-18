@@ -4275,46 +4275,6 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             text = build_py.read_text(encoding="utf-8", errors="replace")
         except Exception:
             return False
-
-    def _try_hotfix_missing_cmake_archive_target() -> bool:
-        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
-        target_miss_signals = [
-            "no rule to make target 'archive'",
-            'no rule to make target "archive"',
-            "unknown target archive",
-        ]
-        if not any(sig in diag for sig in target_miss_signals):
-            return False
-
-        build_py = gen.repo_root / "fuzz" / "build.py"
-        if not build_py.is_file():
-            return False
-        try:
-            text = build_py.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            return False
-
-        new_text = text
-        changed = False
-        replacements = [
-            ("'--target', 'archive'", "'--target', 'all'"),
-            ('"--target", "archive"', '"--target", "all"'),
-            ("'--target','archive'", "'--target','all'"),
-            ('"--target","archive"', '"--target","all"'),
-        ]
-        for old, new in replacements:
-            if old in new_text:
-                new_text = new_text.replace(old, new)
-                changed = True
-
-        if not changed or new_text == text:
-            return False
-        try:
-            build_py.write_text(new_text, encoding="utf-8", errors="replace")
-            _wf_log(cast(dict[str, Any], state), "fix_build: replaced cmake --target archive with --target all")
-            return True
-        except Exception:
-            return False
         uses_repo_build = (
             "BUILD_DIR = REPO_ROOT / \"build\"" in text
             or "BUILD_DIR=REPO_ROOT / \"build\"" in text
@@ -4353,6 +4313,87 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             return True
         except Exception:
             return False
+
+    def _try_hotfix_missing_cmake_archive_target() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        target_miss_signals = [
+            "no rule to make target 'archive'",
+            'no rule to make target "archive"',
+            "unknown target archive",
+        ]
+        if not any(sig in diag for sig in target_miss_signals):
+            return False
+
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        changed = False
+        new_text = text
+        replacements = [
+            ("'--target', 'archive'", "'--target', 'all'"),
+            ('"--target", "archive"', '"--target", "all"'),
+            ("'--target','archive'", "'--target','all'"),
+            ('"--target","archive"', '"--target","all"'),
+        ]
+        for old, new in replacements:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+                changed = True
+        if changed and new_text != text:
+            try:
+                build_py.write_text(new_text, encoding="utf-8", errors="replace")
+                _wf_log(cast(dict[str, Any], state), "fix_build: replaced cmake --target archive with --target all")
+            except Exception:
+                return False
+
+        pkg_signals: list[tuple[list[str], str]] = [
+            (['could not find zlib', 'zlib_library', 'zlib_include_dir'], 'zlib'),
+            (['could not find bzip2', 'bzip2_libraries', 'bzip2_include_dir'], 'bzip2'),
+            (['could not find liblzma', 'liblzma_library', 'liblzma_include_dir'], 'liblzma'),
+            (['could not find lz4', 'lz4_library', 'lz4_include_dir'], 'lz4'),
+            (['could not find zstd', "one of the modules 'libzstd'", 'zstd_library'], 'zstd'),
+            (['could not find openssl', 'openssl_crypto_library', 'openssl_include_dir'], 'openssl'),
+            (['could not find expat', 'expat_library', 'expat_include_dir'], 'expat'),
+            (['could not find libxml2', 'libxml2_library', 'libxml2_include_dir'], 'libxml2'),
+        ]
+        need_pkgs: list[str] = []
+        for needles, pkg in pkg_signals:
+            if any(n in diag for n in needles):
+                need_pkgs.append(pkg)
+        if need_pkgs:
+            dep_file = gen.repo_root / 'fuzz' / 'system_packages.txt'
+            existing: list[str] = []
+            if dep_file.is_file():
+                try:
+                    for line in dep_file.read_text(encoding='utf-8', errors='replace').splitlines():
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        existing.append(line)
+                except Exception:
+                    existing = []
+            merged = sorted(set(existing) | set(need_pkgs))
+            if merged != sorted(set(existing)):
+                dep_file.parent.mkdir(parents=True, exist_ok=True)
+                body = (
+                    '# Auto-maintained by fix_build hotfix rules.\n'
+                    '# Package names are vcpkg ports (not apt package names).\n'
+                    + '\n'.join(merged)
+                    + '\n'
+                )
+                try:
+                    dep_file.write_text(body, encoding='utf-8', errors='replace')
+                    _wf_log(cast(dict[str, Any], state), f'fix_build: declared system packages in {dep_file}')
+                    changed = True
+                except Exception:
+                    pass
+
+        return changed
 
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():

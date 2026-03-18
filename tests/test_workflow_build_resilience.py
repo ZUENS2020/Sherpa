@@ -1022,7 +1022,11 @@ def test_fix_build_rule_missing_cmake_archive_target(tmp_path: Path, monkeypatch
         {
             "generator": gen,
             "last_error": "gmake: *** No rule to make target 'archive'.  Stop.",
-            "build_stdout_tail": "",
+            "build_stdout_tail": (
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n"
+                "-- Could NOT find OpenSSL, try to set the path to OpenSSL root folder "
+                "(missing: OPENSSL_CRYPTO_LIBRARY OPENSSL_INCLUDE_DIR)\n"
+            ),
             "build_stderr_tail": "",
         }
     )
@@ -1031,6 +1035,9 @@ def test_fix_build_rule_missing_cmake_archive_target(tmp_path: Path, monkeypatch
     txt = build_py.read_text(encoding="utf-8")
     assert "'--target', 'all'" in txt
     assert "'--target', 'archive'" not in txt
+    dep_text = (fuzz_dir / "system_packages.txt").read_text(encoding="utf-8")
+    assert "zlib" in dep_text
+    assert "openssl" in dep_text
 
 
 def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):
