@@ -1661,7 +1661,7 @@ class NonOssFuzzHarnessGenerator:
                     fi
                 fi
                 if [ -x "$vcpkg_root/bootstrap-vcpkg.sh" ]; then
-                    if ! "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics; then
+                    if ! (cd "$vcpkg_root" && ./bootstrap-vcpkg.sh -disableMetrics); then
                         echo "[warn] ({log_prefix}) vcpkg bootstrap failed; skipping auto-install"
                     fi
                 fi
