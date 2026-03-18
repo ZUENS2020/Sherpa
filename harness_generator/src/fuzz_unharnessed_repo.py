@@ -136,6 +136,8 @@ FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
+VCPKG_REPO_DIR = (os.environ.get("SHERPA_VCPKG_REPO_DIR") or "vcpkg").strip() or "vcpkg"
+VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or ".vcpkg_installed").strip() or ".vcpkg_installed"
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -1484,6 +1486,14 @@ class NonOssFuzzHarnessGenerator:
                 # Keys (if used)
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
+                "VCPKG_ROOT",
+                "VCPKG_DEFAULT_TRIPLET",
+                "VCPKG_INSTALLED_DIR",
+                "CMAKE_TOOLCHAIN_FILE",
+                "CMAKE_PREFIX_PATH",
+                "LD_LIBRARY_PATH",
+                "LIBRARY_PATH",
+                "PKG_CONFIG_PATH",
             }
             allow_prefixes = (
                 "SHERPA_",
@@ -1552,10 +1562,111 @@ class NonOssFuzzHarnessGenerator:
             return True
         return norm.endswith("/build.py") or norm.endswith("/build.sh")
 
+    @staticmethod
+    def _vcpkg_triplet() -> str:
+        raw = (os.environ.get("SHERPA_VCPKG_TRIPLET") or "").strip()
+        if raw:
+            return raw
+        arch = (os.environ.get("TARGETARCH") or "").strip().lower()
+        if not arch:
+            arch = (os.uname().machine or "").strip().lower()
+        if arch in {"amd64", "x86_64"}:
+            return "x64-linux"
+        if arch in {"arm64", "aarch64"}:
+            return "arm64-linux"
+        return "x64-linux"
+
+    def _compose_vcpkg_runtime_env(self, base_env: Optional[Dict[str, str]] = None, *, repo_root: Optional[Path] = None) -> Dict[str, str]:
+        env = dict(base_env or os.environ.copy())
+        rr = Path(repo_root or self.repo_root)
+        vcpkg_root = rr / VCPKG_REPO_DIR
+        installed_root = rr / VCPKG_INSTALLED_DIR
+        triplet = self._vcpkg_triplet()
+
+        env["VCPKG_ROOT"] = str(vcpkg_root)
+        env.setdefault("VCPKG_DEFAULT_TRIPLET", triplet)
+        env["VCPKG_INSTALLED_DIR"] = str(installed_root)
+        env["CMAKE_TOOLCHAIN_FILE"] = str(vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake")
+
+        install_triplet = installed_root / triplet
+        include_dir = install_triplet / "include"
+        lib_dir = install_triplet / "lib"
+        dbg_lib_dir = install_triplet / "debug" / "lib"
+        pkgconfig_dir = lib_dir / "pkgconfig"
+
+        def _prepend_env_path(key: str, values: Sequence[Path]) -> None:
+            existing = (env.get(key) or "").strip()
+            merged: List[str] = []
+            seen: set[str] = set()
+            for p in values:
+                txt = str(p)
+                if not txt or txt in seen:
+                    continue
+                seen.add(txt)
+                merged.append(txt)
+            if existing:
+                for item in existing.split(":"):
+                    it = item.strip()
+                    if it and it not in seen:
+                        seen.add(it)
+                        merged.append(it)
+            env[key] = ":".join(merged)
+
+        _prepend_env_path("CMAKE_PREFIX_PATH", [install_triplet])
+        _prepend_env_path("C_INCLUDE_PATH", [include_dir])
+        _prepend_env_path("CPLUS_INCLUDE_PATH", [include_dir])
+        _prepend_env_path("CPATH", [include_dir])
+        _prepend_env_path("LIBRARY_PATH", [lib_dir, dbg_lib_dir])
+        _prepend_env_path("LD_LIBRARY_PATH", [lib_dir, dbg_lib_dir])
+        _prepend_env_path("PKG_CONFIG_PATH", [pkgconfig_dir])
+        return env
+
     def _build_system_dep_setup(self, dep_file: str, *, log_prefix: str) -> str:
         return textwrap.dedent(
             f"""
             dep_file={shlex.quote(dep_file)}
+            triplet={shlex.quote(self._vcpkg_triplet())}
+            repo_root="$(cd "$(dirname "$dep_file")/.." && pwd -P)"
+            vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
+            vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
+            export VCPKG_ROOT="$vcpkg_root"
+            export VCPKG_DEFAULT_TRIPLET="$triplet"
+            export VCPKG_INSTALLED_DIR="$vcpkg_installed"
+            export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+            export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+            export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
+            export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
+            export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
+            export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
+            export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+            export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+
+            if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                if [ ! -d "$vcpkg_root/.git" ]; then
+                    if [ -d /opt/vcpkg-template/.git ]; then
+                        echo "[*] ({log_prefix}) seeding vcpkg from image template"
+                        if ! cp -a /opt/vcpkg-template "$vcpkg_root"; then
+                            echo "[warn] ({log_prefix}) failed to copy /opt/vcpkg-template"
+                        fi
+                    fi
+                fi
+                if [ ! -d "$vcpkg_root/.git" ]; then
+                    if command -v git >/dev/null 2>&1; then
+                        echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
+                        if ! git clone --depth 1 https://github.com/microsoft/vcpkg "$vcpkg_root"; then
+                            echo "[warn] ({log_prefix}) unable to clone vcpkg; skipping auto-install"
+                        fi
+                    else
+                        echo "[warn] ({log_prefix}) git is missing; cannot bootstrap vcpkg"
+                    fi
+                fi
+                if [ -x "$vcpkg_root/bootstrap-vcpkg.sh" ]; then
+                    if ! "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics; then
+                        echo "[warn] ({log_prefix}) vcpkg bootstrap failed; skipping auto-install"
+                    fi
+                fi
+            fi
+
             if [ -f "$dep_file" ]; then
                 pkgs=""
                 while IFS= read -r line || [ -n "$line" ]; do
@@ -1570,40 +1681,24 @@ class NonOssFuzzHarnessGenerator:
                 done < "$dep_file"
 
                 if [ -n "$pkgs" ]; then
+                    if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                        echo "[warn] ({log_prefix}) vcpkg unavailable; skipping auto-install"
+                        exit 0
+                    fi
                     missing_pkgs=""
                     for p in $pkgs; do
-                        if command -v dpkg-query >/dev/null 2>&1; then
-                            if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-                                continue
-                            fi
+                        if "$vcpkg_root/vcpkg" list "$p:$triplet" 2>/dev/null | grep -Eq "^$p:$triplet\\s"; then
+                            continue
                         fi
                         missing_pkgs="$missing_pkgs $p"
                     done
 
                     if [ -z "$missing_pkgs" ]; then
-                        echo "[*] ({log_prefix}) all requested packages already installed; skipping"
+                        echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
                     else
-                        echo "[*] ({log_prefix}) installing from $dep_file:$missing_pkgs"
-                        if command -v apt-get >/dev/null 2>&1; then
-                            if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
-                                echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
-                            elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
-                            fi
-                        elif command -v dnf >/dev/null 2>&1; then
-                            if ! dnf install -y $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
-                            fi
-                        elif command -v yum >/dev/null 2>&1; then
-                            if ! yum install -y $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
-                            fi
-                        elif command -v apk >/dev/null 2>&1; then
-                            if ! apk add --no-cache $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
-                            fi
-                        else
-                            echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
+                        echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
+                        if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
+                            echo "[warn] ({log_prefix}) vcpkg install failed; continuing without auto-install"
                         fi
                     fi
                 fi
@@ -3129,6 +3224,7 @@ class NonOssFuzzHarnessGenerator:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
         env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")

@@ -66,7 +66,7 @@ def test_dockerize_autoinstall_triggers_for_build_py_from_fuzz_cwd(tmp_path: Pat
     assert "-w /work/fuzz" in joined
     assert "dep_file=/work/fuzz/system_packages.txt" in joined
     assert "set -u" in joined
-    assert "(docker/deps) installing from" in joined
+    assert "(docker/deps) installing vcpkg ports from" in joined
     assert "continuing without auto-install" in joined
     assert "exec python3 build.py" in joined
 

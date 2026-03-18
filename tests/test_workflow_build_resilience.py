@@ -584,9 +584,9 @@ def test_fix_build_rule_missing_system_packages_requires_env_rebuild(tmp_path: P
     out = workflow_graph._node_fix_build(
         {
             "generator": gen,
-            "last_error": "./build/autogen.sh: 58: aclocal: not found",
-            "build_stdout_tail": "Warning: Missing tools: autoconf, automake, libtool",
-            "build_stderr_tail": "",
+            "last_error": "Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "fatal error: bzlib.h: No such file or directory",
         }
     )
 
@@ -973,8 +973,8 @@ def test_fix_build_rule_missing_system_packages_declared(tmp_path: Path, monkeyp
     dep_file = fuzz_dir / "system_packages.txt"
     assert dep_file.is_file()
     dep_text = dep_file.read_text(encoding="utf-8")
-    assert "zlib1g-dev" in dep_text
-    assert "libbz2-dev" in dep_text
+    assert "zlib" in dep_text
+    assert "bzip2" in dep_text
 
 
 def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):

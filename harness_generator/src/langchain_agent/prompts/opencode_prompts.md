@@ -72,7 +72,7 @@ MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver repository-understanding artifacts first, then the smallest scaffold consistent with them.
 
-If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
+If external system dependencies are required, write vcpkg port names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
@@ -155,7 +155,7 @@ Constraints:
 - Only edit files under `fuzz/`
 - The only allowed file outside `fuzz/` is `./done` (sentinel). Any other path change is rejected by the workflow.
 - Do not modify repository source/build files outside `fuzz/` (for example: `*.c`, `*.cc`, `*.cpp`, `*.h`, `CMakeLists.txt`, `Makefile`, `configure`).
-- If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+- If external system deps are required, declare vcpkg port names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
 - If you change `fuzz/system_packages.txt`, still finish all other necessary `fuzz/` edits in the same attempt. Do not stop after only declaring packages if `fuzz/build.py` or harness glue also needs changes.
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
@@ -173,7 +173,7 @@ Constraints:
 - If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
 - If the failure is due to missing tools/packages (for example `aclocal`, `autoconf`, `automake`, `libtool`, missing `-dev` packages), prefer:
-  1. declare the required packages in `fuzz/system_packages.txt`
+  1. declare the required vcpkg ports in `fuzz/system_packages.txt`
   2. make any matching `fuzz/build.py` adjustments needed for the new environment
   3. avoid fake fixes that would still fail before packages are installed
 

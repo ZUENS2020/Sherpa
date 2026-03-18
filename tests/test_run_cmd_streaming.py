@@ -49,24 +49,23 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("cmake-data\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
 
-    log_path = tmp_path / "apt.log"
+    log_path = tmp_path / "vcpkg.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    apt_script = bin_dir / "apt-get"
-    apt_script.write_text(
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
         "#!/bin/sh\n"
         f"echo \"$@\" >> {log_path}\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
-    apt_script.chmod(0o755)
-
-    dpkg_query = bin_dir / "dpkg-query"
-    dpkg_query.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    dpkg_query.chmod(0o755)
+    vcpkg_script.chmod(0o755)
 
     build_script = fuzz_dir / "build.sh"
     build_script.write_text("#!/bin/sh\necho native-build-ok\n", encoding="utf-8")
@@ -87,8 +86,9 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert rc == 0
     assert "native-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true" in log_text
-    assert "install -y --no-install-recommends cmake-data" in log_text
+    assert "list zlib:" in log_text
+    assert "install --triplet" in log_text
+    assert "zlib" in log_text
 
 
 def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
