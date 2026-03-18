@@ -2466,7 +2466,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_readme": has_readme,
             "has_repo_understanding": has_repo_understanding,
             "has_build_strategy": has_build_strategy,
-            "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
+            # build_strategy.json is generated deterministically later by _write_build_strategy_doc.
+            "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding,
             "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
             "scan_errors": scan_errors[:8],
             "scan_error_count": len(scan_errors),
@@ -2489,8 +2490,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             missing.append("`fuzz/README.md`")
         if not status.get("has_repo_understanding"):
             missing.append("`fuzz/repo_understanding.json`")
-        if not status.get("has_build_strategy"):
-            missing.append("`fuzz/build_strategy.json`")
         return missing
 
     def _synthesis_grace_wait(max_sec: int) -> bool:
@@ -2614,6 +2613,32 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
+
+    def _ensure_min_readme_fallback() -> bool:
+        readme = gen.repo_root / "fuzz" / "README.md"
+        if readme.is_file():
+            return False
+        status = _synthesis_output_status()
+        harnesses = list(status.get("harnesses") or [])
+        if not harnesses:
+            return False
+        selected_label = selected_target_api or selected_target_name or "unknown"
+        harness_label = harnesses[0]
+        body = (
+            "# Fuzz Harness Notes\n\n"
+            f"- Selected target: {selected_label}\n"
+            "- Final target: unknown\n"
+            "- Technical reason: scaffold fallback README generated locally\n"
+            "- Relation: to be updated after target alignment analysis\n"
+            f"- Harness file: {harness_label}\n"
+        )
+        try:
+            readme.parent.mkdir(parents=True, exist_ok=True)
+            readme.write_text(body, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "synthesize: generated fallback fuzz/README.md")
+            return True
+        except Exception:
+            return False
 
     def _run_readme_alignment_completion(timeout: int, alignment: dict[str, Any]) -> None:
         selected_label = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip() or "unknown"
@@ -2777,6 +2802,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                     "synthesize: required scaffold still missing; running forced required-scaffold repair",
                 )
                 _run_required_scaffold_repair(remaining_for_required)
+            if not _has_required_synthesis_outputs():
+                _ensure_min_readme_fallback()
             if not _has_required_synthesis_outputs():
                 missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
                 diag = _synthesis_output_status()

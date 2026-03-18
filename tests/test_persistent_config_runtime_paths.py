@@ -125,6 +125,6 @@ def test_write_opencode_env_uses_runtime_parent_and_cross_device_fallback(
 def test_normalize_model_for_opencode_prefixes_single_configured_provider():
     cfg = pc.WebPersistentConfig()
 
-    out = pc.normalize_model_for_opencode("MiniMax-M2.5", cfg=cfg)
+    out = pc.normalize_model_for_opencode("MiniMax-M2.7-highspeed", cfg=cfg)
 
-    assert out == "minimax/MiniMax-M2.5"
+    assert out == "minimax/MiniMax-M2.7-highspeed"

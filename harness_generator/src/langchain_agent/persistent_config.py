@@ -17,10 +17,10 @@ from pydantic import BaseModel, Field
 _OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
 _MINIMAX_PROVIDER = "minimax"
 _MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic/v1"
-_MINIMAX_DEFAULT_MODEL = "MiniMax-M2.5"
+_MINIMAX_DEFAULT_MODEL = "MiniMax-M2.7-highspeed"
 _OPENCODE_PROVIDER_MODEL_CANDIDATES: dict[str, list[str]] = {
     _MINIMAX_PROVIDER: [
-        "MiniMax-M2.5",
+        "MiniMax-M2.7-highspeed",
         "MiniMax-Text-01",
     ],
 }

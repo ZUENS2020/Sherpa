@@ -110,12 +110,12 @@ services:
       # MiniMax-only provider source (recommended in .env).
       MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
       MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
-      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
+      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
       # Compatibility vars consumed by existing tooling.
       OPENAI_API_KEY: ${MINIMAX_API_KEY:-}
       OPENAI_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
-      OPENAI_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
-      OPENCODE_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.5}
+      OPENAI_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
+      OPENCODE_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
       OPENCODE_CONFIG: "/tmp/sherpa-runtime/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       DATABASE_URL: ${DATABASE_URL:-postgresql://sherpa:sherpa@postgres:5432/sherpa}
