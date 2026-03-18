@@ -32,7 +32,7 @@ def test_worker_forces_native_mode_ignores_payload_docker_image(tmp_path: Path, 
         "time_budget": 900,
         "run_time_budget": 600,
         "docker_image": "sherpa-fuzz-cpp:latest",
-        "model": "minimax/MiniMax-M2.5",
+        "model": "minimax/MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -65,7 +65,7 @@ def test_worker_forces_native_mode_when_payload_docker_image_missing(tmp_path: P
         "max_len": 1000,
         "time_budget": 900,
         "run_time_budget": 900,
-        "model": "minimax/MiniMax-M2.5",
+        "model": "minimax/MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -129,7 +129,7 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         "max_len": 1000,
         "time_budget": 900,
         "run_time_budget": 900,
-        "model": "MiniMax-M2.5",
+        "model": "MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
