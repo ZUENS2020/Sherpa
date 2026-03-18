@@ -39,6 +39,14 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         cmake \
         ninja-build \
         pkg-config \
+    autoconf \
+    automake \
+    libtool \
+    m4 \
+    gettext \
+    bison \
+    flex \
+    gawk \
         postgresql-client \
         ripgrep \
         libfuzzer-19-dev \
@@ -84,6 +92,14 @@ RUN set -e; \
     command -v cmake >/dev/null; \
     command -v ninja >/dev/null; \
     command -v pkg-config >/dev/null; \
+  command -v aclocal >/dev/null; \
+  command -v autoconf >/dev/null; \
+  command -v autoreconf >/dev/null; \
+  command -v automake >/dev/null; \
+  command -v libtoolize >/dev/null; \
+  command -v m4 >/dev/null; \
+  command -v bison >/dev/null; \
+  command -v flex >/dev/null; \
     resource_dir="$(clang++ -print-resource-dir)"; \
     test -n "$resource_dir"; \
     find "$resource_dir/lib" -type f -name 'libclang_rt.fuzzer*.a' | grep -q .; \
