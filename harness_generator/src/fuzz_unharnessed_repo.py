@@ -41,9 +41,13 @@ Relies on the existing CodexHelper (OpenCode-backed).
 from __future__ import annotations
 
 import argparse
+import bz2
 import difflib
+import gzip
+import io
 import json
 import logging
+import lzma
 import os
 import queue
 import re
@@ -53,12 +57,14 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import threading
 import time
 import hashlib
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -3073,6 +3079,29 @@ EOF
                     break
             if len(selected) >= 12:
                 break
+        if seed_profile == "archive-container" and len(selected) < 12:
+            for suffix, data in self._default_archive_seed_samples():
+                if len(selected) >= 12:
+                    break
+                size = len(data)
+                if size <= 0 or size > max_seed_file:
+                    rejected += 1
+                    continue
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in seen_hashes:
+                    rejected += 1
+                    continue
+                dest = corpus_dir / f"repo_{len(selected)+1:02d}{suffix}"
+                try:
+                    dest.write_bytes(data)
+                except Exception:
+                    rejected += 1
+                    continue
+                seen_hashes.add(digest)
+                selected.append(dest)
+                accepted += 1
+                for family in _classify_seed_family(dest):
+                    family_limits[family] = family_limits.get(family, 0) + 1
         return selected, {
             "sources": ["repo_examples"] if selected else [],
             "accepted_count": accepted,
@@ -3081,6 +3110,45 @@ EOF
             "family_limits": family_limits,
             "required_families": sorted(required_set),
         }
+
+    def _default_archive_seed_samples(self) -> list[tuple[str, bytes]]:
+        samples: list[tuple[str, bytes]] = []
+        payload = b"seed\n"
+
+        try:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("a.txt", payload)
+            samples.append((".zip", zip_buf.getvalue()))
+        except Exception:
+            pass
+
+        try:
+            tar_buf = io.BytesIO()
+            info = tarfile.TarInfo(name="a.txt")
+            info.size = len(payload)
+            with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+                tf.addfile(info, io.BytesIO(payload))
+            samples.append((".tar", tar_buf.getvalue()))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".gz", gzip.compress(payload)))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".bz2", bz2.compress(payload)))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".xz", lzma.compress(payload)))
+        except Exception:
+            pass
+
+        return samples
 
     def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
