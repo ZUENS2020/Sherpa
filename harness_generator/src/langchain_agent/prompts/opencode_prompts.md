@@ -9,6 +9,7 @@ Perform the planning step and produce fuzz/PLAN.md and fuzz/targets.json as requ
 PLAN.md must include a short summary and concrete next-step implementation suggestions for synthesis/build.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/PLAN.md` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver minimal valid artifacts now: create `fuzz/PLAN.md` and schema-valid `fuzz/targets.json`, then write `fuzz/PLAN.md` into `./done`.
@@ -68,6 +69,7 @@ Execution strategy requirement:
 - Only after those understanding artifacts are grounded in repository facts should you create or update the harness and `fuzz/build.py`.
 
 IMPORTANT: Do NOT run any build, compile, or test commands. Only create/edit files.
+You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
 MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver repository-understanding artifacts first, then the smallest scaffold consistent with them.
@@ -86,13 +88,9 @@ Hard requirements:
 - Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
 - Add an early input-size guard in the harness entrypoint before heavy parsing/work (for C/C++ style harnesses, prefer `if (size > 8192) return 0;` unless a smaller cap is clearly required).
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
-- In `fuzz/build.py`, do not hardcode a single top-level library artifact path. Resolve artifacts using multiple concrete candidates plus recursive fallback under the build directory (for example handle `build/libfoo.a`, `build/lib/libfoo.a`, `build/**/libfoo.so`, `build/**/libfoo.so.*`).
-- After repository build commands complete, `fuzz/build.py` must verify that the chosen library artifact path actually exists before compiling fuzzers, and fail only after trying the documented fallback candidates.
-- In `fuzz/build.py`, include reusable static-lib discovery scaffolding (or equivalent):
-  - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt names to current target library)
-  - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt per repository layout)
-  - `def find_static_lib(repo_root, lib_name_pattern): ...`
-  Use candidate paths first, then recursive glob fallback. Do not rely on a single guessed location.
+- In `fuzz/build.py`, do not hardcode a single static library path.
+- Use runtime discovery with command execution (for example `subprocess.run(["find", str(REPO_ROOT), "-name", "*.a", "-type", "f"], ...)`) plus a helper like `find_static_lib(...)`.
+- Exclude obvious test-only artifacts and verify the selected library path exists before linking.
 - In `fuzz/build.py`, define default CMake args and apply them by default:
   - `DEFAULT_CMAKE_ARGS = [`
   - `    "-DENABLE_TEST=OFF",`
@@ -153,6 +151,7 @@ Rules:
 - Keep `fuzz/build_strategy.json` aligned with an external scaffold strategy and record an explicit `fuzzer_entry_strategy`.
 - Keep `fuzz/build_runtime_facts.json` aligned with the actual compiler/runtime assumptions used by `fuzz/build.py`.
 - Do NOT run any build, compile, or test commands. Only create/edit files.
+- You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
 - If progress stalls, prioritize missing understanding files before writing fallback scaffold files, then write `fuzz/out/` into `./done`.
 - If `fuzz/README.md` is missing, create it with required fields (`Selected target`, `Final target`, `Technical reason`, `Relation`, `Harness file`).
 - If `fuzz/build_strategy.json` is missing, create a minimal valid JSON strategy aligned with current harness/build path.
@@ -170,8 +169,9 @@ Goal (will be verified by a separate automated system — do NOT run these yours
 - `(cd fuzz && python build.py)` should complete successfully
 - fuzz/out/ should contain at least one runnable fuzzer binary
 
-CRITICAL: Do NOT run any commands (no cmake, make, python, bash, gcc, clang, etc.).
-Only edit source files. The build will be executed by the workflow after you finish.
+CRITICAL: Do NOT run build/execute commands (no cmake, make, python build scripts, bash build wrappers, gcc/clang compile runs, etc.).
+You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
+Only edit source files for the fix. The build will be executed by the workflow after you finish.
 
 Constraints:
 - Keep changes minimal; avoid refactors
@@ -199,7 +199,7 @@ Constraints:
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
 - If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
 - Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
-- Prefer a reusable helper (`find_static_lib`) with `STATIC_LIB_NAMES` and `SEARCH_PATHS` constants over ad-hoc one-off path fixes.
+- Prefer a reusable helper (`find_static_lib`) that uses runtime command discovery (for example `find`) over ad-hoc one-off hardcoded paths.
 - If logs show `Could NOT find ...` for key optional libraries, do not treat that as acceptable completion; update `fuzz/system_packages.txt` with the matching vcpkg ports and make the build script consume them.
 - If logs show linker errors like `cannot find -l...`, you MUST create or update `fuzz/system_packages.txt` in the same attempt (port mapping examples: `-lz`→`zlib`, `-lbz2`→`bzip2`, `-llzma`→`liblzma`, `-llz4`→`lz4`, `-lcrypto/-lssl`→`openssl`, `-lxml2`→`libxml2`, `-lexpat`→`expat`).
 - First repair pass must be build-ready: do not defer dependency declaration to a later round when the current log already names missing link libraries.
@@ -230,7 +230,8 @@ Goal (will be verified by a separate automated system — do NOT run these yours
 - The fuzzer should build successfully.
 - Running the fuzzer with the previous crashing input should no longer crash.
 
-CRITICAL: Do NOT run any commands. Only edit source files.
+CRITICAL: Do NOT run build/execute commands. You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
+Only edit source files.
 
 When finished, write the key file you modified into ./done.
 If `./done` is missing, this step is treated as failed.
@@ -249,7 +250,8 @@ Goal (will be verified by a separate automated system — do NOT run these yours
 - The fuzzer should build successfully.
 - The previous crashing input should no longer crash.
 
-CRITICAL: Do NOT run any commands. Only edit source files.
+CRITICAL: Do NOT run build/execute commands. You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
+Only edit source files.
 
 When finished, write the key file you modified into ./done.
 If `./done` is missing, this step is treated as failed.
@@ -269,6 +271,7 @@ Required schema:
 Constraints:
 - Keep edits minimal
 - Do NOT run any build, compile, or test commands
+- You MAY run any read-only commands for repository exploration (for example `find`, `grep`, `rg`, `cat`, `ls`).
 - Only edit files
 - `fuzz/targets.json` must be plain JSON only; no Markdown fences, no wrapper object, no empty array
 - MANDATORY: create `./done` when finished, and write `fuzz/targets.json` into it.
