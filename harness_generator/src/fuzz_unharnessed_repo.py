@@ -2155,6 +2155,7 @@ EOF
 
         stdout = self.patcher.run_codex_command(
             instructions,
+            stage_skill="plan",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_workflow_opencode_cli_retries(),
@@ -2205,6 +2206,7 @@ EOF
         stdout = self.patcher.run_codex_command(
             instructions,
             additional_context=context,
+            stage_skill="synthesize",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_workflow_opencode_cli_retries(),

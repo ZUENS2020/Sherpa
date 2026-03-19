@@ -10,7 +10,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 - `fuzz/observed_target.json` (if present)
 
 ## Required Outputs
-- harness source file under `fuzz/`
+- at least one harness source file under `fuzz/` (`*.c`, `*.cc`, `*.cpp`, `*.cxx`, or `*.java`)
 - `fuzz/build.py` or `fuzz/build.sh`
 - `fuzz/README.md`
 - `fuzz/repo_understanding.json`
@@ -44,9 +44,14 @@ def find_static_lib(repo_root):
 ```
 
 ## Acceptance Criteria
+- harness-first contract: create harness source file before completing build/json/readme scaffold.
 - all required scaffold files exist.
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
 - build script does not hardcode a single guessed static-library path.
+- `fuzz/README.md` field `Harness file:` points to an existing harness file under `fuzz/`.
+- perform explicit self-check before completion:
+  - confirm harness file count is >= 1;
+  - confirm `fuzz/build.py|build.sh`, `fuzz/README.md`, `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` all exist.
 
 ## Command Policy
 - Allowed: read-only commands only.

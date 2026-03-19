@@ -472,6 +472,8 @@ def test_run_codex_command_injects_stage_skill_when_requested(
     cmd = captured.get("cmd")
     assert isinstance(cmd, list)
     prompt = str(cmd[-1])
+    assert "Follow the stage contract for done content exactly." in prompt
+    assert "Example: `echo fuzz/build.py > done`" not in prompt
     assert ".git/sherpa-opencode/stage_skill_plan.md" in prompt
     skill_file = helper.working_dir / ".git" / "sherpa-opencode" / "stage_skill_plan.md"
     assert skill_file.is_file()

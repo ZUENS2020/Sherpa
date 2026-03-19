@@ -1141,8 +1141,8 @@ class CodexHelper:
             "When ALL tasks are complete:",
             "  1) Print a short summary.",
             "  2) Create/overwrite a file called 'done' in the repo root (./done).",
-            "     Put the relative path to the single most relevant file you created or modified on the first line.",
-            "     Example: `echo fuzz/build.py > done`",
+            "     Follow the stage contract for done content exactly.",
+            "     If the stage skill specifies a required sentinel path/value, that contract overrides generic defaults.",
             "MANDATORY: Read these files before any edit:",
             "  - ./.git/sherpa-opencode/task.txt",
         ]
