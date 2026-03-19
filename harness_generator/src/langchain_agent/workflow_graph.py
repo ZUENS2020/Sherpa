@@ -359,6 +359,124 @@ def _opencode_done_path(repo_root: Path) -> Path:
     return repo_root / "done"
 
 
+def _opencode_feedback_dir(repo_root: Path) -> Path:
+    return repo_root / ".git" / "sherpa-opencode" / "feedback"
+
+
+def _feedback_group_for_stage(stage: str) -> str:
+    s = str(stage or "").strip().lower()
+    if s in {"plan", "plan_fix_targets_schema", "synthesize", "synthesize_complete_scaffold"}:
+        return "planning_synth"
+    if s == "fix_build":
+        return "fix_build"
+    if s in {"fix_crash_harness_error", "fix_crash_upstream_bug"}:
+        return "fix_crash"
+    return s or "default"
+
+
+def _feedback_file_for_stage(repo_root: Path, stage: str) -> Path:
+    safe = re.sub(r"[^a-z0-9_.-]+", "-", str(stage or "unknown").strip().lower()).strip("-") or "unknown"
+    return _opencode_feedback_dir(repo_root) / f"{safe}.md"
+
+
+def _feedback_text_limits() -> tuple[int, int]:
+    raw_lines = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_LINES") or "120").strip()
+    raw_chars = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_CHARS") or "12000").strip()
+    try:
+        max_lines = max(20, min(int(raw_lines), 600))
+    except Exception:
+        max_lines = 120
+    try:
+        max_chars = max(512, min(int(raw_chars), 200000))
+    except Exception:
+        max_chars = 12000
+    return max_lines, max_chars
+
+
+def _trim_feedback_text(text: str) -> str:
+    src = str(text or "").strip()
+    if not src:
+        return ""
+    max_lines, max_chars = _feedback_text_limits()
+    lines = src.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    out = "\n".join(lines).strip()
+    if len(out) > max_chars:
+        out = out[-max_chars:].lstrip()
+    return out
+
+
+def _write_stage_feedback(
+    repo_root: Path,
+    *,
+    stage: str,
+    error_text: str,
+    state: dict[str, Any] | None = None,
+) -> str:
+    state = state or {}
+    parts: list[str] = [
+        f"# Stage Failure Feedback: {stage}",
+        "",
+        f"- stage: {stage}",
+        f"- group: {_feedback_group_for_stage(stage)}",
+        f"- ts: {int(time.time())}",
+    ]
+    for k in ("restart_to_plan_reason", "build_error_kind", "build_error_code", "run_error_kind"):
+        v = str(state.get(k) or "").strip()
+        if v:
+            parts.append(f"- {k}: {v}")
+    err = _trim_feedback_text(error_text)
+    if err:
+        parts.extend(["", "## Error", "", "```text", err, "```"])
+    stdout_tail = _trim_feedback_text(str(state.get("build_stdout_tail") or ""))
+    stderr_tail = _trim_feedback_text(str(state.get("build_stderr_tail") or ""))
+    if stdout_tail:
+        parts.extend(["", "## Build Stdout Tail", "", "```text", stdout_tail, "```"])
+    if stderr_tail:
+        parts.extend(["", "## Build Stderr Tail", "", "```text", stderr_tail, "```"])
+    body = "\n".join(parts).strip() + "\n"
+    path = _feedback_file_for_stage(repo_root, stage)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8", errors="replace")
+        return str(path)
+    except Exception:
+        return ""
+
+
+def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) -> str:
+    group_name = str(group or "").strip().lower()
+    stage_groups = {
+        "plan": _feedback_group_for_stage("plan"),
+        "plan_fix_targets_schema": _feedback_group_for_stage("plan_fix_targets_schema"),
+        "synthesize": _feedback_group_for_stage("synthesize"),
+        "synthesize_complete_scaffold": _feedback_group_for_stage("synthesize_complete_scaffold"),
+        "fix_build": _feedback_group_for_stage("fix_build"),
+        "fix_crash_harness_error": _feedback_group_for_stage("fix_crash_harness_error"),
+        "fix_crash_upstream_bug": _feedback_group_for_stage("fix_crash_upstream_bug"),
+    }
+    picked: list[Path] = []
+    for stage, g in stage_groups.items():
+        if g != group_name:
+            continue
+        p = _feedback_file_for_stage(repo_root, stage)
+        if p.is_file():
+            picked.append(p)
+    if not picked:
+        return ""
+    picked.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    texts: list[str] = []
+    for p in picked[: max(1, int(limit))]:
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            txt = ""
+        if txt:
+            texts.append(f"=== {p.name} ===\n{_trim_feedback_text(txt)}")
+    return "\n\n".join(texts).strip()
+
+
 def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
     done_path = _opencode_done_path(repo_root)
     if not done_path.exists():
@@ -2305,6 +2423,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if report_tail:
             injected_ctx += "\n=== re failure report tail ===\n" + report_tail + "\n"
         hint = (hint + "\n\n" + injected_ctx).strip() if hint else injected_ctx
+    planning_feedback = _collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)
+    if planning_feedback:
+        feedback_hint = "Recent planning/synthesis failures (use these to avoid repeating the same mistakes):\n" + planning_feedback
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     if not _has_codex_key():
         out = {
             **state,
@@ -2495,6 +2617,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
+        _write_stage_feedback(
+            gen.repo_root,
+            stage="plan",
+            error_text=str(e),
+            state=cast(dict[str, Any], state),
+        )
         out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -2551,6 +2679,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         if "selected_targets.json" not in hint:
             hint = ((hint.strip() + "\n\n") if hint.strip() else "") + selected_target_soft_hint
+    planning_feedback = _collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)
+    if planning_feedback:
+        feedback_hint = (
+            "Recent planning/synthesis failures from previous attempts "
+            "(use these to avoid repeating the same mistakes):\n"
+            + planning_feedback
+        )
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     restored_from_cache = False
     try:
         restored_from_cache = _restore_cached_build_template_if_missing(gen.repo_root)
@@ -3122,6 +3258,12 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
+        _write_stage_feedback(
+            gen.repo_root,
+            stage="synthesize",
+            error_text=str(e),
+            state=cast(dict[str, Any], state),
+        )
         out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out

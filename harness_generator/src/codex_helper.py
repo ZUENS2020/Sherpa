@@ -193,6 +193,19 @@ def _opencode_stage_skills_path() -> Path:
     return _opencode_default_stage_skills_path()
 
 
+def _resolve_stage_session_group(stage_skill: str) -> str:
+    stage = str(stage_skill or "").strip()
+    if not stage:
+        return "default"
+    if stage in {"plan", "plan_fix_targets_schema", "synthesize", "synthesize_complete_scaffold"}:
+        return "planning_synth"
+    if stage == "fix_build":
+        return "fix_build"
+    if stage in {"fix_crash_harness_error", "fix_crash_upstream_bug"}:
+        return "fix_crash"
+    return stage
+
+
 def _load_stage_skill_text(stage_skill: str) -> tuple[Path, str]:
     root = _opencode_stage_skills_path()
     path = root / stage_skill / "SKILL.md"
@@ -463,14 +476,48 @@ def _opencode_repo_slug(working_dir: Path) -> str:
 
 
 def _resolve_opencode_home_dir(shared_out: str, working_dir: Path | None = None) -> str:
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    session_group = str(os.environ.get("SHERPA_OPENCODE_SESSION_GROUP") or "").strip()
+    job_seg = re.sub(r"[^a-zA-Z0-9._-]+", "-", job_id).strip("-") if job_id else ""
+    group_seg = re.sub(r"[^a-zA-Z0-9._-]+", "-", session_group).strip("-") if session_group else ""
+    suffix = ""
+    if job_seg:
+        suffix += f"/{job_seg}"
     if shared_out and shared_out.strip():
         base = f"{shared_out.rstrip('/')}/.opencode-home"
         if working_dir is not None:
-            return f"{base}/{_opencode_repo_slug(working_dir)}"
-        return base
+            path = f"{base}{suffix}/{_opencode_repo_slug(working_dir)}"
+            if group_seg:
+                path += f"/{group_seg}"
+            return path
+        return f"{base}{suffix}" if suffix else base
     if working_dir is not None:
-        return f"/tmp/.opencode-home/{_opencode_repo_slug(working_dir)}"
+        path = f"/tmp/.opencode-home{suffix}/{_opencode_repo_slug(working_dir)}"
+        if group_seg:
+            path += f"/{group_seg}"
+        return path
     return "/tmp"
+
+
+def _session_state_path(working_dir: Path) -> Path:
+    return working_dir / ".git" / "sherpa-opencode" / "session_state.json"
+
+
+def _load_session_state(working_dir: Path) -> dict:
+    path = _session_state_path(working_dir)
+    if not path.is_file():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _save_session_state(working_dir: Path, state: dict) -> None:
+    path = _session_state_path(working_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _opencode_provider_map_from_config(config_path: str) -> dict[str, set[str]]:
@@ -1071,6 +1118,12 @@ class CodexHelper:
                 max_chars=max_ctx_chars,
             )
         stage_skill_name = str(stage_skill or "").strip()
+        session_group = _resolve_stage_session_group(stage_skill_name)
+        session_state = _load_session_state(self.working_dir)
+        session_groups = session_state.get("session_groups")
+        if not isinstance(session_groups, dict):
+            session_groups = {}
+        continue_session = bool(session_groups.get(session_group)) if session_group else False
         stage_skill_source_path: Path | None = None
         stage_skill_materialized_path: Path | None = None
         compact_stage_skill = ""
@@ -1188,6 +1241,8 @@ class CodexHelper:
                 "stage_skill_source_path": str(stage_skill_source_path) if stage_skill_source_path else "",
                 "stage_skill_file": str(stage_skill_materialized_path) if stage_skill_materialized_path else "",
                 "stage_skill_hash": stage_skill_hash if compact_stage_skill else "",
+                "session_group": session_group,
+                "session_continue": continue_session,
                 "policy_source_path": str(policy_source_path) if _opencode_policy_enabled() else "",
                 "policy_file": str(policy_materialized_path) if policy_materialized_path else "",
                 "policy_hash": policy_hash if compact_policy else "",
@@ -1251,7 +1306,11 @@ class CodexHelper:
                     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.working_dir.name or "repo").strip("-") or "repo"
                     run_name = f"sherpa-opencode-{slug}-{os.getpid()}-{int(time.time())}-{cli_try}-{attempt}".lower()
                     env["SHERPA_OPENCODE_RUN_NAME"] = run_name
+                if session_group:
+                    env["SHERPA_OPENCODE_SESSION_GROUP"] = session_group
                 cmd: list[str] = ["run"]
+                if continue_session:
+                    cmd.append("--continue")
                 model = _resolve_opencode_model(env)
                 if model:
                     cmd += ["--model", model]
@@ -1466,6 +1525,13 @@ class CodexHelper:
 
             if diff_changed or self._git_diff_head() != baseline_diff:
                 LOGGER.info("[OpenCodeHelper] diff produced — success")
+                if session_group:
+                    session_groups[session_group] = {
+                        "has_session": True,
+                        "updated_at": int(time.time()),
+                    }
+                    session_state["session_groups"] = session_groups
+                    _save_session_state(self.working_dir, session_state)
                 run_meta["status"] = "success"
                 run_meta["cli_retries_used"] = cli_try
                 _append_opencode_metadata(self.working_dir, run_meta)

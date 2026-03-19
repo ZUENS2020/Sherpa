@@ -45,6 +45,8 @@ def _parse_int_keep_zero(value: object, default: int) -> int:
 def main() -> int:
     payload = _decode_payload()
     job_id = str(payload.get("job_id") or "")
+    if job_id:
+        os.environ["SHERPA_JOB_ID"] = job_id
     result_path = Path(str(payload.get("result_path") or f"/shared/output/_k8s_jobs/{job_id}/result.json")).expanduser()
     error_path = Path(str(payload.get("error_path") or f"/shared/output/_k8s_jobs/{job_id}/error.txt")).expanduser()
 
