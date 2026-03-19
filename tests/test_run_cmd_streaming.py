@@ -209,7 +209,7 @@ def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp
         "done\n"
         "url=\"$prev\"\n"
         "dst=\"$last\"\n"
-        "if [ \"$url\" = \"https://github.com/microsoft/vcpkg\" ]; then\n"
+        "if [ \"$url\" = \"https://ghfast.top/https://github.com/microsoft/vcpkg\" ]; then\n"
         "  exit 1\n"
         "fi\n"
         "mkdir -p \"$dst/.git\"\n"
@@ -252,8 +252,23 @@ def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp
     assert rc == 0
     assert "mirror-build-ok" in out
     log = clone_log.read_text(encoding="utf-8")
-    assert "https://github.com/microsoft/vcpkg" in log
     assert "https://ghfast.top/https://github.com/microsoft/vcpkg" in log
+    assert "https://ghproxy.net/https://github.com/microsoft/vcpkg" in log
+    assert "clone --depth 1 https://github.com/microsoft/vcpkg " not in log
+
+
+def test_candidate_clone_urls_prefers_mirrors_before_github(monkeypatch):
+    monkeypatch.setenv(
+        "SHERPA_GIT_MIRRORS",
+        "https://ghfast.top/{url},https://ghproxy.net/{url}",
+    )
+    monkeypatch.delenv("SHERPA_GITHUB_MIRROR", raising=False)
+
+    urls = fur._candidate_clone_urls("https://github.com/fmtlib/fmt.git")
+
+    assert urls[0] == "https://ghfast.top/https://github.com/fmtlib/fmt.git"
+    assert urls[1] == "https://ghproxy.net/https://github.com/fmtlib/fmt.git"
+    assert urls[-1] == "https://github.com/fmtlib/fmt.git"
 
 
 def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, monkeypatch):

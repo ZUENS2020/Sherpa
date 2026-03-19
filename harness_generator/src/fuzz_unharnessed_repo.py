@@ -636,10 +636,10 @@ def _host_git_proxy_env() -> Dict[str, str]:
 def _candidate_clone_urls(url: str) -> List[str]:
     """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
-    urls: List[str] = [url]
+    urls: List[str] = []
     if not url.startswith("https://github.com/"):
         # Non-GitHub URLs are returned as-is to avoid breaking custom hosts.
-        return urls
+        return [url]
 
     mirror_specs: List[str] = []
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
@@ -667,6 +667,9 @@ def _candidate_clone_urls(url: str) -> List[str]:
         if candidate and candidate not in urls:
             urls.append(candidate)
 
+    if url not in urls:
+        # Keep official github as the final fallback.
+        urls.append(url)
     return urls
 
 
@@ -1841,7 +1844,7 @@ class NonOssFuzzHarnessGenerator:
                         vcpkg_git_bin="${{SHERPA_VCPKG_GIT_BIN:-git}}"
                         if command -v "$vcpkg_git_bin" >/dev/null 2>&1; then
                             echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
-                            clone_urls="https://github.com/microsoft/vcpkg https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg"
+                            clone_urls="https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg https://github.com/microsoft/vcpkg"
                             cloned_ok=0
                             for u in $clone_urls; do
                                 echo "[*] ({log_prefix}) trying vcpkg source: $u"
