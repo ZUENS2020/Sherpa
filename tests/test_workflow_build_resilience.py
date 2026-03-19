@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,6 +100,43 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     assert out["build_error_kind"] == ""
     assert out["build_error_code"] == ""
     assert len(gen.commands) == 2
+
+
+def test_find_static_lib_discovers_nested_archive_artifacts(tmp_path: Path):
+    nested = tmp_path / "build" / "libarchive"
+    nested.mkdir(parents=True, exist_ok=True)
+    lib_file = nested / "libarchive.a"
+    lib_file.write_text("", encoding="utf-8")
+
+    found = workflow_graph._find_static_lib(tmp_path, "libarchive.a")
+
+    assert found == lib_file
+
+
+def test_build_success_writes_template_cache(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    cache_path = Path(str(out.get("build_template_cache_path") or ""))
+    assert cache_path.is_file()
+    cache_doc = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "build_py" in cache_doc
+    assert "print('build')" in str(cache_doc.get("build_py") or "")
 
 
 def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _no_sleep):
