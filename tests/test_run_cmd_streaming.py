@@ -257,6 +257,17 @@ def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp
     assert "clone --depth 1 https://github.com/microsoft/vcpkg " not in log
 
 
+def test_build_system_dep_setup_prefers_shared_vcpkg_download_cache():
+    gen = _fake_generator(Path("/tmp/sherpa-test"))
+    script = gen._build_system_dep_setup("fuzz/system_packages.txt", log_prefix="native/deps")
+
+    assert 'shared_downloads_default="/shared/tmp/vcpkg-downloads"' in script
+    assert 'configured_downloads="${SHERPA_VCPKG_DOWNLOADS_DIR:-$shared_downloads_default}"' in script
+    assert 'if mkdir -p "$configured_downloads" 2>/dev/null; then' in script
+    assert 'export VCPKG_DOWNLOADS="$configured_downloads"' in script
+    assert 'export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"' in script
+
+
 def test_candidate_clone_urls_prefers_mirrors_before_github(monkeypatch):
     monkeypatch.setenv(
         "SHERPA_GIT_MIRRORS",
