@@ -1874,8 +1874,14 @@ class NonOssFuzzHarnessGenerator:
                 export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
                 export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
                 export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
-                export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
-                mkdir -p "$VCPKG_DOWNLOADS" || true
+                shared_downloads_default="/shared/tmp/vcpkg-downloads"
+                configured_downloads="${{SHERPA_VCPKG_DOWNLOADS_DIR:-$shared_downloads_default}}"
+                if mkdir -p "$configured_downloads" 2>/dev/null; then
+                    export VCPKG_DOWNLOADS="$configured_downloads"
+                else
+                    export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
+                    mkdir -p "$VCPKG_DOWNLOADS" || true
+                fi
 
                 # Keep vcpkg asset downloads from stalling on first github attempt:
                 # install a local curl wrapper with mirror-first URL rewrite + short connect timeout.
