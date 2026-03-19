@@ -18,6 +18,10 @@ Complete only missing required scaffold items without rewriting unrelated files.
   - `Technical reason: ...`
   - `Relation: ...`
   - `Harness file: ...`
+- `fuzz/repo_understanding.json` repair contract:
+  - if file exists but keys are incomplete, repair it in place
+  - ensure non-empty `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`
+  - ensure `evidence` is a non-empty array
 - `fuzz/build_strategy.json`
   - explicit `fuzzer_entry_strategy`
   - consistent with existing harness/build path
@@ -27,6 +31,7 @@ Complete only missing required scaffold items without rewriting unrelated files.
 ## Acceptance Criteria
 - all required scaffold files exist after this step.
 - if harness was missing before this step, harness exists after this step.
+- if `fuzz/repo_understanding.json` existed but was incomplete, required keys are repaired and non-empty.
 - existing harness/build assets are preserved unless minimal changes are required.
 - no guessed paths/targets are introduced.
 

@@ -119,6 +119,17 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "harness-first contract" in synth
     assert "harness file count is >= 1" in synth
     assert "Harness file:` points to an existing harness file under `fuzz/`." in synth
+    assert "chosen_target_api" in synth
+    assert "chosen_target_reason" in synth
+    assert "fuzzer_entry_strategy" in synth
+    assert "evidence" in synth
+    assert "def build_fuzzers():" in synth
+    assert "static_lib = find_static_lib(BUILD_DIR) or find_static_lib(REPO_ROOT)" in synth
+    assert '"clang++"' in synth
+    assert "-fsanitize=address,undefined,fuzzer" in synth
+    assert '"cmake", "-S", str(REPO_ROOT), "-B", str(BUILD_DIR)' in synth
 
     assert "if harness source is missing" in complete
     assert "if harness was missing before this step, harness exists after this step." in complete
+    assert "repo_understanding.json" in complete
+    assert "repair it in place" in complete
