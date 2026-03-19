@@ -288,6 +288,37 @@ def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, mon
     assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
 
 
+def test_run_cmd_preflight_disables_non_root_install_steps(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "import subprocess\n"
+        "cmake_cfg = ['cmake', '-DENABLE_INSTALL=ON', '..']\n"
+        "cmake_build = ['cmake', '--build', 'build', '--target', 'install']\n"
+        "print('install-preflight-ok')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "install-preflight-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert "-DENABLE_INSTALL=OFF" in txt
+    assert "'--target', 'install'" not in txt
+    assert "'--target', 'all'" in txt
+
+
 def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"

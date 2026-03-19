@@ -1628,6 +1628,54 @@ class NonOssFuzzHarnessGenerator:
         except Exception:
             return False
 
+    def _sanitize_build_py_for_non_root_install(self) -> bool:
+        """Prevent generated build scripts from installing into system directories.
+
+        Runtime containers run as non-root by default, so any install path that
+        writes to `/usr/local` (or similar system prefixes) is fragile and will
+        fail with permission denied. Force generated build scripts to link from
+        build tree artifacts instead of running install steps.
+        """
+
+        fuzz_dir = Path(getattr(self, "fuzz_dir", self.repo_root / FUZZ_DIR))
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        new_text = text
+        # Turn on-tree install toggles off.
+        new_text = re.sub(
+            r"(-DENABLE_INSTALL=)(ON|on|TRUE|True|1)\b",
+            r"\1OFF",
+            new_text,
+        )
+        # Rewrite explicit install targets to normal build targets.
+        replacements = [
+            ("'--target', 'install'", "'--target', 'all'"),
+            ('"--target", "install"', '"--target", "all"'),
+            ("'--target','install'", "'--target','all'"),
+            ('"--target","install"', '"--target","all"'),
+            ("'--install'", "'--build'"),
+            ('"--install"', '"--build"'),
+            ("cmake --install ", "cmake --build "),
+        ]
+        for old, new in replacements:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+
+        if new_text == text:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            print("[*] build preflight: disabled install step for non-root runtime")
+            return True
+        except Exception:
+            return False
+
     @staticmethod
     def _vcpkg_triplet() -> str:
         raw = (os.environ.get("SHERPA_VCPKG_TRIPLET") or "").strip()
@@ -2098,6 +2146,7 @@ class NonOssFuzzHarnessGenerator:
             - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` alone means a repository fuzz target should be built.
             - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
             - Prefer external harness linking by default, but use a real repository fuzz target when that target is clearly identified and more faithful.
+            - Non-root runtime rule: do not add install-to-system-dir steps (`-DENABLE_INSTALL=ON`, `cmake --install`, `--target install`); use build-tree artifacts directly.
             - Do not consider the task complete if you only produced a harness/build script without a grounded repository-understanding file.
 
             **Acceptance criteria:**
@@ -4436,6 +4485,7 @@ class NonOssFuzzHarnessGenerator:
         exec_args = list(cmd)
         if any(self._is_build_entry_arg(str(a)) for a in exec_args):
             self._sanitize_build_py_for_source_build_collision()
+            self._sanitize_build_py_for_non_root_install()
         dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
         if self.docker_image:
             actual_cmd = self._dockerize_cmd(exec_args, cwd=cwd, env=effective_env)
