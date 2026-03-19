@@ -2319,6 +2319,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prompt = _render_opencode_prompt("plan_with_hint", hint=hint)
             gen.patcher.run_codex_command(
                 prompt,
+                stage_skill="plan",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -2342,6 +2343,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
             gen.patcher.run_codex_command(
                 prompt,
+                stage_skill="plan_fix_targets_schema",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -2775,6 +2777,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context,
+            stage_skill="synthesize_complete_scaffold",
             timeout=min(remaining, 300),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2787,6 +2790,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2818,6 +2822,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2877,6 +2882,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2938,6 +2944,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             gen.patcher.run_codex_command(
                 prompt,
                 additional_context=ctx or None,
+                stage_skill="synthesize",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -4969,6 +4976,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context or None,
+            stage_skill="fix_build",
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -6055,6 +6063,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context or None,
+            stage_skill=("fix_crash_harness_error" if harness_error else "fix_crash_upstream_bug"),
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
