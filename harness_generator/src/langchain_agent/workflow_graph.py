@@ -6179,7 +6179,8 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         if rem <= 0:
             raise HarnessGeneratorError("re-run workspace rebuild skipped: no remaining workflow budget")
-        gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_result = gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_root = Path(clone_result).expanduser().resolve()
         source_fuzz = repo_root / "fuzz"
         if not source_fuzz.is_dir():
             raise HarnessGeneratorError(f"run fuzz directory missing: {source_fuzz}")
@@ -6363,18 +6364,32 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 repro_env = gen._compose_vcpkg_runtime_env(repro_env, repo_root=workdir)  # type: ignore[attr-defined]
             except Exception:
                 pass
-        repro = subprocess.run(
-            [str(fuzzer_bin), "-runs=1", str(artifact_path)],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=repro_timeout,
-            env=repro_env,
-        )
-        payload["reproduce_rc"] = int(repro.returncode)
-        payload["reproduce_ok"] = repro.returncode != 0
-        payload["stdout_tail"] = (repro.stdout or "")[-4000:]
-        payload["stderr_tail"] = (repro.stderr or "")[-4000:]
+        repro_cmd = [str(fuzzer_bin), "-runs=1", str(artifact_path)]
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                repro_cmd,
+                cwd=workdir,
+                env=repro_env,
+                timeout=repro_timeout,
+                idle_timeout=0,
+            )
+            payload["reproduce_rc"] = int(rc)
+            payload["reproduce_ok"] = int(rc) != 0
+            payload["stdout_tail"] = (out or "")[-4000:]
+            payload["stderr_tail"] = (err or "")[-4000:]
+        else:
+            repro = subprocess.run(
+                repro_cmd,
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=repro_timeout,
+                env=repro_env,
+            )
+            payload["reproduce_rc"] = int(repro.returncode)
+            payload["reproduce_ok"] = repro.returncode != 0
+            payload["stdout_tail"] = (repro.stdout or "")[-4000:]
+            payload["stderr_tail"] = (repro.stderr or "")[-4000:]
         _write_repro_context(
             repo_root,
             repo_url=str(state.get("repo_url") or ""),

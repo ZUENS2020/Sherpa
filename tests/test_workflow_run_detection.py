@@ -988,6 +988,55 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
 
+
+def test_node_re_run_uses_generator_run_cmd_when_available(tmp_path: Path):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = out_dir / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    seen: dict[str, object] = {}
+
+    def _run_cmd(cmd, *, cwd, env, timeout, idle_timeout):
+        seen["cmd"] = [str(x) for x in cmd]
+        seen["cwd"] = str(cwd)
+        seen["timeout"] = int(timeout)
+        seen["idle_timeout"] = int(idle_timeout)
+        seen["env_has_marker"] = str(env.get("REPRO_MARKER") or "") == "1"
+        return 1, "boom", "asan"
+
+    def _compose_vcpkg_runtime_env(env, *, repo_root):
+        out_env = dict(env)
+        out_env["REPRO_MARKER"] = "1"
+        return out_env
+
+    gen = SimpleNamespace(
+        repo_root=tmp_path,
+        _run_cmd=_run_cmd,
+        _compose_vcpkg_runtime_env=_compose_vcpkg_runtime_env,
+    )
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "fmt_format_string_fuzz",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+    assert seen["cwd"] == str(workspace)
+    assert seen["idle_timeout"] == 0
+    assert seen["env_has_marker"] is True
+    assert "-runs=1" in (seen["cmd"] or [])
+
+
 def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypatch):
     workspace = tmp_path / ".repro_crash" / "workdir"
     out_dir = workspace / "fuzz" / "out"
