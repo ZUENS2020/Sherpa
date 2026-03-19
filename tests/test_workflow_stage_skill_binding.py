@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WF = ROOT / "harness_generator" / "src" / "langchain_agent" / "workflow_graph.py"
+LEGACY = ROOT / "harness_generator" / "src" / "fuzz_unharnessed_repo.py"
 
 
 def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
@@ -35,3 +36,20 @@ def test_main_workflow_stage_skills_exist() -> None:
     for stage in required:
         skill = root / stage / "SKILL.md"
         assert skill.is_file(), f"missing {skill}"
+
+
+def test_legacy_passes_also_bind_stage_skills_for_plan_and_synthesize() -> None:
+    text = LEGACY.read_text(encoding="utf-8")
+    assert 'stage_skill="plan"' in text
+    assert 'stage_skill="synthesize"' in text
+
+
+def test_workflow_attempts_forced_harness_repair_before_missing_harness_error() -> None:
+    text = WF.read_text(encoding="utf-8")
+    repair_hint = "synthesize: harness missing after grace wait; running forced harness repair"
+    error_hint = "synthesize incomplete: missing harness source under fuzz/"
+    repair_pos = text.find(repair_hint)
+    error_pos = text.find(error_hint)
+    assert repair_pos != -1
+    assert error_pos != -1
+    assert repair_pos < error_pos

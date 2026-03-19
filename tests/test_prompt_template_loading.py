@@ -109,3 +109,16 @@ def test_stage_skills_include_exact_build_template_block():
         assert "capture_output=True, text=True, timeout=60" in text
         assert 'for p in result.stdout.strip().split("\\n"):' in text
         assert 'if "test" not in p.name.lower() and p.exists():' in text
+
+
+def test_synthesize_skills_require_harness_output_and_self_check():
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    synth = (skill_root / "synthesize" / "SKILL.md").read_text(encoding="utf-8")
+    complete = (skill_root / "synthesize_complete_scaffold" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "harness-first contract" in synth
+    assert "harness file count is >= 1" in synth
+    assert "Harness file:` points to an existing harness file under `fuzz/`." in synth
+
+    assert "if harness source is missing" in complete
+    assert "if harness was missing before this step, harness exists after this step." in complete

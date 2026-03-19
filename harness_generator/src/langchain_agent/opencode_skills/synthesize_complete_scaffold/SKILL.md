@@ -9,6 +9,7 @@ Complete only missing required scaffold items without rewriting unrelated files.
 
 ## Required Outputs
 - missing required files completed under `fuzz/`
+- if harness source is missing, create at least one harness source file under `fuzz/`
 
 ## Key File Templates
 - `fuzz/README.md` required fields:
@@ -25,6 +26,7 @@ Complete only missing required scaffold items without rewriting unrelated files.
 
 ## Acceptance Criteria
 - all required scaffold files exist after this step.
+- if harness was missing before this step, harness exists after this step.
 - existing harness/build assets are preserved unless minimal changes are required.
 - no guessed paths/targets are introduced.
 

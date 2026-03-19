@@ -2994,7 +2994,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 _run_synthesize_completion(remaining_after_direct)
 
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
-            raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
+            remaining_for_harness_repair = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_for_harness_repair > 0:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: harness missing after grace wait; running forced harness repair",
+                )
+                _run_required_scaffold_repair(remaining_for_harness_repair)
+            if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(3):
+                raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
         if not _has_required_synthesis_outputs():
             try:
                 required_grace_sec = max(0, min(int((os.environ.get("SHERPA_SYNTHESIZE_REQUIRED_GRACE_SEC") or "8").strip()), 60))
