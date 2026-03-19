@@ -1650,7 +1650,6 @@ class NonOssFuzzHarnessGenerator:
             if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
                 return ""
             return VCPKG_PORT_ALIASES.get(token, token)
-
         rr = Path(repo_root or self.repo_root)
         dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
         dep_file = rr / dep_rel
@@ -1758,7 +1757,6 @@ class NonOssFuzzHarnessGenerator:
                         *) pkgs="$pkgs $mapped" ;;
                     esac
                 done < "$dep_file"
-
                 if [ -n "$pkgs" ]; then
                     {{
                         echo "# Auto-normalized to vcpkg port names."

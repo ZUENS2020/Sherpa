@@ -152,8 +152,6 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     assert "list z:" not in log_text
     assert "list bz2:" not in log_text
     assert "list lzma:" not in log_text
-
-
 def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
