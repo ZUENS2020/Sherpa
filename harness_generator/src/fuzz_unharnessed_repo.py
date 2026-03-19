@@ -2183,7 +2183,8 @@ EOF
                             rank it lower and choose an in-repo/low-dependency alternative when possible.
             - If compile_commands.json is needed, note it in `PLAN.md`, but do not generate it yet.
 
-            **Do not run commands**; only write the files above and any small metadata you need.
+            **Do not run build/execute commands**; you MAY run any read-only repository exploration commands (for example `find`, `grep`, `rg`, `cat`, `ls`).
+            Only write the files above and any small metadata you need.
             MANDATORY: when finished, you MUST write the path to `{FUZZ_DIR}/PLAN.md` into `./done`.
             If `./done` is missing, this step is treated as failed.
             """
@@ -2246,12 +2247,10 @@ EOF
                               - `    "-DENABLE_INSTALL=OFF",`
                               - `]`
                               Apply them by default unless repository facts explicitly require overrides.
-                            - Include reusable static-library discovery scaffolding with candidate constants and helper function,
-                              for example:
-                              - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt to target lib names)
-                              - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt to repo layout)
-                              - `def find_static_lib(repo_root, lib_name_pattern): ...`
-                              Prefer candidate paths first, then recursive glob fallback.
+                            - Do not hardcode a single static library path in build.py.
+                            - Use runtime command discovery (for example `subprocess.run(["find", ...])`) with a helper like
+                              `find_static_lib(repo_root, lib_name_pattern)` to locate `.a` artifacts before linking.
+                            - Exclude obvious test-only archives and verify the chosen path exists before final link.
                             - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
                             - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
@@ -2294,7 +2293,8 @@ EOF
             - The harness compiles with symbols; ASan/UBSan enabled for C/C++.
             - The harness reaches some code with a trivial input (will be tested soon).
 
-            Do not run any commands here; only create/modify files.
+            Do not run build/execute commands here. You MAY run any read-only repository exploration commands (for example `find`, `grep`, `rg`, `cat`, `ls`).
+            Only create/modify files.
             MANDATORY: when finished, you MUST write `{FUZZ_OUT_DIR}` into `./done`.
             If `./done` is missing, this step is treated as failed.
             """
