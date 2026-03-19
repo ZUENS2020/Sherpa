@@ -2149,7 +2149,7 @@ EOF
             2) `targets.json` — JSON array of ranked candidates with fields:
                ```json
                [{{"name": "...",
-                  "api": "qualified::symbol_or_Class.method",
+                  "api": "...",
                   "lang": "c-cpp|java",
                   "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
                   "proto": "const uint8_t*,size_t|byte[]|InputStream",
@@ -2157,6 +2157,11 @@ EOF
                   "reason": "...",
                   "evidence": ["path:line", "..."]}}]
                ```
+            TARGETS_JSON_SCHEMA:
+            targets.json field rules:
+            - `name` must use the source filename stem (strip `.cc`), for example `libarchive_7zip_fuzzer`
+            - `api` must use the source filename, for example `libarchive_7zip_fuzzer.cc`
+            - forbidden: do not use `LLVMFuzzerTestOneInput` as the `name` value
             3) Choose the single **best** candidate for a first harness and record its canonical
                fuzzer name (e.g., `xyz_format_fuzz`) at the top of `PLAN.md`.
 
@@ -2235,6 +2240,12 @@ EOF
                             - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
                             - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
                             - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
+                            - For CMake-based builds, define and use default configure args:
+                              - `DEFAULT_CMAKE_ARGS = [`
+                              - `    "-DENABLE_TEST=OFF",`
+                              - `    "-DENABLE_INSTALL=OFF",`
+                              - `]`
+                              Apply them by default unless repository facts explicitly require overrides.
                             - Include reusable static-library discovery scaffolding with candidate constants and helper function,
                               for example:
                               - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt to target lib names)
