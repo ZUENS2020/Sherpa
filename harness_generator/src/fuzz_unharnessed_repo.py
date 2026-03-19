@@ -115,6 +115,31 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _env_float(name: str, default: float, *, min_value: float = 0.0, max_value: float = 3600.0) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, val))
+
+
+def _retry_backoff_seconds(
+    attempt: int,
+    *,
+    base_env: str,
+    cap_env: str,
+    default_base: float,
+    default_cap: float,
+) -> float:
+    base = _env_float(base_env, default_base, min_value=0.0, max_value=300.0)
+    cap = _env_float(cap_env, default_cap, min_value=0.0, max_value=600.0)
+    wait = base * max(1, int(attempt))
+    return min(wait, cap)
+
 # Make CodexHelper discoverable in both "package" and "flat script" use.
 try:
     from .codex_helper import CodexHelper  # type: ignore
@@ -636,10 +661,10 @@ def _host_git_proxy_env() -> Dict[str, str]:
 def _candidate_clone_urls(url: str) -> List[str]:
     """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
-    urls: List[str] = [url]
+    urls: List[str] = []
     if not url.startswith("https://github.com/"):
         # Non-GitHub URLs are returned as-is to avoid breaking custom hosts.
-        return urls
+        return [url]
 
     mirror_specs: List[str] = []
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
@@ -667,6 +692,9 @@ def _candidate_clone_urls(url: str) -> List[str]:
         if candidate and candidate not in urls:
             urls.append(candidate)
 
+    if url not in urls:
+        # Keep official github as the final fallback.
+        urls.append(url)
     return urls
 
 
@@ -1166,7 +1194,15 @@ class NonOssFuzzHarnessGenerator:
                     pass
                 if time.time() >= deadline:
                     raise HarnessGeneratorError("Docker daemon is not ready (timeout waiting for docker info).")
-                time.sleep(2)
+                time.sleep(
+                    _retry_backoff_seconds(
+                        1,
+                        base_env="SHERPA_DOCKER_DAEMON_WAIT_INTERVAL_SEC",
+                        cap_env="SHERPA_DOCKER_DAEMON_WAIT_INTERVAL_SEC",
+                        default_base=1.0,
+                        default_cap=1.0,
+                    )
+                )
 
         # Ensure daemon is reachable first; this avoids startup race failures.
         _wait_for_docker_daemon_ready()
@@ -1335,7 +1371,6 @@ class NonOssFuzzHarnessGenerator:
         except Exception:
             max_tries = 3
 
-        backoff_s = 2.0
         last_rc = 1
         last_lines: list[str] = []
         force_classic_builder = os.environ.get("DOCKER_BUILDKIT", "").strip() == "0"
@@ -1368,9 +1403,15 @@ class NonOssFuzzHarnessGenerator:
 
             if attempt < max_tries and (_is_transient_registry_error(lines) or _is_docker_daemon_unavailable(lines)):
                 reason = "daemon/network transient error"
+                backoff_s = _retry_backoff_seconds(
+                    attempt,
+                    base_env="SHERPA_DOCKER_BUILD_RETRY_BASE_SEC",
+                    cap_env="SHERPA_DOCKER_BUILD_RETRY_MAX_SEC",
+                    default_base=1.0,
+                    default_cap=6.0,
+                )
                 print(f"[warn] docker build {reason}; retrying in {backoff_s:.0f}s ({attempt}/{max_tries})")
                 time.sleep(backoff_s)
-                backoff_s = min(backoff_s * 2, 20.0)
                 continue
             break
 
@@ -1841,7 +1882,7 @@ class NonOssFuzzHarnessGenerator:
                         vcpkg_git_bin="${{SHERPA_VCPKG_GIT_BIN:-git}}"
                         if command -v "$vcpkg_git_bin" >/dev/null 2>&1; then
                             echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
-                            clone_urls="https://github.com/microsoft/vcpkg https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg"
+                            clone_urls="https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg https://github.com/microsoft/vcpkg"
                             cloned_ok=0
                             for u in $clone_urls; do
                                 echo "[*] ({log_prefix}) trying vcpkg source: $u"
@@ -4072,7 +4113,15 @@ class NonOssFuzzHarnessGenerator:
                         print(
                             f"[warn] (host/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_HOST_CLONE_TIMEOUT_SEC}s); retrying..."
                         )
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         continue
 
                     if rc == 0:
@@ -4086,7 +4135,15 @@ class NonOssFuzzHarnessGenerator:
                     print(
                         f"[warn] (host/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    time.sleep(2 * attempt)
+                    time.sleep(
+                        _retry_backoff_seconds(
+                            attempt,
+                            base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                            cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                            default_base=0.5,
+                            default_cap=3.0,
+                        )
+                    )
 
                 if clone_success:
                     break
@@ -4204,7 +4261,15 @@ class NonOssFuzzHarnessGenerator:
                                 shutil.rmtree(temp_root, ignore_errors=True)
                         except Exception:
                             pass
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         continue
 
                     if rc == 0:
@@ -4237,7 +4302,15 @@ class NonOssFuzzHarnessGenerator:
                     print(
                         f"[warn] (docker/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    time.sleep(2 * attempt)
+                    time.sleep(
+                        _retry_backoff_seconds(
+                            attempt,
+                            base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                            cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                            default_base=0.5,
+                            default_cap=3.0,
+                        )
+                    )
 
                 if clone_success:
                     break
@@ -4306,7 +4379,15 @@ class NonOssFuzzHarnessGenerator:
                         if (t := _tail_lines(fout)):
                             print("[warn] (docker/git) fetch stdout (tail):\n" + textwrap.indent(t, "    "))
                         print(f"[warn] (docker/git) fetch failed (attempt {attempt}/3, rc={frc}); retrying...")
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         fe = type("_FE", (), {"returncode": frc})()  # type: ignore
                     assert fe is not None
                     if fe.returncode != 0:
