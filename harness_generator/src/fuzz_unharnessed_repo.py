@@ -115,6 +115,14 @@ def _get_sherpa_git_mirrors() -> str:
     return os.environ.get("SHERPA_GIT_MIRRORS", "").strip()
 
 
+def _default_git_mirror_specs() -> List[str]:
+    # Built-in mirror-first defaults for GitHub clone stability.
+    return [
+        "https://ghfast.top/{url}",
+        "https://ghproxy.net/{url}",
+    ]
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -676,6 +684,8 @@ def _candidate_clone_urls(url: str) -> List[str]:
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
     if sherpa_git_mirrors:
         mirror_specs.extend([p.strip() for p in sherpa_git_mirrors.split(",") if p.strip()])
+    else:
+        mirror_specs.extend(_default_git_mirror_specs())
 
     sherpa_github_mirror = _get_sherpa_github_mirror()
     if sherpa_github_mirror:

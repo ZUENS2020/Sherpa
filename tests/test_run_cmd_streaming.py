@@ -282,6 +282,17 @@ def test_candidate_clone_urls_prefers_mirrors_before_github(monkeypatch):
     assert urls[-1] == "https://github.com/fmtlib/fmt.git"
 
 
+def test_candidate_clone_urls_uses_builtin_mirrors_when_env_missing(monkeypatch):
+    monkeypatch.delenv("SHERPA_GIT_MIRRORS", raising=False)
+    monkeypatch.delenv("SHERPA_GITHUB_MIRROR", raising=False)
+
+    urls = fur._candidate_clone_urls("https://github.com/fmtlib/fmt.git")
+
+    assert urls[0] == "https://ghfast.top/https://github.com/fmtlib/fmt.git"
+    assert urls[1] == "https://ghproxy.net/https://github.com/fmtlib/fmt.git"
+    assert urls[-1] == "https://github.com/fmtlib/fmt.git"
+
+
 def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
