@@ -768,6 +768,18 @@ def test_calc_parallel_batch_budget_caps_unlimited_round_by_default(monkeypatch)
     assert hard_timeout == 7320
 
 
+def test_default_run_rss_limit_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_RSS_LIMIT_MB", "65536")
+    monkeypatch.setenv("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi")
+    assert workflow_graph._default_run_rss_limit_mb() == 65536
+
+
+def test_default_run_rss_limit_derived_from_k8s_memory_limit(monkeypatch):
+    monkeypatch.delenv("SHERPA_RUN_RSS_LIMIT_MB", raising=False)
+    monkeypatch.setenv("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi")
+    assert workflow_graph._default_run_rss_limit_mb() == int(64 * 1024 * 0.8)
+
+
 def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Path):
     timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-deadbeef"
     timeout_artifact.parent.mkdir(parents=True, exist_ok=True)

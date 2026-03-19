@@ -1320,11 +1320,37 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
 
 
 def _default_run_rss_limit_mb() -> int:
-    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "131072").strip()
+    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
     try:
         return max(256, int(raw))
     except Exception:
-        return 131072
+        pass
+
+    def _parse_k8s_mem_mb(text: str) -> int:
+        src = str(text or "").strip().lower()
+        if not src:
+            return 0
+        m = re.fullmatch(r"([0-9]+)([a-z]+)?", src)
+        if not m:
+            return 0
+        val = int(m.group(1) or 0)
+        unit = str(m.group(2) or "")
+        if unit in {"gi", "g"}:
+            return val * 1024
+        if unit in {"mi", "m"}:
+            return val
+        if unit in {"ki", "k"}:
+            return max(1, val // 1024)
+        if unit in {"ti", "t"}:
+            return val * 1024 * 1024
+        if unit == "":
+            return max(1, val // (1024 * 1024))
+        return 0
+
+    limit_mb = _parse_k8s_mem_mb(os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", ""))
+    if limit_mb > 0:
+        return max(256, int(limit_mb * 0.8))
+    return 131072
 
 
 def _antlr_assist_enabled() -> bool:
