@@ -138,6 +138,19 @@ ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
 VCPKG_REPO_DIR = (os.environ.get("SHERPA_VCPKG_REPO_DIR") or "vcpkg").strip() or "vcpkg"
 VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or "vcpkg_installed").strip() or "vcpkg_installed"
+VCPKG_PORT_ALIASES: Dict[str, str] = {
+    # Common generic/library shorthands -> vcpkg ports
+    "z": "zlib",
+    "bz2": "bzip2",
+    "lzma": "liblzma",
+    "xz": "liblzma",
+    "ssl": "openssl",
+    "crypto": "openssl",
+    "libssl": "openssl",
+    "libcrypto": "openssl",
+    "xml2": "libxml2",
+    "libxml": "libxml2",
+}
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -1630,6 +1643,14 @@ class NonOssFuzzHarnessGenerator:
         return "x64-linux"
 
     def _declared_vcpkg_ports(self, *, repo_root: Optional[Path] = None) -> list[str]:
+        def _normalize_port(raw: str) -> str:
+            token = raw.strip().lower()
+            if not token:
+                return ""
+            if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                return ""
+            return VCPKG_PORT_ALIASES.get(token, token)
+
         rr = Path(repo_root or self.repo_root)
         dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
         dep_file = rr / dep_rel
@@ -1640,14 +1661,13 @@ class NonOssFuzzHarnessGenerator:
         try:
             for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = raw_line.split("#", 1)[0].strip().lower()
-                if not line:
+                norm = _normalize_port(line)
+                if not norm:
                     continue
-                if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", line):
+                if norm in seen:
                     continue
-                if line in seen:
-                    continue
-                seen.add(line)
-                ports.append(line)
+                seen.add(norm)
+                ports.append(norm)
         except Exception:
             return []
         return ports
@@ -1717,13 +1737,36 @@ class NonOssFuzzHarnessGenerator:
                     line="${{line%%#*}}"
                     line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
                     [ -n "$line" ] || continue
-                    if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
-                        pkgs="$pkgs $line"
-                    else
+                    if ! printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
                         echo "[warn] ({log_prefix}) skip invalid package token: $line"
+                        continue
                     fi
+                    pkg="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+                    case "$pkg" in
+                        z) mapped="zlib" ;;
+                        bz2) mapped="bzip2" ;;
+                        lzma|xz) mapped="liblzma" ;;
+                        ssl|crypto|libssl|libcrypto) mapped="openssl" ;;
+                        xml2|libxml) mapped="libxml2" ;;
+                        *) mapped="$pkg" ;;
+                    esac
+                    if [ "$mapped" != "$pkg" ]; then
+                        echo "[warn] ({log_prefix}) normalized package token '$pkg' -> '$mapped' (vcpkg port)"
+                    fi
+                    case " $pkgs " in
+                        *" $mapped "*) ;;
+                        *) pkgs="$pkgs $mapped" ;;
+                    esac
                 done < "$dep_file"
 
+                if [ -n "$pkgs" ]; then
+                    {{
+                        echo "# Auto-normalized to vcpkg port names."
+                        for p in $pkgs; do
+                            echo "$p"
+                        done
+                    }} > "$dep_file" || true
+                fi
             fi
 
             if [ -n "$pkgs" ]; then
@@ -2039,7 +2082,8 @@ class NonOssFuzzHarnessGenerator:
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
                         - If external system packages are strictly required, create `{FUZZ_SYSTEM_PACKAGES_FILE}`
-                            with one package name per line (comments with `#` are allowed, no shell commands).
+                            with one vcpkg port name per line (comments with `#` are allowed, no shell commands).
+                            Use canonical port names (for example `zlib`, `bzip2`, `liblzma`, `lz4`), never aliases like `z`, `bz2`, `lzma`.
 
             **Critical constraints:**
             - Use **public/documented APIs**; avoid low-level helpers.

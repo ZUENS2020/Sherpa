@@ -94,6 +94,66 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert "zlib" in log_text
 
 
+def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+
+    ports = gen._declared_vcpkg_ports(repo_root=tmp_path)
+
+    assert ports == ["zlib", "bzip2", "liblzma", "lz4"]
+
+
+def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+
+    log_path = tmp_path / "vcpkg.log"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {log_path}\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho alias-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+
+    rc, out, _err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "alias-build-ok" in out
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "list zlib:" in log_text
+    assert "list bzip2:" in log_text
+    assert "list liblzma:" in log_text
+    assert "list lz4:" in log_text
+    assert "list z:" not in log_text
+    assert "list bz2:" not in log_text
+    assert "list lzma:" not in log_text
+
+
 def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"

@@ -74,6 +74,11 @@ If progress stalls, still deliver repository-understanding artifacts first, then
 
 If external system dependencies are required, write vcpkg port names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
+Use canonical vcpkg port names only (not generic/apt names). Examples:
+- `zlib` (NOT `z`)
+- `bzip2` (NOT `bz2`)
+- `liblzma` (NOT `lzma`)
+- `lz4` (valid as-is)
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
 Hard requirements:
@@ -162,6 +167,7 @@ Constraints:
 - The only allowed file outside `fuzz/` is `./done` (sentinel). Any other path change is rejected by the workflow.
 - Do not modify repository source/build files outside `fuzz/` (for example: `*.c`, `*.cc`, `*.cpp`, `*.h`, `CMakeLists.txt`, `Makefile`, `configure`).
 - If external system deps are required, declare vcpkg port names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+- Use canonical vcpkg port names only in `fuzz/system_packages.txt`. Never write generic aliases like `z`, `bz2`, or `lzma`; use `zlib`, `bzip2`, `liblzma`.
 - If you change `fuzz/system_packages.txt`, still finish all other necessary `fuzz/` edits in the same attempt. Do not stop after only declaring packages if `fuzz/build.py` or harness glue also needs changes.
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
