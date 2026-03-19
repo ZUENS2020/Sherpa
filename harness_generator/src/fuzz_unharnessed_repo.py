@@ -1868,6 +1868,82 @@ class NonOssFuzzHarnessGenerator:
                 export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
                 export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
                 export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+                export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
+                mkdir -p "$VCPKG_DOWNLOADS" || true
+
+                # Keep vcpkg asset downloads from stalling on first github attempt:
+                # install a local curl wrapper with mirror-first URL rewrite + short connect timeout.
+                if command -v curl >/dev/null 2>&1; then
+                    real_curl="$(command -v curl)"
+                    shim_bin="$repo_root/.sherpa-bin"
+                    mkdir -p "$shim_bin" || true
+                    cat > "$shim_bin/curl" <<'EOF'
+#!/bin/sh
+set -u
+real_curl="${{SHERPA_REAL_CURL_BIN:-/usr/bin/curl}}"
+if [ ! -x "$real_curl" ]; then
+  real_curl="$(command -v curl 2>/dev/null || true)"
+fi
+if [ -z "$real_curl" ]; then
+  echo "[sherpa/curl] real curl not found" >&2
+  exit 127
+fi
+
+argc=$#
+if [ "$argc" -le 0 ]; then
+  exec "$real_curl"
+fi
+
+last_arg=""
+for a in "$@"; do
+  last_arg="$a"
+done
+case "$last_arg" in
+  http://*|https://*) orig_url="$last_arg" ;;
+  *) exec "$real_curl" --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" --retry-delay 0 "$@" ;;
+esac
+
+if [ "$argc" -eq 1 ]; then
+  base_eval="set --"
+else
+  i=1
+  base_eval="set --"
+  for arg in "$@"; do
+    if [ "$i" -ge "$argc" ]; then
+      break
+    fi
+    esc=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
+    base_eval="$base_eval '$esc'"
+    i=$((i + 1))
+  done
+fi
+
+case "$orig_url" in
+  https://github.com/*)
+    candidates="https://ghfast.top/$orig_url https://ghproxy.net/$orig_url $orig_url"
+    for u in $candidates; do
+      eval "$base_eval '$u'"
+      "$real_curl" \
+        --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" \
+        --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" \
+        --retry-delay 0 \
+        "$@"
+      rc=$?
+      if [ $rc -eq 0 ]; then
+        exit 0
+      fi
+    done
+    exit 56
+    ;;
+  *)
+    exec "$real_curl" --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" --retry-delay 0 "$@"
+    ;;
+esac
+EOF
+                    chmod +x "$shim_bin/curl" || true
+                    export SHERPA_REAL_CURL_BIN="$real_curl"
+                    export PATH="$shim_bin:$PATH"
+                fi
 
                 if [ ! -x "$vcpkg_root/vcpkg" ]; then
                     if [ ! -d "$vcpkg_root/.git" ]; then
