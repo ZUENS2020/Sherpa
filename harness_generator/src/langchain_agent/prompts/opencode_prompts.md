@@ -93,6 +93,12 @@ Hard requirements:
   - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt per repository layout)
   - `def find_static_lib(repo_root, lib_name_pattern): ...`
   Use candidate paths first, then recursive glob fallback. Do not rely on a single guessed location.
+- In `fuzz/build.py`, define default CMake args and apply them by default:
+  - `DEFAULT_CMAKE_ARGS = [`
+  - `    "-DENABLE_TEST=OFF",`
+  - `    "-DENABLE_INSTALL=OFF",`
+  - `]`
+  Ensure these defaults are included in CMake configure command unless repository facts explicitly require overrides.
 - Do not silently accept optional dependency downgrades. When CMake/build output indicates missing key libraries (for example zlib/bzip2/lzma/lz4/zstd/openssl/libxml2/expat), declare matching vcpkg ports in `fuzz/system_packages.txt` and keep build configuration aligned with those dependencies.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.

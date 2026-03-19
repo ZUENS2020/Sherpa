@@ -80,6 +80,9 @@ def test_synthesize_prompts_require_observed_target_alignment():
     assert "STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']" in synth
     assert "SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']" in synth
     assert "def find_static_lib(repo_root, lib_name_pattern):" in synth
+    assert "DEFAULT_CMAKE_ARGS = [" in synth
+    assert "\"-DENABLE_TEST=OFF\"" in synth
+    assert "\"-DENABLE_INSTALL=OFF\"" in synth
     assert "fuzz/observed_target.json" in scaffold
     assert "fuzz/repo_understanding.json" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
