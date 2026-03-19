@@ -2141,52 +2141,15 @@ EOF
         """
         instructions = textwrap.dedent(
             f"""
-            **Goal:** Analyze this repository and produce a realistic fuzz plan.
-            **Deliverables (create inside `{FUZZ_DIR}/`):**
-            1) `PLAN.md` — brief rationale describing the top 3–10 *public, attacker-reachable*
-               entrypoints (file/packet/string parsers) with justification for real-world reachability,
-               expected initialization, and any tricky preconditions.
-            2) `targets.json` — JSON array of ranked candidates with fields:
-               ```json
-               [{{"name": "...",
-                  "api": "...",
-                  "lang": "c-cpp|java",
-                  "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
-                  "proto": "const uint8_t*,size_t|byte[]|InputStream",
-                  "build_target": "cmake target or path if known",
-                  "reason": "...",
-                  "evidence": ["path:line", "..."]}}]
-               ```
-            TARGETS_JSON_SCHEMA:
-            targets.json field rules:
-            - `name` must use the source filename stem (strip `.cc`), for example `libarchive_7zip_fuzzer`
-            - `api` must use the source filename, for example `libarchive_7zip_fuzzer.cc`
-            - forbidden: do not use `LLVMFuzzerTestOneInput` as the `name` value
-            3) Choose the single **best** candidate for a first harness and record its canonical
-               fuzzer name (e.g., `xyz_format_fuzz`) at the top of `PLAN.md`.
-
-            **Rules:**
-            - Favor the highest-level API that ingests untrusted data (files/streams/packets).
-            - You MUST classify every chosen target into one `target_type` from this exact enum:
-              `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`,
-              `interpreter`, `generic`.
-            - Pick the most specific type available. For example:
-              - parse/scan/tokenize/read structured text or binary -> `parser`
-              - decode/decompress/inflate/unpack -> `decoder`
-              - tar/zip/archive extraction or listing -> `archive`
-              - emit/dump/serialize/write structured output -> `serializer`
-            - Avoid low-level helpers (e.g., `_read_u32`) unless nothing higher validates input.
-            - Prefer targets with small/clear init and good branch structure.
-                        - Prefer the **lowest dependency footprint** target first: prioritize APIs that compile with
-                            toolchain + repository-local code only (or standard runtime libs already present).
-                        - If a candidate requires extra system/dev packages (e.g. new `apt`/`dnf` libraries),
-                            rank it lower and choose an in-repo/low-dependency alternative when possible.
-            - If compile_commands.json is needed, note it in `PLAN.md`, but do not generate it yet.
-
-            **Do not run build/execute commands**; you MAY run any read-only repository exploration commands (for example `find`, `grep`, `rg`, `cat`, `ls`).
-            Only write the files above and any small metadata you need.
-            MANDATORY: when finished, you MUST write the path to `{FUZZ_DIR}/PLAN.md` into `./done`.
-            If `./done` is missing, this step is treated as failed.
+            Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
+            Goal: produce `{FUZZ_DIR}/PLAN.md` and strict-schema `{FUZZ_DIR}/targets.json`.
+            Keep runtime-viable/public targets first. Avoid helper-only targets.
+            targets.json requirements:
+            - non-empty JSON array
+            - each item includes non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`
+            - forbidden: `name = LLVMFuzzerTestOneInput`
+            Do NOT run build/execute commands; read-only inspection commands are allowed.
+            MANDATORY: write `{FUZZ_DIR}/PLAN.md` into `./done`.
             """
         ).strip()
 
@@ -2216,87 +2179,22 @@ EOF
 
         instructions = textwrap.dedent(
             f"""
-            **Goal:** Create a *local* fuzzing scaffold for the chosen top target from `PLAN.md`.
-
-            Deep-understanding policy:
-            - Do not optimize for the fastest possible artifact output.
-            - First read enough repository/build context to explain the real link path.
-            - Before treating synthesis as complete, create `fuzz/repo_understanding.json` with grounded build facts.
-
-            **Requirements (create under `{FUZZ_DIR}/`):**
-            - **`repo_understanding.json`**:
-                - Record only these fields:
-                  `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`,
-                  `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`.
-                - `evidence` must be a non-empty array of concrete repository/build references.
-            - One harness:
-              - **C/C++**: `<name>_fuzz.cc` implementing:
-                ```c++
-                extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
-                    // minimal realistic init; call the public API; no stubs; no UB
-                }}
-                ```
-              - **Java**: `<Name>Fuzzer.java` compatible with **Jazzer**.
-                        - **`build.py`**:
-                            - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
-                            - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
-                            - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
-                            - For CMake-based builds, define and use default configure args:
-                              - `DEFAULT_CMAKE_ARGS = [`
-                              - `    "-DENABLE_TEST=OFF",`
-                              - `    "-DENABLE_INSTALL=OFF",`
-                              - `]`
-                              Apply them by default unless repository facts explicitly require overrides.
-                            - Do not hardcode a single static library path in build.py.
-                            - Use runtime command discovery (for example `subprocess.run(["find", ...])`) with a helper like
-                              `find_static_lib(repo_root, lib_name_pattern)` to locate `.a` artifacts before linking.
-                            - Exclude obvious test-only archives and verify the chosen path exists before final link.
-                            - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
-                            - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
-                            - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
-                        - **`build_strategy.json`**:
-                            - Record build-scaffold strategy fields:
-                              `build_system`, `build_mode`, `library_targets`, `library_artifacts`,
-                              `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`,
-                              `repo_fuzz_targets`, `selected_repo_target`.
-                            - `build_mode` MUST be `repo_target`, `library_link`, or `custom_script`.
-                            - Only use `repo_target` if the exact target name is grounded in repository files/build metadata.
-                            - Keep it consistent with `repo_understanding.json`; do not leave `build_system` at `unknown`
-                              if repository files already reveal the concrete build system.
-            - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
-            - **README.md** explaining the entrypoint and how to run the fuzzer.
-            - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
-                        - If external system packages are strictly required, create `{FUZZ_SYSTEM_PACKAGES_FILE}`
-                            with one vcpkg port name per line (comments with `#` are allowed, no shell commands).
-                            Use canonical port names (for example `zlib`, `bzip2`, `liblzma`, `lz4`), never aliases like `z`, `bz2`, `lzma`.
-
-            **Critical constraints:**
-            - Use **public/documented APIs**; avoid low-level helpers.
-            - Perform **minimal real-world init** (contexts/handles via proper constructors).
-            - Avoid harness mistakes (double-free, wrong types, lifetime bugs).
-                        - Keep dependency footprint minimal: prefer targets/build paths that require no new
-                            external system packages beyond the existing image/toolchain.
-                        - Do not introduce new third-party library dependencies just to make a harness compile;
-                            if the selected target needs unavailable deps, choose a lower-dependency target instead.
-            - Do not vendor large third-party code; use the repo as-is.
-            - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
-            - You may invoke a repository-provided fuzz target only if the exact target name is first grounded in repository files/build metadata and recorded in both `repo_understanding.json` and `build_strategy.json`.
-            - Never invoke guessed targets such as `cmake --build --target <name>-fuzzer`.
-            - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` alone means a repository fuzz target should be built.
-            - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
-            - Prefer external harness linking by default, but use a real repository fuzz target when that target is clearly identified and more faithful.
-            - Non-root runtime rule: do not add install-to-system-dir steps (`-DENABLE_INSTALL=ON`, `cmake --install`, `--target install`); use build-tree artifacts directly.
-            - Do not consider the task complete if you only produced a harness/build script without a grounded repository-understanding file.
-
-            **Acceptance criteria:**
-            - After `(cd {FUZZ_DIR} && python build.py)`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
-            - The harness compiles with symbols; ASan/UBSan enabled for C/C++.
-            - The harness reaches some code with a trivial input (will be tested soon).
-
-            Do not run build/execute commands here. You MAY run any read-only repository exploration commands (for example `find`, `grep`, `rg`, `cat`, `ls`).
-            Only create/modify files.
-            MANDATORY: when finished, you MUST write `{FUZZ_OUT_DIR}` into `./done`.
-            If `./done` is missing, this step is treated as failed.
+            Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
+            Goal: synthesize a complete fuzz scaffold under `{FUZZ_DIR}`.
+            Required outputs:
+            - harness source file(s)
+            - `fuzz/build.py` or `fuzz/build.sh`
+            - `fuzz/repo_understanding.json`
+            - `fuzz/build_strategy.json`
+            - `fuzz/build_runtime_facts.json`
+            - `fuzz/README.md`
+            Build constraints:
+            - keep `DEFAULT_CMAKE_ARGS` with `-DENABLE_TEST=OFF` and `-DENABLE_INSTALL=OFF`
+            - do not hardcode a single artifact path; use discovery
+            - if external deps are required, write canonical vcpkg port names to `{FUZZ_SYSTEM_PACKAGES_FILE}`
+            Keep selected/observed target alignment and record drift reasons.
+            Do NOT run build/execute commands; read-only inspection commands are allowed.
+            MANDATORY: write `{FUZZ_OUT_DIR}` into `./done`.
             """
         ).strip()
 
