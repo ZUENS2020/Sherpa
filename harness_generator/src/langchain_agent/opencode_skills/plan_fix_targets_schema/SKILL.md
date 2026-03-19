@@ -20,6 +20,7 @@ Repair `fuzz/targets.json` so it passes strict schema validation.
     - `lang` in `c-cpp|cpp|c|c++|java`
     - `target_type` in `parser|decoder|archive|image|document|network|database|serializer|interpreter|generic`
     - `seed_profile` in `parser-structure|parser-token|parser-format|parser-numeric|decoder-binary|archive-container|serializer-structured|document-text|network-message|generic`
+  - forbidden: `name = LLVMFuzzerTestOneInput`
 
 ## Acceptance Criteria
 - JSON parses successfully.

@@ -19,6 +19,7 @@ Fix the upstream bug so the same crashing input no longer reproduces the fault.
 - fix addresses root cause in upstream code path.
 - no broad refactor or behavior masking.
 - clear, minimal code delta.
+- must produce textual code changes; pure no-op is invalid.
 
 ## Command Policy
 - Allowed: read-only commands only.

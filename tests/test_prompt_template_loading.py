@@ -123,6 +123,9 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "chosen_target_reason" in synth
     assert "fuzzer_entry_strategy" in synth
     assert "evidence" in synth
+    assert "minimal valid template" in synth
+    assert "never use shell substitutions like `$(nproc)`" in synth
+    assert '["-j", str(os.cpu_count() or 1)]' in synth
     assert "def build_fuzzers():" in synth
     assert "static_lib = find_static_lib(BUILD_DIR) or find_static_lib(REPO_ROOT)" in synth
     assert '"clang++"' in synth
@@ -133,3 +136,22 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "if harness was missing before this step, harness exists after this step." in complete
     assert "repo_understanding.json" in complete
     assert "repair it in place" in complete
+    assert "minimal valid shape example" in complete
+    assert "`$(nproc)`" in complete
+    assert '["-j", str(os.cpu_count() or 1)]' in complete
+
+
+def test_other_stage_skills_include_runtime_contract_clauses():
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    plan = (skill_root / "plan" / "SKILL.md").read_text(encoding="utf-8")
+    plan_fix = (skill_root / "plan_fix_targets_schema" / "SKILL.md").read_text(encoding="utf-8")
+    fix_build = (skill_root / "fix_build" / "SKILL.md").read_text(encoding="utf-8")
+    fix_crash_h = (skill_root / "fix_crash_harness_error" / "SKILL.md").read_text(encoding="utf-8")
+    fix_crash_u = (skill_root / "fix_crash_upstream_bug" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
+    assert "canonical vcpkg examples" in fix_build
+    assert "`zlib`, `bzip2`, `liblzma`" in fix_build
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u

@@ -32,6 +32,7 @@ def find_static_lib(repo_root):
     return None
 ```
 - if dependency evidence exists, update `fuzz/system_packages.txt` with canonical vcpkg names only.
+- canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
