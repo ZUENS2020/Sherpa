@@ -209,19 +209,9 @@ def _compact_text_for_opencode(text: str, *, max_lines: int, max_chars: int) -> 
     src = str(text or "")
     if not src:
         return ""
-    lines = src.splitlines()
-    if len(lines) > max_lines:
-        keep_head = max(1, max_lines // 2)
-        keep_tail = max(1, max_lines - keep_head - 1)
-        dropped = max(0, len(lines) - keep_head - keep_tail)
-        marker = f"... [{dropped} lines omitted] ..."
-        lines = lines[:keep_head] + [marker] + lines[-keep_tail:]
-    out = "\n".join(lines).strip()
-    if len(out) > max_chars:
-        head = max(128, max_chars // 2)
-        tail = max(128, max_chars - head - 32)
-        out = f"{out[:head]}\n... [truncated] ...\n{out[-tail:]}"
-    return out.strip()
+    # Do not truncate task/context/policy/skill payloads. The model must read
+    # full stage contracts and evidence files to avoid partial-guidance errors.
+    return src.strip()
 
 
 def _write_opencode_materialized_text(

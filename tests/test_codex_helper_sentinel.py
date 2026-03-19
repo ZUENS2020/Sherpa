@@ -258,6 +258,14 @@ def test_run_codex_command_prompt_uses_real_repo_root_in_native_mode(
     assert "mounted at /repo" not in prompt
 
 
+def test_compact_text_for_opencode_does_not_truncate() -> None:
+    src = "\n".join(f"line-{i}" for i in range(1, 401))
+    out = ch._compact_text_for_opencode(src, max_lines=10, max_chars=200)
+    assert out == src
+    assert "... [truncated] ..." not in out
+    assert "lines omitted" not in out
+
+
 def test_run_codex_command_materializes_long_inputs_to_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -306,8 +314,12 @@ def test_run_codex_command_materializes_long_inputs_to_files(
     context_file = helper.working_dir / ".git" / "sherpa-opencode" / "additional_context.txt"
     assert task_file.is_file()
     assert context_file.is_file()
-    assert len(task_file.read_text(encoding="utf-8").splitlines()) <= 50
-    assert len(context_file.read_text(encoding="utf-8").splitlines()) <= 50
+    task_lines = task_file.read_text(encoding="utf-8").splitlines()
+    ctx_lines = context_file.read_text(encoding="utf-8").splitlines()
+    assert len(task_lines) == 220
+    assert len(ctx_lines) == 260
+    assert task_lines[-1] == "task line 219"
+    assert ctx_lines[-1] == "context line 259"
 
 
 def test_run_codex_command_injects_global_policy_by_default(
