@@ -2998,6 +2998,18 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             return raw in {"1", "true", "yes", "on"}
 
         def _read_declared_system_packages(dep_file: Path) -> set[str]:
+            alias_map = {
+                "z": "zlib",
+                "bz2": "bzip2",
+                "lzma": "liblzma",
+                "xz": "liblzma",
+                "ssl": "openssl",
+                "crypto": "openssl",
+                "libssl": "openssl",
+                "libcrypto": "openssl",
+                "xml2": "libxml2",
+                "libxml": "libxml2",
+            }
             if not dep_file.is_file():
                 return set()
             declared: set[str] = set()
@@ -3007,7 +3019,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     if not line:
                         continue
                     if re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", line):
-                        declared.add(line)
+                        declared.add(alias_map.get(line, line))
             except Exception:
                 return set()
             return declared
@@ -4299,6 +4311,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return False
 
     def _try_hotfix_missing_system_packages() -> bool:
+        alias_map = {
+            "z": "zlib",
+            "bz2": "bzip2",
+            "lzma": "liblzma",
+            "xz": "liblzma",
+            "ssl": "openssl",
+            "crypto": "openssl",
+            "libssl": "openssl",
+            "libcrypto": "openssl",
+            "xml2": "libxml2",
+            "libxml": "libxml2",
+        }
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         if "cannot find -lz" in diag or "undefined reference to `gz" in diag or "undefined reference to `inflate" in diag:
             # Prefer dedicated link-fix rule for zlib linker failures.
@@ -4327,7 +4351,10 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
-                    existing.append(line)
+                    token = line.split("#", 1)[0].strip().lower()
+                    if not token or not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                        continue
+                    existing.append(alias_map.get(token, token))
             except Exception:
                 return False
         merged = sorted(set(existing) | set(need_pkgs))
@@ -4482,6 +4509,18 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             if any(n in diag for n in needles):
                 need_pkgs.append(pkg)
         if need_pkgs:
+            alias_map = {
+                "z": "zlib",
+                "bz2": "bzip2",
+                "lzma": "liblzma",
+                "xz": "liblzma",
+                "ssl": "openssl",
+                "crypto": "openssl",
+                "libssl": "openssl",
+                "libcrypto": "openssl",
+                "xml2": "libxml2",
+                "libxml": "libxml2",
+            }
             dep_file = gen.repo_root / 'fuzz' / 'system_packages.txt'
             existing: list[str] = []
             if dep_file.is_file():
@@ -4490,7 +4529,10 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                         line = line.strip()
                         if not line or line.startswith('#'):
                             continue
-                        existing.append(line)
+                        token = line.split("#", 1)[0].strip().lower()
+                        if not token or not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                            continue
+                        existing.append(alias_map.get(token, token))
                 except Exception:
                     existing = []
             merged = sorted(set(existing) | set(need_pkgs))
