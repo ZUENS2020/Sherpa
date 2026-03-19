@@ -75,6 +75,7 @@ def test_k8s_configmap_defaults_tmpdir_to_container_tmp():
     data = configmap["data"]
 
     assert data["TMPDIR"] == "/tmp"
+    assert data["SHERPA_VCPKG_INSTALLED_DIR"] == "vcpkg_installed"
 
 
 def test_k8s_manifest_applies_default_worker_resources():

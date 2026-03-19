@@ -57,6 +57,9 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
 
     vcpkg_dir = tmp_path / "vcpkg"
     vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
     vcpkg_script = vcpkg_dir / "vcpkg"
     vcpkg_script.write_text(
         "#!/bin/sh\n"
@@ -89,6 +92,110 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert "list zlib:" in log_text
     assert "install --triplet" in log_text
     assert "zlib" in log_text
+
+
+def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho should-not-run\n", encoding="utf-8")
+    build_script.chmod(0o755)
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    vcpkg_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["PATH"] = "/bin"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc != 0
+    assert "should-not-run" not in out
+    merged = (out + "\n" + err).lower()
+    assert "vcpkg install failed" in merged
+
+
+def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    clone_log = tmp_path / "clone.log"
+    git_bin_dir = tmp_path / "bin"
+    git_bin_dir.mkdir(parents=True, exist_ok=True)
+    git_script = git_bin_dir / "git"
+    git_script.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {clone_log}\n"
+        "prev=\"\"\n"
+        "last=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  prev=\"$last\"\n"
+        "  last=\"$arg\"\n"
+        "done\n"
+        "url=\"$prev\"\n"
+        "dst=\"$last\"\n"
+        "if [ \"$url\" = \"https://github.com/microsoft/vcpkg\" ]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        "mkdir -p \"$dst/.git\"\n"
+        "mkdir -p \"$dst/scripts/buildsystems\"\n"
+        "cat > \"$dst/scripts/buildsystems/vcpkg.cmake\" <<'EOF'\n"
+        "# fake toolchain\n"
+        "EOF\n"
+        "cat > \"$dst/bootstrap-vcpkg.sh\" <<'EOF'\n"
+        "#!/bin/sh\n"
+        "cat > ./vcpkg <<'INNER'\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        "exit 0\n"
+        "INNER\n"
+        "chmod +x ./vcpkg\n"
+        "exit 0\n"
+        "EOF\n"
+        "chmod +x \"$dst/bootstrap-vcpkg.sh\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    git_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho mirror-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["SHERPA_VCPKG_GIT_BIN"] = str(git_script)
+
+    rc, out, _err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=20,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "mirror-build-ok" in out
+    log = clone_log.read_text(encoding="utf-8")
+    assert "https://github.com/microsoft/vcpkg" in log
+    assert "https://ghfast.top/https://github.com/microsoft/vcpkg" in log
 
 
 def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, monkeypatch):

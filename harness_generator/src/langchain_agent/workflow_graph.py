@@ -1320,11 +1320,37 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
 
 
 def _default_run_rss_limit_mb() -> int:
-    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "131072").strip()
+    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
     try:
         return max(256, int(raw))
     except Exception:
-        return 131072
+        pass
+
+    def _parse_k8s_mem_mb(text: str) -> int:
+        src = str(text or "").strip().lower()
+        if not src:
+            return 0
+        m = re.fullmatch(r"([0-9]+)([a-z]+)?", src)
+        if not m:
+            return 0
+        val = int(m.group(1) or 0)
+        unit = str(m.group(2) or "")
+        if unit in {"gi", "g"}:
+            return val * 1024
+        if unit in {"mi", "m"}:
+            return val
+        if unit in {"ki", "k"}:
+            return max(1, val // 1024)
+        if unit in {"ti", "t"}:
+            return val * 1024 * 1024
+        if unit == "":
+            return max(1, val // (1024 * 1024))
+        return 0
+
+    limit_mb = _parse_k8s_mem_mb(os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", ""))
+    if limit_mb > 0:
+        return max(256, int(limit_mb * 0.8))
+    return 131072
 
 
 def _antlr_assist_enabled() -> bool:
@@ -6153,7 +6179,8 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         if rem <= 0:
             raise HarnessGeneratorError("re-run workspace rebuild skipped: no remaining workflow budget")
-        gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_result = gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_root = Path(clone_result).expanduser().resolve()
         source_fuzz = repo_root / "fuzz"
         if not source_fuzz.is_dir():
             raise HarnessGeneratorError(f"run fuzz directory missing: {source_fuzz}")
@@ -6337,18 +6364,32 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 repro_env = gen._compose_vcpkg_runtime_env(repro_env, repo_root=workdir)  # type: ignore[attr-defined]
             except Exception:
                 pass
-        repro = subprocess.run(
-            [str(fuzzer_bin), "-runs=1", str(artifact_path)],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=repro_timeout,
-            env=repro_env,
-        )
-        payload["reproduce_rc"] = int(repro.returncode)
-        payload["reproduce_ok"] = repro.returncode != 0
-        payload["stdout_tail"] = (repro.stdout or "")[-4000:]
-        payload["stderr_tail"] = (repro.stderr or "")[-4000:]
+        repro_cmd = [str(fuzzer_bin), "-runs=1", str(artifact_path)]
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                repro_cmd,
+                cwd=workdir,
+                env=repro_env,
+                timeout=repro_timeout,
+                idle_timeout=0,
+            )
+            payload["reproduce_rc"] = int(rc)
+            payload["reproduce_ok"] = int(rc) != 0
+            payload["stdout_tail"] = (out or "")[-4000:]
+            payload["stderr_tail"] = (err or "")[-4000:]
+        else:
+            repro = subprocess.run(
+                repro_cmd,
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=repro_timeout,
+                env=repro_env,
+            )
+            payload["reproduce_rc"] = int(repro.returncode)
+            payload["reproduce_ok"] = repro.returncode != 0
+            payload["stdout_tail"] = (repro.stdout or "")[-4000:]
+            payload["stderr_tail"] = (repro.stderr or "")[-4000:]
         _write_repro_context(
             repo_root,
             repo_url=str(state.get("repo_url") or ""),

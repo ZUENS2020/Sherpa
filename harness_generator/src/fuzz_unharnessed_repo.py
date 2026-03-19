@@ -137,7 +137,7 @@ FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
 VCPKG_REPO_DIR = (os.environ.get("SHERPA_VCPKG_REPO_DIR") or "vcpkg").strip() or "vcpkg"
-VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or ".vcpkg_installed").strip() or ".vcpkg_installed"
+VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or "vcpkg_installed").strip() or "vcpkg_installed"
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -1629,17 +1629,45 @@ class NonOssFuzzHarnessGenerator:
             return "arm64-linux"
         return "x64-linux"
 
+    def _declared_vcpkg_ports(self, *, repo_root: Optional[Path] = None) -> list[str]:
+        rr = Path(repo_root or self.repo_root)
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        dep_file = rr / dep_rel
+        if not dep_file.is_file():
+            return []
+        ports: list[str] = []
+        seen: set[str] = set()
+        try:
+            for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.split("#", 1)[0].strip().lower()
+                if not line:
+                    continue
+                if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", line):
+                    continue
+                if line in seen:
+                    continue
+                seen.add(line)
+                ports.append(line)
+        except Exception:
+            return []
+        return ports
+
     def _compose_vcpkg_runtime_env(self, base_env: Optional[Dict[str, str]] = None, *, repo_root: Optional[Path] = None) -> Dict[str, str]:
         env = dict(base_env or os.environ.copy())
         rr = Path(repo_root or self.repo_root)
         vcpkg_root = rr / VCPKG_REPO_DIR
         installed_root = rr / VCPKG_INSTALLED_DIR
         triplet = self._vcpkg_triplet()
+        toolchain = vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake"
+        declared_ports = self._declared_vcpkg_ports(repo_root=rr)
 
         env["VCPKG_ROOT"] = str(vcpkg_root)
         env.setdefault("VCPKG_DEFAULT_TRIPLET", triplet)
         env["VCPKG_INSTALLED_DIR"] = str(installed_root)
-        env["CMAKE_TOOLCHAIN_FILE"] = str(vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake")
+        if not declared_ports or not toolchain.is_file():
+            env.pop("CMAKE_TOOLCHAIN_FILE", None)
+            return env
+        env["CMAKE_TOOLCHAIN_FILE"] = str(toolchain)
 
         install_triplet = installed_root / triplet
         include_dir = install_triplet / "include"
@@ -1682,46 +1710,9 @@ class NonOssFuzzHarnessGenerator:
             repo_root="$(cd "$(dirname "$dep_file")/.." && pwd -P)"
             vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
             vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
-            export VCPKG_ROOT="$vcpkg_root"
-            export VCPKG_DEFAULT_TRIPLET="$triplet"
-            export VCPKG_INSTALLED_DIR="$vcpkg_installed"
-            export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
-            export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
-            export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
-            export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
-            export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
-            export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
-            export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
-            export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
 
-            if [ ! -x "$vcpkg_root/vcpkg" ]; then
-                if [ ! -d "$vcpkg_root/.git" ]; then
-                    if [ -d /opt/vcpkg-template/.git ]; then
-                        echo "[*] ({log_prefix}) seeding vcpkg from image template"
-                        if ! cp -a /opt/vcpkg-template "$vcpkg_root"; then
-                            echo "[warn] ({log_prefix}) failed to copy /opt/vcpkg-template"
-                        fi
-                    fi
-                fi
-                if [ ! -d "$vcpkg_root/.git" ]; then
-                    if command -v git >/dev/null 2>&1; then
-                        echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
-                        if ! git clone --depth 1 https://github.com/microsoft/vcpkg "$vcpkg_root"; then
-                            echo "[warn] ({log_prefix}) unable to clone vcpkg; skipping auto-install"
-                        fi
-                    else
-                        echo "[warn] ({log_prefix}) git is missing; cannot bootstrap vcpkg"
-                    fi
-                fi
-                if [ -x "$vcpkg_root/bootstrap-vcpkg.sh" ]; then
-                    if ! (cd "$vcpkg_root" && ./bootstrap-vcpkg.sh -disableMetrics); then
-                        echo "[warn] ({log_prefix}) vcpkg bootstrap failed; skipping auto-install"
-                    fi
-                fi
-            fi
-
+            pkgs=""
             if [ -f "$dep_file" ]; then
-                pkgs=""
                 while IFS= read -r line || [ -n "$line" ]; do
                     line="${{line%%#*}}"
                     line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
@@ -1733,28 +1724,99 @@ class NonOssFuzzHarnessGenerator:
                     fi
                 done < "$dep_file"
 
-                if [ -n "$pkgs" ]; then
-                    if [ ! -x "$vcpkg_root/vcpkg" ]; then
-                        echo "[warn] ({log_prefix}) vcpkg unavailable; skipping auto-install"
-                        exit 0
-                    fi
-                    missing_pkgs=""
-                    for p in $pkgs; do
-                        if "$vcpkg_root/vcpkg" list "$p:$triplet" 2>/dev/null | grep -Eq "^$p:$triplet\\s"; then
-                            continue
-                        fi
-                        missing_pkgs="$missing_pkgs $p"
-                    done
+            fi
 
-                    if [ -z "$missing_pkgs" ]; then
-                        echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
-                    else
-                        echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
-                        if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
-                            echo "[warn] ({log_prefix}) vcpkg install failed; continuing without auto-install"
+            if [ -n "$pkgs" ]; then
+                export VCPKG_ROOT="$vcpkg_root"
+                export VCPKG_DEFAULT_TRIPLET="$triplet"
+                export VCPKG_INSTALLED_DIR="$vcpkg_installed"
+                export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+                export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
+                export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
+                export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
+                export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
+                export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+                export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+
+                if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                    if [ ! -d "$vcpkg_root/.git" ]; then
+                        if [ -d /opt/vcpkg-template/.git ]; then
+                            echo "[*] ({log_prefix}) seeding vcpkg from image template"
+                            if ! cp -a /opt/vcpkg-template "$vcpkg_root"; then
+                                echo "[warn] ({log_prefix}) failed to copy /opt/vcpkg-template"
+                            fi
+                        fi
+                    fi
+                    if [ ! -d "$vcpkg_root/.git" ]; then
+                        vcpkg_git_bin="${{SHERPA_VCPKG_GIT_BIN:-git}}"
+                        if command -v "$vcpkg_git_bin" >/dev/null 2>&1; then
+                            echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
+                            clone_urls="https://github.com/microsoft/vcpkg https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg"
+                            cloned_ok=0
+                            for u in $clone_urls; do
+                                echo "[*] ({log_prefix}) trying vcpkg source: $u"
+                                if "$vcpkg_git_bin" clone --depth 1 "$u" "$vcpkg_root"; then
+                                    cloned_ok=1
+                                    break
+                                fi
+                                rm -rf "$vcpkg_root"
+                            done
+                            if [ "$cloned_ok" -ne 1 ]; then
+                                echo "[warn] ({log_prefix}) unable to clone vcpkg from all configured sources"
+                            fi
+                        else
+                            echo "[warn] ({log_prefix}) git is missing; cannot bootstrap vcpkg"
+                        fi
+                    fi
+                    if [ -x "$vcpkg_root/bootstrap-vcpkg.sh" ]; then
+                        if ! (cd "$vcpkg_root" && ./bootstrap-vcpkg.sh -disableMetrics); then
+                            echo "[warn] ({log_prefix}) vcpkg bootstrap failed"
                         fi
                     fi
                 fi
+
+                if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                    echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
+                    exit 86
+                fi
+
+                missing_pkgs=""
+                for p in $pkgs; do
+                    if "$vcpkg_root/vcpkg" list "$p:$triplet" 2>/dev/null | grep -Eq "^$p:$triplet\\s"; then
+                        continue
+                    fi
+                    missing_pkgs="$missing_pkgs $p"
+                done
+
+                if [ -z "$missing_pkgs" ]; then
+                    echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
+                else
+                    echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
+                    if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
+                        echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
+                        exit 87
+                    fi
+                fi
+            fi
+
+            if [ -n "$pkgs" ] && [ -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
+                export VCPKG_ROOT="$vcpkg_root"
+                export VCPKG_DEFAULT_TRIPLET="$triplet"
+                export VCPKG_INSTALLED_DIR="$vcpkg_installed"
+                export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+                export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
+                export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
+                export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
+                export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
+                export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+                export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+            fi
+
+            if [ -n "$pkgs" ] && [ ! -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
+                echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                exit 88
             fi
             """
         ).strip()

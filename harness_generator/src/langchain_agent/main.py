@@ -2381,6 +2381,9 @@ def _run_fuzz_job(
                     "restart_to_plan_stage": "",
                     "restart_to_plan_error_text": "",
                     "restart_to_plan_report_path": "",
+                    "run_oom_retry_count": "",
+                    "run_rss_limit_mb_override": "",
+                    "run_parallel_fuzzers_override": "",
                 }
                 current_stage = start_step
                 if current_stage in {"fix_build", "fix_crash"}:
@@ -2446,6 +2449,9 @@ def _run_fuzz_job(
                         "restart_to_plan_stage": (stage_ctx.get("restart_to_plan_stage") or None),
                         "restart_to_plan_error_text": (stage_ctx.get("restart_to_plan_error_text") or None),
                         "restart_to_plan_report_path": (stage_ctx.get("restart_to_plan_report_path") or None),
+                        "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
+                        "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
+                        "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -2474,18 +2480,43 @@ def _run_fuzz_job(
                         stage_fail_error = _redact_sensitive_text(str(e))
                         failure_doc = dict(e.result or {})
                         stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
-                        stage_result = {
-                            "message": f"stage {stage} failed in k8s worker; restarting from plan",
-                            "repo_root": current_repo_root,
-                            "workflow_last_step": stage,
-                            "workflow_recommended_next": "plan",
-                            "restart_to_plan": True,
-                            "restart_to_plan_reason": stage_fail_reason,
-                            "restart_to_plan_stage": stage,
-                            "restart_to_plan_error_text": stage_fail_error,
-                            "restart_to_plan_report_path": "",
-                            "error": stage_fail_error,
-                        }
+                        oom_retry_count = int(stage_ctx.get("run_oom_retry_count") or 0)
+                        if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
+                            rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
+                            try:
+                                base_rss = int(rss_raw) if rss_raw else 131072
+                            except Exception:
+                                base_rss = 131072
+                            retry_rss = max(2048, int(base_rss * 0.75))
+                            stage_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
+                            stage_ctx["run_rss_limit_mb_override"] = str(retry_rss)
+                            stage_ctx["run_parallel_fuzzers_override"] = "1"
+                            stage_result = {
+                                "message": "run stage oom_killed; retrying run once with reduced rss/parallel",
+                                "repo_root": current_repo_root,
+                                "workflow_last_step": stage,
+                                "workflow_recommended_next": "run",
+                                "restart_to_plan": False,
+                                "run_oom_retry_count": stage_ctx["run_oom_retry_count"],
+                                "run_rss_limit_mb_override": stage_ctx["run_rss_limit_mb_override"],
+                                "run_parallel_fuzzers_override": stage_ctx["run_parallel_fuzzers_override"],
+                            }
+                            stage_failed = False
+                            stage_fail_reason = ""
+                            stage_fail_error = ""
+                        else:
+                            stage_result = {
+                                "message": f"stage {stage} failed in k8s worker; restarting from plan",
+                                "repo_root": current_repo_root,
+                                "workflow_last_step": stage,
+                                "workflow_recommended_next": "plan",
+                                "restart_to_plan": True,
+                                "restart_to_plan_reason": stage_fail_reason,
+                                "restart_to_plan_stage": stage,
+                                "restart_to_plan_error_text": stage_fail_error,
+                                "restart_to_plan_report_path": "",
+                                "error": stage_fail_error,
+                            }
                     except Exception as e:
                         stage_failed = True
                         stage_fail_error = _redact_sensitive_text(str(e))
@@ -2523,6 +2554,9 @@ def _run_fuzz_job(
                             "restart_to_plan_stage",
                             "restart_to_plan_error_text",
                             "restart_to_plan_report_path",
+                            "run_oom_retry_count",
+                            "run_rss_limit_mb_override",
+                            "run_parallel_fuzzers_override",
                         ):
                             v = str(stage_result.get(key) or "").strip()
                             if v:
