@@ -88,6 +88,11 @@ Hard requirements:
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
 - In `fuzz/build.py`, do not hardcode a single top-level library artifact path. Resolve artifacts using multiple concrete candidates plus recursive fallback under the build directory (for example handle `build/libfoo.a`, `build/lib/libfoo.a`, `build/**/libfoo.so`, `build/**/libfoo.so.*`).
 - After repository build commands complete, `fuzz/build.py` must verify that the chosen library artifact path actually exists before compiling fuzzers, and fail only after trying the documented fallback candidates.
+- In `fuzz/build.py`, include reusable static-lib discovery scaffolding (or equivalent):
+  - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt names to current target library)
+  - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt per repository layout)
+  - `def find_static_lib(repo_root, lib_name_pattern): ...`
+  Use candidate paths first, then recursive glob fallback. Do not rely on a single guessed location.
 - Do not silently accept optional dependency downgrades. When CMake/build output indicates missing key libraries (for example zlib/bzip2/lzma/lz4/zstd/openssl/libxml2/expat), declare matching vcpkg ports in `fuzz/system_packages.txt` and keep build configuration aligned with those dependencies.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
@@ -188,6 +193,7 @@ Constraints:
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
 - If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
 - Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
+- Prefer a reusable helper (`find_static_lib`) with `STATIC_LIB_NAMES` and `SEARCH_PATHS` constants over ad-hoc one-off path fixes.
 - If logs show `Could NOT find ...` for key optional libraries, do not treat that as acceptable completion; update `fuzz/system_packages.txt` with the matching vcpkg ports and make the build script consume them.
 - If logs show linker errors like `cannot find -l...`, you MUST create or update `fuzz/system_packages.txt` in the same attempt (port mapping examples: `-lz`→`zlib`, `-lbz2`→`bzip2`, `-llzma`→`liblzma`, `-llz4`→`lz4`, `-lcrypto/-lssl`→`openssl`, `-lxml2`→`libxml2`, `-lexpat`→`expat`).
 - First repair pass must be build-ready: do not defer dependency declaration to a later round when the current log already names missing link libraries.

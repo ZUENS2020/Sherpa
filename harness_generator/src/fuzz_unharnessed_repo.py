@@ -2235,6 +2235,12 @@ EOF
                             - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
                             - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
                             - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
+                            - Include reusable static-library discovery scaffolding with candidate constants and helper function,
+                              for example:
+                              - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt to target lib names)
+                              - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt to repo layout)
+                              - `def find_static_lib(repo_root, lib_name_pattern): ...`
+                              Prefer candidate paths first, then recursive glob fallback.
                             - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
                             - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.

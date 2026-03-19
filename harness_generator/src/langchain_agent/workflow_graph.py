@@ -103,6 +103,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     build_stdout_tail: str
     build_stderr_tail: str
     build_full_log_path: str
+    build_template_cache_path: str
     build_error_signature: str
     build_error_signature_before: str
     build_error_signature_after: str
@@ -1078,6 +1079,103 @@ def _synthesize_activity_watch_paths() -> list[str]:
 
 def _build_scaffold_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_strategy.json"
+
+
+def _build_template_cache_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "build_template_cache.json"
+
+
+def _find_static_lib(repo_root: Path, lib_name_pattern: str) -> Path | None:
+    pattern = str(lib_name_pattern or "").strip()
+    if not pattern:
+        return None
+    patterns = [
+        f"**/{pattern}",
+        f"**/libarchive/{pattern}",
+        "**/libarchive/libarchive*.a",
+        "**/.libs/libarchive*.a",
+    ]
+    seen: set[str] = set()
+    for glob_pat in patterns:
+        try:
+            for match in repo_root.glob(glob_pat):
+                if not match.is_file():
+                    continue
+                key = str(match)
+                if key in seen:
+                    continue
+                seen.add(key)
+                return match
+        except Exception:
+            continue
+    return None
+
+
+def _load_build_template_cache_doc(repo_root: Path) -> dict[str, Any]:
+    path = _build_template_cache_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _write_build_template_cache_doc(repo_root: Path, doc: dict[str, Any]) -> str:
+    path = _build_template_cache_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | None = None) -> str:
+    fuzz_dir = repo_root / "fuzz"
+    build_py = fuzz_dir / "build.py"
+    if not build_py.is_file():
+        return ""
+    try:
+        build_text = build_py.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    strategy = _load_build_strategy_doc(repo_root)
+    doc: dict[str, Any] = {
+        "schema_version": 1,
+        "saved_at": int(time.time()),
+        "build_py": build_text,
+        "build_strategy": strategy if isinstance(strategy, dict) else {},
+        "binary_names": [p.name for p in (binaries or []) if isinstance(p, Path)],
+    }
+    try:
+        return _write_build_template_cache_doc(repo_root, doc)
+    except Exception:
+        return ""
+
+
+def _restore_cached_build_template_if_missing(repo_root: Path) -> bool:
+    fuzz_dir = repo_root / "fuzz"
+    build_py = fuzz_dir / "build.py"
+    if build_py.is_file():
+        return False
+    cache_doc = _load_build_template_cache_doc(repo_root)
+    build_text = str(cache_doc.get("build_py") or "")
+    if not build_text.strip():
+        return False
+    try:
+        fuzz_dir.mkdir(parents=True, exist_ok=True)
+        build_py.write_text(build_text, encoding="utf-8")
+    except Exception:
+        return False
+    strategy = cache_doc.get("build_strategy")
+    if isinstance(strategy, dict) and strategy:
+        try:
+            _build_scaffold_path(repo_root).write_text(
+                json.dumps(strategy, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    return True
 
 
 def _build_runtime_facts_path(repo_root: Path) -> Path:
@@ -2451,6 +2549,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         if "selected_targets.json" not in hint:
             hint = ((hint.strip() + "\n\n") if hint.strip() else "") + selected_target_soft_hint
+    restored_from_cache = False
+    try:
+        restored_from_cache = _restore_cached_build_template_if_missing(gen.repo_root)
+    except Exception:
+        restored_from_cache = False
+    if restored_from_cache:
+        _wf_log(cast(dict[str, Any], state), "synthesize: restored cached build.py/build_strategy template")
 
     def _synthesis_output_status() -> dict[str, Any]:
         fuzz_dir = gen.repo_root / "fuzz"
@@ -2586,6 +2691,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             build_runtime_facts = gen.repo_root / "fuzz" / "build_runtime_facts.json"
             if build_runtime_facts.is_file():
                 parts.append("=== existing fuzz/build_runtime_facts.json ===\n" + build_runtime_facts.read_text(encoding="utf-8", errors="replace"))
+            build_cache = _build_template_cache_path(gen.repo_root)
+            if build_cache.is_file():
+                parts.append("=== existing fuzz/build_template_cache.json ===\n" + build_cache.read_text(encoding="utf-8", errors="replace"))
             build_sh = gen.repo_root / "fuzz" / "build.sh"
             if build_sh.is_file():
                 parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
@@ -2595,6 +2703,83 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         except Exception:
             pass
         return "\n\n".join(parts)
+
+    def _run_post_synthesize_build_validation() -> None:
+        raw_enabled = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE") or "1").strip().lower()
+        if raw_enabled in {"0", "false", "no", "off"}:
+            return
+        fuzz_dir = gen.repo_root / "fuzz"
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file() or not hasattr(gen, "_run_cmd"):
+            return
+        remaining = _remaining_time_budget_sec(state, min_timeout=0)
+        if remaining <= 0:
+            return
+        raw_timeout = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE_TIMEOUT_SEC") or "90").strip()
+        try:
+            cfg_timeout = max(10, min(int(raw_timeout), 600))
+        except Exception:
+            cfg_timeout = 90
+        timeout = min(remaining, cfg_timeout)
+        cmd = [gen._python_runner(), "build.py"] if hasattr(gen, "_python_runner") else [shutil.which("python3") or "python", "build.py"]
+        build_env = os.environ.copy()
+        include_root = str(gen.repo_root)
+        for key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            prev = build_env.get(key, "").strip()
+            build_env[key] = f"{include_root}:{prev}" if prev else include_root
+        rc, out, err = gen._run_cmd(list(cmd), cwd=fuzz_dir, env=build_env, timeout=timeout)
+        bins = gen._discover_fuzz_binaries() if rc == 0 else []
+        if rc == 0 and bins:
+            _wf_log(cast(dict[str, Any], state), "synthesize: build scaffold validation passed")
+            return
+        diag = ((out or "") + "\n" + (err or "")).lower()
+        path_error_signals = (
+            "could not find",
+            "cannot find -l",
+            "no such file or directory",
+            "undefined reference",
+        )
+        if not any(sig in diag for sig in path_error_signals):
+            return
+        static_probe = _find_static_lib(gen.repo_root, "libarchive*.a")
+        static_probe_txt = str(static_probe.relative_to(gen.repo_root)) if isinstance(static_probe, Path) else "(none found)"
+        prompt = textwrap.dedent(
+            """
+            Repair `fuzz/build.py` for static library artifact discovery.
+            The scaffold validation build failed, and this looks like a path/link discovery issue.
+
+            Required edits:
+            1. Add a reusable helper:
+               def find_static_lib(repo_root, lib_name_pattern):
+                   ...
+            2. Include candidate constants in build.py:
+               STATIC_LIB_NAMES and SEARCH_PATHS.
+            3. Resolve library artifacts via multiple candidates + recursive glob fallback.
+            4. Verify the selected artifact path exists before final link command.
+            5. Keep non-root compatibility (no install-to-system-dir flow).
+
+            Do not run commands. Only edit `fuzz/build.py` and `fuzz/build_strategy.json` if needed.
+            Write `fuzz/build.py` into `./done`.
+            """
+        ).strip()
+        context = (
+            "=== synth-validate build stdout (tail) ===\n"
+            + "\n".join((out or "").splitlines()[-120:])
+            + "\n\n=== synth-validate build stderr (tail) ===\n"
+            + "\n".join((err or "").splitlines()[-120:])
+            + "\n\n=== static-lib-probe ===\n"
+            + static_probe_txt
+            + "\n\n=== existing fuzz/build.py ===\n"
+            + build_py.read_text(encoding="utf-8", errors="replace")
+        )
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context,
+            timeout=min(remaining, 300),
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+        )
+        _wf_log(cast(dict[str, Any], state), "synthesize: applied post-validation build.py repair for path/link issue")
 
     def _run_synthesize_completion(timeout: int) -> None:
         missing_items = "\n".join(f"- {item}" for item in _missing_synthesis_items()) or "- no missing items detected"
@@ -2840,6 +3025,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 diag_bits.append(f"harnesses={harness_count}")
                 diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
+        _run_post_synthesize_build_validation()
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
@@ -3365,6 +3551,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 return next_state
 
+        cache_path = _cache_successful_build_template(gen.repo_root, binaries=final_bins)
+        if cache_path:
+            next_state["build_template_cache_path"] = cache_path
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
