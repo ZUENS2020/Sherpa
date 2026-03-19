@@ -57,6 +57,12 @@ def main() -> int:
 
         # Native runtime baseline: never execute inner Docker in k8s worker.
         effective_docker_image = None
+        run_rss_limit_mb_override = str(payload.get("run_rss_limit_mb_override") or "").strip()
+        if run_rss_limit_mb_override:
+            os.environ["SHERPA_RUN_RSS_LIMIT_MB"] = run_rss_limit_mb_override
+        run_parallel_fuzzers_override = str(payload.get("run_parallel_fuzzers_override") or "").strip()
+        if run_parallel_fuzzers_override:
+            os.environ["SHERPA_PARALLEL_FUZZERS"] = run_parallel_fuzzers_override
 
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),

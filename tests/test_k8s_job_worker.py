@@ -32,7 +32,7 @@ def test_worker_forces_native_mode_ignores_payload_docker_image(tmp_path: Path, 
         "time_budget": 900,
         "run_time_budget": 600,
         "docker_image": "sherpa-fuzz-cpp:latest",
-        "model": "minimax/MiniMax-M2.5",
+        "model": "minimax/MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -65,7 +65,7 @@ def test_worker_forces_native_mode_when_payload_docker_image_missing(tmp_path: P
         "max_len": 1000,
         "time_budget": 900,
         "run_time_budget": 900,
-        "model": "minimax/MiniMax-M2.5",
+        "model": "minimax/MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -129,7 +129,7 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         "max_len": 1000,
         "time_budget": 900,
         "run_time_budget": 900,
-        "model": "MiniMax-M2.5",
+        "model": "MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -154,6 +154,38 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
 
     monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
 
+    rc = k8s_job_worker.main()
+    assert rc == 0
+    assert captured["docker_image"] is None
+
+
+def test_worker_applies_run_oom_retry_overrides_to_env(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    payload = {
+        "job_id": "job-oom-retry-override",
+        "repo_url": "https://github.com/fmtlib/fmt.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "run_rss_limit_mb_override": "98304",
+        "run_parallel_fuzzers_override": "1",
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.delenv("SHERPA_RUN_RSS_LIMIT_MB", raising=False)
+    monkeypatch.delenv("SHERPA_PARALLEL_FUZZERS", raising=False)
+
+    def _fake_fuzz_logic(**kwargs):
+        captured.update(kwargs)
+        assert os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") == "98304"
+        assert os.environ.get("SHERPA_PARALLEL_FUZZERS") == "1"
+        return {"ok": True}
+
+    monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
     rc = k8s_job_worker.main()
     assert rc == 0
     assert captured["docker_image"] is None

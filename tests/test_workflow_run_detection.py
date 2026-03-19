@@ -768,6 +768,18 @@ def test_calc_parallel_batch_budget_caps_unlimited_round_by_default(monkeypatch)
     assert hard_timeout == 7320
 
 
+def test_default_run_rss_limit_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_RSS_LIMIT_MB", "65536")
+    monkeypatch.setenv("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi")
+    assert workflow_graph._default_run_rss_limit_mb() == 65536
+
+
+def test_default_run_rss_limit_derived_from_k8s_memory_limit(monkeypatch):
+    monkeypatch.delenv("SHERPA_RUN_RSS_LIMIT_MB", raising=False)
+    monkeypatch.setenv("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi")
+    assert workflow_graph._default_run_rss_limit_mb() == int(64 * 1024 * 0.8)
+
+
 def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Path):
     timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-deadbeef"
     timeout_artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -976,6 +988,55 @@ def test_node_re_run_recovers_context_from_re_build_report(tmp_path: Path, monke
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
 
+
+def test_node_re_run_uses_generator_run_cmd_when_available(tmp_path: Path):
+    workspace = tmp_path / ".repro_crash" / "workdir"
+    out_dir = workspace / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = out_dir / "fmt_format_string_fuzz"
+    fuzzer_bin.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fuzzer_bin.chmod(0o755)
+    artifact = out_dir / "artifacts" / "crash-deadbeef"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"boom")
+
+    seen: dict[str, object] = {}
+
+    def _run_cmd(cmd, *, cwd, env, timeout, idle_timeout):
+        seen["cmd"] = [str(x) for x in cmd]
+        seen["cwd"] = str(cwd)
+        seen["timeout"] = int(timeout)
+        seen["idle_timeout"] = int(idle_timeout)
+        seen["env_has_marker"] = str(env.get("REPRO_MARKER") or "") == "1"
+        return 1, "boom", "asan"
+
+    def _compose_vcpkg_runtime_env(env, *, repo_root):
+        out_env = dict(env)
+        out_env["REPRO_MARKER"] = "1"
+        return out_env
+
+    gen = SimpleNamespace(
+        repo_root=tmp_path,
+        _run_cmd=_run_cmd,
+        _compose_vcpkg_runtime_env=_compose_vcpkg_runtime_env,
+    )
+    out = workflow_graph._node_re_run(
+        {
+            "generator": gen,
+            "last_fuzzer": "fmt_format_string_fuzz",
+            "last_crash_artifact": str(artifact),
+            "re_workspace_root": str(workspace),
+        }
+    )
+    assert out["re_run_done"] is True
+    assert out["re_run_ok"] is True
+    assert out["crash_repro_ok"] is True
+    assert seen["cwd"] == str(workspace)
+    assert seen["idle_timeout"] == 0
+    assert seen["env_has_marker"] is True
+    assert "-runs=1" in (seen["cmd"] or [])
+
+
 def test_node_re_run_recovers_artifact_from_run_summary(tmp_path: Path, monkeypatch):
     workspace = tmp_path / ".repro_crash" / "workdir"
     out_dir = workspace / "fuzz" / "out"
@@ -1076,7 +1137,7 @@ def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch
     def _python_runner():
         return "python3"
 
-    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None):
+    def _fake_subprocess_run(cmd, cwd=None, capture_output=None, text=None, timeout=None, env=None):
         cmd_list = [str(x) for x in cmd]
         if cmd_list[:2] == ["python3", "build.py"]:
             out_dir = Path(cwd) / "out"

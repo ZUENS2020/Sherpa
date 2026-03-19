@@ -41,9 +41,13 @@ Relies on the existing CodexHelper (OpenCode-backed).
 from __future__ import annotations
 
 import argparse
+import bz2
 import difflib
+import gzip
+import io
 import json
 import logging
+import lzma
 import os
 import queue
 import re
@@ -53,12 +57,14 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import threading
 import time
 import hashlib
 import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -115,6 +121,31 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _env_float(name: str, default: float, *, min_value: float = 0.0, max_value: float = 3600.0) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, val))
+
+
+def _retry_backoff_seconds(
+    attempt: int,
+    *,
+    base_env: str,
+    cap_env: str,
+    default_base: float,
+    default_cap: float,
+) -> float:
+    base = _env_float(base_env, default_base, min_value=0.0, max_value=300.0)
+    cap = _env_float(cap_env, default_cap, min_value=0.0, max_value=600.0)
+    wait = base * max(1, int(attempt))
+    return min(wait, cap)
+
 # Make CodexHelper discoverable in both "package" and "flat script" use.
 try:
     from .codex_helper import CodexHelper  # type: ignore
@@ -136,6 +167,21 @@ FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
+VCPKG_REPO_DIR = (os.environ.get("SHERPA_VCPKG_REPO_DIR") or "vcpkg").strip() or "vcpkg"
+VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or "vcpkg_installed").strip() or "vcpkg_installed"
+VCPKG_PORT_ALIASES: Dict[str, str] = {
+    # Common generic/library shorthands -> vcpkg ports
+    "z": "zlib",
+    "bz2": "bzip2",
+    "lzma": "liblzma",
+    "xz": "liblzma",
+    "ssl": "openssl",
+    "crypto": "openssl",
+    "libssl": "openssl",
+    "libcrypto": "openssl",
+    "xml2": "libxml2",
+    "libxml": "libxml2",
+}
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -621,10 +667,10 @@ def _host_git_proxy_env() -> Dict[str, str]:
 def _candidate_clone_urls(url: str) -> List[str]:
     """Return clone URLs, optionally extended by explicitly configured mirrors."""
 
-    urls: List[str] = [url]
+    urls: List[str] = []
     if not url.startswith("https://github.com/"):
         # Non-GitHub URLs are returned as-is to avoid breaking custom hosts.
-        return urls
+        return [url]
 
     mirror_specs: List[str] = []
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
@@ -652,6 +698,9 @@ def _candidate_clone_urls(url: str) -> List[str]:
         if candidate and candidate not in urls:
             urls.append(candidate)
 
+    if url not in urls:
+        # Keep official github as the final fallback.
+        urls.append(url)
     return urls
 
 
@@ -1151,7 +1200,15 @@ class NonOssFuzzHarnessGenerator:
                     pass
                 if time.time() >= deadline:
                     raise HarnessGeneratorError("Docker daemon is not ready (timeout waiting for docker info).")
-                time.sleep(2)
+                time.sleep(
+                    _retry_backoff_seconds(
+                        1,
+                        base_env="SHERPA_DOCKER_DAEMON_WAIT_INTERVAL_SEC",
+                        cap_env="SHERPA_DOCKER_DAEMON_WAIT_INTERVAL_SEC",
+                        default_base=1.0,
+                        default_cap=1.0,
+                    )
+                )
 
         # Ensure daemon is reachable first; this avoids startup race failures.
         _wait_for_docker_daemon_ready()
@@ -1320,7 +1377,6 @@ class NonOssFuzzHarnessGenerator:
         except Exception:
             max_tries = 3
 
-        backoff_s = 2.0
         last_rc = 1
         last_lines: list[str] = []
         force_classic_builder = os.environ.get("DOCKER_BUILDKIT", "").strip() == "0"
@@ -1353,9 +1409,15 @@ class NonOssFuzzHarnessGenerator:
 
             if attempt < max_tries and (_is_transient_registry_error(lines) or _is_docker_daemon_unavailable(lines)):
                 reason = "daemon/network transient error"
+                backoff_s = _retry_backoff_seconds(
+                    attempt,
+                    base_env="SHERPA_DOCKER_BUILD_RETRY_BASE_SEC",
+                    cap_env="SHERPA_DOCKER_BUILD_RETRY_MAX_SEC",
+                    default_base=1.0,
+                    default_cap=6.0,
+                )
                 print(f"[warn] docker build {reason}; retrying in {backoff_s:.0f}s ({attempt}/{max_tries})")
                 time.sleep(backoff_s)
-                backoff_s = min(backoff_s * 2, 20.0)
                 continue
             break
 
@@ -1484,6 +1546,14 @@ class NonOssFuzzHarnessGenerator:
                 # Keys (if used)
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
+                "VCPKG_ROOT",
+                "VCPKG_DEFAULT_TRIPLET",
+                "VCPKG_INSTALLED_DIR",
+                "CMAKE_TOOLCHAIN_FILE",
+                "CMAKE_PREFIX_PATH",
+                "LD_LIBRARY_PATH",
+                "LIBRARY_PATH",
+                "PKG_CONFIG_PATH",
             }
             allow_prefixes = (
                 "SHERPA_",
@@ -1552,61 +1622,413 @@ class NonOssFuzzHarnessGenerator:
             return True
         return norm.endswith("/build.py") or norm.endswith("/build.sh")
 
+    def _sanitize_build_py_for_source_build_collision(self) -> bool:
+        """Prevent generated build scripts from deleting source-controlled build/ trees.
+
+        Some upstream repos keep real files under REPO_ROOT/build/ (for example,
+        build/version and build/cmake/*). If fuzz/build.py reuses REPO_ROOT/build as
+        a scratch dir and cleans it, it destroys tracked source files before CMake runs.
+        We proactively rewrite that pattern to an isolated fuzz/build-work directory.
+        """
+
+        fuzz_dir = Path(getattr(self, "fuzz_dir", self.repo_root / FUZZ_DIR))
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        uses_repo_build = (
+            "BUILD_DIR = REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR=REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR = REPO_ROOT/'build'" in text
+        )
+        destructive_clean = ("shutil.rmtree(BUILD_DIR" in text or "rm -rf \"$BUILD_DIR\"" in text)
+        if not (uses_repo_build and destructive_clean):
+            return False
+
+        new_text = text
+        if "BUILD_DIR = REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT / \"build\"",
+                "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+        if "BUILD_DIR=REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR=REPO_ROOT / \"build\"",
+                "BUILD_DIR=REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+        if "BUILD_DIR = REPO_ROOT/'build'" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT/'build'",
+                "BUILD_DIR = REPO_ROOT/'fuzz'/'build-work'",
+            )
+
+        if new_text == text:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            print("[*] build preflight: rewrote BUILD_DIR to fuzz/build-work to avoid source build/ collision")
+            return True
+        except Exception:
+            return False
+
+    def _sanitize_build_py_for_non_root_install(self) -> bool:
+        """Prevent generated build scripts from installing into system directories.
+
+        Runtime containers run as non-root by default, so any install path that
+        writes to `/usr/local` (or similar system prefixes) is fragile and will
+        fail with permission denied. Force generated build scripts to link from
+        build tree artifacts instead of running install steps.
+        """
+
+        fuzz_dir = Path(getattr(self, "fuzz_dir", self.repo_root / FUZZ_DIR))
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        new_text = text
+        # Turn on-tree install toggles off.
+        new_text = re.sub(
+            r"(-DENABLE_INSTALL=)(ON|on|TRUE|True|1)\b",
+            r"\1OFF",
+            new_text,
+        )
+        # Rewrite explicit install targets to normal build targets.
+        replacements = [
+            ("'--target', 'install'", "'--target', 'all'"),
+            ('"--target", "install"', '"--target", "all"'),
+            ("'--target','install'", "'--target','all'"),
+            ('"--target","install"', '"--target","all"'),
+            ("'--install'", "'--build'"),
+            ('"--install"', '"--build"'),
+            ("cmake --install ", "cmake --build "),
+        ]
+        for old, new in replacements:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+
+        if new_text == text:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            print("[*] build preflight: disabled install step for non-root runtime")
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _vcpkg_triplet() -> str:
+        raw = (os.environ.get("SHERPA_VCPKG_TRIPLET") or "").strip()
+        if raw:
+            return raw
+        arch = (os.environ.get("TARGETARCH") or "").strip().lower()
+        if not arch:
+            arch = (os.uname().machine or "").strip().lower()
+        if arch in {"amd64", "x86_64"}:
+            return "x64-linux"
+        if arch in {"arm64", "aarch64"}:
+            return "arm64-linux"
+        return "x64-linux"
+
+    def _declared_vcpkg_ports(self, *, repo_root: Optional[Path] = None) -> list[str]:
+        def _normalize_port(raw: str) -> str:
+            token = raw.strip().lower()
+            if not token:
+                return ""
+            if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                return ""
+            return VCPKG_PORT_ALIASES.get(token, token)
+        rr = Path(repo_root or self.repo_root)
+        dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
+        dep_file = rr / dep_rel
+        if not dep_file.is_file():
+            return []
+        ports: list[str] = []
+        seen: set[str] = set()
+        try:
+            for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.split("#", 1)[0].strip().lower()
+                norm = _normalize_port(line)
+                if not norm:
+                    continue
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                ports.append(norm)
+        except Exception:
+            return []
+        return ports
+
+    def _compose_vcpkg_runtime_env(self, base_env: Optional[Dict[str, str]] = None, *, repo_root: Optional[Path] = None) -> Dict[str, str]:
+        env = dict(base_env or os.environ.copy())
+        rr = Path(repo_root or self.repo_root)
+        vcpkg_root = rr / VCPKG_REPO_DIR
+        installed_root = rr / VCPKG_INSTALLED_DIR
+        triplet = self._vcpkg_triplet()
+        toolchain = vcpkg_root / "scripts" / "buildsystems" / "vcpkg.cmake"
+        declared_ports = self._declared_vcpkg_ports(repo_root=rr)
+
+        env["VCPKG_ROOT"] = str(vcpkg_root)
+        env.setdefault("VCPKG_DEFAULT_TRIPLET", triplet)
+        env["VCPKG_INSTALLED_DIR"] = str(installed_root)
+        if not declared_ports or not toolchain.is_file():
+            env.pop("CMAKE_TOOLCHAIN_FILE", None)
+            return env
+        env["CMAKE_TOOLCHAIN_FILE"] = str(toolchain)
+
+        install_triplet = installed_root / triplet
+        include_dir = install_triplet / "include"
+        lib_dir = install_triplet / "lib"
+        dbg_lib_dir = install_triplet / "debug" / "lib"
+        pkgconfig_dir = lib_dir / "pkgconfig"
+
+        def _prepend_env_path(key: str, values: Sequence[Path]) -> None:
+            existing = (env.get(key) or "").strip()
+            merged: List[str] = []
+            seen: set[str] = set()
+            for p in values:
+                txt = str(p)
+                if not txt or txt in seen:
+                    continue
+                seen.add(txt)
+                merged.append(txt)
+            if existing:
+                for item in existing.split(":"):
+                    it = item.strip()
+                    if it and it not in seen:
+                        seen.add(it)
+                        merged.append(it)
+            env[key] = ":".join(merged)
+
+        _prepend_env_path("CMAKE_PREFIX_PATH", [install_triplet])
+        _prepend_env_path("C_INCLUDE_PATH", [include_dir])
+        _prepend_env_path("CPLUS_INCLUDE_PATH", [include_dir])
+        _prepend_env_path("CPATH", [include_dir])
+        _prepend_env_path("LIBRARY_PATH", [lib_dir, dbg_lib_dir])
+        _prepend_env_path("LD_LIBRARY_PATH", [lib_dir, dbg_lib_dir])
+        _prepend_env_path("PKG_CONFIG_PATH", [pkgconfig_dir])
+        return env
+
     def _build_system_dep_setup(self, dep_file: str, *, log_prefix: str) -> str:
         return textwrap.dedent(
             f"""
             dep_file={shlex.quote(dep_file)}
+            triplet={shlex.quote(self._vcpkg_triplet())}
+            repo_root="$(cd "$(dirname "$dep_file")/.." && pwd -P)"
+            vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
+            vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
+
+            pkgs=""
             if [ -f "$dep_file" ]; then
-                pkgs=""
                 while IFS= read -r line || [ -n "$line" ]; do
                     line="${{line%%#*}}"
                     line="$(printf '%s' "$line" | tr -d '\\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
                     [ -n "$line" ] || continue
-                    if printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
-                        pkgs="$pkgs $line"
-                    else
+                    if ! printf '%s' "$line" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9+._-]*$'; then
                         echo "[warn] ({log_prefix}) skip invalid package token: $line"
+                        continue
                     fi
+                    pkg="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+                    case "$pkg" in
+                        z) mapped="zlib" ;;
+                        bz2) mapped="bzip2" ;;
+                        lzma|xz) mapped="liblzma" ;;
+                        ssl|crypto|libssl|libcrypto) mapped="openssl" ;;
+                        xml2|libxml) mapped="libxml2" ;;
+                        *) mapped="$pkg" ;;
+                    esac
+                    if [ "$mapped" != "$pkg" ]; then
+                        echo "[warn] ({log_prefix}) normalized package token '$pkg' -> '$mapped' (vcpkg port)"
+                    fi
+                    case " $pkgs " in
+                        *" $mapped "*) ;;
+                        *) pkgs="$pkgs $mapped" ;;
+                    esac
                 done < "$dep_file"
-
                 if [ -n "$pkgs" ]; then
-                    missing_pkgs=""
-                    for p in $pkgs; do
-                        if command -v dpkg-query >/dev/null 2>&1; then
-                            if dpkg-query -W -f='${{Status}}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
-                                continue
+                    {{
+                        echo "# Auto-normalized to vcpkg port names."
+                        for p in $pkgs; do
+                            echo "$p"
+                        done
+                    }} > "$dep_file" || true
+                fi
+            fi
+
+            if [ -n "$pkgs" ]; then
+                export VCPKG_ROOT="$vcpkg_root"
+                export VCPKG_DEFAULT_TRIPLET="$triplet"
+                export VCPKG_INSTALLED_DIR="$vcpkg_installed"
+                export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+                export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
+                export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
+                export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
+                export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
+                export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+                export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+                export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
+                mkdir -p "$VCPKG_DOWNLOADS" || true
+
+                # Keep vcpkg asset downloads from stalling on first github attempt:
+                # install a local curl wrapper with mirror-first URL rewrite + short connect timeout.
+                if command -v curl >/dev/null 2>&1; then
+                    real_curl="$(command -v curl)"
+                    shim_bin="$repo_root/.sherpa-bin"
+                    mkdir -p "$shim_bin" || true
+                    cat > "$shim_bin/curl" <<'EOF'
+#!/bin/sh
+set -u
+real_curl="${{SHERPA_REAL_CURL_BIN:-/usr/bin/curl}}"
+if [ ! -x "$real_curl" ]; then
+  real_curl="$(command -v curl 2>/dev/null || true)"
+fi
+if [ -z "$real_curl" ]; then
+  echo "[sherpa/curl] real curl not found" >&2
+  exit 127
+fi
+
+argc=$#
+if [ "$argc" -le 0 ]; then
+  exec "$real_curl"
+fi
+
+last_arg=""
+for a in "$@"; do
+  last_arg="$a"
+done
+case "$last_arg" in
+  http://*|https://*) orig_url="$last_arg" ;;
+  *) exec "$real_curl" --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" --retry-delay 0 "$@" ;;
+esac
+
+if [ "$argc" -eq 1 ]; then
+  base_eval="set --"
+else
+  i=1
+  base_eval="set --"
+  for arg in "$@"; do
+    if [ "$i" -ge "$argc" ]; then
+      break
+    fi
+    esc=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
+    base_eval="$base_eval '$esc'"
+    i=$((i + 1))
+  done
+fi
+
+case "$orig_url" in
+  https://github.com/*)
+    candidates="https://ghfast.top/$orig_url https://ghproxy.net/$orig_url $orig_url"
+    for u in $candidates; do
+      eval "$base_eval '$u'"
+      "$real_curl" \
+        --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" \
+        --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" \
+        --retry-delay 0 \
+        "$@"
+      rc=$?
+      if [ $rc -eq 0 ]; then
+        exit 0
+      fi
+    done
+    exit 56
+    ;;
+  *)
+    exec "$real_curl" --connect-timeout "${{SHERPA_VCPKG_CURL_CONNECT_TIMEOUT_SEC:-8}}" --max-time "${{SHERPA_VCPKG_CURL_MAX_TIME_SEC:-90}}" --retry-delay 0 "$@"
+    ;;
+esac
+EOF
+                    chmod +x "$shim_bin/curl" || true
+                    export SHERPA_REAL_CURL_BIN="$real_curl"
+                    export PATH="$shim_bin:$PATH"
+                fi
+
+                if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                    if [ ! -d "$vcpkg_root/.git" ]; then
+                        if [ -d /opt/vcpkg-template/.git ]; then
+                            echo "[*] ({log_prefix}) seeding vcpkg from image template"
+                            if ! cp -a /opt/vcpkg-template "$vcpkg_root"; then
+                                echo "[warn] ({log_prefix}) failed to copy /opt/vcpkg-template"
                             fi
                         fi
-                        missing_pkgs="$missing_pkgs $p"
-                    done
-
-                    if [ -z "$missing_pkgs" ]; then
-                        echo "[*] ({log_prefix}) all requested packages already installed; skipping"
-                    else
-                        echo "[*] ({log_prefix}) installing from $dep_file:$missing_pkgs"
-                        if command -v apt-get >/dev/null 2>&1; then
-                            if ! apt-get update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true; then
-                                echo "[warn] ({log_prefix}) apt-get update failed; continuing without auto-install"
-                            elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) apt-get install failed; continuing without auto-install"
-                            fi
-                        elif command -v dnf >/dev/null 2>&1; then
-                            if ! dnf install -y $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) dnf install failed; continuing without auto-install"
-                            fi
-                        elif command -v yum >/dev/null 2>&1; then
-                            if ! yum install -y $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) yum install failed; continuing without auto-install"
-                            fi
-                        elif command -v apk >/dev/null 2>&1; then
-                            if ! apk add --no-cache $missing_pkgs; then
-                                echo "[warn] ({log_prefix}) apk add failed; continuing without auto-install"
+                    fi
+                    if [ ! -d "$vcpkg_root/.git" ]; then
+                        vcpkg_git_bin="${{SHERPA_VCPKG_GIT_BIN:-git}}"
+                        if command -v "$vcpkg_git_bin" >/dev/null 2>&1; then
+                            echo "[*] ({log_prefix}) cloning vcpkg into $vcpkg_root"
+                            clone_urls="https://ghfast.top/https://github.com/microsoft/vcpkg https://ghproxy.net/https://github.com/microsoft/vcpkg https://github.com/microsoft/vcpkg"
+                            cloned_ok=0
+                            for u in $clone_urls; do
+                                echo "[*] ({log_prefix}) trying vcpkg source: $u"
+                                if "$vcpkg_git_bin" clone --depth 1 "$u" "$vcpkg_root"; then
+                                    cloned_ok=1
+                                    break
+                                fi
+                                rm -rf "$vcpkg_root"
+                            done
+                            if [ "$cloned_ok" -ne 1 ]; then
+                                echo "[warn] ({log_prefix}) unable to clone vcpkg from all configured sources"
                             fi
                         else
-                            echo "[warn] ({log_prefix}) no supported package manager found; skipping auto-install"
+                            echo "[warn] ({log_prefix}) git is missing; cannot bootstrap vcpkg"
+                        fi
+                    fi
+                    if [ -x "$vcpkg_root/bootstrap-vcpkg.sh" ]; then
+                        if ! (cd "$vcpkg_root" && ./bootstrap-vcpkg.sh -disableMetrics); then
+                            echo "[warn] ({log_prefix}) vcpkg bootstrap failed"
                         fi
                     fi
                 fi
+
+                if [ ! -x "$vcpkg_root/vcpkg" ]; then
+                    echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
+                    exit 86
+                fi
+
+                missing_pkgs=""
+                for p in $pkgs; do
+                    if "$vcpkg_root/vcpkg" list "$p:$triplet" 2>/dev/null | grep -Eq "^$p:$triplet\\s"; then
+                        continue
+                    fi
+                    missing_pkgs="$missing_pkgs $p"
+                done
+
+                if [ -z "$missing_pkgs" ]; then
+                    echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
+                else
+                    echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
+                    if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
+                        echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
+                        exit 87
+                    fi
+                fi
+            fi
+
+            if [ -n "$pkgs" ] && [ -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
+                export VCPKG_ROOT="$vcpkg_root"
+                export VCPKG_DEFAULT_TRIPLET="$triplet"
+                export VCPKG_INSTALLED_DIR="$vcpkg_installed"
+                export CMAKE_TOOLCHAIN_FILE="$vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                export CMAKE_PREFIX_PATH="$vcpkg_installed/$triplet${{CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}}"
+                export C_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{C_INCLUDE_PATH:+:$C_INCLUDE_PATH}}"
+                export CPLUS_INCLUDE_PATH="$vcpkg_installed/$triplet/include${{CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}}"
+                export CPATH="$vcpkg_installed/$triplet/include${{CPATH:+:$CPATH}}"
+                export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
+                export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
+                export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
+            fi
+
+            if [ -n "$pkgs" ] && [ ! -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
+                echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                exit 88
             fi
             """
         ).strip()
@@ -1727,7 +2149,7 @@ class NonOssFuzzHarnessGenerator:
             2) `targets.json` — JSON array of ranked candidates with fields:
                ```json
                [{{"name": "...",
-                  "api": "qualified::symbol_or_Class.method",
+                  "api": "...",
                   "lang": "c-cpp|java",
                   "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
                   "proto": "const uint8_t*,size_t|byte[]|InputStream",
@@ -1735,6 +2157,11 @@ class NonOssFuzzHarnessGenerator:
                   "reason": "...",
                   "evidence": ["path:line", "..."]}}]
                ```
+            TARGETS_JSON_SCHEMA:
+            targets.json field rules:
+            - `name` must use the source filename stem (strip `.cc`), for example `libarchive_7zip_fuzzer`
+            - `api` must use the source filename, for example `libarchive_7zip_fuzzer.cc`
+            - forbidden: do not use `LLVMFuzzerTestOneInput` as the `name` value
             3) Choose the single **best** candidate for a first harness and record its canonical
                fuzzer name (e.g., `xyz_format_fuzz`) at the top of `PLAN.md`.
 
@@ -1813,6 +2240,18 @@ class NonOssFuzzHarnessGenerator:
                             - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
                             - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
                             - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
+                            - For CMake-based builds, define and use default configure args:
+                              - `DEFAULT_CMAKE_ARGS = [`
+                              - `    "-DENABLE_TEST=OFF",`
+                              - `    "-DENABLE_INSTALL=OFF",`
+                              - `]`
+                              Apply them by default unless repository facts explicitly require overrides.
+                            - Include reusable static-library discovery scaffolding with candidate constants and helper function,
+                              for example:
+                              - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt to target lib names)
+                              - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt to repo layout)
+                              - `def find_static_lib(repo_root, lib_name_pattern): ...`
+                              Prefer candidate paths first, then recursive glob fallback.
                             - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
                             - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
                             - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
@@ -1829,7 +2268,8 @@ class NonOssFuzzHarnessGenerator:
             - **README.md** explaining the entrypoint and how to run the fuzzer.
             - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
                         - If external system packages are strictly required, create `{FUZZ_SYSTEM_PACKAGES_FILE}`
-                            with one package name per line (comments with `#` are allowed, no shell commands).
+                            with one vcpkg port name per line (comments with `#` are allowed, no shell commands).
+                            Use canonical port names (for example `zlib`, `bzip2`, `liblzma`, `lz4`), never aliases like `z`, `bz2`, `lzma`.
 
             **Critical constraints:**
             - Use **public/documented APIs**; avoid low-level helpers.
@@ -1846,6 +2286,7 @@ class NonOssFuzzHarnessGenerator:
             - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` alone means a repository fuzz target should be built.
             - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
             - Prefer external harness linking by default, but use a real repository fuzz target when that target is clearly identified and more faithful.
+            - Non-root runtime rule: do not add install-to-system-dir steps (`-DENABLE_INSTALL=ON`, `cmake --install`, `--target install`); use build-tree artifacts directly.
             - Do not consider the task complete if you only produced a harness/build script without a grounded repository-understanding file.
 
             **Acceptance criteria:**
@@ -2655,6 +3096,29 @@ class NonOssFuzzHarnessGenerator:
                     break
             if len(selected) >= 12:
                 break
+        if seed_profile == "archive-container" and len(selected) < 12:
+            for suffix, data in self._default_archive_seed_samples():
+                if len(selected) >= 12:
+                    break
+                size = len(data)
+                if size <= 0 or size > max_seed_file:
+                    rejected += 1
+                    continue
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in seen_hashes:
+                    rejected += 1
+                    continue
+                dest = corpus_dir / f"repo_{len(selected)+1:02d}{suffix}"
+                try:
+                    dest.write_bytes(data)
+                except Exception:
+                    rejected += 1
+                    continue
+                seen_hashes.add(digest)
+                selected.append(dest)
+                accepted += 1
+                for family in _classify_seed_family(dest):
+                    family_limits[family] = family_limits.get(family, 0) + 1
         return selected, {
             "sources": ["repo_examples"] if selected else [],
             "accepted_count": accepted,
@@ -2663,6 +3127,45 @@ class NonOssFuzzHarnessGenerator:
             "family_limits": family_limits,
             "required_families": sorted(required_set),
         }
+
+    def _default_archive_seed_samples(self) -> list[tuple[str, bytes]]:
+        samples: list[tuple[str, bytes]] = []
+        payload = b"seed\n"
+
+        try:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("a.txt", payload)
+            samples.append((".zip", zip_buf.getvalue()))
+        except Exception:
+            pass
+
+        try:
+            tar_buf = io.BytesIO()
+            info = tarfile.TarInfo(name="a.txt")
+            info.size = len(payload)
+            with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+                tf.addfile(info, io.BytesIO(payload))
+            samples.append((".tar", tar_buf.getvalue()))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".gz", gzip.compress(payload)))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".bz2", bz2.compress(payload)))
+        except Exception:
+            pass
+
+        try:
+            samples.append((".xz", lzma.compress(payload)))
+        except Exception:
+            pass
+
+        return samples
 
     def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
@@ -3129,6 +3632,7 @@ class NonOssFuzzHarnessGenerator:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         env = os.environ.copy()
+        env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
         env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
@@ -3770,7 +4274,15 @@ class NonOssFuzzHarnessGenerator:
                         print(
                             f"[warn] (host/git) clone timed out (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, timeout={GIT_HOST_CLONE_TIMEOUT_SEC}s); retrying..."
                         )
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         continue
 
                     if rc == 0:
@@ -3784,7 +4296,15 @@ class NonOssFuzzHarnessGenerator:
                     print(
                         f"[warn] (host/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    time.sleep(2 * attempt)
+                    time.sleep(
+                        _retry_backoff_seconds(
+                            attempt,
+                            base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                            cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                            default_base=0.5,
+                            default_cap=3.0,
+                        )
+                    )
 
                 if clone_success:
                     break
@@ -3902,7 +4422,15 @@ class NonOssFuzzHarnessGenerator:
                                 shutil.rmtree(temp_root, ignore_errors=True)
                         except Exception:
                             pass
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         continue
 
                     if rc == 0:
@@ -3935,7 +4463,15 @@ class NonOssFuzzHarnessGenerator:
                     print(
                         f"[warn] (docker/git) clone failed (url={clone_url}, attempt {attempt}/{max(1, GIT_CLONE_RETRIES)}, rc={rc}); retrying..."
                     )
-                    time.sleep(2 * attempt)
+                    time.sleep(
+                        _retry_backoff_seconds(
+                            attempt,
+                            base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                            cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                            default_base=0.5,
+                            default_cap=3.0,
+                        )
+                    )
 
                 if clone_success:
                     break
@@ -4004,7 +4540,15 @@ class NonOssFuzzHarnessGenerator:
                         if (t := _tail_lines(fout)):
                             print("[warn] (docker/git) fetch stdout (tail):\n" + textwrap.indent(t, "    "))
                         print(f"[warn] (docker/git) fetch failed (attempt {attempt}/3, rc={frc}); retrying...")
-                        time.sleep(2 * attempt)
+                        time.sleep(
+                            _retry_backoff_seconds(
+                                attempt,
+                                base_env="SHERPA_GIT_RETRY_BASE_SEC",
+                                cap_env="SHERPA_GIT_RETRY_MAX_SEC",
+                                default_base=0.5,
+                                default_cap=3.0,
+                            )
+                        )
                         fe = type("_FE", (), {"returncode": frc})()  # type: ignore
                     assert fe is not None
                     if fe.returncode != 0:
@@ -4181,6 +4725,9 @@ class NonOssFuzzHarnessGenerator:
 
         effective_env = env or os.environ.copy()
         exec_args = list(cmd)
+        if any(self._is_build_entry_arg(str(a)) for a in exec_args):
+            self._sanitize_build_py_for_source_build_collision()
+            self._sanitize_build_py_for_non_root_install()
         dep_rel = (FUZZ_SYSTEM_PACKAGES_FILE or "fuzz/system_packages.txt").replace("\\", "/").strip("/")
         if self.docker_image:
             actual_cmd = self._dockerize_cmd(exec_args, cwd=cwd, env=effective_env)

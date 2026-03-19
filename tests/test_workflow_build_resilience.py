@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +102,43 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     assert len(gen.commands) == 2
 
 
+def test_find_static_lib_discovers_nested_archive_artifacts(tmp_path: Path):
+    nested = tmp_path / "build" / "libarchive"
+    nested.mkdir(parents=True, exist_ok=True)
+    lib_file = nested / "libarchive.a"
+    lib_file.write_text("", encoding="utf-8")
+
+    found = workflow_graph._find_static_lib(tmp_path, "libarchive.a")
+
+    assert found == lib_file
+
+
+def test_build_success_writes_template_cache(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    cache_path = Path(str(out.get("build_template_cache_path") or ""))
+    assert cache_path.is_file()
+    cache_doc = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "build_py" in cache_doc
+    assert "print('build')" in str(cache_doc.get("build_py") or "")
+
+
 def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +165,103 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert out["build_error_code"] == ""
     assert len(gen.commands) == 2
     assert gen.commands[1][-1] == "--clean"
+
+
+def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (
+                0,
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n",
+                "",
+            )
+        ],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 0
+    assert out["message"] == "build missing declared optional deps"
+    assert "system_packages.txt" in out["last_error"]
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "missing_system_packages_declared"
+    assert workflow_graph._route_after_build_state(out) == "fix_build"
+
+
+def test_build_gate_allows_declared_optional_ports(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (
+                0,
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n",
+                "",
+            )
+        ],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["last_error"] == ""
+    assert out["message"].startswith("built (")
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
+
+
+def test_build_gate_allows_declared_optional_ports_with_alias(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("z\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[
+            (
+                0,
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n",
+                "",
+            )
+        ],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["last_error"] == ""
+    assert out["message"].startswith("built (")
+    assert out["build_error_kind"] == ""
+    assert out["build_error_code"] == ""
 
 
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
@@ -584,9 +719,9 @@ def test_fix_build_rule_missing_system_packages_requires_env_rebuild(tmp_path: P
     out = workflow_graph._node_fix_build(
         {
             "generator": gen,
-            "last_error": "./build/autogen.sh: 58: aclocal: not found",
-            "build_stdout_tail": "Warning: Missing tools: autoconf, automake, libtool",
-            "build_stderr_tail": "",
+            "last_error": "Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)",
+            "build_stdout_tail": "",
+            "build_stderr_tail": "fatal error: bzlib.h: No such file or directory",
         }
     )
 
@@ -973,8 +1108,71 @@ def test_fix_build_rule_missing_system_packages_declared(tmp_path: Path, monkeyp
     dep_file = fuzz_dir / "system_packages.txt"
     assert dep_file.is_file()
     dep_text = dep_file.read_text(encoding="utf-8")
-    assert "zlib1g-dev" in dep_text
-    assert "libbz2-dev" in dep_text
+    assert "zlib" in dep_text
+    assert "bzip2" in dep_text
+
+
+def test_fix_build_rule_source_build_dir_collision(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"build\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "CMake Error at CMakeLists.txt:97 (include): include could not find requested file: cmake/CheckFileOffsetBits.cmake",
+            "build_stdout_tail": "CMake Error at build/version:1 (file): file failed to open for reading",
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "source_build_dir_collision" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
+    assert "shutil.rmtree(BUILD_DIR)" in txt
+
+
+def test_fix_build_rule_missing_cmake_archive_target(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "import subprocess\n"
+        "subprocess.run(['cmake', '--build', 'build', '--target', 'archive', '-j', '8'])\n",
+        encoding="utf-8",
+    )
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace(run_codex_command=lambda *_a, **_k: None))
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    out = workflow_graph._node_fix_build(
+        {
+            "generator": gen,
+            "last_error": "gmake: *** No rule to make target 'archive'.  Stop.",
+            "build_stdout_tail": (
+                "-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)\n"
+                "-- Could NOT find OpenSSL, try to set the path to OpenSSL root folder "
+                "(missing: OPENSSL_CRYPTO_LIBRARY OPENSSL_INCLUDE_DIR)\n"
+            ),
+            "build_stderr_tail": "",
+        }
+    )
+    assert out["last_error"] == ""
+    assert "missing_cmake_archive_target" in (out.get("fix_build_rule_hits") or [])
+    txt = build_py.read_text(encoding="utf-8")
+    assert "'--target', 'all'" in txt
+    assert "'--target', 'archive'" not in txt
+    dep_text = (fuzz_dir / "system_packages.txt").read_text(encoding="utf-8")
+    assert "zlib" in dep_text
+    assert "openssl" in dep_text
 
 
 def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monkeypatch):

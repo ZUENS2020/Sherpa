@@ -103,6 +103,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     build_stdout_tail: str
     build_stderr_tail: str
     build_full_log_path: str
+    build_template_cache_path: str
     build_error_signature: str
     build_error_signature_before: str
     build_error_signature_after: str
@@ -1080,6 +1081,103 @@ def _build_scaffold_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_strategy.json"
 
 
+def _build_template_cache_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "build_template_cache.json"
+
+
+def _find_static_lib(repo_root: Path, lib_name_pattern: str) -> Path | None:
+    pattern = str(lib_name_pattern or "").strip()
+    if not pattern:
+        return None
+    patterns = [
+        f"**/{pattern}",
+        f"**/libarchive/{pattern}",
+        "**/libarchive/libarchive*.a",
+        "**/.libs/libarchive*.a",
+    ]
+    seen: set[str] = set()
+    for glob_pat in patterns:
+        try:
+            for match in repo_root.glob(glob_pat):
+                if not match.is_file():
+                    continue
+                key = str(match)
+                if key in seen:
+                    continue
+                seen.add(key)
+                return match
+        except Exception:
+            continue
+    return None
+
+
+def _load_build_template_cache_doc(repo_root: Path) -> dict[str, Any]:
+    path = _build_template_cache_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _write_build_template_cache_doc(repo_root: Path, doc: dict[str, Any]) -> str:
+    path = _build_template_cache_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | None = None) -> str:
+    fuzz_dir = repo_root / "fuzz"
+    build_py = fuzz_dir / "build.py"
+    if not build_py.is_file():
+        return ""
+    try:
+        build_text = build_py.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    strategy = _load_build_strategy_doc(repo_root)
+    doc: dict[str, Any] = {
+        "schema_version": 1,
+        "saved_at": int(time.time()),
+        "build_py": build_text,
+        "build_strategy": strategy if isinstance(strategy, dict) else {},
+        "binary_names": [p.name for p in (binaries or []) if isinstance(p, Path)],
+    }
+    try:
+        return _write_build_template_cache_doc(repo_root, doc)
+    except Exception:
+        return ""
+
+
+def _restore_cached_build_template_if_missing(repo_root: Path) -> bool:
+    fuzz_dir = repo_root / "fuzz"
+    build_py = fuzz_dir / "build.py"
+    if build_py.is_file():
+        return False
+    cache_doc = _load_build_template_cache_doc(repo_root)
+    build_text = str(cache_doc.get("build_py") or "")
+    if not build_text.strip():
+        return False
+    try:
+        fuzz_dir.mkdir(parents=True, exist_ok=True)
+        build_py.write_text(build_text, encoding="utf-8")
+    except Exception:
+        return False
+    strategy = cache_doc.get("build_strategy")
+    if isinstance(strategy, dict) and strategy:
+        try:
+            _build_scaffold_path(repo_root).write_text(
+                json.dumps(strategy, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    return True
+
+
 def _build_runtime_facts_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "build_runtime_facts.json"
 
@@ -1320,11 +1418,37 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
 
 
 def _default_run_rss_limit_mb() -> int:
-    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "131072").strip()
+    raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
     try:
         return max(256, int(raw))
     except Exception:
-        return 131072
+        pass
+
+    def _parse_k8s_mem_mb(text: str) -> int:
+        src = str(text or "").strip().lower()
+        if not src:
+            return 0
+        m = re.fullmatch(r"([0-9]+)([a-z]+)?", src)
+        if not m:
+            return 0
+        val = int(m.group(1) or 0)
+        unit = str(m.group(2) or "")
+        if unit in {"gi", "g"}:
+            return val * 1024
+        if unit in {"mi", "m"}:
+            return val
+        if unit in {"ki", "k"}:
+            return max(1, val // 1024)
+        if unit in {"ti", "t"}:
+            return val * 1024 * 1024
+        if unit == "":
+            return max(1, val // (1024 * 1024))
+        return 0
+
+    limit_mb = _parse_k8s_mem_mb(os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", ""))
+    if limit_mb > 0:
+        return max(256, int(limit_mb * 0.8))
+    return 131072
 
 
 def _antlr_assist_enabled() -> bool:
@@ -2425,6 +2549,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         if "selected_targets.json" not in hint:
             hint = ((hint.strip() + "\n\n") if hint.strip() else "") + selected_target_soft_hint
+    restored_from_cache = False
+    try:
+        restored_from_cache = _restore_cached_build_template_if_missing(gen.repo_root)
+    except Exception:
+        restored_from_cache = False
+    if restored_from_cache:
+        _wf_log(cast(dict[str, Any], state), "synthesize: restored cached build.py/build_strategy template")
 
     def _synthesis_output_status() -> dict[str, Any]:
         fuzz_dir = gen.repo_root / "fuzz"
@@ -2466,7 +2597,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "has_readme": has_readme,
             "has_repo_understanding": has_repo_understanding,
             "has_build_strategy": has_build_strategy,
-            "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding and has_build_strategy,
+            # build_strategy.json is generated deterministically later by _write_build_strategy_doc.
+            "has_required": bool(harnesses) and has_build_script and has_readme and has_repo_understanding,
             "has_partial": bool(harnesses) or has_build_script or has_readme or has_repo_understanding or has_build_strategy,
             "scan_errors": scan_errors[:8],
             "scan_error_count": len(scan_errors),
@@ -2489,8 +2621,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             missing.append("`fuzz/README.md`")
         if not status.get("has_repo_understanding"):
             missing.append("`fuzz/repo_understanding.json`")
-        if not status.get("has_build_strategy"):
-            missing.append("`fuzz/build_strategy.json`")
         return missing
 
     def _synthesis_grace_wait(max_sec: int) -> bool:
@@ -2561,6 +2691,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             build_runtime_facts = gen.repo_root / "fuzz" / "build_runtime_facts.json"
             if build_runtime_facts.is_file():
                 parts.append("=== existing fuzz/build_runtime_facts.json ===\n" + build_runtime_facts.read_text(encoding="utf-8", errors="replace"))
+            build_cache = _build_template_cache_path(gen.repo_root)
+            if build_cache.is_file():
+                parts.append("=== existing fuzz/build_template_cache.json ===\n" + build_cache.read_text(encoding="utf-8", errors="replace"))
             build_sh = gen.repo_root / "fuzz" / "build.sh"
             if build_sh.is_file():
                 parts.append("=== existing fuzz/build.sh ===\n" + build_sh.read_text(encoding="utf-8", errors="replace"))
@@ -2570,6 +2703,83 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         except Exception:
             pass
         return "\n\n".join(parts)
+
+    def _run_post_synthesize_build_validation() -> None:
+        raw_enabled = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE") or "1").strip().lower()
+        if raw_enabled in {"0", "false", "no", "off"}:
+            return
+        fuzz_dir = gen.repo_root / "fuzz"
+        build_py = fuzz_dir / "build.py"
+        if not build_py.is_file() or not hasattr(gen, "_run_cmd"):
+            return
+        remaining = _remaining_time_budget_sec(state, min_timeout=0)
+        if remaining <= 0:
+            return
+        raw_timeout = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE_TIMEOUT_SEC") or "90").strip()
+        try:
+            cfg_timeout = max(10, min(int(raw_timeout), 600))
+        except Exception:
+            cfg_timeout = 90
+        timeout = min(remaining, cfg_timeout)
+        cmd = [gen._python_runner(), "build.py"] if hasattr(gen, "_python_runner") else [shutil.which("python3") or "python", "build.py"]
+        build_env = os.environ.copy()
+        include_root = str(gen.repo_root)
+        for key in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            prev = build_env.get(key, "").strip()
+            build_env[key] = f"{include_root}:{prev}" if prev else include_root
+        rc, out, err = gen._run_cmd(list(cmd), cwd=fuzz_dir, env=build_env, timeout=timeout)
+        bins = gen._discover_fuzz_binaries() if rc == 0 else []
+        if rc == 0 and bins:
+            _wf_log(cast(dict[str, Any], state), "synthesize: build scaffold validation passed")
+            return
+        diag = ((out or "") + "\n" + (err or "")).lower()
+        path_error_signals = (
+            "could not find",
+            "cannot find -l",
+            "no such file or directory",
+            "undefined reference",
+        )
+        if not any(sig in diag for sig in path_error_signals):
+            return
+        static_probe = _find_static_lib(gen.repo_root, "libarchive*.a")
+        static_probe_txt = str(static_probe.relative_to(gen.repo_root)) if isinstance(static_probe, Path) else "(none found)"
+        prompt = textwrap.dedent(
+            """
+            Repair `fuzz/build.py` for static library artifact discovery.
+            The scaffold validation build failed, and this looks like a path/link discovery issue.
+
+            Required edits:
+            1. Add a reusable helper:
+               def find_static_lib(repo_root, lib_name_pattern):
+                   ...
+            2. Include candidate constants in build.py:
+               STATIC_LIB_NAMES and SEARCH_PATHS.
+            3. Resolve library artifacts via multiple candidates + recursive glob fallback.
+            4. Verify the selected artifact path exists before final link command.
+            5. Keep non-root compatibility (no install-to-system-dir flow).
+
+            Do not run commands. Only edit `fuzz/build.py` and `fuzz/build_strategy.json` if needed.
+            Write `fuzz/build.py` into `./done`.
+            """
+        ).strip()
+        context = (
+            "=== synth-validate build stdout (tail) ===\n"
+            + "\n".join((out or "").splitlines()[-120:])
+            + "\n\n=== synth-validate build stderr (tail) ===\n"
+            + "\n".join((err or "").splitlines()[-120:])
+            + "\n\n=== static-lib-probe ===\n"
+            + static_probe_txt
+            + "\n\n=== existing fuzz/build.py ===\n"
+            + build_py.read_text(encoding="utf-8", errors="replace")
+        )
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context,
+            timeout=min(remaining, 300),
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+        )
+        _wf_log(cast(dict[str, Any], state), "synthesize: applied post-validation build.py repair for path/link issue")
 
     def _run_synthesize_completion(timeout: int) -> None:
         missing_items = "\n".join(f"- {item}" for item in _missing_synthesis_items()) or "- no missing items detected"
@@ -2614,6 +2824,32 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
         )
+
+    def _ensure_min_readme_fallback() -> bool:
+        readme = gen.repo_root / "fuzz" / "README.md"
+        if readme.is_file():
+            return False
+        status = _synthesis_output_status()
+        harnesses = list(status.get("harnesses") or [])
+        if not harnesses:
+            return False
+        selected_label = selected_target_api or selected_target_name or "unknown"
+        harness_label = harnesses[0]
+        body = (
+            "# Fuzz Harness Notes\n\n"
+            f"- Selected target: {selected_label}\n"
+            "- Final target: unknown\n"
+            "- Technical reason: scaffold fallback README generated locally\n"
+            "- Relation: to be updated after target alignment analysis\n"
+            f"- Harness file: {harness_label}\n"
+        )
+        try:
+            readme.parent.mkdir(parents=True, exist_ok=True)
+            readme.write_text(body, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "synthesize: generated fallback fuzz/README.md")
+            return True
+        except Exception:
+            return False
 
     def _run_readme_alignment_completion(timeout: int, alignment: dict[str, Any]) -> None:
         selected_label = str(alignment.get("expected_api") or alignment.get("expected_target_name") or "").strip() or "unknown"
@@ -2778,6 +3014,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 )
                 _run_required_scaffold_repair(remaining_for_required)
             if not _has_required_synthesis_outputs():
+                _ensure_min_readme_fallback()
+            if not _has_required_synthesis_outputs():
                 missing = ", ".join(_missing_synthesis_items()) or "unknown required files"
                 diag = _synthesis_output_status()
                 diag_bits: list[str] = []
@@ -2787,6 +3025,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 diag_bits.append(f"harnesses={harness_count}")
                 diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
+        _run_post_synthesize_build_validation()
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
@@ -2943,6 +3182,51 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if not raw:
                 return default
             return raw in {"1", "true", "yes", "on"}
+
+        def _read_declared_system_packages(dep_file: Path) -> set[str]:
+            alias_map = {
+                "z": "zlib",
+                "bz2": "bzip2",
+                "lzma": "liblzma",
+                "xz": "liblzma",
+                "ssl": "openssl",
+                "crypto": "openssl",
+                "libssl": "openssl",
+                "libcrypto": "openssl",
+                "xml2": "libxml2",
+                "libxml": "libxml2",
+            }
+            if not dep_file.is_file():
+                return set()
+            declared: set[str] = set()
+            try:
+                for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw_line.split("#", 1)[0].strip().lower()
+                    if not line:
+                        continue
+                    if re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", line):
+                        declared.add(alias_map.get(line, line))
+            except Exception:
+                return set()
+            return declared
+
+        def _detect_missing_optional_ports(stdout_text: str, stderr_text: str) -> list[str]:
+            combined = ((stdout_text or "") + "\n" + (stderr_text or "")).lower()
+            signal_to_port: list[tuple[list[str], str]] = [
+                (["could not find zlib", "zlib_library", "zlib_include_dir"], "zlib"),
+                (["could not find bzip2", "bzip2_libraries", "bzip2_include_dir"], "bzip2"),
+                (["could not find liblzma", "liblzma_library", "liblzma_include_dir"], "liblzma"),
+                (["could not find lz4", "lz4_library", "lz4_include_dir"], "lz4"),
+                (["could not find zstd", "zstd_library", "zstd_include_dir"], "zstd"),
+                (["could not find openssl", "openssl_crypto_library", "openssl_include_dir"], "openssl"),
+                (["could not find libxml2", "libxml2_library", "libxml2_include_dir"], "libxml2"),
+                (["could not find expat", "expat_library", "expat_include_dir"], "expat"),
+            ]
+            missing: list[str] = []
+            for needles, port in signal_to_port:
+                if any(n in combined for n in needles) and port not in missing:
+                    missing.append(port)
+            return missing
 
         def _list_static_libs_for_diagnostics() -> str:
             build_dir = gen.repo_root / "build"
@@ -3237,6 +3521,39 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         next_state["fix_action_type"] = ""
         next_state["fix_effect"] = ""
         next_state["last_error"] = ""
+
+        enforce_declared_optional_deps = _env_bool("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", True)
+        if enforce_declared_optional_deps:
+            dep_file = fuzz_dir / "system_packages.txt"
+            declared_ports = _read_declared_system_packages(dep_file)
+            missing_ports = [
+                p for p in _detect_missing_optional_ports(final_out, final_err)
+                if p not in declared_ports
+            ]
+            if missing_ports:
+                next_state["last_error"] = (
+                    "build succeeded with missing optional libraries but "
+                    "fuzz/system_packages.txt does not declare required vcpkg ports: "
+                    + ", ".join(missing_ports)
+                )
+                next_state["message"] = "build missing declared optional deps"
+                next_state["build_error_kind"] = "source"
+                next_state["build_error_code"] = "missing_system_packages_declared"
+                next_state["restart_to_plan"] = False
+                next_state["restart_to_plan_reason"] = ""
+                next_state["restart_to_plan_stage"] = ""
+                next_state["restart_to_plan_error_text"] = ""
+                next_state["restart_to_plan_report_path"] = ""
+                _wf_log(
+                    cast(dict[str, Any], next_state),
+                    "<- build gate missing-optional-deps "
+                    f"ports={','.join(missing_ports)} dt={_fmt_dt(time.perf_counter()-t0)}",
+                )
+                return next_state
+
+        cache_path = _cache_successful_build_template(gen.repo_root, binaries=final_bins)
+        if cache_path:
+            next_state["build_template_cache_path"] = cache_path
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
@@ -4183,22 +4500,31 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return False
 
     def _try_hotfix_missing_system_packages() -> bool:
+        alias_map = {
+            "z": "zlib",
+            "bz2": "bzip2",
+            "lzma": "liblzma",
+            "xz": "liblzma",
+            "ssl": "openssl",
+            "crypto": "openssl",
+            "libssl": "openssl",
+            "libcrypto": "openssl",
+            "xml2": "libxml2",
+            "libxml": "libxml2",
+        }
         diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
         if "cannot find -lz" in diag or "undefined reference to `gz" in diag or "undefined reference to `inflate" in diag:
             # Prefer dedicated link-fix rule for zlib linker failures.
             return False
         pkg_signals: list[tuple[list[str], str]] = [
-            (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib1g-dev"),
-            (["bzlib.h", "could not find bzip2"], "libbz2-dev"),
-            (["lzma.h", "could not find liblzma"], "liblzma-dev"),
-            (["zstd.h", "could not find zstd", "one of the modules 'libzstd'"], "libzstd-dev"),
-            (["lz4.h", "could not find lz4"], "liblz4-dev"),
-            (["openssl/", "could not find openssl"], "libssl-dev"),
-            (["expat.h", "could not find expat"], "libexpat1-dev"),
-            (["libxml/parser.h", "could not find libxml2"], "libxml2-dev"),
-            (["aclocal: not found", "automake: not found", "missing tools: automake"], "automake"),
-            (["autoconf: not found", "missing tools: autoconf"], "autoconf"),
-            (["libtool: not found", "libtoolize: not found", "missing tools: libtool"], "libtool"),
+            (["zlib.h", "could not find zlib", "cannot find -lz"], "zlib"),
+            (["bzlib.h", "could not find bzip2"], "bzip2"),
+            (["lzma.h", "could not find liblzma"], "liblzma"),
+            (["zstd.h", "could not find zstd", "one of the modules 'libzstd'"], "zstd"),
+            (["lz4.h", "could not find lz4"], "lz4"),
+            (["openssl/", "could not find openssl"], "openssl"),
+            (["expat.h", "could not find expat"], "expat"),
+            (["libxml/parser.h", "could not find libxml2"], "libxml2"),
         ]
         need_pkgs: list[str] = []
         for needles, pkg in pkg_signals:
@@ -4214,7 +4540,10 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                     line = line.strip()
                     if not line or line.startswith("#"):
                         continue
-                    existing.append(line)
+                    token = line.split("#", 1)[0].strip().lower()
+                    if not token or not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                        continue
+                    existing.append(alias_map.get(token, token))
             except Exception:
                 return False
         merged = sorted(set(existing) | set(need_pkgs))
@@ -4223,7 +4552,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         dep_file.parent.mkdir(parents=True, exist_ok=True)
         body = (
             "# Auto-maintained by fix_build hotfix rules.\n"
-            "# Package names are Debian/Ubuntu apt identifiers.\n"
+            "# Package names are vcpkg ports (not apt package names).\n"
             + "\n".join(merged)
             + "\n"
         )
@@ -4262,6 +4591,156 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             return True
         except Exception:
             return False
+
+    def _try_hotfix_source_build_dir_collision() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        collision_signals = [
+            "build/version",
+            "build/cmake",
+            "cmakelists.txt: could not find requested file",
+            "include(cmake/checkfileoffsetbits.cmake)",
+        ]
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        uses_repo_build = (
+            "BUILD_DIR = REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR=REPO_ROOT / \"build\"" in text
+            or "BUILD_DIR = REPO_ROOT/'build'" in text
+        )
+        destructive_clean = ("shutil.rmtree(BUILD_DIR" in text or "rm -rf \"$BUILD_DIR\"" in text)
+        if not ((any(sig in diag for sig in collision_signals) or uses_repo_build) and uses_repo_build and destructive_clean):
+            return False
+
+        new_text = text
+        changed = False
+        if "BUILD_DIR = REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT / \"build\"",
+                "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+            changed = True
+        if "BUILD_DIR=REPO_ROOT / \"build\"" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR=REPO_ROOT / \"build\"",
+                "BUILD_DIR=REPO_ROOT / \"fuzz\" / \"build-work\"",
+            )
+            changed = True
+        if "BUILD_DIR = REPO_ROOT/'build'" in new_text:
+            new_text = new_text.replace(
+                "BUILD_DIR = REPO_ROOT/'build'",
+                "BUILD_DIR = REPO_ROOT/'fuzz'/'build-work'",
+            )
+            changed = True
+
+        if new_text == text or not changed:
+            return False
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+            _wf_log(cast(dict[str, Any], state), "fix_build: applied local hotfix for source_build_dir_collision")
+            return True
+        except Exception:
+            return False
+
+    def _try_hotfix_missing_cmake_archive_target() -> bool:
+        diag = (last_error + "\n" + stdout_tail + "\n" + stderr_tail).lower()
+        target_miss_signals = [
+            "no rule to make target 'archive'",
+            'no rule to make target "archive"',
+            "unknown target archive",
+        ]
+        if not any(sig in diag for sig in target_miss_signals):
+            return False
+
+        build_py = gen.repo_root / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        changed = False
+        new_text = text
+        replacements = [
+            ("'--target', 'archive'", "'--target', 'all'"),
+            ('"--target", "archive"', '"--target", "all"'),
+            ("'--target','archive'", "'--target','all'"),
+            ('"--target","archive"', '"--target","all"'),
+        ]
+        for old, new in replacements:
+            if old in new_text:
+                new_text = new_text.replace(old, new)
+                changed = True
+        if changed and new_text != text:
+            try:
+                build_py.write_text(new_text, encoding="utf-8", errors="replace")
+                _wf_log(cast(dict[str, Any], state), "fix_build: replaced cmake --target archive with --target all")
+            except Exception:
+                return False
+
+        pkg_signals: list[tuple[list[str], str]] = [
+            (['could not find zlib', 'zlib_library', 'zlib_include_dir'], 'zlib'),
+            (['could not find bzip2', 'bzip2_libraries', 'bzip2_include_dir'], 'bzip2'),
+            (['could not find liblzma', 'liblzma_library', 'liblzma_include_dir'], 'liblzma'),
+            (['could not find lz4', 'lz4_library', 'lz4_include_dir'], 'lz4'),
+            (['could not find zstd', "one of the modules 'libzstd'", 'zstd_library'], 'zstd'),
+            (['could not find openssl', 'openssl_crypto_library', 'openssl_include_dir'], 'openssl'),
+            (['could not find expat', 'expat_library', 'expat_include_dir'], 'expat'),
+            (['could not find libxml2', 'libxml2_library', 'libxml2_include_dir'], 'libxml2'),
+        ]
+        need_pkgs: list[str] = []
+        for needles, pkg in pkg_signals:
+            if any(n in diag for n in needles):
+                need_pkgs.append(pkg)
+        if need_pkgs:
+            alias_map = {
+                "z": "zlib",
+                "bz2": "bzip2",
+                "lzma": "liblzma",
+                "xz": "liblzma",
+                "ssl": "openssl",
+                "crypto": "openssl",
+                "libssl": "openssl",
+                "libcrypto": "openssl",
+                "xml2": "libxml2",
+                "libxml": "libxml2",
+            }
+            dep_file = gen.repo_root / 'fuzz' / 'system_packages.txt'
+            existing: list[str] = []
+            if dep_file.is_file():
+                try:
+                    for line in dep_file.read_text(encoding='utf-8', errors='replace').splitlines():
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        token = line.split("#", 1)[0].strip().lower()
+                        if not token or not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", token):
+                            continue
+                        existing.append(alias_map.get(token, token))
+                except Exception:
+                    existing = []
+            merged = sorted(set(existing) | set(need_pkgs))
+            if merged != sorted(set(existing)):
+                dep_file.parent.mkdir(parents=True, exist_ok=True)
+                body = (
+                    '# Auto-maintained by fix_build hotfix rules.\n'
+                    '# Package names are vcpkg ports (not apt package names).\n'
+                    + '\n'.join(merged)
+                    + '\n'
+                )
+                try:
+                    dep_file.write_text(body, encoding='utf-8', errors='replace')
+                    _wf_log(cast(dict[str, Any], state), f'fix_build: declared system packages in {dep_file}')
+                    changed = True
+                except Exception:
+                    pass
+
+        return changed
 
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():
@@ -4305,6 +4784,24 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "local hotfix for fuzz_out_path_mismatch applied",
                 outcome="rule_fixed",
                 rule_hit="fuzz_out_path_mismatch",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_source_build_dir_collision():
+            out = _success_out(
+                "local hotfix for source_build_dir_collision applied",
+                outcome="rule_fixed",
+                rule_hit="source_build_dir_collision",
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_cmake_archive_target():
+            out = _success_out(
+                "local hotfix for missing_cmake_archive_target applied",
+                outcome="rule_fixed",
+                rule_hit="missing_cmake_archive_target",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -5730,19 +6227,41 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         build_timeout = max(30, min(rem, 600))
-        build = subprocess.run(
-            build_cmd,
-            cwd=build_cwd,
-            capture_output=True,
-            text=True,
-            timeout=build_timeout,
-        )
-        payload["build_rc"] = int(build.returncode)
-        payload["build_ok"] = build.returncode == 0
-        if build.returncode != 0:
-            payload["stdout_tail"] = (build.stdout or "")[-4000:]
-            payload["stderr_tail"] = (build.stderr or "")[-4000:]
-            raise HarnessGeneratorError(f"re-build build failed (rc={build.returncode})")
+        build_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                build_cmd,
+                cwd=build_cwd,
+                env=build_env,
+                timeout=build_timeout,
+                idle_timeout=0,
+            )
+            payload["build_rc"] = int(rc)
+            payload["build_ok"] = int(rc) == 0
+            if int(rc) != 0:
+                payload["stdout_tail"] = (out or "")[-4000:]
+                payload["stderr_tail"] = (err or "")[-4000:]
+                raise HarnessGeneratorError(f"re-build build failed (rc={rc})")
+        else:
+            build = subprocess.run(
+                build_cmd,
+                cwd=build_cwd,
+                capture_output=True,
+                text=True,
+                timeout=build_timeout,
+                env=build_env,
+            )
+            payload["build_rc"] = int(build.returncode)
+            payload["build_ok"] = build.returncode == 0
+            if build.returncode != 0:
+                payload["stdout_tail"] = (build.stdout or "")[-4000:]
+                payload["stderr_tail"] = (build.stderr or "")[-4000:]
+                raise HarnessGeneratorError(f"re-build build failed (rc={build.returncode})")
     except Exception as e:
         payload["error"] = str(e)
 
@@ -5891,7 +6410,8 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         if rem <= 0:
             raise HarnessGeneratorError("re-run workspace rebuild skipped: no remaining workflow budget")
-        gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_result = gen._clone_repo(RepoSpec(url=repo_url, workdir=clone_root))
+        clone_root = Path(clone_result).expanduser().resolve()
         source_fuzz = repo_root / "fuzz"
         if not source_fuzz.is_dir():
             raise HarnessGeneratorError(f"run fuzz directory missing: {source_fuzz}")
@@ -5918,16 +6438,35 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in re-run workspace rebuild")
 
         build_timeout = max(30, min(rem, 600))
-        build = subprocess.run(
-            build_cmd,
-            cwd=build_cwd,
-            capture_output=True,
-            text=True,
-            timeout=build_timeout,
-        )
-        if build.returncode != 0:
-            err_tail = ((build.stderr or "") + "\n" + (build.stdout or ""))[-1200:]
-            raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={build.returncode}): {err_tail}")
+        build_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                build_cmd,
+                cwd=build_cwd,
+                env=build_env,
+                timeout=build_timeout,
+                idle_timeout=0,
+            )
+            if int(rc) != 0:
+                err_tail = ((err or "") + "\n" + (out or ""))[-1200:]
+                raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={rc}): {err_tail}")
+        else:
+            build = subprocess.run(
+                build_cmd,
+                cwd=build_cwd,
+                capture_output=True,
+                text=True,
+                timeout=build_timeout,
+                env=build_env,
+            )
+            if build.returncode != 0:
+                err_tail = ((build.stderr or "") + "\n" + (build.stdout or ""))[-1200:]
+                raise HarnessGeneratorError(f"re-run workspace rebuild build failed (rc={build.returncode}): {err_tail}")
         return clone_root
 
     def _guess_fuzzer_from_workspace(workdir: Path) -> str:
@@ -6050,17 +6589,38 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 raise HarnessGeneratorError(f"re-run fuzzer binary not found after workspace rebuild: {fuzzer_bin}")
         rem = _remaining_time_budget_sec(state, min_timeout=15)
         repro_timeout = max(20, min(rem, 180))
-        repro = subprocess.run(
-            [str(fuzzer_bin), "-runs=1", str(artifact_path)],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=repro_timeout,
-        )
-        payload["reproduce_rc"] = int(repro.returncode)
-        payload["reproduce_ok"] = repro.returncode != 0
-        payload["stdout_tail"] = (repro.stdout or "")[-4000:]
-        payload["stderr_tail"] = (repro.stderr or "")[-4000:]
+        repro_env = os.environ.copy()
+        if hasattr(gen, "_compose_vcpkg_runtime_env"):
+            try:
+                repro_env = gen._compose_vcpkg_runtime_env(repro_env, repo_root=workdir)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        repro_cmd = [str(fuzzer_bin), "-runs=1", str(artifact_path)]
+        if hasattr(gen, "_run_cmd"):
+            rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
+                repro_cmd,
+                cwd=workdir,
+                env=repro_env,
+                timeout=repro_timeout,
+                idle_timeout=0,
+            )
+            payload["reproduce_rc"] = int(rc)
+            payload["reproduce_ok"] = int(rc) != 0
+            payload["stdout_tail"] = (out or "")[-4000:]
+            payload["stderr_tail"] = (err or "")[-4000:]
+        else:
+            repro = subprocess.run(
+                repro_cmd,
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=repro_timeout,
+                env=repro_env,
+            )
+            payload["reproduce_rc"] = int(repro.returncode)
+            payload["reproduce_ok"] = repro.returncode != 0
+            payload["stdout_tail"] = (repro.stdout or "")[-4000:]
+            payload["stderr_tail"] = (repro.stderr or "")[-4000:]
         _write_repro_context(
             repo_root,
             repo_url=str(state.get("repo_url") or ""),

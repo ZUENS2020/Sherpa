@@ -49,24 +49,26 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("cmake-data\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
 
-    log_path = tmp_path / "apt.log"
+    log_path = tmp_path / "vcpkg.log"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    apt_script = bin_dir / "apt-get"
-    apt_script.write_text(
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
         "#!/bin/sh\n"
         f"echo \"$@\" >> {log_path}\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
-    apt_script.chmod(0o755)
-
-    dpkg_query = bin_dir / "dpkg-query"
-    dpkg_query.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    dpkg_query.chmod(0o755)
+    vcpkg_script.chmod(0o755)
 
     build_script = fuzz_dir / "build.sh"
     build_script.write_text("#!/bin/sh\necho native-build-ok\n", encoding="utf-8")
@@ -87,8 +89,281 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert rc == 0
     assert "native-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "update -o Acquire::Retries=3 -o Acquire::ForceIPv4=true" in log_text
-    assert "install -y --no-install-recommends cmake-data" in log_text
+    assert "list zlib:" in log_text
+    assert "install --triplet" in log_text
+    assert "zlib" in log_text
+
+
+def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+
+    ports = gen._declared_vcpkg_ports(repo_root=tmp_path)
+
+    assert ports == ["zlib", "bzip2", "liblzma", "lz4"]
+
+
+def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+
+    log_path = tmp_path / "vcpkg.log"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {log_path}\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho alias-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+
+    rc, out, _err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "alias-build-ok" in out
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "list zlib:" in log_text
+    assert "list bzip2:" in log_text
+    assert "list liblzma:" in log_text
+    assert "list lz4:" in log_text
+    assert "list z:" not in log_text
+    assert "list bz2:" not in log_text
+    assert "list lzma:" not in log_text
+def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho should-not-run\n", encoding="utf-8")
+    build_script.chmod(0o755)
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    vcpkg_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["PATH"] = "/bin"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc != 0
+    assert "should-not-run" not in out
+    merged = (out + "\n" + err).lower()
+    assert "vcpkg install failed" in merged
+
+
+def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    clone_log = tmp_path / "clone.log"
+    git_bin_dir = tmp_path / "bin"
+    git_bin_dir.mkdir(parents=True, exist_ok=True)
+    git_script = git_bin_dir / "git"
+    git_script.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$@\" >> {clone_log}\n"
+        "prev=\"\"\n"
+        "last=\"\"\n"
+        "for arg in \"$@\"; do\n"
+        "  prev=\"$last\"\n"
+        "  last=\"$arg\"\n"
+        "done\n"
+        "url=\"$prev\"\n"
+        "dst=\"$last\"\n"
+        "if [ \"$url\" = \"https://ghfast.top/https://github.com/microsoft/vcpkg\" ]; then\n"
+        "  exit 1\n"
+        "fi\n"
+        "mkdir -p \"$dst/.git\"\n"
+        "mkdir -p \"$dst/scripts/buildsystems\"\n"
+        "cat > \"$dst/scripts/buildsystems/vcpkg.cmake\" <<'EOF'\n"
+        "# fake toolchain\n"
+        "EOF\n"
+        "cat > \"$dst/bootstrap-vcpkg.sh\" <<'EOF'\n"
+        "#!/bin/sh\n"
+        "cat > ./vcpkg <<'INNER'\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        "exit 0\n"
+        "INNER\n"
+        "chmod +x ./vcpkg\n"
+        "exit 0\n"
+        "EOF\n"
+        "chmod +x \"$dst/bootstrap-vcpkg.sh\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    git_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho mirror-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["SHERPA_VCPKG_GIT_BIN"] = str(git_script)
+
+    rc, out, _err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=20,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "mirror-build-ok" in out
+    log = clone_log.read_text(encoding="utf-8")
+    assert "https://ghfast.top/https://github.com/microsoft/vcpkg" in log
+    assert "https://ghproxy.net/https://github.com/microsoft/vcpkg" in log
+    assert "clone --depth 1 https://github.com/microsoft/vcpkg " not in log
+
+
+def test_candidate_clone_urls_prefers_mirrors_before_github(monkeypatch):
+    monkeypatch.setenv(
+        "SHERPA_GIT_MIRRORS",
+        "https://ghfast.top/{url},https://ghproxy.net/{url}",
+    )
+    monkeypatch.delenv("SHERPA_GITHUB_MIRROR", raising=False)
+
+    urls = fur._candidate_clone_urls("https://github.com/fmtlib/fmt.git")
+
+    assert urls[0] == "https://ghfast.top/https://github.com/fmtlib/fmt.git"
+    assert urls[1] == "https://ghproxy.net/https://github.com/fmtlib/fmt.git"
+    assert urls[-1] == "https://github.com/fmtlib/fmt.git"
+
+
+def test_run_cmd_preflight_rewrites_dangerous_repo_build_dir(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"build\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n"
+        "print('preflight-ok')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "preflight-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert 'BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"' in txt
+
+
+def test_run_cmd_preflight_disables_non_root_install_steps(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "import subprocess\n"
+        "cmake_cfg = ['cmake', '-DENABLE_INSTALL=ON', '..']\n"
+        "cmake_build = ['cmake', '--build', 'build', '--target', 'install']\n"
+        "print('install-preflight-ok')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "install-preflight-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert "-DENABLE_INSTALL=OFF" in txt
+    assert "'--target', 'install'" not in txt
+    assert "'--target', 'all'" in txt
+
+
+def test_run_cmd_preflight_keeps_safe_build_dir_unchanged(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    build_py = fuzz_dir / "build.py"
+    build_py.write_text(
+        "from pathlib import Path\n"
+        "import shutil\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
+        "BUILD_DIR = REPO_ROOT / \"fuzz\" / \"build-work\"\n"
+        "if BUILD_DIR.exists():\n"
+        "    shutil.rmtree(BUILD_DIR)\n"
+        "print('safe-ok')\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("SHERPA_AUTO_INSTALL_SYSTEM_DEPS", "0")
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "build.py"],
+        cwd=fuzz_dir,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "safe-ok" in out
+    txt = build_py.read_text(encoding="utf-8")
+    assert txt.count('BUILD_DIR = REPO_ROOT / "fuzz" / "build-work"') == 1
 
 
 def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):

@@ -44,7 +44,7 @@ def _isolate_runtime_state(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("SHERPA_WEB_AUTO_RESUME_ON_START", "0")
     monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
     monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
-    monkeypatch.setenv("MINIMAX_MODEL", "MiniMax-M2.5")
+    monkeypatch.setenv("MINIMAX_MODEL", "MiniMax-M2.7-highspeed")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
@@ -324,7 +324,7 @@ def test_post_opencode_provider_models_uses_request_overrides(monkeypatch):
         captured["provider"] = provider
         captured["api_key_override"] = api_key_override
         captured["base_url_override"] = base_url_override
-        return "minimax", ["MiniMax-M2.5"], "remote", ""
+        return "minimax", ["MiniMax-M2.7-highspeed"], "remote", ""
 
     monkeypatch.setattr(web_main, "list_opencode_provider_models_resolved", _fake)
 
@@ -340,7 +340,7 @@ def test_post_opencode_provider_models_uses_request_overrides(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["provider"] == "minimax"
-    assert data["models"] == ["MiniMax-M2.5"]
+    assert data["models"] == ["MiniMax-M2.7-highspeed"]
     assert data["source"] == "remote"
     assert captured["provider"] == "minimax"
     assert captured["api_key_override"] == "minimax-test-key"
@@ -376,7 +376,7 @@ def test_build_opencode_runtime_config_uses_local_mcp_command_array():
                 enabled=True,
                 base_url="https://api.minimaxi.com/anthropic/v1",
                 api_key="dummy",
-                models=["MiniMax-M2.5"],
+                models=["MiniMax-M2.7-highspeed"],
             )
         ]
     )

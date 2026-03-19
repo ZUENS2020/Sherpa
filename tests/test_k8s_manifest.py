@@ -34,7 +34,7 @@ def test_k8s_manifest_does_not_force_empty_opencode_docker_image():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -52,15 +52,15 @@ def test_k8s_manifest_normalizes_opencode_model_value():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
     env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
     env_map = {item["name"]: item["value"] for item in env_items if "value" in item}
 
-    assert env_map["OPENCODE_MODEL"] == "minimax/MiniMax-M2.5"
-    assert env_map["OPENAI_MODEL"] == "MiniMax-M2.5"
+    assert env_map["OPENCODE_MODEL"] == "minimax/MiniMax-M2.7-highspeed"
+    assert env_map["OPENAI_MODEL"] == "MiniMax-M2.7-highspeed"
 
 
 def test_k8s_configmap_does_not_set_opencode_docker_image():
@@ -75,6 +75,7 @@ def test_k8s_configmap_defaults_tmpdir_to_container_tmp():
     data = configmap["data"]
 
     assert data["TMPDIR"] == "/tmp"
+    assert data["SHERPA_VCPKG_INSTALLED_DIR"] == "vcpkg_installed"
 
 
 def test_k8s_manifest_applies_default_worker_resources():
@@ -83,7 +84,7 @@ def test_k8s_manifest_applies_default_worker_resources():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -101,7 +102,7 @@ def test_k8s_manifest_uses_optional_proxy_secret_env_from():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -124,7 +125,7 @@ def test_k8s_manifest_allows_disabling_proxy_secret(monkeypatch: pytest.MonkeyPa
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -144,7 +145,7 @@ def test_k8s_manifest_explicitly_injects_git_mirrors(monkeypatch: pytest.MonkeyP
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -168,7 +169,7 @@ def test_k8s_manifest_allows_worker_resource_env_override(monkeypatch: pytest.Mo
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -186,7 +187,7 @@ def test_k8s_manifest_applies_non_root_security_context():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)
@@ -209,7 +210,7 @@ def test_k8s_manifest_initializes_runtime_volume_permissions():
         {
             "job_id": "job-test",
             "repo_url": "https://github.com/madler/zlib.git",
-            "model": "MiniMax-M2.5",
+            "model": "MiniMax-M2.7-highspeed",
         },
     )
     manifest = yaml.safe_load(manifest_yaml)

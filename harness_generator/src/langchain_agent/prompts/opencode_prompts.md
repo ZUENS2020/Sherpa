@@ -72,14 +72,34 @@ MANDATORY: you MUST create `./done` before finishing this step.
 Write `fuzz/out/` into `./done` (single line). Missing `./done` means this step fails.
 If progress stalls, still deliver repository-understanding artifacts first, then the smallest scaffold consistent with them.
 
-If external system dependencies are required, write package names (one per line) to fuzz/system_packages.txt.
+If external system dependencies are required, write vcpkg port names (one per line) to fuzz/system_packages.txt.
 Use package names only; no shell commands.
+Use canonical vcpkg port names only (not generic/apt names). Examples:
+- `zlib` (NOT `z`)
+- `bzip2` (NOT `bz2`)
+- `liblzma` (NOT `lzma`)
+- `lz4` (valid as-is)
+Non-root runtime rule: do not enable install-to-system-dir flows in build scripts (for example avoid `-DENABLE_INSTALL=ON`, `cmake --install`, or `--target install`); link libraries directly from build tree artifacts.
 Avoid forcing C++ standard library selection flags (for example: do not add `-stdlib=libc++`).
 If the upstream source contains a `main` symbol, handle symbol conflict in build flags (for example `-Dmain=vuln_main`) so libFuzzer link can succeed.
 Hard requirements:
 - Default to the first runtime-viable target in `fuzz/selected_targets.json`; drift only when repository facts prove it is not directly fuzzable.
 - Add an early input-size guard in the harness entrypoint before heavy parsing/work (for C/C++ style harnesses, prefer `if (size > 8192) return 0;` unless a smaller cap is clearly required).
 - The harness, `fuzz/README.md`, and `fuzz/build_strategy.json` must agree on one final external/library API. Do not call a local helper/checker/wrapper the final target.
+- In `fuzz/build.py`, do not hardcode a single top-level library artifact path. Resolve artifacts using multiple concrete candidates plus recursive fallback under the build directory (for example handle `build/libfoo.a`, `build/lib/libfoo.a`, `build/**/libfoo.so`, `build/**/libfoo.so.*`).
+- After repository build commands complete, `fuzz/build.py` must verify that the chosen library artifact path actually exists before compiling fuzzers, and fail only after trying the documented fallback candidates.
+- In `fuzz/build.py`, include reusable static-lib discovery scaffolding (or equivalent):
+  - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt names to current target library)
+  - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt per repository layout)
+  - `def find_static_lib(repo_root, lib_name_pattern): ...`
+  Use candidate paths first, then recursive glob fallback. Do not rely on a single guessed location.
+- In `fuzz/build.py`, define default CMake args and apply them by default:
+  - `DEFAULT_CMAKE_ARGS = [`
+  - `    "-DENABLE_TEST=OFF",`
+  - `    "-DENABLE_INSTALL=OFF",`
+  - `]`
+  Ensure these defaults are included in CMake configure command unless repository facts explicitly require overrides.
+- Do not silently accept optional dependency downgrades. When CMake/build output indicates missing key libraries (for example zlib/bzip2/lzma/lz4/zstd/openssl/libxml2/expat), declare matching vcpkg ports in `fuzz/system_packages.txt` and keep build configuration aligned with those dependencies.
 - If `fuzz/observed_target.json` exists, keep new outputs consistent with it unless the harness target actually changes.
 - If you drift, record the rejected original target and the replacement rationale in `fuzz/repo_understanding.json`.
 - You may use a repository-provided fuzz target only when its exact real target name is documented in both `fuzz/repo_understanding.json` and `fuzz/build_strategy.json`. Never guess names such as `<name>-fuzzer` or `<name>_fuzzer`.
@@ -95,6 +115,9 @@ Hard requirements:
   - `Technical reason: ...`
   - `Relation: ...`
   - `Harness file: ...`
+- FIRST-PASS QUALITY GATE (non-optional): before writing `./done`, verify `fuzz/build.py`, `fuzz/build_strategy.json`, and `fuzz/system_packages.txt` are internally consistent for the first build attempt.
+- If `fuzz/build.py` links any of `-lz`, `-lbz2`, `-llzma`, `-llz4`, `-lzstd`, `-lcrypto`, `-lssl`, `-lxml2`, or `-lexpat`, you MUST declare matching vcpkg ports in `fuzz/system_packages.txt` in the same attempt.
+- If the build strategy intentionally disables those features, remove their matching link flags from `fuzz/build.py` in the same attempt. Never keep contradictory "feature disabled but still linked" states.
 
 Additional instruction from coordinator:
 {{hint}}
@@ -155,7 +178,9 @@ Constraints:
 - Only edit files under `fuzz/`
 - The only allowed file outside `fuzz/` is `./done` (sentinel). Any other path change is rejected by the workflow.
 - Do not modify repository source/build files outside `fuzz/` (for example: `*.c`, `*.cc`, `*.cpp`, `*.h`, `CMakeLists.txt`, `Makefile`, `configure`).
-- If external system deps are required, declare package names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+- If external system deps are required, declare vcpkg port names in fuzz/system_packages.txt (one per line, comments allowed, no shell commands)
+- Use canonical vcpkg port names only in `fuzz/system_packages.txt`. Never write generic aliases like `z`, `bz2`, or `lzma`; use `zlib`, `bzip2`, `liblzma`.
+- Non-root runtime rule: never add install-to-system-dir build steps (`-DENABLE_INSTALL=ON`, `cmake --install`, `--target install`). Build and link from workspace artifacts only.
 - If you change `fuzz/system_packages.txt`, still finish all other necessary `fuzz/` edits in the same attempt. Do not stop after only declaring packages if `fuzz/build.py` or harness glue also needs changes.
 - Treat `fuzz/system_packages.txt` as “requires a fresh build job to validate”. Do not assume the current container can verify those package additions.
 - Do not force C++ stdlib flags like `-stdlib=libc++` in this environment.
@@ -172,8 +197,14 @@ Constraints:
 - You MUST read `{{build_log_file}}` before editing, and base your fix on that full log (not only short tails).
 - If this attempt cannot produce a valid fix, do NOT exit with sentinel only; you must provide the smallest verifiable patch under `fuzz/`.
 - You must explicitly address the current error signature and avoid repeating previously rejected no-op patterns.
+- If the error indicates a built library cannot be found (for example `Could not find <lib> library`), treat it as an artifact-discovery bug first: repair `fuzz/build.py` to search nested build output directories and versioned shared libraries (`.so.*`) before failing.
+- Avoid assumptions that libraries are emitted at build root; support common layouts like `build/<module>/lib<name>.a` and `build/<module>/lib<name>.so.*`.
+- Prefer a reusable helper (`find_static_lib`) with `STATIC_LIB_NAMES` and `SEARCH_PATHS` constants over ad-hoc one-off path fixes.
+- If logs show `Could NOT find ...` for key optional libraries, do not treat that as acceptable completion; update `fuzz/system_packages.txt` with the matching vcpkg ports and make the build script consume them.
+- If logs show linker errors like `cannot find -l...`, you MUST create or update `fuzz/system_packages.txt` in the same attempt (port mapping examples: `-lz`→`zlib`, `-lbz2`→`bzip2`, `-llzma`→`liblzma`, `-llz4`→`lz4`, `-lcrypto/-lssl`→`openssl`, `-lxml2`→`libxml2`, `-lexpat`→`expat`).
+- First repair pass must be build-ready: do not defer dependency declaration to a later round when the current log already names missing link libraries.
 - If the failure is due to missing tools/packages (for example `aclocal`, `autoconf`, `automake`, `libtool`, missing `-dev` packages), prefer:
-  1. declare the required packages in `fuzz/system_packages.txt`
+  1. declare the required vcpkg ports in `fuzz/system_packages.txt`
   2. make any matching `fuzz/build.py` adjustments needed for the new environment
   3. avoid fake fixes that would still fail before packages are installed
 
