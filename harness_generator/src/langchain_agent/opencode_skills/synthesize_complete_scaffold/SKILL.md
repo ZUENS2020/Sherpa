@@ -20,13 +20,16 @@ Complete only missing required scaffold items without rewriting unrelated files.
   - `Harness file: ...`
 - `fuzz/repo_understanding.json` repair contract:
   - if file exists but keys are incomplete, repair it in place
+  - if fields are present but semantically invalid, repair them before any cosmetic/doc-only edits
   - ensure non-empty `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`
   - ensure `evidence` is a non-empty array
+  - ensure `chosen_target_api` is an API identifier, not a harness file path/value ending in `.c|.cc|.cpp|.cxx|.java`
+  - ensure `build_system.lower() != "unknown"`
   - minimal valid shape example:
 ```json
 {
   "build_system": "cmake",
-  "chosen_target_api": "target_fuzz.cc",
+  "chosen_target_api": "archive_read_open1",
   "chosen_target_reason": "runtime-reachable entrypoint",
   "fuzzer_entry_strategy": "sanitizer_fuzzer",
   "evidence": ["concrete repo build facts"]
@@ -42,7 +45,9 @@ Complete only missing required scaffold items without rewriting unrelated files.
 ## Acceptance Criteria
 - all required scaffold files exist after this step.
 - if harness was missing before this step, harness exists after this step.
-- if `fuzz/repo_understanding.json` existed but was incomplete, required keys are repaired and non-empty.
+- if `fuzz/repo_understanding.json` existed but was incomplete or semantically invalid, required keys are repaired and non-empty.
+- `chosen_target_api` is not a harness file path pattern and not a filename-only suffix value.
+- `build_system` is concrete (not `unknown`) and `evidence` is a non-empty string array.
 - existing harness/build assets are preserved unless minimal changes are required.
 - no guessed paths/targets are introduced.
 

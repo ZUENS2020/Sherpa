@@ -33,11 +33,13 @@ def find_static_lib(repo_root):
 ```
 - if dependency evidence exists, update `fuzz/system_packages.txt` with canonical vcpkg names only.
 - canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
+- if editing `fuzz/repo_understanding.json`, keep `chosen_target_api` as API identifier (not `fuzz/*.cc`-style path), keep `build_system != unknown`, and keep `evidence` as non-empty string array.
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.
+- do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
 
 ## Command Policy
 - Allowed: read-only commands only.

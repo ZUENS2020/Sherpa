@@ -21,6 +21,7 @@ Repair `fuzz/targets.json` so it passes strict schema validation.
     - `target_type` in `parser|decoder|archive|image|document|network|database|serializer|interpreter|generic`
     - `seed_profile` in `parser-structure|parser-token|parser-format|parser-numeric|decoder-binary|archive-container|serializer-structured|document-text|network-message|generic`
   - forbidden: `name = LLVMFuzzerTestOneInput`
+  - semantic reminder: do not rewrite `api` to harness file paths like `fuzz/*.cc` even when schema only requires string type
 
 ## Acceptance Criteria
 - JSON parses successfully.

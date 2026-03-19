@@ -20,6 +20,7 @@ Fix the upstream bug so the same crashing input no longer reproduces the fault.
 - no broad refactor or behavior masking.
 - clear, minimal code delta.
 - must produce textual code changes; pure no-op is invalid.
+- do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
 
 ## Command Policy
 - Allowed: read-only commands only.
