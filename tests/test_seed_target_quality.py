@@ -84,6 +84,25 @@ def test_collect_repo_seed_examples_respects_seed_max_file_bytes(tmp_path: Path,
     assert meta["accepted_count"] == 1
 
 
+def test_collect_repo_seed_examples_bootstraps_archive_samples_when_repo_has_none(tmp_path: Path):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "archive_fuzz"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    gen = _make_generator(tmp_path)
+
+    selected, meta = gen._collect_repo_seed_examples(
+        "archive-container",
+        "archive_unpack_fuzz",
+        corpus_dir,
+        required_families=["flow_structures"],
+    )
+
+    assert len(selected) >= 3
+    suffixes = {p.suffix for p in selected}
+    assert ".zip" in suffixes or ".tar" in suffixes
+    assert any(ext in suffixes for ext in {".gz", ".bz2", ".xz"})
+    assert meta["accepted_count"] == len(selected)
+
+
 def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +208,7 @@ def test_host_git_clone_retries_before_failing_over(monkeypatch, tmp_path: Path)
     assert len(clone_attempts) == 2
     assert clone_attempts[0][1] == clone_attempts[1][1]
     assert clone_attempts[0][2]["HTTP_PROXY"] == "http://192.168.1.79:6789"
-    assert sleeps == [2]
+    assert sleeps == [0.5]
     assert GIT_CLONE_RETRIES >= 2
 
 
