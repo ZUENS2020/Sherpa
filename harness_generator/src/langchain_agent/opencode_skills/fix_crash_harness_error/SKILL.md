@@ -19,6 +19,7 @@ Fix harness/build glue errors so the same crashing input no longer fails due to 
 - patch addresses harness-side root cause.
 - no unrelated refactor.
 - no upstream/project source modifications unless strictly required.
+- must produce textual code changes; pure no-op is invalid.
 
 ## Command Policy
 - Allowed: read-only commands only.

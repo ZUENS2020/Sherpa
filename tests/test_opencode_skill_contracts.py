@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILL_ROOT = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+
+
+def _load(stage: str) -> str:
+    return (SKILL_ROOT / stage / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_synthesize_contract_matches_workflow_hard_checks() -> None:
+    synth = _load("synthesize")
+    assert "at least one harness source file under `fuzz/`" in synth
+    assert "before completing scaffold docs/json" in synth
+    assert "`fuzz/repo_understanding.json` must include non-empty" in synth
+    assert "`chosen_target_api`" in synth
+    assert "`evidence` (non-empty array)" in synth
+    assert "never use shell substitutions like `$(nproc)`" in synth
+    assert '["-j", str(os.cpu_count() or 1)]' in synth
+
+
+def test_synthesize_completion_contract_repairs_harness_and_understanding() -> None:
+    complete = _load("synthesize_complete_scaffold")
+    assert "if harness source is missing, create at least one harness source file" in complete
+    assert "before only-doc/json fixes" in complete
+    assert "ensure non-empty `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`" in complete
+    assert "ensure `evidence` is a non-empty array" in complete
+    assert "if `fuzz/build.py` exists and uses invalid parallel style" in complete
+
+
+def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
+    plan = _load("plan")
+    plan_fix = _load("plan_fix_targets_schema")
+    fix_build = _load("fix_build")
+    fix_crash_h = _load("fix_crash_harness_error")
+    fix_crash_u = _load("fix_crash_upstream_bug")
+
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
+    assert "canonical vcpkg examples" in fix_build
+    assert "never `z`, `bz2`, `lzma`" in fix_build
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u

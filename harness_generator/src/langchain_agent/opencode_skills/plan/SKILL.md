@@ -20,6 +20,7 @@ Produce a realistic, runtime-viable target plan for harness generation.
 - `fuzz/targets.json`
   - non-empty JSON array
   - each item has non-empty: `name`, `api`, `lang`, `target_type`, `seed_profile`
+  - forbidden: `name = LLVMFuzzerTestOneInput`
   - rank runtime-executable/public targets first
 
 ## Acceptance Criteria
