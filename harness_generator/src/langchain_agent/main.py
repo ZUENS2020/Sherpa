@@ -69,6 +69,7 @@ _INIT_LOCK = threading.Lock()
 _JOB_STORE: JobStore | None = None
 _JOB_FUTURES_LOCK = threading.Lock()
 _JOB_FUTURES: dict[str, Future] = {}
+_K8S_METRICS_API_UNAVAILABLE_UNTIL = 0.0
 
 # In-memory API log retention limit (characters).
 # 0 or negative means unlimited (no truncation).
@@ -848,6 +849,7 @@ def _k8s_get_job_node_name(job_name: str) -> str:
 
 
 def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
+    global _K8S_METRICS_API_UNAVAILABLE_UNTIL
     if not node_name:
         return False, "empty_node"
 
@@ -891,42 +893,148 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
     except Exception:
         max_mem_pct = 95
 
+    def _parse_cpu_to_millicores(raw: str) -> int | None:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        try:
+            if txt.endswith("m"):
+                return int(float(txt[:-1]))
+            return int(float(txt) * 1000.0)
+        except Exception:
+            return None
+
+    def _parse_memory_to_bytes(raw: str) -> int | None:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        units = {
+            "Ki": 1024,
+            "Mi": 1024 ** 2,
+            "Gi": 1024 ** 3,
+            "Ti": 1024 ** 4,
+            "Pi": 1024 ** 5,
+            "Ei": 1024 ** 6,
+            "K": 1000,
+            "M": 1000 ** 2,
+            "G": 1000 ** 3,
+            "T": 1000 ** 4,
+            "P": 1000 ** 5,
+            "E": 1000 ** 6,
+        }
+        for suffix, mul in units.items():
+            if txt.endswith(suffix):
+                try:
+                    return int(float(txt[: -len(suffix)]) * float(mul))
+                except Exception:
+                    return None
+        try:
+            return int(float(txt))
+        except Exception:
+            return None
+
+    # First preference: live usage from metrics-server.
+    now_ts = time.time()
     rc_top, out_top, err_top = _kubectl(["top", "node", node_name, "--no-headers"], timeout=10)
-    if rc_top != 0:
-        detail = (err_top or out_top).strip()
-        if detail:
-            detail_norm = re.sub(r"\s+", " ", detail).strip()
-            # Canonicalize common metrics-server absence into a stable token.
-            if re.search(r"metrics api not available", detail_norm, re.IGNORECASE):
-                return True, "node_ready_no_metrics_warn:metrics_api_not_available"
-            # Avoid confusing "error:" prefixes in warning-only status messages.
-            detail_norm = re.sub(r"^\s*error:\s*", "", detail_norm, flags=re.IGNORECASE)
-            detail_token = re.sub(r"\s+", "_", detail_norm)[:160]
-            return True, f"node_ready_no_metrics_warn:{detail_token}"
-        return True, "node_ready_no_metrics_warn"
-    line = ""
-    for raw in (out_top or "").splitlines():
-        txt = raw.strip()
-        if txt:
-            line = txt
-            break
-    if not line:
-        return True, "node_ready_empty_metrics"
-    parts = line.split()
-    if len(parts) < 5:
-        return True, "node_ready_bad_metrics"
-    cpu_pct_txt = parts[2].rstrip("%")
-    mem_pct_txt = parts[4].rstrip("%")
+    if rc_top == 0:
+        line = ""
+        for raw in (out_top or "").splitlines():
+            txt = raw.strip()
+            if txt:
+                line = txt
+                break
+        if line:
+            parts = line.split()
+            if len(parts) >= 5:
+                cpu_pct_txt = parts[2].rstrip("%")
+                mem_pct_txt = parts[4].rstrip("%")
+                try:
+                    cpu_pct = int(cpu_pct_txt)
+                    mem_pct = int(mem_pct_txt)
+                    if cpu_pct >= max_cpu_pct:
+                        return False, f"node_cpu_busy:{cpu_pct}%"
+                    if mem_pct >= max_mem_pct:
+                        return False, f"node_mem_busy:{mem_pct}%"
+                    return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
+                except Exception:
+                    pass
+
+    # Fallback: request-based capacity check (works without metrics-server).
+    detail = (err_top or out_top).strip()
+    if detail and re.search(r"metrics api not available", re.sub(r"\s+", " ", detail), re.IGNORECASE):
+        try:
+            backoff_sec = int(
+                (os.environ.get("SHERPA_K8S_METRICS_API_UNAVAILABLE_BACKOFF_SEC") or "300").strip()
+            )
+        except Exception:
+            backoff_sec = 300
+        _K8S_METRICS_API_UNAVAILABLE_UNTIL = now_ts + float(max(30, backoff_sec))
+
+    alloc = status_doc.get("allocatable") if isinstance(status_doc, dict) else {}
+    if not isinstance(alloc, dict):
+        alloc = {}
+    alloc_cpu_m = _parse_cpu_to_millicores(str(alloc.get("cpu") or ""))
+    alloc_mem_b = _parse_memory_to_bytes(str(alloc.get("memory") or ""))
+
+    rc_pods, out_pods, err_pods = _kubectl(
+        ["get", "pods", "-A", "--field-selector", f"spec.nodeName={node_name}", "-o", "json"],
+        timeout=20,
+    )
+    if rc_pods != 0:
+        return True, "node_ready_no_metrics_capacity_unknown"
+
     try:
-        cpu_pct = int(cpu_pct_txt)
-        mem_pct = int(mem_pct_txt)
+        pods_doc = json.loads(out_pods)
     except Exception:
-        return True, "node_ready_unparsed_metrics"
-    if cpu_pct >= max_cpu_pct:
-        return False, f"node_cpu_busy:{cpu_pct}%"
-    if mem_pct >= max_mem_pct:
-        return False, f"node_mem_busy:{mem_pct}%"
-    return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
+        return True, "node_ready_no_metrics_capacity_unknown"
+
+    items = pods_doc.get("items") if isinstance(pods_doc, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    req_cpu_m = 0
+    req_mem_b = 0
+    for pod in items:
+        if not isinstance(pod, dict):
+            continue
+        pod_status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        phase = str(pod_status.get("phase") or "").strip()
+        if phase in {"Succeeded", "Failed"}:
+            continue
+        pod_spec = pod.get("spec") if isinstance(pod.get("spec"), dict) else {}
+        containers = pod_spec.get("containers")
+        if not isinstance(containers, list):
+            containers = []
+        for c in containers:
+            if not isinstance(c, dict):
+                continue
+            resources = c.get("resources") if isinstance(c.get("resources"), dict) else {}
+            requests = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
+            cpu_m = _parse_cpu_to_millicores(str(requests.get("cpu") or "0"))
+            mem_b = _parse_memory_to_bytes(str(requests.get("memory") or "0"))
+            if cpu_m is not None and cpu_m > 0:
+                req_cpu_m += cpu_m
+            if mem_b is not None and mem_b > 0:
+                req_mem_b += mem_b
+
+    cpu_req_pct: int | None = None
+    mem_req_pct: int | None = None
+    if alloc_cpu_m and alloc_cpu_m > 0:
+        cpu_req_pct = int((float(req_cpu_m) / float(alloc_cpu_m)) * 100.0)
+    if alloc_mem_b and alloc_mem_b > 0:
+        mem_req_pct = int((float(req_mem_b) / float(alloc_mem_b)) * 100.0)
+
+    if cpu_req_pct is not None and cpu_req_pct >= max_cpu_pct:
+        return False, f"node_cpu_request_busy:{cpu_req_pct}%"
+    if mem_req_pct is not None and mem_req_pct >= max_mem_pct:
+        return False, f"node_mem_request_busy:{mem_req_pct}%"
+
+    if cpu_req_pct is not None or mem_req_pct is not None:
+        cpu_txt = f"{cpu_req_pct}%" if cpu_req_pct is not None else "n/a"
+        mem_txt = f"{mem_req_pct}%" if mem_req_pct is not None else "n/a"
+        return True, f"node_ready_req_cpu={cpu_txt}_req_mem={mem_txt}"
+
+    return True, "node_ready_no_metrics_capacity_unknown"
 
 
 def _execute_k8s_job(
@@ -2932,7 +3040,12 @@ def _run_fuzz_job(
                                 f"[job {job_id}] stage {stage} skip node pinning ({current_node_name}): {node_check_reason}"
                             )
                         else:
-                            print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}")
+                            if node_check_reason in {"node_ready", "node_ready_no_metrics"}:
+                                print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
+                            else:
+                                print(
+                                    f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}"
+                                )
 
                     payload = {
                         "job_id": job_id,
