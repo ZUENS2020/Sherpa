@@ -269,25 +269,15 @@ jobs:
           )
 
           # Set deterministic args (avoid repeated duplicate entries).
-          kubectl -n kube-system patch deploy metrics-server --type='merge' -p='{
-            "spec": {
-              "template": {
-                "spec": {
-                  "containers": [{
-                    "name": "metrics-server",
-                    "args": [
-                      "--cert-dir=/tmp",
-                      "--secure-port=10250",
-                      "--kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP",
-                      "--kubelet-use-node-status-port",
-                      "--metric-resolution=15s",
-                      "--kubelet-insecure-tls"
-                    ]
-                  }]
-                }
-              }
-            }
-          }' || true
+          kubectl -n kube-system set args deployment/metrics-server \
+            --containers=metrics-server \
+            -- \
+            --cert-dir=/tmp \
+            --secure-port=10250 \
+            --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP \
+            --kubelet-use-node-status-port \
+            --metric-resolution=15s \
+            --kubelet-insecure-tls || true
 
           rollout_metrics_server() {
             # Proactively clear stuck terminating pods before waiting rollout.
