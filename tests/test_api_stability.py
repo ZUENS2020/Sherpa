@@ -59,6 +59,7 @@ def _isolate_runtime_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_main, "_JOB_STORE", store)
     monkeypatch.setattr(web_main, "_init_job_store", lambda: None)
     web_main._cfg_set(WebPersistentConfig())
+    monkeypatch.setattr(web_main, "_K8S_METRICS_API_UNAVAILABLE_UNTIL", 0.0)
 
     monkeypatch.setattr(web_main, "executor", _ImmediateExecutor())
     monkeypatch.setattr(web_main, "save_config", lambda cfg: None)
@@ -716,6 +717,80 @@ def test_api_metrics_contains_job_counters():
     assert 'sherpa_jobs_status{status="running"} ' in body
     assert 'sherpa_jobs_status{status="error"} ' in body
     assert "sherpa_jobs_failure_rate_window " in body
+
+
+def test_k8s_node_can_run_job_falls_back_to_request_capacity_when_metrics_unavailable(monkeypatch):
+    node_doc = {
+        "spec": {"unschedulable": False},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"cpu": "4", "memory": "8Gi"},
+        },
+    }
+    pods_doc = {
+        "items": [
+            {
+                "status": {"phase": "Running"},
+                "spec": {
+                    "containers": [
+                        {"resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}},
+                        {"resources": {"requests": {"cpu": "250m", "memory": "256Mi"}}},
+                    ]
+                },
+            }
+        ]
+    }
+
+    def _fake_kubectl(args, *, input_text=None, timeout=30):
+        if args[:3] == ["get", "node", "node-a"]:
+            return 0, web_main.json.dumps(node_doc), ""
+        if args[:3] == ["top", "node", "node-a"]:
+            return 1, "", "error: Metrics API not available"
+        if args[:3] == ["get", "pods", "-A"]:
+            return 0, web_main.json.dumps(pods_doc), ""
+        raise AssertionError(f"unexpected kubectl args: {args}")
+
+    monkeypatch.setattr(web_main, "_kubectl", _fake_kubectl)
+    ok, reason = web_main._k8s_node_can_run_job("node-a")
+    assert ok is True
+    assert reason.startswith("node_ready_req_cpu=")
+    assert "req_mem=" in reason
+
+
+def test_k8s_node_can_run_job_rejects_high_request_pressure_without_metrics(monkeypatch):
+    node_doc = {
+        "spec": {"unschedulable": False},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"cpu": "2", "memory": "1Gi"},
+        },
+    }
+    pods_doc = {
+        "items": [
+            {
+                "status": {"phase": "Running"},
+                "spec": {
+                    "containers": [
+                        {"resources": {"requests": {"cpu": "1900m", "memory": "900Mi"}}},
+                    ]
+                },
+            }
+        ]
+    }
+
+    def _fake_kubectl(args, *, input_text=None, timeout=30):
+        if args[:3] == ["get", "node", "node-b"]:
+            return 0, web_main.json.dumps(node_doc), ""
+        if args[:3] == ["top", "node", "node-b"]:
+            return 1, "", "error: Metrics API not available"
+        if args[:3] == ["get", "pods", "-A"]:
+            return 0, web_main.json.dumps(pods_doc), ""
+        raise AssertionError(f"unexpected kubectl args: {args}")
+
+    monkeypatch.setattr(web_main, "_kubectl", _fake_kubectl)
+    ok, reason = web_main._k8s_node_can_run_job("node-b")
+    assert ok is False
+    assert reason == "node_cpu_request_busy:95%"
 
 
 def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
