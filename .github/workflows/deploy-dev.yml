@@ -232,8 +232,10 @@ jobs:
         run: |
           set -euo pipefail
           manifest_urls=(
-            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
             "https://ghfast.top/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://mirror.ghproxy.com/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.moeyy.xyz/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
           )
           applied=0
           for u in "${manifest_urls[@]}"; do
@@ -246,6 +248,15 @@ jobs:
           if [[ "$applied" != "1" ]]; then
             echo "::error::Failed to download metrics-server manifest"
             exit 1
+          fi
+
+          # Prefer mirrored registry for image pulls in regions where registry.k8s.io is unstable.
+          current_image="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+          if [[ -n "${current_image}" ]]; then
+            mirrored_image="${current_image/registry.k8s.io/registry.cn-hangzhou.aliyuncs.com/google_containers}"
+            if [[ "${mirrored_image}" != "${current_image}" ]]; then
+              kubectl -n kube-system set image deployment/metrics-server metrics-server="${mirrored_image}" || true
+            fi
           fi
 
           # Keep this patch idempotent; add args only when missing.
