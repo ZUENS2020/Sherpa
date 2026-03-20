@@ -232,6 +232,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if kubectl top nodes >/tmp/metrics-top.log 2>&1; then
+            echo "::notice::metrics-server already healthy; skip reinstall"
+            exit 0
+          fi
+
           manifest_urls=(
             "https://ghfast.top/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
             "https://mirror.ghproxy.com/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
@@ -268,6 +273,11 @@ jobs:
           fi
 
           rollout_metrics_server() {
+            kubectl -n kube-system get pods -l k8s-app=metrics-server \
+              -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{"\n"}{end}' | \
+              awk '$2!=""{print $1}' | \
+              xargs -r -I{} kubectl -n kube-system delete pod {} --force --grace-period=0 --wait=false || true
+
             if kubectl -n kube-system rollout status deployment/metrics-server --timeout=600s; then
               return 0
             fi
