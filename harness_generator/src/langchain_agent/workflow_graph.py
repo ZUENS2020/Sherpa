@@ -71,12 +71,14 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_counts_raw: dict[str, int]
     coverage_seed_counts_filtered: dict[str, int]
     coverage_seed_noise_rejected_count: int
+    coverage_missing_execution_targets: list[str]
     coverage_seed_family_coverage: dict[str, Any]
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
+    execution_plan_path: str
     repo_understanding_path: str
     build_strategy_path: str
     build_mode: str
@@ -661,12 +663,41 @@ def _selected_targets_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "selected_targets.json"
 
 
+def _execution_plan_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "execution_plan.json"
+
+
 def _observed_target_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "observed_target.json"
 
 
+def _execution_targets_max() -> int:
+    raw = (os.environ.get("SHERPA_EXECUTION_TARGETS_MAX") or "3").strip()
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        return 3
+
+
+def _execution_targets_min_required() -> int:
+    raw = (os.environ.get("SHERPA_EXECUTION_TARGETS_MIN_REQUIRED") or "2").strip()
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        return 2
+
+
+def _runtime_viability_rank(value: str) -> int:
+    lowered = str(value or "").strip().lower()
+    if lowered == "high":
+        return 2
+    if lowered == "medium":
+        return 1
+    return 0
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
         target_name = str(item.get("name") or "").strip()
         api = str(item.get("api") or target_name).strip()
@@ -684,7 +715,7 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             )
             selection_rationale = selection_rationale or auto_rationale
             runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
-        out.append(
+        ranked_items.append(
             {
                 "target_name": target_name,
                 "name": target_name,
@@ -703,6 +734,22 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
             }
         )
+    ranked_items.sort(
+        key=lambda row: (
+            -int(row.get("depth_score") or 0),
+            -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
+            str(row.get("target_name") or ""),
+        )
+    )
+    out: list[dict[str, Any]] = []
+    max_targets = _execution_targets_max()
+    for idx, row in enumerate(ranked_items):
+        row["execution_priority"] = int(idx + 1) if idx < max_targets else 0
+        target_type = str(row.get("target_type") or "").strip().lower()
+        row["must_run"] = bool(
+            idx < max_targets and (idx == 0 or target_type in {"archive", "parser", "decoder"})
+        )
+        out.append(row)
     return out
 
 
@@ -725,6 +772,59 @@ def _load_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def _build_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    selected = list(selected_doc or _load_selected_targets_doc(repo_root))
+    max_targets = _execution_targets_max()
+    min_required = _execution_targets_min_required()
+    execution_targets: list[dict[str, Any]] = []
+    for item in selected:
+        prio = int(item.get("execution_priority") or 0)
+        if prio <= 0 or prio > max_targets:
+            continue
+        target_name = str(item.get("target_name") or item.get("name") or "").strip()
+        expected_bin = str(item.get("wrapper_fuzzer_name") or target_name).strip()
+        execution_targets.append(
+            {
+                "target_name": target_name,
+                "expected_fuzzer_name": expected_bin,
+                "api": str(item.get("api") or "").strip(),
+                "seed_profile": str(item.get("seed_profile") or "").strip(),
+                "target_type": str(item.get("target_type") or "").strip(),
+                "must_run": bool(item.get("must_run") or False),
+                "execution_priority": prio,
+            }
+        )
+    execution_targets.sort(key=lambda row: int(row.get("execution_priority") or 999))
+    execution_targets = execution_targets[:max_targets]
+    required_floor = max(1, min_required)
+    required_built = min(max(required_floor, 1), max(1, len(execution_targets))) if execution_targets else 1
+    return {
+        "schema_version": 1,
+        "max_targets": max_targets,
+        "min_required_built_targets": required_built,
+        "execution_targets": execution_targets,
+    }
+
+
+def _write_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]]:
+    path = _execution_plan_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = _build_execution_plan_doc(repo_root, selected_doc=selected_doc)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
+    path = _execution_plan_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def _write_observed_target_doc(
@@ -1247,7 +1347,12 @@ def _write_build_template_cache_doc(repo_root: Path, doc: dict[str, Any]) -> str
     return str(path)
 
 
-def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | None = None) -> str:
+def _cache_successful_build_template(
+    repo_root: Path,
+    *,
+    binaries: list[Path] | None = None,
+    target_build_matrix: list[dict[str, Any]] | None = None,
+) -> str:
     fuzz_dir = repo_root / "fuzz"
     build_py = fuzz_dir / "build.py"
     if not build_py.is_file():
@@ -1258,11 +1363,12 @@ def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | 
         return ""
     strategy = _load_build_strategy_doc(repo_root)
     doc: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "saved_at": int(time.time()),
         "build_py": build_text,
         "build_strategy": strategy if isinstance(strategy, dict) else {},
         "binary_names": [p.name for p in (binaries or []) if isinstance(p, Path)],
+        "target_build_matrix": list(target_build_matrix or []),
     }
     try:
         return _write_build_template_cache_doc(repo_root, doc)
@@ -2510,8 +2616,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
         primary_target = _select_primary_target(gen.repo_root)
         selected_targets_path = ""
+        execution_plan_path = ""
         try:
             selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
+            execution_plan_path, _ = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
         except Exception:
             selected_targets_doc = []
         new_target_name = str(primary_target.get("name") or "")
@@ -2587,6 +2695,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
             "selected_targets_path": selected_targets_path,
+            "execution_plan_path": execution_plan_path,
             "coverage_target_name": new_target_name or prev_target_name,
             "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
@@ -3664,6 +3773,60 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             return next_state
 
+        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
+        built_names = {p.name for p in final_bins}
+        built_stems = {Path(name).stem for name in built_names}
+        target_build_matrix: list[dict[str, Any]] = []
+        built_execution_targets = 0
+        for item in execution_targets:
+            expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
+            matched = expected in built_names or Path(expected).stem in built_stems
+            if matched:
+                built_execution_targets += 1
+            target_build_matrix.append(
+                {
+                    "target_name": str(item.get("target_name") or ""),
+                    "expected_fuzzer_name": expected,
+                    "must_run": bool(item.get("must_run") or False),
+                    "built": bool(matched),
+                }
+            )
+        min_required_built = int(execution_plan_doc.get("min_required_built_targets") or _execution_targets_min_required())
+        if execution_targets and len(execution_targets) > 1 and built_execution_targets < min_required_built:
+            missing_targets = [
+                str(item.get("target_name") or item.get("expected_fuzzer_name") or "")
+                for item in target_build_matrix
+                if not bool(item.get("built"))
+            ]
+            next_state["last_error"] = (
+                "partial_build_undercoverage: built "
+                f"{built_execution_targets}/{len(execution_targets)} execution targets "
+                f"(required>={min_required_built}); missing={','.join([x for x in missing_targets if x]) or 'unknown'}"
+            )
+            next_state["message"] = "build undercoverage: execution target gate not met"
+            next_state["build_error_kind"] = "source"
+            next_state["build_error_code"] = "partial_build_undercoverage"
+            next_state["restart_to_plan"] = False
+            next_state["restart_to_plan_reason"] = ""
+            next_state["restart_to_plan_stage"] = ""
+            next_state["restart_to_plan_error_text"] = ""
+            next_state["restart_to_plan_report_path"] = ""
+            next_state["build_gate_reason"] = "partial_build_undercoverage"
+            next_state["built_targets"] = sorted(built_names)
+            next_state["missing_targets"] = missing_targets
+            next_state["target_build_matrix"] = target_build_matrix
+            _wf_log(
+                cast(dict[str, Any], next_state),
+                "<- build gate partial_build_undercoverage "
+                f"built={built_execution_targets}/{len(execution_targets)} required={min_required_built} "
+                f"dt={_fmt_dt(time.perf_counter()-t0)}",
+            )
+            return next_state
+
         next_state["build_error_signature"] = ""
         next_state["build_error_signature_before"] = prev_sig
         next_state["build_error_signature_after"] = ""
@@ -3708,9 +3871,21 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 return next_state
 
-        cache_path = _cache_successful_build_template(gen.repo_root, binaries=final_bins)
+        cache_path = _cache_successful_build_template(
+            gen.repo_root,
+            binaries=final_bins,
+            target_build_matrix=target_build_matrix,
+        )
         if cache_path:
             next_state["build_template_cache_path"] = cache_path
+        next_state["built_targets"] = sorted(built_names)
+        next_state["missing_targets"] = [
+            str(item.get("target_name") or item.get("expected_fuzzer_name") or "")
+            for item in target_build_matrix
+            if not bool(item.get("built"))
+        ]
+        next_state["target_build_matrix"] = target_build_matrix
+        next_state["build_gate_reason"] = "ok"
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
@@ -5310,9 +5485,31 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         repo_examples_rejected_count = 0
         repo_examples_accepted_count = 0
         seed_noise_rejected_count = 0
+        missing_execution_targets: list[str] = []
         seed_family_coverage_state: dict[str, Any] = {}
+        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
+        bins_by_name = {p.name: p for p in bins}
+        bins_by_stem = {p.stem: p for p in bins}
+        seed_fuzzers: list[Path] = []
+        if execution_targets:
+            for item in execution_targets:
+                expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
+                candidate = bins_by_name.get(expected) or bins_by_stem.get(Path(expected).stem)
+                if candidate is not None:
+                    if candidate not in seed_fuzzers:
+                        seed_fuzzers.append(candidate)
+                else:
+                    missing_name = str(item.get("target_name") or expected)
+                    if missing_name and missing_name not in missing_execution_targets:
+                        missing_execution_targets.append(missing_name)
+        if not seed_fuzzers:
+            seed_fuzzers = list(bins)
         try:
-            for bin_path in bins:
+            for bin_path in seed_fuzzers:
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
                 if remaining_for_seed <= 0:
                     return _time_budget_exceeded_state(state, step_name="run")
@@ -5778,6 +5975,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_counts_raw": seed_count_raw_total,
             "coverage_seed_counts_filtered": seed_count_filtered_total,
             "coverage_seed_noise_rejected_count": seed_noise_rejected_count,
+            "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
             "coverage_repo_examples_filtered": repo_examples_filtered,
             "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
@@ -5829,6 +6027,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             quality_flags.append("target_runtime_mismatch")
         if list(out.get("coverage_seed_families_missing") or []):
             quality_flags.append("seed_family_undercovered")
+        if list(out.get("coverage_missing_execution_targets") or []):
+            quality_flags.append("missing_execution_targets")
         raw_total = int((out.get("coverage_seed_counts_raw") or {}).get("total") or 0)
         noise_rejected = int(out.get("coverage_seed_noise_rejected_count") or 0)
         if noise_rejected > 0 and (raw_total <= 0 or float(noise_rejected) / float(max(raw_total, 1)) >= 0.25):

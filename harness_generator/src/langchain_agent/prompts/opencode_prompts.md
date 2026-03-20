@@ -11,6 +11,7 @@ Use GLOBAL POLICY only as fallback.
 Goal:
 - produce `fuzz/PLAN.md`
 - produce strict-schema `fuzz/targets.json`
+- produce `fuzz/execution_plan.json` aligned to high-value runtime targets
 
 Constraints:
 - Do NOT run build/execute commands.
@@ -21,6 +22,9 @@ Constraints:
 - `target_type` must be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`.
 - `seed_profile` must be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`.
 - Keep runtime-viable/public entrypoints first.
+- Add execution metadata in `fuzz/selected_targets.json` semantics:
+  - `execution_priority` (higher priority first, default top 3)
+  - `must_run` for high-value parser/archive/decoder targets.
 
 MANDATORY:
 - create `./done`
@@ -44,6 +48,7 @@ Required outputs:
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- keep compatibility with `fuzz/execution_plan.json` (top targets must be buildable by scaffold)
 
 Stage requirements:
 - Do NOT run build/execute commands.
@@ -61,6 +66,7 @@ Stage requirements:
 - In `fuzz/build.py`, include:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
   - runtime artifact discovery (do not hardcode a single static library path)
+  - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
 
 MANDATORY:
 - create `./done`
@@ -86,6 +92,7 @@ Required outputs:
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- outputs remain consistent with `fuzz/execution_plan.json`
 
 Constraints:
 - Do NOT run build/execute commands.
@@ -93,6 +100,7 @@ Constraints:
 - Preserve existing scaffold unless a minimal fix is needed.
 - Keep `fuzz/observed_target.json` alignment when present.
 - Ensure README required fields are present and consistent.
+- If execution plan contains multiple targets, scaffold should not silently collapse to one target.
 
 MANDATORY:
 - create `./done`
@@ -114,6 +122,7 @@ Constraints:
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
 - keep `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` consistent
 - if missing dependencies are indicated by build evidence, update `fuzz/system_packages.txt` with canonical vcpkg names
+- keep build output aligned with `fuzz/execution_plan.json` target coverage (do not regress to single-target build when multi-target execution is required)
 
 Coordinator instruction:
 {{codex_hint}}

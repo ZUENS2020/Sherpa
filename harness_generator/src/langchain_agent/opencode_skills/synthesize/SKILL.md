@@ -6,6 +6,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 ## Required Inputs
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
+- `fuzz/execution_plan.json` (if present)
 - `fuzz/selected_targets.json` (if present)
 - `fuzz/observed_target.json` (if present)
 
@@ -16,6 +17,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- when execution plan has multiple targets, scaffold should preserve multi-target buildability (not single-target-only by default)
 
 ## Key File Templates
 - `fuzz/README.md` fields:
@@ -122,11 +124,13 @@ if __name__ == "__main__":
 ```
   - `build_fuzzers()` must call `find_static_lib()` directly; defining it without calling it is invalid.
   - `build_fuzzers()` must produce a concrete fuzzer executable under `fuzz/out/`.
+  - if `fuzz/execution_plan.json` lists multiple execution targets, `build_fuzzers()` should compile/link multiple fuzzers accordingly.
 
 ## Acceptance Criteria
 - harness-first contract: create harness source file before completing build/json/readme scaffold.
 - all required scaffold files exist.
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
+- scaffold aligns with `fuzz/execution_plan.json` when present.
 - build script does not hardcode a single guessed static-library path.
 - `fuzz/README.md` field `Harness file:` points to an existing harness file under `fuzz/`.
 - `fuzz/repo_understanding.json` contains all required non-empty keys:

@@ -7,6 +7,7 @@ Fix `fuzz/` build glue so the next workflow build attempt can pass.
 - build diagnostics (`fuzz/build_full.log` or coordinator context)
 - current `fuzz/build.py` and harness files
 - current strategy/understanding files under `fuzz/`
+- `fuzz/execution_plan.json` (if present)
 
 ## Required Outputs
 - minimal build fix under `fuzz/`
@@ -34,11 +35,13 @@ def find_static_lib(repo_root):
 - if dependency evidence exists, update `fuzz/system_packages.txt` with canonical vcpkg names only.
 - canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
 - if editing `fuzz/repo_understanding.json`, keep `chosen_target_api` as API identifier (not `fuzz/*.cc`-style path), keep `build_system != unknown`, and keep `evidence` as non-empty string array.
+- when execution plan requires multiple targets, do not "fix" build by dropping to single-target-only output.
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.
+- build result remains aligned with execution-plan target coverage constraints.
 - do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
 
 ## Command Policy
