@@ -1,6 +1,6 @@
 # main.py
 from __future__ import annotations
-from fastapi import FastAPI, Body, HTTPException, Response
+from fastapi import FastAPI, Body, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -18,6 +18,7 @@ import threading
 import time
 import queue
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from io import StringIO
@@ -57,6 +58,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _http_metrics_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(getattr(response, "status_code", 500))
+        return response
+    finally:
+        elapsed_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
+        now_ts = time.time()
+        with _HTTP_METRICS_LOCK:
+            _HTTP_REQUEST_EVENTS.append((now_ts, elapsed_ms, status_code))
+            cutoff = now_ts - 3600.0
+            while _HTTP_REQUEST_EVENTS and _HTTP_REQUEST_EVENTS[0][0] < cutoff:
+                _HTTP_REQUEST_EVENTS.popleft()
+
 #创建线程池
 _MAX_WORKERS = int(os.environ.get("SHERPA_WEB_MAX_WORKERS", "5"))
 executor = ThreadPoolExecutor(max_workers=max(1, _MAX_WORKERS))
@@ -70,6 +90,8 @@ _JOB_STORE: JobStore | None = None
 _JOB_FUTURES_LOCK = threading.Lock()
 _JOB_FUTURES: dict[str, Future] = {}
 _K8S_METRICS_API_UNAVAILABLE_UNTIL = 0.0
+_HTTP_METRICS_LOCK = threading.Lock()
+_HTTP_REQUEST_EVENTS: deque[tuple[float, float, int]] = deque()
 
 # In-memory API log retention limit (characters).
 # 0 or negative means unlimited (no truncation).
@@ -1949,6 +1971,103 @@ def _performance_series_from_jobs(now: float, fuzz_jobs: list[dict]) -> list[dic
     return points
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    seq = sorted(values)
+    if len(seq) == 1:
+        return seq[0]
+    q_clamped = max(0.0, min(1.0, q))
+    pos = q_clamped * float(len(seq) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return seq[lo]
+    frac = pos - float(lo)
+    return seq[lo] + (seq[hi] - seq[lo]) * frac
+
+
+def _http_metrics_snapshot(*, now: float, window_sec: float = 300.0) -> dict[str, float | int | None]:
+    cutoff = now - float(max(30.0, window_sec * 2.0))
+    with _HTTP_METRICS_LOCK:
+        while _HTTP_REQUEST_EVENTS and _HTTP_REQUEST_EVENTS[0][0] < cutoff:
+            _HTTP_REQUEST_EVENTS.popleft()
+        events = list(_HTTP_REQUEST_EVENTS)
+
+    current_start = now - window_sec
+    prev_start = now - (window_sec * 2.0)
+    current = [e for e in events if current_start <= e[0] < now]
+    previous = [e for e in events if prev_start <= e[0] < current_start]
+    current_lat = [float(e[1]) for e in current]
+    current_errors = sum(1 for e in current if int(e[2]) >= 500)
+    previous_errors = sum(1 for e in previous if int(e[2]) >= 500)
+
+    current_qps = (float(len(current)) / window_sec) if window_sec > 0 else None
+    previous_qps = (float(len(previous)) / window_sec) if window_sec > 0 else None
+    current_err_ratio = (float(current_errors) / float(len(current)) * 100.0) if current else 0.0
+    previous_err_ratio = (float(previous_errors) / float(len(previous)) * 100.0) if previous else 0.0
+    return {
+        "qps": current_qps,
+        "qps_prev": previous_qps,
+        "lat_p95_ms": _percentile(current_lat, 0.95),
+        "error_ratio_pct": current_err_ratio,
+        "error_ratio_prev_pct": previous_err_ratio,
+        "request_count": len(current),
+    }
+
+
+def _format_tokens_per_hour(tokens_per_hour: float | None) -> str | None:
+    if tokens_per_hour is None:
+        return None
+    v = max(0.0, tokens_per_hour)
+    if v >= 1_000_000.0:
+        return f"{v / 1_000_000.0:.2f}M / hr"
+    if v >= 1_000.0:
+        return f"{v / 1_000.0:.1f}K / hr"
+    return f"{int(round(v))} / hr"
+
+
+def _job_token_estimate(job: dict) -> float | None:
+    result = job.get("result")
+    totals = _extract_numeric_values_by_keys(result, {"total_tokens"}, max_count=16)
+    if totals:
+        return max(0.0, max(totals))
+    prompts = _extract_numeric_values_by_keys(result, {"prompt_tokens", "input_tokens"}, max_count=16)
+    completions = _extract_numeric_values_by_keys(result, {"completion_tokens", "output_tokens"}, max_count=16)
+    if prompts or completions:
+        return max(0.0, (max(prompts) if prompts else 0.0) + (max(completions) if completions else 0.0))
+    req = job.get("request") if isinstance(job.get("request"), dict) else {}
+    req_max_tokens = _safe_float(req.get("max_tokens"))
+    if req_max_tokens is not None and req_max_tokens > 0:
+        # Conservative fallback when detailed token accounting is absent.
+        return max(0.0, req_max_tokens * 0.2)
+    return None
+
+
+def _extract_coverage_values(obj: object, *, max_count: int = 256) -> list[float]:
+    keys = {
+        "final_cov",
+        "max_cov",
+        "coverage",
+        "cov",
+        "coverage_percent",
+        "line_coverage",
+        "function_coverage",
+        "branch_coverage",
+    }
+    raw_vals = _extract_numeric_values_by_keys(obj, keys, max_count=max_count)
+    out: list[float] = []
+    for value in raw_vals:
+        if value < 0:
+            continue
+        if value <= 1.0:
+            out.append(value * 100.0)
+            continue
+        if value <= 100.0:
+            out.append(value)
+    return out
+
+
 def _system_status() -> dict:
     now = time.time()
     with _JOBS_LOCK:
@@ -2041,21 +2160,18 @@ def _system_status() -> dict:
 
     coverage_values: list[float] = []
     for j in fuzz_jobs:
-        result = j.get("result")
-        coverage_values.extend(
-            _extract_numeric_values_by_keys(
-                result,
-                {"final_cov", "max_cov", "coverage", "cov"},
-                max_count=16,
-            )
-        )
-    coverage_values = [v for v in coverage_values if 0.0 <= v <= 100.0]
+        coverage_values.extend(_extract_coverage_values(j.get("result"), max_count=24))
     avg_coverage = (sum(coverage_values) / float(len(coverage_values))) if coverage_values else None
 
     running_fuzz = sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "running")
 
     cgroup_ratio = _safe_float(memory.get("cgroup_usage_ratio"))
     cluster_load_pct = (max(0.0, min(100.0, cgroup_ratio * 100.0)) if cgroup_ratio is not None else None)
+    http_metrics = _http_metrics_snapshot(now=now, window_sec=300.0)
+    http_error_ratio = _safe_float(http_metrics.get("error_ratio_pct"))
+    http_error_ratio_prev = _safe_float(http_metrics.get("error_ratio_prev_pct"))
+    http_qps = _safe_float(http_metrics.get("qps"))
+    http_p95 = _safe_float(http_metrics.get("lat_p95_ms"))
 
     performance_series = _performance_series_from_jobs(now, fuzz_jobs)
     recent_finished = [
@@ -2063,6 +2179,21 @@ def _system_status() -> dict:
         if (ts := _safe_float(j.get("finished_at"))) is not None and ts >= (now - 300.0)
     ]
     recent_jobs_per_sec = (float(len(recent_finished)) / 300.0) if recent_finished else None
+
+    token_window_sec = 3600.0
+    token_cutoff = now - token_window_sec
+    token_sum = 0.0
+    token_count = 0
+    for j in fuzz_jobs:
+        ts = _safe_float(j.get("updated_at")) or _safe_float(j.get("finished_at")) or _safe_float(j.get("created_at"))
+        if ts is None or ts < token_cutoff:
+            continue
+        est = _job_token_estimate(j)
+        if est is None:
+            continue
+        token_sum += est
+        token_count += 1
+    tokens_per_hour = token_sum / (token_window_sec / 3600.0)
 
     agent_health_matrix: list[int] = []
     latest_fuzz = sorted(
@@ -2073,11 +2204,39 @@ def _system_status() -> dict:
     for j in latest_fuzz:
         agent_health_matrix.append(0 if _status_bucket(str(j.get("status") or "")) == "error" else 1)
 
+    signal_points: list[float] = []
+    if current_health is not None:
+        signal_points.append(current_health)
+    if cluster_load_pct is not None:
+        signal_points.append(max(0.0, 100.0 - cluster_load_pct))
+    if http_error_ratio is not None:
+        signal_points.append(max(0.0, 100.0 - http_error_ratio))
+    composite_health = (sum(signal_points) / float(len(signal_points))) if signal_points else None
+    previous_signal_points: list[float] = []
+    if previous_health is not None:
+        previous_signal_points.append(previous_health)
+    if cluster_load_pct is not None:
+        previous_signal_points.append(max(0.0, 100.0 - cluster_load_pct))
+    if http_error_ratio_prev is not None:
+        previous_signal_points.append(max(0.0, 100.0 - http_error_ratio_prev))
+    composite_health_prev = (
+        (sum(previous_signal_points) / float(len(previous_signal_points))) if previous_signal_points else None
+    )
+
+    gateway_sli = None
+    if http_error_ratio is not None:
+        gateway_sli = max(0.0, min(100.0, 100.0 - http_error_ratio))
+    fastapi_status = "UP"
+    if http_error_ratio is not None and http_error_ratio >= 5.0:
+        fastapi_status = "DEGRADED"
+    if http_error_ratio is not None and http_error_ratio >= 20.0:
+        fastapi_status = "ERROR"
+
     overview = {
         "avg_fuzz_time": _format_duration_human(avg_fuzz_seconds),
         "active_agents": str(running_fuzz),
-        "cluster_health": _format_percent(current_health, 1),
-        "cluster_health_trend": _format_trend(current_health, previous_health, unit_suffix="%"),
+        "cluster_health": _format_percent(composite_health, 1),
+        "cluster_health_trend": _format_trend(composite_health, composite_health_prev, unit_suffix="%"),
         "crash_triage_rate": str(current_errors),
         "crash_triage_rate_trend": _format_trend(float(current_errors), float(previous_errors), unit_suffix=""),
         "harnesses_synthesized": str(success_24h),
@@ -2086,12 +2245,16 @@ def _system_status() -> dict:
         "avg_coverage_trend": None,
     }
     telemetry = {
-        "llm_token_usage": None,
-        "llm_token_status": None,
+        "llm_token_usage": _format_tokens_per_hour(tokens_per_hour),
+        "llm_token_status": ("Active" if token_count > 0 else "Low Sample"),
         "k8s_pod_capacity": (f"{cluster_load_pct:.0f}% CAP" if cluster_load_pct is not None else None),
         "k8s_pod_status": ("Normal" if cluster_load_pct is not None and cluster_load_pct < 90.0 else ("Expansion Req" if cluster_load_pct is not None else None)),
-        "fastapi_gateway": None,
-        "fastapi_status": "UP",
+        "fastapi_gateway": (
+            f"{gateway_sli:.2f}% SLI · p95 {http_p95:.0f}ms · {http_qps:.2f} rps"
+            if gateway_sli is not None and http_p95 is not None and http_qps is not None
+            else (f"{gateway_sli:.2f}% SLI" if gateway_sli is not None else None)
+        ),
+        "fastapi_status": fastapi_status,
         "agent_health_matrix": agent_health_matrix,
         "performance_series": performance_series,
     }
