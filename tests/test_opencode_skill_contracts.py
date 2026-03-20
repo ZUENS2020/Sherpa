@@ -61,3 +61,12 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
     assert "do not bypass acceptance by tampering" in fix_crash_u
     assert "Read and fix <path>[:line]" in fix_crash_u
+
+
+def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:
+    seed = _load("seed_generation")
+    assert "real archive samples first" in seed
+    assert "contrib/oss-fuzz/corpus.zip" in seed
+    assert "Avoid hand-crafted magic-only files" in seed
+    assert "malformed/truncated seeds <= 30%" in seed
+    assert "at least one semantically valid archive sample exists" in seed

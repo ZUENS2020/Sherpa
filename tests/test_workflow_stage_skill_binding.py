@@ -32,6 +32,7 @@ def test_main_workflow_stage_skills_exist() -> None:
         "fix_build",
         "fix_crash_harness_error",
         "fix_crash_upstream_bug",
+        "seed_generation",
     ]
     for stage in required:
         skill = root / stage / "SKILL.md"
@@ -42,6 +43,7 @@ def test_legacy_passes_also_bind_stage_skills_for_plan_and_synthesize() -> None:
     text = LEGACY.read_text(encoding="utf-8")
     assert 'stage_skill="plan"' in text
     assert 'stage_skill="synthesize"' in text
+    assert 'stage_skill="seed_generation"' in text
 
 
 def test_workflow_attempts_forced_harness_repair_before_missing_harness_error() -> None:

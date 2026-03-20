@@ -98,6 +98,9 @@ def test_global_policy_document_contains_core_rules():
     assert "Do not hardcode a single build artifact path." in policy
     assert "Allowed: read-only inspection commands" in policy
     assert "Forbidden: `name = \"LLVMFuzzerTestOneInput\"`." in policy
+    assert "Archive Seed Policy" in policy
+    assert "use real repository samples first" in policy
+    assert "Keep malformed/truncated archive seeds as a minority" in policy
 
 
 def test_stage_skills_include_exact_build_template_block():
