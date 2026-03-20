@@ -267,6 +267,35 @@ def _append_opencode_metadata(repo_root: Path, payload: dict) -> None:
         pass
 
 
+def _extract_changed_paths_from_diff(diff_text: str, *, limit: int = 20) -> list[str]:
+    text = str(diff_text or "")
+    if not text:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        m = re.match(r"^diff --git a/(.+?) b/(.+)$", line.strip())
+        if m:
+            p = str(m.group(2) or "").strip()
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+                if len(out) >= limit:
+                    return out
+            continue
+        m = re.match(r"^[ MADRCU?!]{1,2}\s+(.+)$", line.strip())
+        if m:
+            p = str(m.group(1) or "").strip()
+            if p.startswith("->"):
+                continue
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
 def _build_blocklist() -> list[str]:
     # Default: block build/test/fuzz/run commands but allow read-only tools.
     always_allow = {"grep", "egrep", "fgrep", "rg", "ripgrep"}
@@ -1107,23 +1136,64 @@ class CodexHelper:
             max_lines=max_ctx_lines,
             max_chars=max_ctx_chars,
         )
-        context_path: Path | None = None
-        compact_context = ""
-        if additional_context:
-            context_path, compact_context = _write_opencode_materialized_text(
-                self.working_dir,
-                name="additional_context.txt",
-                text=additional_context,
-                max_lines=max_ctx_lines,
-                max_chars=max_ctx_chars,
-            )
         stage_skill_name = str(stage_skill or "").strip()
         session_group = _resolve_stage_session_group(stage_skill_name)
         session_state = _load_session_state(self.working_dir)
         session_groups = session_state.get("session_groups")
         if not isinstance(session_groups, dict):
             session_groups = {}
-        continue_session = bool(session_groups.get(session_group)) if session_group else False
+        group_state_raw = session_groups.get(session_group) if session_group else None
+        group_state = group_state_raw if isinstance(group_state_raw, dict) else {}
+
+        def _compose_session_memory_text() -> str:
+            if not group_state:
+                return ""
+            attempts = group_state.get("recent_attempts")
+            rows = attempts if isinstance(attempts, list) else []
+            rows = [x for x in rows if isinstance(x, dict)][-3:]
+            if not rows:
+                return ""
+            parts = ["SESSION MEMORY (recent attempts in this session group):"]
+            for idx, row in enumerate(rows, start=1):
+                status = str(row.get("status") or "").strip() or "unknown"
+                changed = list(row.get("changed_paths") or [])
+                changed_str = ", ".join(str(p) for p in changed[:6]) if changed else "-"
+                err = str(row.get("error") or "").strip()
+                if len(err) > 240:
+                    err = err[-240:]
+                parts.append(
+                    f"{idx}. status={status}; changed_paths={changed_str}; "
+                    f"error={err or '-'}"
+                )
+            return "\n".join(parts).strip()
+
+        continue_session = bool(group_state.get("has_session")) if session_group else False
+        if session_group and not continue_session:
+            # Defensive fallback: if we already have attempt memory for this group,
+            # continue the same conversation chain even when legacy flags are stale.
+            recent_attempts = group_state.get("recent_attempts")
+            if isinstance(recent_attempts, list) and recent_attempts:
+                continue_session = True
+
+        merged_context = str(additional_context or "").strip()
+        session_memory_text = _compose_session_memory_text()
+        if session_memory_text:
+            merged_context = (
+                (session_memory_text + "\n\n" + merged_context).strip()
+                if merged_context
+                else session_memory_text
+            )
+
+        context_path: Path | None = None
+        compact_context = ""
+        if merged_context:
+            context_path, compact_context = _write_opencode_materialized_text(
+                self.working_dir,
+                name="additional_context.txt",
+                text=merged_context,
+                max_lines=max_ctx_lines,
+                max_chars=max_ctx_chars,
+            )
         stage_skill_source_path: Path | None = None
         stage_skill_materialized_path: Path | None = None
         compact_stage_skill = ""
@@ -1243,6 +1313,7 @@ class CodexHelper:
                 "stage_skill_hash": stage_skill_hash if compact_stage_skill else "",
                 "session_group": session_group,
                 "session_continue": continue_session,
+                "session_memory_injected": bool(session_memory_text),
                 "policy_source_path": str(policy_source_path) if _opencode_policy_enabled() else "",
                 "policy_file": str(policy_materialized_path) if policy_materialized_path else "",
                 "policy_hash": policy_hash if compact_policy else "",
@@ -1250,6 +1321,32 @@ class CodexHelper:
                 "status": "running",
                 "repo_root": str(self.working_dir),
             }
+
+            def _record_session_attempt(status: str, *, changed_paths: list[str] | None = None, error: str = "") -> None:
+                if not session_group:
+                    return
+                rows = group_state.get("recent_attempts")
+                attempts: list[dict[str, Any]] = rows if isinstance(rows, list) else []
+                attempts = [x for x in attempts if isinstance(x, dict)]
+                attempts.append(
+                    {
+                        "ts": int(time.time()),
+                        "status": str(status or "").strip() or "unknown",
+                        "changed_paths": list(changed_paths or [])[:20],
+                        "error": str(error or "").strip()[:600],
+                        "prompt_hash": prompt_hash,
+                        "context_hash": context_hash,
+                        "stage_skill": stage_skill_name,
+                    }
+                )
+                attempts = attempts[-8:]
+                group_state["recent_attempts"] = attempts
+                group_state["last_status"] = str(status or "").strip() or "unknown"
+                group_state["updated_at"] = int(time.time())
+                group_state["has_session"] = True
+                session_groups[session_group] = group_state
+                session_state["session_groups"] = session_groups
+                _save_session_state(self.working_dir, session_state)
 
             # ----------------------------------------------------------------
             # Inner loop – retry CLI invocation on transient errors.
@@ -1322,6 +1419,12 @@ class CodexHelper:
                     image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
                     if image:
                         _ensure_opencode_image(image, env)
+                    if session_group:
+                        # Mark session as active as soon as we dispatch a run, even if this
+                        # attempt later ends with no diff/no sentinel. This preserves dialogue
+                        # continuity for subsequent retries.
+                        _record_session_attempt("running")
+                        continue_session = True
                     full_cmd = _build_opencode_cmd(cli_exe, cmd, self.working_dir, env)
                     proc = subprocess.Popen(
                         full_cmd,
@@ -1496,6 +1599,7 @@ class CodexHelper:
                     _cleanup_docker_run()
 
                 if saw_retry_error:
+                    _record_session_attempt("retryable_error")
                     time.sleep(backoff)
                     backoff *= 2
                     continue
@@ -1518,6 +1622,10 @@ class CodexHelper:
                 run_meta["status"] = "retry_no_sentinel"
                 run_meta["cli_retries_used"] = cli_try
                 _append_opencode_metadata(self.working_dir, run_meta)
+                _record_session_attempt(
+                    "retry_no_sentinel",
+                    changed_paths=_extract_changed_paths_from_diff(diff_now, limit=12),
+                )
                 continue  # outer attempt loop
 
             # Refresh repo to ensure it sees new changes.
@@ -1525,13 +1633,10 @@ class CodexHelper:
 
             if diff_changed or self._git_diff_head() != baseline_diff:
                 LOGGER.info("[OpenCodeHelper] diff produced — success")
-                if session_group:
-                    session_groups[session_group] = {
-                        "has_session": True,
-                        "updated_at": int(time.time()),
-                    }
-                    session_state["session_groups"] = session_groups
-                    _save_session_state(self.working_dir, session_state)
+                _record_session_attempt(
+                    "success",
+                    changed_paths=_extract_changed_paths_from_diff(diff_now, limit=20),
+                )
                 run_meta["status"] = "success"
                 run_meta["cli_retries_used"] = cli_try
                 _append_opencode_metadata(self.working_dir, run_meta)
@@ -1542,8 +1647,10 @@ class CodexHelper:
             run_meta["status"] = "retry_no_diff"
             run_meta["cli_retries_used"] = cli_try
             _append_opencode_metadata(self.working_dir, run_meta)
+            _record_session_attempt("retry_no_diff")
 
         LOGGER.warning("[OpenCodeHelper] exhausted attempts — no edits produced")
+        _record_session_attempt("exhausted")
         _append_opencode_metadata(
             self.working_dir,
             {

@@ -35,6 +35,7 @@ Produce a realistic, runtime-viable target plan for harness generation.
 - `fuzz/targets.json` is strict-schema valid and non-empty.
 - top-ranked target is runtime-viable and not a helper-only target.
 - `fuzz/execution_plan.json` exists and is consistent with selected top runtime targets.
+- when diagnostics/context include concrete file paths, surface explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `head`, `tail`, read-only `sed`).

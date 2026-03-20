@@ -21,6 +21,7 @@ Fix harness/build glue errors so the same crashing input no longer fails due to 
 - no upstream/project source modifications unless strictly required.
 - must produce textual code changes; pure no-op is invalid.
 - do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
+- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
 - Allowed: read-only commands only.

@@ -1181,6 +1181,63 @@ def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) 
     return _wf_common.summarize_build_error(last_error, stdout_tail, stderr_tail)
 
 
+def _extract_actionable_build_locations(
+    last_error: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    *,
+    limit: int = 4,
+) -> list[dict[str, str]]:
+    text = "\n".join([str(last_error or ""), str(stdout_tail or ""), str(stderr_tail or "")])
+    lines = text.splitlines()
+    path_re = re.compile(r"(?P<path>(?:\./)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:cxx|cpp|cc|c|hpp|h|py|java))(?:[:(](?P<line>\d+))?")
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line in lines:
+        for m in path_re.finditer(line):
+            path = str(m.group("path") or "").lstrip("./")
+            if not path:
+                continue
+            ln = str(m.group("line") or "").strip()
+            key = (path, ln)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "path": path,
+                    "line": ln,
+                    "evidence": line.strip()[:500],
+                }
+            )
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _build_file_targeted_fix_lines(
+    last_error: str,
+    stdout_tail: str,
+    stderr_tail: str,
+) -> list[str]:
+    hits = _extract_actionable_build_locations(last_error, stdout_tail, stderr_tail, limit=3)
+    if not hits:
+        return []
+    full_diag = "\n".join([str(last_error or ""), str(stdout_tail or ""), str(stderr_tail or "")]).lower()
+    lines: list[str] = ["Prioritize file-targeted fixes from diagnostics:"]
+    for item in hits:
+        path = item.get("path") or ""
+        ln = item.get("line") or ""
+        loc = f"{path}:{ln}" if ln else path
+        if "include" in full_diag and ("not declared" in full_diag or "not a member" in full_diag or "undeclared" in full_diag):
+            lines.append(f"- Read and fix `{loc}` (header/symbol declaration mismatch; add the required include or declaration).")
+        elif "undefined reference" in full_diag or "cannot find -l" in full_diag:
+            lines.append(f"- Read and fix `{loc}` (linkage/build glue mismatch; align build.py/link inputs with this source usage).")
+        else:
+            lines.append(f"- Read and fix `{loc}` based on the failing diagnostic evidence.")
+    return lines
+
+
 def _classify_build_failure(
     last_error: str,
     stdout_tail: str,
@@ -5231,6 +5288,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     codex_hint = (state.get("codex_hint") or "").strip()
 
     if not codex_hint:
+        targeted_fix_lines = _build_file_targeted_fix_lines(last_error, stdout_tail, stderr_tail)
         if llm is not None:
             coordinator_prompt = (
                 "You are coordinating OpenCode to fix a fuzz harness build.\n"
@@ -5238,6 +5296,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "Requirements for your output:\n"
                 "- Output JSON only: {\"codex_hint\": \"...\"}\n"
                 "- codex_hint must be 1-10 lines, concrete and minimal.\n"
+                "- Extract concrete failing file paths from diagnostics when possible.\n"
+                "- Include at least one line in the form: `Read and fix <path>[:line]` when file evidence exists.\n"
                 "- Tell OpenCode to only change files under fuzz/.\n"
                 "- Any change outside fuzz/ (except ./done sentinel) is rejected.\n"
                 + (f"- Tell OpenCode to read full build logs from `{build_log_file}` before editing.\n" if build_log_file else "")
@@ -5274,6 +5334,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "Always build the repository library/objects and link the generated harness externally.\n"
                 "Do not refactor production code or edit upstream source files."
             )
+        if targeted_fix_lines:
+            codex_hint = (codex_hint.strip() + "\n" + "\n".join(targeted_fix_lines)).strip()
         if build_error_code == "build_strategy_mismatch":
             codex_hint = (
                 codex_hint.strip()
