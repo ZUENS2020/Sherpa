@@ -233,8 +233,10 @@ jobs:
         run: |
           set -euo pipefail
           manifest_urls=(
-            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
             "https://ghfast.top/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://mirror.ghproxy.com/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.moeyy.xyz/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
           )
           applied=0
           for u in "${manifest_urls[@]}"; do
@@ -249,6 +251,14 @@ jobs:
             exit 1
           fi
 
+          current_image="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+          if [[ -n "${current_image}" ]]; then
+            mirrored_image="${current_image/registry.k8s.io/registry.cn-hangzhou.aliyuncs.com/google_containers}"
+            if [[ "${mirrored_image}" != "${current_image}" ]]; then
+              kubectl -n kube-system set image deployment/metrics-server metrics-server="${mirrored_image}" || true
+            fi
+          fi
+
           current_args="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)"
           if [[ "${current_args}" != *"--kubelet-insecure-tls"* || "${current_args}" != *"--kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP"* ]]; then
             kubectl -n kube-system patch deploy metrics-server --type='json' -p='[
@@ -257,8 +267,24 @@ jobs:
             ]' || true
           fi
 
-          kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
-          kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=180s
+          rollout_metrics_server() {
+            if kubectl -n kube-system rollout status deployment/metrics-server --timeout=600s; then
+              return 0
+            fi
+            echo "::warning::metrics-server rollout timed out; collecting diagnostics and retrying"
+            kubectl -n kube-system get deployment metrics-server -o wide || true
+            kubectl -n kube-system describe deployment metrics-server || true
+            kubectl -n kube-system get pods -l k8s-app=metrics-server -o wide || true
+            kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -n 80 || true
+
+            kubectl -n kube-system get pods -l k8s-app=metrics-server -o name | \
+              xargs -r -I{} kubectl -n kube-system delete {} --force --grace-period=0 --wait=false || true
+
+            kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+          }
+
+          rollout_metrics_server
+          kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=240s
           kubectl top nodes
 
       - name: Guardrail (prod no reset)
