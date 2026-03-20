@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
+from urllib.parse import urlparse
 import base64
 import yaml
 from fuzz_relative_functions import fuzz_logic
@@ -1830,6 +1831,34 @@ def _status_upper(status: str) -> str:
     return mapping.get(lowered, (str(status or "").strip().upper() or "UNKNOWN"))
 
 
+def _task_display_repo(job: dict | None) -> str | None:
+    if not isinstance(job, dict):
+        return None
+    repo = str(job.get("repo") or "").strip()
+    if repo and repo.lower() != "batch":
+        return repo
+    request = job.get("request") if isinstance(job.get("request"), dict) else {}
+    jobs = request.get("jobs") if isinstance(request, dict) else []
+    if isinstance(jobs, list):
+        repos: list[str] = []
+        for item in jobs:
+            if not isinstance(item, dict):
+                continue
+            code_url = str(item.get("code_url") or "").strip()
+            if code_url:
+                parsed = urlparse(code_url)
+                path = str(parsed.path or "").rstrip("/")
+                slug = path.rsplit("/", 1)[-1] if path else ""
+                if slug.endswith(".git"):
+                    slug = slug[:-4]
+                repos.append(slug or code_url)
+        if repos:
+            if len(set(repos)) == 1:
+                return repos[0]
+            return f"{repos[0]} (+{len(repos) - 1} more)"
+    return repo or None
+
+
 def _task_progress_from_children(derived_status: str, children_status: dict[str, int]) -> int:
     total = int(children_status.get("total") or 0)
     if total <= 0:
@@ -2998,7 +3027,8 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "status": status_upper,
                 "status_raw": derived_status,
                 "stage": str(stage_value or "").upper() or "UNKNOWN",
-                "repo": job.get("repo"),
+                "repo": _task_display_repo(job),
+                "repo_raw": job.get("repo"),
                 "created_at": job.get("created_at"),
                 "created_at_iso": _iso_time(job.get("created_at")),
                 "updated_at": job.get("updated_at"),
