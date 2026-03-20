@@ -674,6 +674,26 @@ def test_list_tasks_exposes_error_code_for_task_and_children():
     assert listing[0]["phase"] == "error"
 
 
+def test_list_tasks_displays_real_repo_for_batch_tasks():
+    task_id = web_main._create_job("task", "batch")
+    web_main._job_update(
+        task_id,
+        request={
+            "jobs": [
+                {"code_url": "https://github.com/example/repo-a.git"},
+                {"code_url": "https://github.com/example/repo-b.git"},
+            ]
+        },
+    )
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["repo"] == "repo-a (+1 more)"
+    assert listing[0]["repo_raw"] == "batch"
+
+
 def test_system_status_contains_dynamic_frontend_blocks():
     task_id = web_main._create_job("task", "batch")
     child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
