@@ -10,10 +10,7 @@
 2. [代码级技术分析](/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
    - 面向开发者，按模块和状态文件解释系统如何工作。
 
-3. [比赛展示版技术解读](/docs/COMPETITION_TECHNICAL_BRIEF.md)
-   - 面向展示、答辩和演示，重点解释设计价值、系统闭环和工程亮点。
-
-4. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
+3. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
    - 描述 `codex/* -> dev -> main` 的标准验证和发布路径。
 
 ## 其他保留文档
