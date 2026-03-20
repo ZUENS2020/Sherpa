@@ -39,10 +39,12 @@ def find_static_lib(repo_root):
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
+- must produce textual code changes when current diagnostics are still failing; pure no-op is invalid.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.
 - build result remains aligned with execution-plan target coverage constraints.
 - do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
+- when the same error repeats, change strategy instead of repeating the same patch.
 
 ## Command Policy
 - Allowed: read-only commands only.

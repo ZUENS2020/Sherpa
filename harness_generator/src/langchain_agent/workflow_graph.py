@@ -382,16 +382,16 @@ def _feedback_file_for_stage(repo_root: Path, stage: str) -> Path:
 
 
 def _feedback_text_limits() -> tuple[int, int]:
-    raw_lines = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_LINES") or "120").strip()
-    raw_chars = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_CHARS") or "12000").strip()
+    raw_lines = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_LINES") or "50").strip()
+    raw_chars = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_CHARS") or "6000").strip()
     try:
         max_lines = max(20, min(int(raw_lines), 600))
     except Exception:
-        max_lines = 120
+        max_lines = 50
     try:
         max_chars = max(512, min(int(raw_chars), 200000))
     except Exception:
-        max_chars = 12000
+        max_chars = 6000
     return max_lines, max_chars
 
 
@@ -428,6 +428,28 @@ def _write_stage_feedback(
         v = str(state.get(k) or "").strip()
         if v:
             parts.append(f"- {k}: {v}")
+    structured = {
+        "stage": str(stage or "").strip(),
+        "error_code": str(
+            state.get("build_error_code")
+            or state.get("run_error_kind")
+            or state.get("restart_to_plan_reason")
+            or ""
+        ).strip(),
+        "signature": str(state.get("build_error_signature_short") or "").strip(),
+        "action_taken": str(state.get("fix_action_type") or "").strip(),
+        "diff_paths": list(state.get("fix_build_last_diff_paths") or []),
+    }
+    parts.extend(
+        [
+            "",
+            "## Structured Summary",
+            "",
+            "```json",
+            json.dumps(structured, ensure_ascii=False, indent=2),
+            "```",
+        ]
+    )
     err = _trim_feedback_text(error_text)
     if err:
         parts.extend(["", "## Error", "", "```text", err, "```"])
@@ -1230,18 +1252,15 @@ def _fix_build_max_attempts() -> int:
 
 
 def _effective_max_fix_rounds(state: FuzzWorkflowRuntimeState) -> int:
-    configured = int(state.get("max_fix_rounds") or 0)
-    if configured > 0:
-        return max(1, configured)
-    return _fix_build_max_attempts()
+    # Fixed unlimited mode: fix_build is bounded only by time/stage budget.
+    _ = state
+    return 0
 
 
 def _effective_same_error_retry_limit(state: FuzzWorkflowRuntimeState) -> int:
-    if "same_error_max_retries" in state:
-        configured = int(state.get("same_error_max_retries") or 0)
-    else:
-        configured = 0
-    return max(0, configured)
+    # Fixed unlimited mode: do not stop/restart by same-error repeat count.
+    _ = state
+    return 0
 
 
 def _fix_build_feedback_history_limit() -> int:
@@ -3698,11 +3717,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 next_state["failed"] = False
                 next_state["last_error"] = repeated_err
-                next_state["message"] = "build failed repeatedly (same error), restarting from plan"
-                next_state["restart_to_plan"] = True
-                next_state["restart_to_plan_reason"] = "build_same_error_repeated"
-                next_state["restart_to_plan_stage"] = "build"
-                next_state["restart_to_plan_error_text"] = repeated_err
+                next_state["message"] = "build failed repeatedly (same error)"
+                next_state["restart_to_plan"] = build_error_kind == "infra"
+                next_state["restart_to_plan_reason"] = "build_same_error_repeated" if build_error_kind == "infra" else ""
+                next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
+                next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-error "
@@ -3716,10 +3735,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if advice:
                 next_state["last_error"] += f"\nrecovery: {advice}"
             next_state["message"] = "build failed"
-            next_state["restart_to_plan"] = True
-            next_state["restart_to_plan_reason"] = "build_failed"
-            next_state["restart_to_plan_stage"] = "build"
-            next_state["restart_to_plan_error_text"] = str(next_state["last_error"])
+            next_state["restart_to_plan"] = build_error_kind == "infra"
+            next_state["restart_to_plan_reason"] = "build_failed" if build_error_kind == "infra" else ""
+            next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
+            next_state["restart_to_plan_error_text"] = str(next_state["last_error"]) if build_error_kind == "infra" else ""
             _wf_log(
                 cast(dict[str, Any], next_state),
                 "<- build fail "
@@ -3749,11 +3768,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 next_state["failed"] = False
                 next_state["last_error"] = repeated_err
-                next_state["message"] = "build failed repeatedly (no fuzzers), restarting from plan"
-                next_state["restart_to_plan"] = True
-                next_state["restart_to_plan_reason"] = "build_no_fuzzer_repeated"
-                next_state["restart_to_plan_stage"] = "build"
-                next_state["restart_to_plan_error_text"] = repeated_err
+                next_state["message"] = "build failed repeatedly (no fuzzers)"
+                next_state["restart_to_plan"] = build_error_kind == "infra"
+                next_state["restart_to_plan_reason"] = "build_no_fuzzer_repeated" if build_error_kind == "infra" else ""
+                next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
+                next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-no-fuzzer "
@@ -3765,10 +3784,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 return next_state
             next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
             next_state["message"] = "build produced no fuzzers"
-            next_state["restart_to_plan"] = True
-            next_state["restart_to_plan_reason"] = "build_no_fuzzers"
-            next_state["restart_to_plan_stage"] = "build"
-            next_state["restart_to_plan_error_text"] = str(next_state["last_error"])
+            next_state["restart_to_plan"] = build_error_kind == "infra"
+            next_state["restart_to_plan_reason"] = "build_no_fuzzers" if build_error_kind == "infra" else ""
+            next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
+            next_state["restart_to_plan_error_text"] = str(next_state["last_error"]) if build_error_kind == "infra" else ""
             _wf_log(
                 cast(dict[str, Any], next_state),
                 "<- build fail no-fuzzers "
@@ -7157,10 +7176,13 @@ def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
 def _route_after_fix_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         return "plan"
-    if (state.get("fix_build_terminal_reason") or "").strip():
-        return "plan"
+    terminal_reason = (state.get("fix_build_terminal_reason") or "").strip()
+    if terminal_reason == "requires_env_rebuild":
+        return "build"
+    if terminal_reason:
+        return "fix_build"
     if (state.get("last_error") or "").strip():
-        return "plan"
+        return "fix_build"
     return "build"
 
 
@@ -7318,8 +7340,11 @@ def build_fuzz_workflow() -> StateGraph:
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("restart_to_plan")):
             return "plan"
-        if (state.get("fix_build_terminal_reason") or "").strip() or (state.get("last_error") or "").strip():
-            return "plan"
+        terminal_reason = (state.get("fix_build_terminal_reason") or "").strip()
+        if terminal_reason == "requires_env_rebuild":
+            return "build"
+        if terminal_reason or (state.get("last_error") or "").strip():
+            return "fix_build"
         if _should_stage_stop(state, "fix_build"):
             return "stop"
         return "build"

@@ -120,6 +120,8 @@ Constraints:
 - only modify files under `fuzz/` and `./done`
 - read-only exploration commands are allowed
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
+- when diagnostics still fail, pure no-op is invalid; produce a concrete patch
+- if the same error signature repeats, change strategy instead of repeating identical edits
 - keep `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` consistent
 - if missing dependencies are indicated by build evidence, update `fuzz/system_packages.txt` with canonical vcpkg names
 - keep build output aligned with `fuzz/execution_plan.json` target coverage (do not regress to single-target build when multi-target execution is required)
