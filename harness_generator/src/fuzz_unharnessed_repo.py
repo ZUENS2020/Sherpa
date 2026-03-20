@@ -1080,6 +1080,8 @@ class NonOssFuzzHarnessGenerator:
         self.seed_generation_timeout_sec: Optional[int] = None
         self.current_run_time_budget_sec: Optional[int] = None
         self.current_run_hard_timeout_sec: Optional[int] = None
+        self._active_run_procs_lock = threading.Lock()
+        self._active_run_procs: set[subprocess.Popen[str]] = set()
         self.last_seed_profile_by_fuzzer: Dict[str, str] = {}
         self.last_seed_bootstrap_by_fuzzer: Dict[str, Dict[str, object]] = {}
         self.last_selected_target_by_fuzzer: Dict[str, Dict[str, object]] = {}
@@ -3834,6 +3836,7 @@ EOF
             timeout=hard_timeout,
             idle_timeout=run_idle_timeout,
             line_callback=_line_callback,
+            track_for_early_stop=True,
         )
 
         # Dump the tail for quick reading.
@@ -4756,6 +4759,47 @@ EOF
                     continue
         return None
 
+    def _register_active_run_process(self, proc: subprocess.Popen[str]) -> None:
+        with self._active_run_procs_lock:
+            self._active_run_procs.add(proc)
+
+    def _unregister_active_run_process(self, proc: subprocess.Popen[str]) -> None:
+        with self._active_run_procs_lock:
+            self._active_run_procs.discard(proc)
+
+    def terminate_active_run_processes(self, *, reason: str = "") -> int:
+        """Terminate currently active run subprocesses (best effort)."""
+        with self._active_run_procs_lock:
+            procs = list(self._active_run_procs)
+        if not procs:
+            return 0
+        stopped = 0
+        for proc in procs:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    stopped += 1
+            except Exception:
+                continue
+        # Escalate to kill for stubborn processes.
+        deadline = time.monotonic() + 2.0
+        for proc in procs:
+            while time.monotonic() < deadline:
+                try:
+                    if proc.poll() is not None:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.05)
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        if reason:
+            print(f"[*] terminate_active_run_processes reason={reason} count={stopped}", flush=True)
+        return stopped
+
     # Run a command capturing stdout/stderr, optionally passing extra inputs after --
     def _run_cmd(
         self,
@@ -4767,6 +4811,7 @@ EOF
         timeout: int = 7200,
         idle_timeout: int = 0,
         line_callback: Optional[Callable[[str, str], Optional[str]]] = None,
+        track_for_early_stop: bool = False,
     ) -> Tuple[int, str, str]:
         def _redact_cmd(argv: Sequence[str]) -> List[str]:
             """Redact sensitive values from commands before printing.
@@ -4865,6 +4910,8 @@ EOF
             errors="replace",
             bufsize=1,
         )
+        if track_for_early_stop:
+            self._register_active_run_process(proc)
 
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
@@ -4978,6 +5025,8 @@ EOF
                     stdout_chunks.append(safe_text)
                 else:
                     stderr_chunks.append(safe_text)
+            if track_for_early_stop:
+                self._unregister_active_run_process(proc)
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
