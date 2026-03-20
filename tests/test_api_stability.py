@@ -691,6 +691,11 @@ def test_system_status_contains_dynamic_frontend_blocks():
     assert "total_jobs" in doc["tasks_tab_metrics"]
     assert "success_rate" in doc["tasks_tab_metrics"]
     assert isinstance(doc["telemetry"].get("performance_series"), list)
+    # No hardcoded placeholder constants should leak from /api/system.
+    assert doc["overview"].get("avg_fuzz_time") != "42m"
+    assert doc["overview"].get("avg_coverage") != "68.4"
+    assert doc["telemetry"].get("llm_token_usage") != "N/A"
+    assert doc["execution"]["summary"].get("avg_triage_time_ms") != "482"
 
 
 def test_api_metrics_contains_job_counters():
