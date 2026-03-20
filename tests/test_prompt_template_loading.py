@@ -124,6 +124,10 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "fuzzer_entry_strategy" in synth
     assert "evidence" in synth
     assert "minimal valid template" in synth
+    assert "must be a target API identifier" in synth
+    assert "forbidden examples: `fuzz/xxx_fuzz.cc`" in synth
+    assert "build_system` must not be `unknown`" in synth
+    assert "evidence` must be a non-empty string array" in synth
     assert "never use shell substitutions like `$(nproc)`" in synth
     assert '["-j", str(os.cpu_count() or 1)]' in synth
     assert "def build_fuzzers():" in synth
@@ -137,6 +141,9 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "repo_understanding.json" in complete
     assert "repair it in place" in complete
     assert "minimal valid shape example" in complete
+    assert "semantically invalid" in complete
+    assert "not a harness file path" in complete
+    assert 'build_system.lower() != "unknown"' in complete
     assert "`$(nproc)`" in complete
     assert '["-j", str(os.cpu_count() or 1)]' in complete
 
@@ -150,8 +157,13 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     fix_crash_u = (skill_root / "fix_crash_upstream_bug" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
+    assert "`api` must describe a target API identifier" in plan
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
+    assert "semantic reminder: do not rewrite `api` to harness file paths" in plan_fix
     assert "canonical vcpkg examples" in fix_build
     assert "`zlib`, `bzip2`, `liblzma`" in fix_build
+    assert "do not bypass workflow acceptance" in fix_build
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
+    assert "do not bypass acceptance by tampering" in fix_crash_h
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
+    assert "do not bypass acceptance by tampering" in fix_crash_u

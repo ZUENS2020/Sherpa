@@ -6,6 +6,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 ## Required Inputs
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
+- `fuzz/execution_plan.json` (if present)
 - `fuzz/selected_targets.json` (if present)
 - `fuzz/observed_target.json` (if present)
 
@@ -16,6 +17,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- when execution plan has multiple targets, scaffold should preserve multi-target buildability (not single-target-only by default)
 
 ## Key File Templates
 - `fuzz/README.md` fields:
@@ -30,11 +32,19 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
   - `chosen_target_reason`
   - `fuzzer_entry_strategy`
   - `evidence` (non-empty array)
+- semantic contract for `chosen_target_api`:
+  - must be a target API identifier (function/method/entrypoint), not a harness file path
+  - forbidden examples: `fuzz/xxx_fuzz.cc`, `fuzz/xxx.c`, `xxx_fuzz.cpp`, `target_fuzz.java`
+  - forbidden fallback values: empty string, filename-only values ending with `.c|.cc|.cpp|.cxx|.java`
+- hard rules:
+  - `build_system` must not be `unknown`
+  - `evidence` must be a non-empty string array (not null/object/string)
 - minimal valid template:
 ```json
 {
   "build_system": "cmake",
-  "chosen_target_api": "target_fuzz.cc",
+  "chosen_target_api": "archive_read_open1",
+  "chosen_target_api": "archive_read_open1",
   "chosen_target_reason": "runtime-reachable parser entrypoint",
   "fuzzer_entry_strategy": "sanitizer_fuzzer",
   "evidence": [
@@ -115,11 +125,13 @@ if __name__ == "__main__":
 ```
   - `build_fuzzers()` must call `find_static_lib()` directly; defining it without calling it is invalid.
   - `build_fuzzers()` must produce a concrete fuzzer executable under `fuzz/out/`.
+  - if `fuzz/execution_plan.json` lists multiple execution targets, `build_fuzzers()` should compile/link multiple fuzzers accordingly.
 
 ## Acceptance Criteria
 - harness-first contract: create harness source file before completing build/json/readme scaffold.
 - all required scaffold files exist.
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
+- scaffold aligns with `fuzz/execution_plan.json` when present.
 - build script does not hardcode a single guessed static-library path.
 - `fuzz/README.md` field `Harness file:` points to an existing harness file under `fuzz/`.
 - `fuzz/repo_understanding.json` contains all required non-empty keys:
@@ -128,6 +140,10 @@ if __name__ == "__main__":
   - confirm harness file count is >= 1;
   - confirm `fuzz/build.py|build.sh`, `fuzz/README.md`, `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` all exist.
   - confirm `fuzz/repo_understanding.json` has non-empty `build_system/chosen_target_api/chosen_target_reason/fuzzer_entry_strategy/evidence`.
+  - confirm `chosen_target_api` does not match harness file path patterns like `^fuzz/.*\\.(c|cc|cpp|cxx|java)$` and is not a filename-only suffix value.
+  - confirm `build_system.lower() != \"unknown\"`.
+  - confirm `evidence` is a non-empty array of non-empty strings.
+  - confirm README consistency: `Final target` describes the same semantic API tracked by `chosen_target_api`, while `Harness file` points to an actual harness file path.
   - confirm `fuzz/build.py` contains a full `build_fuzzers()` flow that compiles and links a runnable fuzzer binary.
 
 ## Command Policy

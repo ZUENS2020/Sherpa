@@ -551,3 +551,100 @@ def test_run_codex_command_stage_skill_missing_raises_when_strict(
             max_cli_retries=1,
             timeout=3,
         )
+
+
+def test_run_codex_command_reuses_session_between_plan_and_synthesize(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls: list[list[str]] = []
+
+    def _fake_popen(*args, **kwargs):
+        cmd = list(args[0])
+        calls.append(cmd)
+        done_path.write_text("fuzz/out/\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        return "" if diff_calls["n"] in {1, 3} else "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out1 = helper.run_codex_command(
+        "plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+    out2 = helper.run_codex_command(
+        "synthesize",
+        stage_skill="synthesize",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out1 is not None
+    assert out2 is not None
+    assert len(calls) == 2
+    assert "--continue" not in calls[0]
+    assert "--continue" in calls[1]
+    state_path = helper.working_dir / ".git" / "sherpa-opencode" / "session_state.json"
+    assert state_path.is_file()
+    state = ch.json.loads(state_path.read_text(encoding="utf-8"))
+    groups = state.get("session_groups") or {}
+    assert "planning_synth" in groups
+
+
+def test_run_codex_command_fix_build_does_not_reuse_planning_synth_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls: list[list[str]] = []
+
+    def _fake_popen(*args, **kwargs):
+        cmd = list(args[0])
+        calls.append(cmd)
+        done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        return "" if diff_calls["n"] in {1, 3} else "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out1 = helper.run_codex_command(
+        "plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+    out2 = helper.run_codex_command(
+        "fix build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out1 is not None
+    assert out2 is not None
+    assert len(calls) == 2
+    assert "--continue" not in calls[0]
+    assert "--continue" not in calls[1]

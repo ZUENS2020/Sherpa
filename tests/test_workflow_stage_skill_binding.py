@@ -53,3 +53,11 @@ def test_workflow_attempts_forced_harness_repair_before_missing_harness_error() 
     assert repair_pos != -1
     assert error_pos != -1
     assert repair_pos < error_pos
+
+
+def test_workflow_plan_and_synthesize_use_group_feedback_context() -> None:
+    text = WF.read_text(encoding="utf-8")
+    assert '_collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)' in text
+    assert "_write_stage_feedback(" in text
+    assert 'stage="plan"' in text
+    assert 'stage="synthesize"' in text
