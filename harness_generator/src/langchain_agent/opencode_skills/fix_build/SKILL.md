@@ -45,6 +45,7 @@ def find_static_lib(repo_root):
 - build result remains aligned with execution-plan target coverage constraints.
 - do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
 - when the same error repeats, change strategy instead of repeating the same patch.
+- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
 - Allowed: read-only commands only.

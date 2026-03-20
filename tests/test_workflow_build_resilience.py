@@ -328,6 +328,17 @@ def test_stage_feedback_contains_structured_summary(tmp_path: Path):
     assert '"fuzz/build.py"' in body
 
 
+def test_build_file_targeted_fix_lines_extracts_actionable_paths():
+    lines = workflow_graph._build_file_targeted_fix_lines(
+        "",
+        "",
+        "fuzz/libarchive_fuzzer.cc:22:10: error: no member named 'unique_ptr' in namespace 'std'",
+    )
+    assert lines
+    joined = "\n".join(lines)
+    assert "Read and fix `fuzz/libarchive_fuzzer.cc:22`" in joined
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

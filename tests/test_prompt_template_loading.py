@@ -81,6 +81,7 @@ def test_fix_build_prompt_references_policy_and_context():
     assert "tighten scaffold" in out
     assert "only modify files under `fuzz/` and `./done`" in out
     assert "pure no-op is invalid" in out
+    assert "Read and fix <path>[:line]" in out
 
 
 def test_global_policy_document_contains_core_rules():
@@ -166,5 +167,7 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "do not bypass workflow acceptance" in fix_build
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
     assert "do not bypass acceptance by tampering" in fix_crash_h
+    assert "Read and fix <path>[:line]" in fix_crash_h
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
     assert "do not bypass acceptance by tampering" in fix_crash_u
+    assert "Read and fix <path>[:line]" in fix_crash_u

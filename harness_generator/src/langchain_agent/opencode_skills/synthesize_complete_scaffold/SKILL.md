@@ -50,6 +50,7 @@ Complete only missing required scaffold items without rewriting unrelated files.
 - if `fuzz/repo_understanding.json` existed but was incomplete or semantically invalid, required keys are repaired and non-empty.
 - `chosen_target_api` is not a harness file path pattern and not a filename-only suffix value.
 - `build_system` is concrete (not `unknown`) and `evidence` is a non-empty string array.
+- when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]` before broader edits.
 - existing harness/build assets are preserved unless minimal changes are required.
 - no guessed paths/targets are introduced.
 - repaired scaffold remains consistent with `fuzz/execution_plan.json` when that file exists.

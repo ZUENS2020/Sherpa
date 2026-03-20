@@ -47,12 +47,17 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
     assert "`api` must describe a target API identifier" in plan
+    assert "Read and fix <path>[:line]" in plan
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
     assert "semantic reminder: do not rewrite `api` to harness file paths" in plan_fix
+    assert "Read and fix <path>[:line]" in plan_fix
     assert "canonical vcpkg examples" in fix_build
     assert "never `z`, `bz2`, `lzma`" in fix_build
     assert "do not bypass workflow acceptance" in fix_build
+    assert "Read and fix <path>[:line]" in fix_build
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
     assert "do not bypass acceptance by tampering" in fix_crash_h
+    assert "Read and fix <path>[:line]" in fix_crash_h
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
     assert "do not bypass acceptance by tampering" in fix_crash_u
+    assert "Read and fix <path>[:line]" in fix_crash_u
