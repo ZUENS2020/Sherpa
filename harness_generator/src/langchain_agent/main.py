@@ -1726,6 +1726,121 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+def _safe_float(raw: object) -> float | None:
+    try:
+        if raw is None:
+            return None
+        v = float(raw)
+        if math.isfinite(v):
+            return v
+    except Exception:
+        return None
+    return None
+
+
+def _status_bucket(raw: str | None) -> str:
+    return _status_for_counter(raw)
+
+
+def _job_duration_seconds(job: dict) -> float | None:
+    start = _safe_float(job.get("started_at"))
+    end = _safe_float(job.get("finished_at"))
+    if start is None or end is None:
+        return None
+    dur = end - start
+    if dur < 0:
+        return None
+    return dur
+
+
+def _format_duration_human(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    sec = max(0, int(round(seconds)))
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h}h {m}m"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _format_percent(value: float | None, digits: int = 1) -> str | None:
+    if value is None:
+        return None
+    return f"{value:.{digits}f}"
+
+
+def _format_trend(current: float | None, previous: float | None, *, unit_suffix: str = "%") -> str | None:
+    if current is None or previous is None:
+        return None
+    delta = current - previous
+    arrow = "▲" if delta >= 0 else "▼"
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.1f}{unit_suffix} {arrow}"
+
+
+def _extract_numeric_values_by_keys(obj: object, keys: set[str], *, max_count: int = 128) -> list[float]:
+    out: list[float] = []
+    stack: list[object] = [obj]
+    while stack and len(out) < max_count:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if str(k) in keys:
+                    fv = _safe_float(v)
+                    if fv is not None:
+                        out.append(fv)
+                        if len(out) >= max_count:
+                            break
+                if isinstance(v, (dict, list, tuple)):
+                    stack.append(v)
+        elif isinstance(cur, (list, tuple)):
+            for v in cur:
+                if isinstance(v, (dict, list, tuple)):
+                    stack.append(v)
+    return out
+
+
+def _count_jobs_in_window(jobs: list[dict], *, field: str, window_start: float, window_end: float) -> int:
+    n = 0
+    for job in jobs:
+        ts = _safe_float(job.get(field))
+        if ts is None:
+            continue
+        if window_start <= ts < window_end:
+            n += 1
+    return n
+
+
+def _performance_series_from_jobs(now: float, fuzz_jobs: list[dict]) -> list[dict[str, object]]:
+    points: list[dict[str, object]] = []
+    # 6 x 4h windows over last 24h + current point.
+    windows = [24, 20, 16, 12, 8, 4, 0]
+    for h in windows:
+        end_ts = now - float(h * 3600)
+        start_ts = end_ts - float(4 * 3600)
+        started = _count_jobs_in_window(
+            fuzz_jobs, field="started_at", window_start=start_ts, window_end=end_ts
+        )
+        finished = [
+            job for job in fuzz_jobs
+            if (ts := _safe_float(job.get("finished_at"))) is not None and start_ts <= ts < end_ts
+        ]
+        durations = [d for d in (_job_duration_seconds(job) for job in finished) if d is not None]
+        avg_latency = (sum(durations) / float(len(durations))) if durations else None
+        points.append(
+            {
+                "time": datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%H:%M"),
+                "throughput": started,
+                "latency": round(avg_latency, 2) if avg_latency is not None else None,
+            }
+        )
+    return points
+
+
 def _system_status() -> dict:
     now = time.time()
     with _JOBS_LOCK:
@@ -1756,58 +1871,150 @@ def _system_status() -> dict:
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
     memory = _memory_status()
-    finished_total = counts["success"] + counts["error"]
-    success_rate = (float(counts["success"]) / float(max(1, finished_total))) * 100.0 if finished_total > 0 else 100.0
-    failure_rate = (float(counts["error"]) / float(max(1, finished_total))) * 100.0 if finished_total > 0 else 0.0
-    run_like = max(1, counts["running"] + counts["queued"])
-    est_execs_per_sec = 42.0 * float(run_like)
-    if isinstance(memory.get("cgroup_usage_ratio"), (int, float)):
-        cluster_load_pct = max(0.0, min(100.0, float(memory.get("cgroup_usage_ratio") or 0.0) * 100.0))
-    else:
-        cluster_load_pct = min(95.0, 35.0 + float(run_like) * 7.0)
+    fuzz_jobs = [j for j in jobs if str(j.get("kind") or "") == "fuzz"]
+    task_jobs = [j for j in jobs if str(j.get("kind") or "") == "task"]
+
+    finished_fuzz = [j for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) in {"success", "error"}]
+    success_fuzz = [j for j in finished_fuzz if _status_bucket(str(j.get("status") or "")) == "success"]
+    error_fuzz = [j for j in finished_fuzz if _status_bucket(str(j.get("status") or "")) == "error"]
+    finished_total = len(finished_fuzz)
+    success_rate = (float(len(success_fuzz)) / float(finished_total) * 100.0) if finished_total > 0 else None
+    failure_rate = (float(len(error_fuzz)) / float(finished_total) * 100.0) if finished_total > 0 else None
+
+    durations = [d for d in (_job_duration_seconds(j) for j in finished_fuzz) if d is not None]
+    avg_fuzz_seconds = (sum(durations) / float(len(durations))) if durations else None
+
+    window_sec = 3600.0
+    curr_start = now - window_sec
+    prev_start = now - (2.0 * window_sec)
+    current_finished = [
+        j for j in finished_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and curr_start <= ts < now
+    ]
+    previous_finished = [
+        j for j in finished_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and prev_start <= ts < curr_start
+    ]
+    current_failure_rate = (
+        float(sum(1 for j in current_finished if _status_bucket(str(j.get("status") or "")) == "error"))
+        / float(len(current_finished))
+        * 100.0
+    ) if current_finished else None
+    previous_failure_rate = (
+        float(sum(1 for j in previous_finished if _status_bucket(str(j.get("status") or "")) == "error"))
+        / float(len(previous_finished))
+        * 100.0
+    ) if previous_finished else None
+    current_health = (100.0 - current_failure_rate) if current_failure_rate is not None else None
+    previous_health = (100.0 - previous_failure_rate) if previous_failure_rate is not None else None
+
+    current_errors = sum(
+        1
+        for j in error_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and curr_start <= ts < now
+    )
+    previous_errors = sum(
+        1
+        for j in error_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and prev_start <= ts < curr_start
+    )
+
+    now_24h = now - 86400.0
+    success_24h = sum(
+        1
+        for j in success_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and ts >= now_24h
+    )
+    previous_success_24h = sum(
+        1
+        for j in success_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and (now_24h - 86400.0) <= ts < now_24h
+    )
+
+    coverage_values: list[float] = []
+    for j in fuzz_jobs:
+        result = j.get("result")
+        coverage_values.extend(
+            _extract_numeric_values_by_keys(
+                result,
+                {"final_cov", "max_cov", "coverage", "cov"},
+                max_count=16,
+            )
+        )
+    coverage_values = [v for v in coverage_values if 0.0 <= v <= 100.0]
+    avg_coverage = (sum(coverage_values) / float(len(coverage_values))) if coverage_values else None
+
+    running_fuzz = sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "running")
+
+    cgroup_ratio = _safe_float(memory.get("cgroup_usage_ratio"))
+    cluster_load_pct = (max(0.0, min(100.0, cgroup_ratio * 100.0)) if cgroup_ratio is not None else None)
+
+    performance_series = _performance_series_from_jobs(now, fuzz_jobs)
+    recent_finished = [
+        j for j in finished_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and ts >= (now - 300.0)
+    ]
+    recent_jobs_per_sec = (float(len(recent_finished)) / 300.0) if recent_finished else None
+
+    agent_health_matrix: list[int] = []
+    latest_fuzz = sorted(
+        fuzz_jobs,
+        key=lambda j: float(_safe_float(j.get("updated_at")) or 0.0),
+        reverse=True,
+    )[:32]
+    for j in latest_fuzz:
+        agent_health_matrix.append(0 if _status_bucket(str(j.get("status") or "")) == "error" else 1)
+
     overview = {
-        "avg_fuzz_time": "42m",
-        "active_agents": f"{max(1, counts['running']):,}",
-        "cluster_health": f"{max(0.0, min(99.9, 100.0 - failure_rate)):.1f}",
-        "cluster_health_trend": "+0.0% ▲",
-        "crash_triage_rate": f"{max(0, counts['error'])}",
-        "crash_triage_rate_trend": "+0% ▲",
-        "harnesses_synthesized": f"{max(0, counts['success'])}",
-        "harnesses_synthesized_trend": "+0% ▲",
-        "avg_coverage": "68.4",
-        "avg_coverage_trend": "+0.0% ▲",
+        "avg_fuzz_time": _format_duration_human(avg_fuzz_seconds),
+        "active_agents": str(running_fuzz),
+        "cluster_health": _format_percent(current_health, 1),
+        "cluster_health_trend": _format_trend(current_health, previous_health, unit_suffix="%"),
+        "crash_triage_rate": str(current_errors),
+        "crash_triage_rate_trend": _format_trend(float(current_errors), float(previous_errors), unit_suffix=""),
+        "harnesses_synthesized": str(success_24h),
+        "harnesses_synthesized_trend": _format_trend(float(success_24h), float(previous_success_24h), unit_suffix=""),
+        "avg_coverage": _format_percent(avg_coverage, 2),
+        "avg_coverage_trend": None,
     }
     telemetry = {
-        "llm_token_usage": "N/A",
-        "llm_token_status": "Stable",
-        "k8s_pod_capacity": f"{cluster_load_pct:.0f}% CAP",
-        "k8s_pod_status": "Normal" if cluster_load_pct < 90.0 else "Expansion Req",
-        "fastapi_gateway": "99.9% SLI",
-        "fastapi_status": "Encrypted",
-        "agent_health_matrix": [1 if i % 11 else 0 for i in range(32)],
-        "performance_series": [
-            {"time": "00:00", "throughput": int(est_execs_per_sec * 0.8), "latency": 45},
-            {"time": "04:00", "throughput": int(est_execs_per_sec * 0.9), "latency": 42},
-            {"time": "08:00", "throughput": int(est_execs_per_sec * 1.1), "latency": 38},
-            {"time": "12:00", "throughput": int(est_execs_per_sec), "latency": 40},
-            {"time": "16:00", "throughput": int(est_execs_per_sec * 1.2), "latency": 35},
-            {"time": "20:00", "throughput": int(est_execs_per_sec * 0.95), "latency": 42},
-            {"time": "24:00", "throughput": int(est_execs_per_sec), "latency": 42},
-        ],
+        "llm_token_usage": None,
+        "llm_token_status": None,
+        "k8s_pod_capacity": (f"{cluster_load_pct:.0f}% CAP" if cluster_load_pct is not None else None),
+        "k8s_pod_status": ("Normal" if cluster_load_pct is not None and cluster_load_pct < 90.0 else ("Expansion Req" if cluster_load_pct is not None else None)),
+        "fastapi_gateway": None,
+        "fastapi_status": "UP",
+        "agent_health_matrix": agent_health_matrix,
+        "performance_series": performance_series,
     }
     execution_summary = {
-        "failure_rate": f"{failure_rate:.2f}%",
-        "fuzzing_jobs_24h": f"{counts['total']}",
-        "cluster_load_peak": f"{cluster_load_pct:.0f}%",
-        "repos_queued": f"{counts['queued']}",
-        "avg_triage_time_ms": "482",
-        "success_ratio": f"{success_rate:.2f}",
+        "failure_rate": (f"{failure_rate:.2f}%" if failure_rate is not None else None),
+        "fuzzing_jobs_24h": str(
+            sum(
+                1
+                for j in fuzz_jobs
+                if (ts := _safe_float(j.get("created_at"))) is not None and ts >= now_24h
+            )
+        ),
+        "cluster_load_peak": (f"{cluster_load_pct:.0f}%" if cluster_load_pct is not None else None),
+        "repos_queued": str(sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "queued")),
+        "avg_triage_time_ms": None,
+        "success_ratio": (f"{success_rate:.2f}" if success_rate is not None else None),
     }
+    task_finished = [
+        j for j in task_jobs
+        if _status_bucket(str(j.get("status") or "")) in {"success", "error"}
+    ]
+    task_success = sum(1 for j in task_finished if _status_bucket(str(j.get("status") or "")) == "success")
+    task_success_rate = (
+        float(task_success) / float(len(task_finished)) * 100.0 if task_finished else None
+    )
+    task_failed = sum(1 for j in task_jobs if _status_bucket(str(j.get("status") or "")) == "error")
     tasks_tab_metrics = {
-        "total_jobs": f"{counts['total']}",
-        "execs_per_sec": f"{est_execs_per_sec:.1f}",
-        "success_rate": f"{success_rate:.1f}",
-        "failed_tasks": f"{counts['error']:02d}",
+        "total_jobs": str(len(task_jobs)),
+        "execs_per_sec": (f"{recent_jobs_per_sec:.3f}" if recent_jobs_per_sec is not None else None),
+        "success_rate": (f"{task_success_rate:.1f}" if task_success_rate is not None else None),
+        "failed_tasks": str(task_failed),
     }
     return {
         "ok": True,
