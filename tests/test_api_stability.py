@@ -678,9 +678,21 @@ def test_system_status_contains_dynamic_frontend_blocks():
     task_id = web_main._create_job("task", "batch")
     child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
     web_main._job_update(task_id, status="running", children=[child_id])
-    web_main._job_update(child_id, status="running")
+    now = time.time()
+    web_main._job_update(
+        child_id,
+        status="success",
+        finished_at=now,
+        updated_at=now,
+        result={
+            "coverage_percent": 63.2,
+            "llm_usage": {"prompt_tokens": 1200, "completion_tokens": 800},
+        },
+        request={"max_tokens": 1000},
+    )
 
     with TestClient(web_main.app) as client:
+        _ = client.get("/api/tasks")
         response = client.get("/api/system")
 
     assert response.status_code == 200
@@ -697,6 +709,10 @@ def test_system_status_contains_dynamic_frontend_blocks():
     assert doc["overview"].get("avg_coverage") != "68.4"
     assert doc["telemetry"].get("llm_token_usage") != "N/A"
     assert doc["execution"]["summary"].get("avg_triage_time_ms") != "482"
+    assert doc["overview"].get("cluster_health") is not None
+    assert doc["overview"].get("avg_coverage") is not None
+    assert doc["telemetry"].get("llm_token_usage") is not None
+    assert doc["telemetry"].get("fastapi_gateway") is not None
 
 
 def test_api_metrics_contains_job_counters():
