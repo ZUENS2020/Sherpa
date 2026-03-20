@@ -21,3 +21,8 @@ This policy applies to every OpenCode stage unless explicitly overridden by stag
 - `name` should be the source file stem when applicable.
 - `api` should be the source filename or concrete callable API.
 - Forbidden: `name = "LLVMFuzzerTestOneInput"`.
+
+## 5) Archive Seed Policy
+- For `archive-container`, use real repository samples first (for example `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, `tests/**`).
+- Avoid hand-crafted magic-only archive seeds.
+- Keep malformed/truncated archive seeds as a minority of the corpus (<=30%).

@@ -841,6 +841,12 @@ def _seed_quality_from_run(
     covered_families: list[str],
     repo_examples_count: int,
     plateau_idle_seconds: int,
+    seed_profile: str = "",
+    archive_valid_count: int = 0,
+    archive_valid_ratio: float = 1.0,
+    archive_min_valid_ratio: float = 0.60,
+    archive_malformed_ratio: float = 0.0,
+    archive_max_malformed_ratio: float = 0.30,
 ) -> Dict[str, object]:
     events = parse_libfuzzer_progress_events(log)
     inited_cov = 0
@@ -888,6 +894,13 @@ def _seed_quality_from_run(
         quality_flags.append("missing_required_families")
     if repo_examples_count == 0 and any(f in (YAML_SEED_FAMILIES | FMT_SEED_FAMILIES) for f in required_families):
         quality_flags.append("repo_examples_missing")
+    if seed_profile == "archive-container":
+        if archive_valid_count < 1:
+            quality_flags.append("archive_valid_seed_missing")
+        if archive_valid_ratio < archive_min_valid_ratio:
+            quality_flags.append("archive_seed_validity_low")
+        if archive_malformed_ratio > archive_max_malformed_ratio:
+            quality_flags.append("archive_seed_malformed_ratio_high")
     return {
         "initial_corpus_files": initial_corpus_files,
         "initial_corpus_bytes": initial_corpus_bytes,
@@ -902,6 +915,12 @@ def _seed_quality_from_run(
         "cov_growth_slope_pre_plateau": _slope("cov"),
         "ft_growth_slope_pre_plateau": _slope("ft"),
         "plateau_after_sec": plateau_idle_seconds,
+        "seed_profile": seed_profile,
+        "archive_valid_count": archive_valid_count,
+        "archive_valid_ratio": archive_valid_ratio,
+        "archive_min_valid_ratio": archive_min_valid_ratio,
+        "archive_malformed_ratio": archive_malformed_ratio,
+        "archive_max_malformed_ratio": archive_max_malformed_ratio,
         "quality_flags": quality_flags,
     }
 
@@ -2814,8 +2833,9 @@ EOF
                 "nested containers, malformed trailers, and magic-byte variations."
             ),
             "archive-container": (
-                "Create valid and malformed archive/container seeds: minimal single-entry container, multiple entries, nested paths, "
-                "long names, metadata edge cases, truncated directory/footer, invalid sizes, and corrupted magic headers."
+                "Create archive/container seeds with a real-sample-first strategy: first ensure valid archive samples exist from "
+                "repository sources (for example `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, `tests/**`), "
+                "then add boundary or malformed variants only when needed for coverage growth. Prefer real archives over hand-crafted malformed bytes."
             ),
             "serializer-structured": (
                 "Create structured serializer seeds: empty object, nested object, repeated fields, large strings, invalid tags, "
@@ -3120,28 +3140,77 @@ EOF
                 return False
         if not raw:
             return False
+        inferred_suffix = suffix
+        if inferred_suffix not in {".zip", ".tar", ".gz", ".bz2", ".xz"}:
+            if raw.startswith(b"PK"):
+                inferred_suffix = ".zip"
+            elif len(raw) > 264 and raw[257:262] == b"ustar":
+                inferred_suffix = ".tar"
+            elif raw.startswith(b"\x1f\x8b"):
+                inferred_suffix = ".gz"
+            elif raw.startswith(b"BZh"):
+                inferred_suffix = ".bz2"
+            elif raw.startswith(b"\xFD7zXZ\x00"):
+                inferred_suffix = ".xz"
+            else:
+                return False
         try:
-            if suffix == ".zip":
+            if inferred_suffix == ".zip":
                 if len(raw) < 4 or raw[:2] != b"PK":
                     return False
                 with zipfile.ZipFile(io.BytesIO(raw), mode="r") as zf:
                     return len(zf.namelist()) > 0
-            if suffix == ".tar":
+            if inferred_suffix == ".tar":
                 with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tf:
                     members = tf.getmembers()
                     return len(members) > 0
-            if suffix == ".gz":
+            if inferred_suffix == ".gz":
                 _ = gzip.decompress(raw)
                 return True
-            if suffix == ".bz2":
+            if inferred_suffix == ".bz2":
                 _ = bz2.decompress(raw)
                 return True
-            if suffix == ".xz":
+            if inferred_suffix == ".xz":
                 _ = lzma.decompress(raw)
                 return True
         except Exception:
             return False
         return True
+
+    def _is_magic_only_archive_seed(self, data: bytes | None) -> bool:
+        raw = data or b""
+        if not raw:
+            return False
+        signature_threshold = 24
+        signatures = (
+            b"PK\x03\x04",
+            b"PK\x05\x06",
+            b"PK\x07\x08",
+            b"\x1f\x8b",
+            b"BZh",
+            b"\xFD7zXZ\x00",
+            b"7z\xBC\xAF\x27\x1C",
+            b"Rar!\x1A\x07",
+        )
+        return len(raw) <= signature_threshold and any(raw.startswith(sig) for sig in signatures)
+
+    def _is_archive_malformed_candidate(self, path: Path, data: bytes | None = None) -> bool:
+        raw = data
+        if raw is None:
+            try:
+                raw = path.read_bytes()
+            except Exception:
+                raw = b""
+        if self._is_magic_only_archive_seed(raw):
+            return True
+        suffix = path.suffix.lower()
+        if suffix in {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".cpio"}:
+            return not self._archive_seed_is_semantically_valid(path, raw)
+        name = path.name.lower()
+        malformed_tokens = ("malformed", "invalid", "corrupt", "broken", "trunc", "magic_only")
+        if any(tok in name for tok in malformed_tokens) and len(raw or b"") <= 256:
+            return True
+        return False
 
     def _import_repo_corpus_zip(
         self,
@@ -3236,7 +3305,7 @@ EOF
         elif seed_profile == "decoder-binary":
             gaps.append("missing malformed length/checksum and truncated binary frames")
         elif seed_profile == "archive-container":
-            gaps.append("missing truncated footer/directory and corrupted magic cases")
+            gaps.append("ensure at least one valid archive sample exists first")
         return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
 
     def _seed_exploration_path(self, fuzzer_name: str) -> Path:
@@ -3276,6 +3345,14 @@ EOF
         except Exception:
             return 0.60
         return max(0.10, min(ratio, 1.0))
+
+    def _seed_archive_max_malformed_ratio(self) -> float:
+        raw = (os.environ.get("SHERPA_SEED_ARCHIVE_MAX_MALFORMED_RATIO") or "0.30").strip()
+        try:
+            ratio = float(raw)
+        except Exception:
+            return 0.30
+        return max(0.05, min(ratio, 0.90))
 
     def _seed_corpus_min_per_target(self) -> int:
         raw = (os.environ.get("SHERPA_SEED_CORPUS_MIN_PER_TARGET") or "16").strip()
@@ -3360,9 +3437,12 @@ EOF
         total_pruned_bytes = 0
         archive_valid_count = 0
         archive_invalid_count = 0
+        archive_magic_only_rejected_count = 0
+        archive_malformed_pruned_count = 0
         family_caps: dict[str, int] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
+        archive_malformed_marks: dict[Path, bool] = {}
         textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
         max_file = self._seed_max_file_bytes()
         max_radamsa_file = self._seed_radamsa_max_file_bytes()
@@ -3394,14 +3474,18 @@ EOF
                 not reject
                 and seed_profile == "archive-container"
                 and self._seed_archive_validate_enabled()
-                and path.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz"}
             ):
-                if self._archive_seed_is_semantically_valid(path, data):
-                    archive_valid_count += 1
-                else:
-                    archive_invalid_count += 1
+                if self._is_magic_only_archive_seed(data):
                     reject = True
                     noise_rejected += 1
+                    archive_magic_only_rejected_count += 1
+                elif path.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz", ".bin", ".dat"}:
+                    if self._archive_seed_is_semantically_valid(path, data):
+                        archive_valid_count += 1
+                    else:
+                        archive_invalid_count += 1
+                        reject = True
+                        noise_rejected += 1
             digest = hashlib.sha256(data).hexdigest()
             if not reject and digest in content_hashes:
                 reject = True
@@ -3438,8 +3522,54 @@ EOF
                 filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
                 continue
             kept.append(path)
+            archive_malformed_marks[path] = (
+                seed_profile == "archive-container" and self._is_archive_malformed_candidate(path, data)
+            )
             for family in families:
                 family_caps[family] = family_caps.get(family, 0) + 1
+        if seed_profile == "archive-container" and kept:
+            max_malformed_ratio = self._seed_archive_max_malformed_ratio()
+
+            def _current_malformed_paths() -> list[Path]:
+                return [p for p in kept if archive_malformed_marks.get(p, False)]
+
+            malformed_paths = _current_malformed_paths()
+            while kept and malformed_paths and (float(len(malformed_paths)) / float(len(kept))) > max_malformed_ratio:
+                def _prune_priority(p: Path) -> tuple[int, int]:
+                    if p.name.startswith("radamsa_"):
+                        source_prio = 0
+                    elif p.name.startswith("repo_"):
+                        source_prio = 2
+                    else:
+                        source_prio = 1
+                    try:
+                        sz = int(p.stat().st_size)
+                    except Exception:
+                        sz = 0
+                    return (source_prio, -sz)
+
+                victim = sorted(malformed_paths, key=_prune_priority)[0]
+                try:
+                    victim_size = int(victim.stat().st_size)
+                except Exception:
+                    victim_size = 0
+                try:
+                    victim.unlink()
+                except Exception:
+                    break
+                archive_malformed_pruned_count += 1
+                total_pruned_count += 1
+                total_pruned_bytes += max(0, victim_size)
+                kept = [p for p in kept if p != victim]
+                if victim.name.startswith("repo_"):
+                    filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
+                elif victim.name.startswith("radamsa_"):
+                    filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                else:
+                    filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
+                filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
+                archive_malformed_marks.pop(victim, None)
+                malformed_paths = _current_malformed_paths()
         if kept:
             total_bytes = 0
             sized: list[tuple[Path, int]] = []
@@ -3479,6 +3609,7 @@ EOF
                     else:
                         filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
                     filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
+        archive_malformed_count = sum(1 for p in kept if archive_malformed_marks.get(p, False))
         return {
             "seed_counts_raw": raw_counts,
             "seed_counts_filtered": filtered_counts,
@@ -3491,6 +3622,15 @@ EOF
             "seed_max_total_bytes": max_total,
             "archive_valid_count": archive_valid_count,
             "archive_invalid_count": archive_invalid_count,
+            "archive_magic_only_rejected_count": archive_magic_only_rejected_count,
+            "archive_malformed_count": archive_malformed_count,
+            "archive_malformed_pruned_count": archive_malformed_pruned_count,
+            "archive_malformed_ratio": (
+                float(archive_malformed_count) / float(max(1, int(filtered_counts.get("total") or 0)))
+                if seed_profile == "archive-container"
+                else 0.0
+            ),
+            "archive_max_malformed_ratio": self._seed_archive_max_malformed_ratio(),
             "archive_valid_ratio": (
                 float(archive_valid_count) / float(max(1, archive_valid_count + archive_invalid_count))
                 if seed_profile == "archive-container"
@@ -3584,6 +3724,10 @@ EOF
 
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
+            - For `archive-container`, real archive samples must come first: import/use repository examples from `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, or `tests/**` before adding synthetic variants.
+            - For `archive-container`, avoid hand-crafted magic-only files (for example a few header bytes without a valid structure).
+            - For `archive-container`, keep malformed/truncated seeds <= 30% of the corpus. Prioritize valid archive samples.
+            - For `archive-container`, ensure at least one semantically valid archive sample exists in the corpus.
             - Write a concise exploration summary to `{seed_exploration_path.relative_to(self.repo_root)}` before or alongside seed creation.
             - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
             - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
@@ -3635,6 +3779,7 @@ EOF
         stdout = self.patcher.run_codex_command(
             instructions,
             additional_context="\n\n".join(additional_context_parts),
+            stage_skill="seed_generation",
             **patcher_kwargs,
         )
         if stdout is None:
@@ -3662,6 +3807,9 @@ EOF
             ],
         )
         archive_valid_ratio = float(filtered_meta.get("archive_valid_ratio") or 1.0)
+        archive_malformed_ratio = float(filtered_meta.get("archive_malformed_ratio") or 0.0)
+        archive_valid_count = int(filtered_meta.get("archive_valid_count") or 0)
+        archive_max_malformed_ratio = float(filtered_meta.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio())
         if (
             seed_profile == "archive-container"
             and self._seed_archive_validate_enabled()
@@ -3671,6 +3819,14 @@ EOF
                 "[warn] archive seed valid ratio below threshold "
                 f"for {fuzzer_name}: ratio={archive_valid_ratio:.2f} "
                 f"threshold={self._seed_archive_min_valid_ratio():.2f}"
+            )
+        if seed_profile == "archive-container" and archive_valid_count < 1:
+            print(f"[warn] archive seed corpus has no semantically valid sample for {fuzzer_name}")
+        if seed_profile == "archive-container" and archive_malformed_ratio > archive_max_malformed_ratio:
+            print(
+                "[warn] archive malformed ratio above threshold "
+                f"for {fuzzer_name}: ratio={archive_malformed_ratio:.2f} "
+                f"threshold={archive_max_malformed_ratio:.2f}"
             )
         seed_quality_path = self.fuzz_dir / f"seed_quality_{re.sub(r'[^A-Za-z0-9_.-]+', '_', fuzzer_name)}.json"
         seed_quality_doc = {
@@ -3687,6 +3843,11 @@ EOF
             "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
             "archive_valid_count": int(filtered_meta.get("archive_valid_count") or 0),
             "archive_invalid_count": int(filtered_meta.get("archive_invalid_count") or 0),
+            "archive_magic_only_rejected_count": int(filtered_meta.get("archive_magic_only_rejected_count") or 0),
+            "archive_malformed_count": int(filtered_meta.get("archive_malformed_count") or 0),
+            "archive_malformed_pruned_count": int(filtered_meta.get("archive_malformed_pruned_count") or 0),
+            "archive_malformed_ratio": archive_malformed_ratio,
+            "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
         }
         try:
@@ -3720,6 +3881,11 @@ EOF
             "seed_max_total_bytes": int(filtered_meta.get("seed_max_total_bytes") or self._seed_max_total_bytes()),
             "archive_valid_count": int(filtered_meta.get("archive_valid_count") or 0),
             "archive_invalid_count": int(filtered_meta.get("archive_invalid_count") or 0),
+            "archive_magic_only_rejected_count": int(filtered_meta.get("archive_magic_only_rejected_count") or 0),
+            "archive_malformed_count": int(filtered_meta.get("archive_malformed_count") or 0),
+            "archive_malformed_pruned_count": int(filtered_meta.get("archive_malformed_pruned_count") or 0),
+            "archive_malformed_ratio": archive_malformed_ratio,
+            "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
@@ -4008,6 +4174,14 @@ EOF
                 covered_families=covered_families,
                 repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
                 plateau_idle_seconds=plateau_idle_seconds,
+                seed_profile=str(seed_bootstrap.get("seed_profile") or ""),
+                archive_valid_count=int(seed_bootstrap.get("archive_valid_count") or 0),
+                archive_valid_ratio=float(seed_bootstrap.get("archive_valid_ratio") or 1.0),
+                archive_min_valid_ratio=self._seed_archive_min_valid_ratio(),
+                archive_malformed_ratio=float(seed_bootstrap.get("archive_malformed_ratio") or 0.0),
+                archive_max_malformed_ratio=float(
+                    seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
+                ),
             ),
         )
 
