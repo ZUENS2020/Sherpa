@@ -1,9 +1,6 @@
 name: Deploy Dev
 
 on:
-  pull_request:
-    branches: ["dev"]
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       force_rebuild_all:
@@ -29,7 +26,6 @@ concurrency:
 
 jobs:
   deploy-dev:
-    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux]
     environment: dev
     timeout-minutes: 90
@@ -514,11 +510,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            sha="${{ github.event.pull_request.head.sha }}"
-          else
-            sha="${GITHUB_SHA}"
-          fi
+          sha="${GITHUB_SHA}"
           echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
           echo "web_tar=/tmp/sherpa-web-${sha}.tar" >> "$GITHUB_OUTPUT"
@@ -530,8 +522,6 @@ jobs:
         shell: bash
         env:
           FORCE_REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild_all || 'false' }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
           FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
         run: |
@@ -545,17 +535,7 @@ jobs:
             frontend_changed=true
           else
             changed_files=""
-            if [[ "${{ github.event_name }}" == "pull_request" && -n "${PR_BASE_SHA}" && -n "${PR_HEAD_SHA}" ]]; then
-              if ! git fetch --no-tags --prune origin "${PR_BASE_SHA}" "${PR_HEAD_SHA}"; then
-                change_detection_uncertain=true
-                echo "::warning::git fetch failed when detecting changed files; falling back to safe rebuild."
-              fi
-              if ! changed_files="$(git diff --name-only "${PR_BASE_SHA}" "${PR_HEAD_SHA}")"; then
-                change_detection_uncertain=true
-                changed_files=""
-                echo "::warning::git diff failed when detecting changed files; falling back to safe rebuild."
-              fi
-            elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
               if ! changed_files="$(git diff --name-only HEAD~1 HEAD)"; then
                 change_detection_uncertain=true
                 changed_files=""
