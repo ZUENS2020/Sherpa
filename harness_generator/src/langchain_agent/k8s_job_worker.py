@@ -65,6 +65,9 @@ def main() -> int:
         run_parallel_fuzzers_override = str(payload.get("run_parallel_fuzzers_override") or "").strip()
         if run_parallel_fuzzers_override:
             os.environ["SHERPA_PARALLEL_FUZZERS"] = run_parallel_fuzzers_override
+        run_unlimited_round_budget_sec = str(payload.get("run_unlimited_round_budget_sec") or "").strip()
+        if run_unlimited_round_budget_sec:
+            os.environ["SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC"] = run_unlimited_round_budget_sec
 
         result = fuzz_logic(
             repo_url=str(payload.get("repo_url") or "").strip(),

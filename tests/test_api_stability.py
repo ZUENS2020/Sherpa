@@ -288,6 +288,15 @@ def test_put_config_accepts_unlimited_budget_zero():
     assert cfg.fuzz_time_budget == 0
 
 
+def test_put_config_accepts_lightweight_api_base_url_payload():
+    with TestClient(web_main.app) as client:
+        response = client.put("/api/config", json={"apiBaseUrl": "http://localhost:8001"})
+
+    assert response.status_code == 200
+    cfg = web_main._cfg_get()
+    assert cfg.api_base_url == "http://localhost:8001"
+
+
 def test_put_config_rejects_negative_budget():
     with TestClient(web_main.app) as client:
         response = client.put(
@@ -569,6 +578,38 @@ def test_task_detail_preserves_run_metadata_in_result(monkeypatch):
     assert result.get("run_children_exit_count") == 2
 
 
+def test_task_api_accepts_duration_alias_fields_and_unlimited_mapping(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_fuzz_logic(*args, **kwargs):
+        captured["time_budget"] = kwargs.get("time_budget")
+        captured["run_time_budget"] = kwargs.get("run_time_budget")
+        return {"ok": True}
+
+    monkeypatch.setattr(web_main, "fuzz_logic", _fake_fuzz_logic)
+
+    with TestClient(web_main.app) as client:
+        response = client.post(
+            "/api/task",
+            json={
+                "jobs": [
+                    {
+                        "code_url": "https://github.com/example/repo.git",
+                        "total_duration": -1,
+                        "single_duration": -1,
+                        "max_tokens": 0,
+                        "unlimited_round_limit": 7200,
+                    }
+                ],
+                "auto_init": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured.get("time_budget") == 0
+    assert captured.get("run_time_budget") == 0
+
+
 def test_list_tasks_returns_recent_tasks_with_child_summary():
     task_old = web_main._create_job("task", "batch")
     time.sleep(0.001)
@@ -584,7 +625,11 @@ def test_list_tasks_returns_recent_tasks_with_child_summary():
     items = response.json()["items"]
     assert len(items) == 2
     assert items[0]["job_id"] == task_new
-    assert items[0]["status"] == "running"
+    assert items[0]["status"] == "RUNNING"
+    assert items[0]["status_raw"] == "running"
+    assert items[0]["id"] == task_new
+    assert items[0]["stage"] == "RUNNING"
+    assert isinstance(items[0]["progress"], int)
     assert items[0]["child_count"] == 1
     assert items[0]["children_status"]["running"] == 1
     assert items[1]["job_id"] == task_old
@@ -626,6 +671,26 @@ def test_list_tasks_exposes_error_code_for_task_and_children():
     assert listing[0]["job_id"] == task_id
     assert listing[0]["error_code"] == "unknown_error"
     assert listing[0]["phase"] == "error"
+
+
+def test_system_status_contains_dynamic_frontend_blocks():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(task_id, status="running", children=[child_id])
+    web_main._job_update(child_id, status="running")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert "overview" in doc
+    assert "telemetry" in doc
+    assert "execution" in doc and "summary" in doc["execution"]
+    assert "tasks_tab_metrics" in doc
+    assert "total_jobs" in doc["tasks_tab_metrics"]
+    assert "success_rate" in doc["tasks_tab_metrics"]
+    assert isinstance(doc["telemetry"].get("performance_series"), list)
 
 
 def test_api_metrics_contains_job_counters():
