@@ -256,23 +256,28 @@ jobs:
             exit 1
           fi
 
-          # Prefer mirrored registry for image pulls in regions where registry.k8s.io is unstable.
           current_image="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
-          if [[ -n "${current_image}" ]]; then
-            mirrored_image="${current_image/registry.k8s.io/registry.cn-hangzhou.aliyuncs.com/google_containers}"
-            if [[ "${mirrored_image}" != "${current_image}" ]]; then
-              kubectl -n kube-system set image deployment/metrics-server metrics-server="${mirrored_image}" || true
-            fi
+          tag="$(printf '%s' "${current_image}" | sed -E 's|.*:([^:]+)$|\1|')"
+          if [[ -z "${tag}" || "${tag}" == "${current_image}" ]]; then
+            tag="v0.8.1"
           fi
+          image_candidates=(
+            "registry.cn-hangzhou.aliyuncs.com/google_containers/metrics-server:${tag}"
+            "registry.aliyuncs.com/google_containers/metrics-server:${tag}"
+            "k8s.m.daocloud.io/metrics-server/metrics-server:${tag}"
+            "registry.k8s.io/metrics-server/metrics-server:${tag}"
+          )
 
-          # Keep this patch idempotent; add args only when missing.
-          current_args="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)"
-          if [[ "${current_args}" != *"--kubelet-insecure-tls"* || "${current_args}" != *"--kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP"* ]]; then
-            kubectl -n kube-system patch deploy metrics-server --type='json' -p='[
-              {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"},
-              {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP"}
-            ]' || true
-          fi
+          # Set deterministic args (avoid repeated duplicate entries).
+          kubectl -n kube-system set args deployment/metrics-server \
+            --containers=metrics-server \
+            -- \
+            --cert-dir=/tmp \
+            --secure-port=10250 \
+            --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP \
+            --kubelet-use-node-status-port \
+            --metric-resolution=15s \
+            --kubelet-insecure-tls || true
 
           rollout_metrics_server() {
             # Proactively clear stuck terminating pods before waiting rollout.
@@ -280,21 +285,17 @@ jobs:
               -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{"\n"}{end}' | \
               awk '$2!=""{print $1}' | \
               xargs -r -I{} kubectl -n kube-system delete pod {} --force --grace-period=0 --wait=false || true
-
-            if kubectl -n kube-system rollout status deployment/metrics-server --timeout=600s; then
-              return 0
-            fi
-            echo "::warning::metrics-server rollout timed out; collecting diagnostics and retrying"
-            kubectl -n kube-system get deployment metrics-server -o wide || true
-            kubectl -n kube-system describe deployment metrics-server || true
-            kubectl -n kube-system get pods -l k8s-app=metrics-server -o wide || true
-            kubectl -n kube-system get events --sort-by=.lastTimestamp | tail -n 80 || true
-
-            # Force-remove stuck terminating pods before one final wait.
-            kubectl -n kube-system get pods -l k8s-app=metrics-server -o name | \
-              xargs -r -I{} kubectl -n kube-system delete {} --force --grace-period=0 --wait=false || true
-
-            kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s
+            for img in "${image_candidates[@]}"; do
+              echo "[metrics-server] trying image: ${img}"
+              kubectl -n kube-system set image deployment/metrics-server metrics-server="${img}" || true
+              if kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s; then
+                return 0
+              fi
+              echo "::warning::metrics-server rollout failed with image ${img}; trying next mirror"
+              kubectl -n kube-system get pods -l k8s-app=metrics-server -o wide || true
+              kubectl -n kube-system describe pod -l k8s-app=metrics-server | tail -n 120 || true
+            done
+            return 1
           }
 
           rollout_metrics_server
