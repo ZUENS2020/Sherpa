@@ -115,6 +115,14 @@ def _get_sherpa_git_mirrors() -> str:
     return os.environ.get("SHERPA_GIT_MIRRORS", "").strip()
 
 
+def _default_git_mirror_specs() -> List[str]:
+    # Built-in mirror-first defaults for GitHub clone stability.
+    return [
+        "https://ghfast.top/{url}",
+        "https://ghproxy.net/{url}",
+    ]
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -676,6 +684,8 @@ def _candidate_clone_urls(url: str) -> List[str]:
     sherpa_git_mirrors = _get_sherpa_git_mirrors()
     if sherpa_git_mirrors:
         mirror_specs.extend([p.strip() for p in sherpa_git_mirrors.split(",") if p.strip()])
+    else:
+        mirror_specs.extend(_default_git_mirror_specs())
 
     sherpa_github_mirror = _get_sherpa_github_mirror()
     if sherpa_github_mirror:
@@ -1874,8 +1884,14 @@ class NonOssFuzzHarnessGenerator:
                 export LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LIBRARY_PATH:+:$LIBRARY_PATH}}"
                 export LD_LIBRARY_PATH="$vcpkg_installed/$triplet/lib:$vcpkg_installed/$triplet/debug/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"
                 export PKG_CONFIG_PATH="$vcpkg_installed/$triplet/lib/pkgconfig${{PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}}"
-                export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
-                mkdir -p "$VCPKG_DOWNLOADS" || true
+                shared_downloads_default="/shared/tmp/vcpkg-downloads"
+                configured_downloads="${{SHERPA_VCPKG_DOWNLOADS_DIR:-$shared_downloads_default}}"
+                if mkdir -p "$configured_downloads" 2>/dev/null; then
+                    export VCPKG_DOWNLOADS="$configured_downloads"
+                else
+                    export VCPKG_DOWNLOADS="$repo_root/.vcpkg-downloads"
+                    mkdir -p "$VCPKG_DOWNLOADS" || true
+                fi
 
                 # Keep vcpkg asset downloads from stalling on first github attempt:
                 # install a local curl wrapper with mirror-first URL rewrite + short connect timeout.
@@ -2141,56 +2157,21 @@ EOF
         """
         instructions = textwrap.dedent(
             f"""
-            **Goal:** Analyze this repository and produce a realistic fuzz plan.
-            **Deliverables (create inside `{FUZZ_DIR}/`):**
-            1) `PLAN.md` — brief rationale describing the top 3–10 *public, attacker-reachable*
-               entrypoints (file/packet/string parsers) with justification for real-world reachability,
-               expected initialization, and any tricky preconditions.
-            2) `targets.json` — JSON array of ranked candidates with fields:
-               ```json
-               [{{"name": "...",
-                  "api": "...",
-                  "lang": "c-cpp|java",
-                  "target_type": "parser|decoder|archive|image|document|network|database|serializer|interpreter|generic",
-                  "proto": "const uint8_t*,size_t|byte[]|InputStream",
-                  "build_target": "cmake target or path if known",
-                  "reason": "...",
-                  "evidence": ["path:line", "..."]}}]
-               ```
-            TARGETS_JSON_SCHEMA:
-            targets.json field rules:
-            - `name` must use the source filename stem (strip `.cc`), for example `libarchive_7zip_fuzzer`
-            - `api` must use the source filename, for example `libarchive_7zip_fuzzer.cc`
-            - forbidden: do not use `LLVMFuzzerTestOneInput` as the `name` value
-            3) Choose the single **best** candidate for a first harness and record its canonical
-               fuzzer name (e.g., `xyz_format_fuzz`) at the top of `PLAN.md`.
-
-            **Rules:**
-            - Favor the highest-level API that ingests untrusted data (files/streams/packets).
-            - You MUST classify every chosen target into one `target_type` from this exact enum:
-              `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`,
-              `interpreter`, `generic`.
-            - Pick the most specific type available. For example:
-              - parse/scan/tokenize/read structured text or binary -> `parser`
-              - decode/decompress/inflate/unpack -> `decoder`
-              - tar/zip/archive extraction or listing -> `archive`
-              - emit/dump/serialize/write structured output -> `serializer`
-            - Avoid low-level helpers (e.g., `_read_u32`) unless nothing higher validates input.
-            - Prefer targets with small/clear init and good branch structure.
-                        - Prefer the **lowest dependency footprint** target first: prioritize APIs that compile with
-                            toolchain + repository-local code only (or standard runtime libs already present).
-                        - If a candidate requires extra system/dev packages (e.g. new `apt`/`dnf` libraries),
-                            rank it lower and choose an in-repo/low-dependency alternative when possible.
-            - If compile_commands.json is needed, note it in `PLAN.md`, but do not generate it yet.
-
-            **Do not run commands**; only write the files above and any small metadata you need.
-            MANDATORY: when finished, you MUST write the path to `{FUZZ_DIR}/PLAN.md` into `./done`.
-            If `./done` is missing, this step is treated as failed.
+            Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
+            Goal: produce `{FUZZ_DIR}/PLAN.md` and strict-schema `{FUZZ_DIR}/targets.json`.
+            Keep runtime-viable/public targets first. Avoid helper-only targets.
+            targets.json requirements:
+            - non-empty JSON array
+            - each item includes non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`
+            - forbidden: `name = LLVMFuzzerTestOneInput`
+            Do NOT run build/execute commands; read-only inspection commands are allowed.
+            MANDATORY: write `{FUZZ_DIR}/PLAN.md` into `./done`.
             """
         ).strip()
 
         stdout = self.patcher.run_codex_command(
             instructions,
+            stage_skill="plan",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_workflow_opencode_cli_retries(),
@@ -2215,88 +2196,22 @@ EOF
 
         instructions = textwrap.dedent(
             f"""
-            **Goal:** Create a *local* fuzzing scaffold for the chosen top target from `PLAN.md`.
-
-            Deep-understanding policy:
-            - Do not optimize for the fastest possible artifact output.
-            - First read enough repository/build context to explain the real link path.
-            - Before treating synthesis as complete, create `fuzz/repo_understanding.json` with grounded build facts.
-
-            **Requirements (create under `{FUZZ_DIR}/`):**
-            - **`repo_understanding.json`**:
-                - Record only these fields:
-                  `build_system`, `candidate_library_inputs`, `chosen_target_api`, `chosen_target_reason`,
-                  `extra_sources`, `include_dirs`, `fuzzer_entry_strategy`, `constraints`, `evidence`.
-                - `evidence` must be a non-empty array of concrete repository/build references.
-            - One harness:
-              - **C/C++**: `<name>_fuzz.cc` implementing:
-                ```c++
-                extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
-                    // minimal realistic init; call the public API; no stubs; no UB
-                }}
-                ```
-              - **Java**: `<Name>Fuzzer.java` compatible with **Jazzer**.
-                        - **`build.py`**:
-                            - Cross-platform, non-interactive build script runnable as `(cd fuzz && python build.py)`.
-                            - Resolve all paths from `Path(__file__).resolve()` so it works regardless of caller cwd.
-                            - Detect common build systems (CMake/Meson/Autotools/Make) and do the minimal work to build the library and the fuzzer.
-                            - For CMake-based builds, define and use default configure args:
-                              - `DEFAULT_CMAKE_ARGS = [`
-                              - `    "-DENABLE_TEST=OFF",`
-                              - `    "-DENABLE_INSTALL=OFF",`
-                              - `]`
-                              Apply them by default unless repository facts explicitly require overrides.
-                            - Include reusable static-library discovery scaffolding with candidate constants and helper function,
-                              for example:
-                              - `STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']` (adapt to target lib names)
-                              - `SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']` (adapt to repo layout)
-                              - `def find_static_lib(repo_root, lib_name_pattern): ...`
-                              Prefer candidate paths first, then recursive glob fallback.
-                            - For C/C++: prefer **clang/clang++** and produce a libFuzzer-style binary when possible.
-                            - Emit fuzzer binaries into `{FUZZ_OUT_DIR}/`.
-                            - For Java: fetch/setup **Jazzer** locally and emit runnable target(s) into `{FUZZ_OUT_DIR}/`.
-                        - **`build_strategy.json`**:
-                            - Record build-scaffold strategy fields:
-                              `build_system`, `build_mode`, `library_targets`, `library_artifacts`,
-                              `include_dirs`, `extra_sources`, `fuzzer_entry_strategy`, `reason`, `evidence`,
-                              `repo_fuzz_targets`, `selected_repo_target`.
-                            - `build_mode` MUST be `repo_target`, `library_link`, or `custom_script`.
-                            - Only use `repo_target` if the exact target name is grounded in repository files/build metadata.
-                            - Keep it consistent with `repo_understanding.json`; do not leave `build_system` at `unknown`
-                              if repository files already reveal the concrete build system.
-            - **.options** (libFuzzer) near each binary if helpful (e.g., `-max_len={self.max_len}`).
-            - **README.md** explaining the entrypoint and how to run the fuzzer.
-            - Ensure seeds will be looked up from `{FUZZ_CORPUS_DIR}/<fuzzer_name>/`.
-                        - If external system packages are strictly required, create `{FUZZ_SYSTEM_PACKAGES_FILE}`
-                            with one vcpkg port name per line (comments with `#` are allowed, no shell commands).
-                            Use canonical port names (for example `zlib`, `bzip2`, `liblzma`, `lz4`), never aliases like `z`, `bz2`, `lzma`.
-
-            **Critical constraints:**
-            - Use **public/documented APIs**; avoid low-level helpers.
-            - Perform **minimal real-world init** (contexts/handles via proper constructors).
-            - Avoid harness mistakes (double-free, wrong types, lifetime bugs).
-                        - Keep dependency footprint minimal: prefer targets/build paths that require no new
-                            external system packages beyond the existing image/toolchain.
-                        - Do not introduce new third-party library dependencies just to make a harness compile;
-                            if the selected target needs unavailable deps, choose a lower-dependency target instead.
-            - Do not vendor large third-party code; use the repo as-is.
-            - Prefer `compile_commands.json` if available; otherwise add just enough build glue in `build.py`.
-            - You may invoke a repository-provided fuzz target only if the exact target name is first grounded in repository files/build metadata and recorded in both `repo_understanding.json` and `build_strategy.json`.
-            - Never invoke guessed targets such as `cmake --build --target <name>-fuzzer`.
-            - Do not infer that `test/fuzzing/`, `main.cc`, or `fuzzer-common.h` alone means a repository fuzz target should be built.
-            - If the repository has a reusable `main.cc`, treat it as a normal source file input, not a build target.
-            - Prefer external harness linking by default, but use a real repository fuzz target when that target is clearly identified and more faithful.
-            - Non-root runtime rule: do not add install-to-system-dir steps (`-DENABLE_INSTALL=ON`, `cmake --install`, `--target install`); use build-tree artifacts directly.
-            - Do not consider the task complete if you only produced a harness/build script without a grounded repository-understanding file.
-
-            **Acceptance criteria:**
-            - After `(cd {FUZZ_DIR} && python build.py)`, at least one fuzzer binary must exist in `{FUZZ_OUT_DIR}/`.
-            - The harness compiles with symbols; ASan/UBSan enabled for C/C++.
-            - The harness reaches some code with a trivial input (will be tested soon).
-
-            Do not run any commands here; only create/modify files.
-            MANDATORY: when finished, you MUST write `{FUZZ_OUT_DIR}` into `./done`.
-            If `./done` is missing, this step is treated as failed.
+            Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
+            Goal: synthesize a complete fuzz scaffold under `{FUZZ_DIR}`.
+            Required outputs:
+            - harness source file(s)
+            - `fuzz/build.py` or `fuzz/build.sh`
+            - `fuzz/repo_understanding.json`
+            - `fuzz/build_strategy.json`
+            - `fuzz/build_runtime_facts.json`
+            - `fuzz/README.md`
+            Build constraints:
+            - keep `DEFAULT_CMAKE_ARGS` with `-DENABLE_TEST=OFF` and `-DENABLE_INSTALL=OFF`
+            - do not hardcode a single artifact path; use discovery
+            - if external deps are required, write canonical vcpkg port names to `{FUZZ_SYSTEM_PACKAGES_FILE}`
+            Keep selected/observed target alignment and record drift reasons.
+            Do NOT run build/execute commands; read-only inspection commands are allowed.
+            MANDATORY: write `{FUZZ_OUT_DIR}` into `./done`.
             """
         ).strip()
 
@@ -2307,6 +2222,7 @@ EOF
         stdout = self.patcher.run_codex_command(
             instructions,
             additional_context=context,
+            stage_skill="synthesize",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_workflow_opencode_cli_retries(),
@@ -2944,7 +2860,16 @@ EOF
         *,
         required_families: list[str] | None = None,
     ) -> tuple[list[Path], dict[str, Any]]:
-        search_roots = ["tests", "examples", "regression-inputs", "testdata", "samples", "docs"]
+        search_roots = [
+            "contrib/oss-fuzz",
+            "tests/examples/testdata",
+            "tests",
+            "examples",
+            "regression-inputs",
+            "testdata",
+            "samples",
+            "docs",
+        ]
         structured_text_suffixes = {".txt", ".yaml", ".yml", ".json", ".xml", ".ini", ".cfg", ".conf", ".toml"}
         binary_suffixes = {".bin", ".dat", ".arc", ".zip", ".tar", ".gz", ".xz", ".png", ".jpg", ".jpeg", ".gif"}
         source_blacklist = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".html", ".md", ".rst", ".cmake", ".py", ".js", ".ts"}
@@ -2957,6 +2882,18 @@ EOF
         family_limits: dict[str, int] = {}
         required_set = set(required_families or [])
         max_seed_file = self._seed_max_file_bytes()
+        imported_zip_count = 0
+        imported_zip_rejected = 0
+
+        if seed_profile == "archive-container":
+            imported_zip_count, imported_zip_rejected = self._import_repo_corpus_zip(
+                corpus_dir=corpus_dir,
+                seen_hashes=seen_hashes,
+                max_seed_file=max_seed_file,
+                max_keep=12,
+            )
+            if imported_zip_count > 0:
+                accepted += imported_zip_count
 
         def _under_sample_dir(path: Path) -> bool:
             parts = [part.lower() for part in path.parts]
@@ -3119,13 +3056,17 @@ EOF
                 accepted += 1
                 for family in _classify_seed_family(dest):
                     family_limits[family] = family_limits.get(family, 0) + 1
+        if imported_zip_rejected > 0:
+            rejected += imported_zip_rejected
         return selected, {
-            "sources": ["repo_examples"] if selected else [],
+            "sources": ["repo_examples"] if (selected or imported_zip_count > 0) else [],
             "accepted_count": accepted,
             "rejected_count": rejected,
             "filtered": True,
             "family_limits": family_limits,
             "required_families": sorted(required_set),
+            "imported_corpus_zip_count": imported_zip_count,
+            "imported_corpus_zip_rejected": imported_zip_rejected,
         }
 
     def _default_archive_seed_samples(self) -> list[tuple[str, bytes]]:
@@ -3166,6 +3107,86 @@ EOF
             pass
 
         return samples
+
+    def _archive_seed_is_semantically_valid(self, path: Path, data: bytes | None = None) -> bool:
+        suffix = path.suffix.lower()
+        raw = data
+        if raw is None:
+            try:
+                raw = path.read_bytes()
+            except Exception:
+                return False
+        if not raw:
+            return False
+        try:
+            if suffix == ".zip":
+                if len(raw) < 4 or raw[:2] != b"PK":
+                    return False
+                with zipfile.ZipFile(io.BytesIO(raw), mode="r") as zf:
+                    return len(zf.namelist()) > 0
+            if suffix == ".tar":
+                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tf:
+                    members = tf.getmembers()
+                    return len(members) > 0
+            if suffix == ".gz":
+                _ = gzip.decompress(raw)
+                return True
+            if suffix == ".bz2":
+                _ = bz2.decompress(raw)
+                return True
+            if suffix == ".xz":
+                _ = lzma.decompress(raw)
+                return True
+        except Exception:
+            return False
+        return True
+
+    def _import_repo_corpus_zip(
+        self,
+        *,
+        corpus_dir: Path,
+        seen_hashes: set[str],
+        max_seed_file: int,
+        max_keep: int,
+    ) -> tuple[int, int]:
+        zip_path = self.repo_root / "contrib" / "oss-fuzz" / "corpus.zip"
+        if not zip_path.is_file():
+            return 0, 0
+        imported = 0
+        rejected = 0
+        try:
+            with zipfile.ZipFile(zip_path, mode="r") as zf:
+                for info in zf.infolist():
+                    if imported >= max_keep:
+                        break
+                    if info.is_dir():
+                        continue
+                    if info.file_size <= 0 or info.file_size > max_seed_file:
+                        rejected += 1
+                        continue
+                    try:
+                        data = zf.read(info.filename)
+                    except Exception:
+                        rejected += 1
+                        continue
+                    digest = hashlib.sha256(data).hexdigest()
+                    if digest in seen_hashes:
+                        rejected += 1
+                        continue
+                    ext = Path(info.filename).suffix.lower()
+                    if ext not in {".zip", ".tar", ".gz", ".bz2", ".xz", ".bin", ".dat"}:
+                        ext = ".bin"
+                    dest = corpus_dir / f"repo_{imported+1:02d}{ext}"
+                    try:
+                        dest.write_bytes(data)
+                    except Exception:
+                        rejected += 1
+                        continue
+                    seen_hashes.add(digest)
+                    imported += 1
+        except Exception:
+            return 0, 0
+        return imported, rejected
 
     def _summarize_seed_corpus(self, corpus_dir: Path) -> str:
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
@@ -3232,13 +3253,34 @@ EOF
             return 8192
 
     def _seed_radamsa_max_file_bytes(self) -> int:
-        raw = (os.environ.get("SHERPA_RADAMSA_MAX_FILE_BYTES") or "").strip()
+        raw = (os.environ.get("SHERPA_RADAMSA_MAX_FILE_BYTES") or "4096").strip()
         if not raw:
             return self._seed_max_file_bytes()
         try:
             return max(512, min(int(raw), 262144))
         except Exception:
             return self._seed_max_file_bytes()
+
+    def _seed_archive_validate_enabled(self) -> bool:
+        raw = (os.environ.get("SHERPA_SEED_ARCHIVE_VALIDATE_ENABLED") or "1").strip().lower()
+        if not raw:
+            return True
+        return raw in {"1", "true", "yes", "on"}
+
+    def _seed_archive_min_valid_ratio(self) -> float:
+        raw = (os.environ.get("SHERPA_SEED_ARCHIVE_MIN_VALID_RATIO") or "0.60").strip()
+        try:
+            ratio = float(raw)
+        except Exception:
+            return 0.60
+        return max(0.10, min(ratio, 1.0))
+
+    def _seed_corpus_min_per_target(self) -> int:
+        raw = (os.environ.get("SHERPA_SEED_CORPUS_MIN_PER_TARGET") or "16").strip()
+        try:
+            return max(4, min(int(raw), 128))
+        except Exception:
+            return 16
 
     def _seed_max_total_bytes(self) -> int:
         raw = (os.environ.get("SHERPA_SEED_MAX_TOTAL_BYTES") or "524288").strip()
@@ -3247,15 +3289,22 @@ EOF
         except Exception:
             return 524288
 
-    def _run_radamsa_bootstrap(self, corpus_dir: Path) -> int:
+    def _run_radamsa_bootstrap(self, corpus_dir: Path, *, seed_profile: str = "") -> int:
         radamsa = which("radamsa")
         if not radamsa:
             print("[warn] radamsa not found; skipping corpus mutation")
             return 0
         base_files = [p for p in sorted(corpus_dir.iterdir()) if p.is_file()][:12]
+        if seed_profile == "archive-container":
+            base_files = [
+                p for p in base_files
+                if p.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz"} and self._archive_seed_is_semantically_valid(p)
+            ]
         if not base_files:
             return 0
         created = 0
+        attempted = 0
+        invalid = 0
         total_bytes = sum((p.stat().st_size for p in corpus_dir.iterdir() if p.is_file()), 0)
         max_total = self._seed_max_total_bytes()
         max_file = self._seed_radamsa_max_file_bytes()
@@ -3267,9 +3316,17 @@ EOF
                 proc = subprocess.run([radamsa, str(path)], capture_output=True)
                 if proc.returncode != 0 or not proc.stdout:
                     continue
+                attempted += 1
                 data = proc.stdout[: min(len(proc.stdout), max_file)]
                 if not data:
                     continue
+                if seed_profile == "archive-container" and path.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz"}:
+                    if not self._archive_seed_is_semantically_valid(dest, data):
+                        invalid += 1
+                        invalid_ratio = float(invalid) / float(max(1, attempted))
+                        if invalid_ratio > 0.40:
+                            return created
+                        continue
                 if total_bytes + len(data) > max_total:
                     return created
                 dest.write_bytes(data)
@@ -3299,6 +3356,8 @@ EOF
         oversized_rejected = 0
         total_pruned_count = 0
         total_pruned_bytes = 0
+        archive_valid_count = 0
+        archive_invalid_count = 0
         family_caps: dict[str, int] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
@@ -3329,6 +3388,18 @@ EOF
             if textual_mode and not _looks_textual_seed(path):
                 reject = True
                 noise_rejected += 1
+            if (
+                not reject
+                and seed_profile == "archive-container"
+                and self._seed_archive_validate_enabled()
+                and path.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz"}
+            ):
+                if self._archive_seed_is_semantically_valid(path, data):
+                    archive_valid_count += 1
+                else:
+                    archive_invalid_count += 1
+                    reject = True
+                    noise_rejected += 1
             digest = hashlib.sha256(data).hexdigest()
             if not reject and digest in content_hashes:
                 reject = True
@@ -3416,6 +3487,13 @@ EOF
             "seed_max_file_bytes": max_file,
             "seed_radamsa_max_file_bytes": max_radamsa_file,
             "seed_max_total_bytes": max_total,
+            "archive_valid_count": archive_valid_count,
+            "archive_invalid_count": archive_invalid_count,
+            "archive_valid_ratio": (
+                float(archive_valid_count) / float(max(1, archive_valid_count + archive_invalid_count))
+                if seed_profile == "archive-container"
+                else 1.0
+            ),
             "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
         }
 
@@ -3466,7 +3544,7 @@ EOF
         )
         sources = list(repo_meta.get("sources") or [])
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
-        target_corpus_files = max(8, len(required_families) * 2)
+        target_corpus_files = max(self._seed_corpus_min_per_target(), len(required_families) * 2)
         per_family_target = 2 if required_families else 1
 
         instructions = textwrap.dedent(
@@ -3562,7 +3640,7 @@ EOF
         ai_seed_count = len([p for p in corpus_dir.iterdir() if p.is_file()]) - len(repo_seed_files)
         if ai_seed_count < 0:
             ai_seed_count = 0
-        radamsa_count = self._run_radamsa_bootstrap(corpus_dir)
+        radamsa_count = self._run_radamsa_bootstrap(corpus_dir, seed_profile=seed_profile)
         if radamsa_count > 0:
             sources.append("radamsa")
         if ai_seed_count > 0:
@@ -3581,6 +3659,38 @@ EOF
                 str(execution_target.get("api") or ""),
             ],
         )
+        archive_valid_ratio = float(filtered_meta.get("archive_valid_ratio") or 1.0)
+        if (
+            seed_profile == "archive-container"
+            and self._seed_archive_validate_enabled()
+            and archive_valid_ratio < self._seed_archive_min_valid_ratio()
+        ):
+            print(
+                "[warn] archive seed valid ratio below threshold "
+                f"for {fuzzer_name}: ratio={archive_valid_ratio:.2f} "
+                f"threshold={self._seed_archive_min_valid_ratio():.2f}"
+            )
+        seed_quality_path = self.fuzz_dir / f"seed_quality_{re.sub(r'[^A-Za-z0-9_.-]+', '_', fuzzer_name)}.json"
+        seed_quality_doc = {
+            "fuzzer": fuzzer_name,
+            "seed_profile": seed_profile,
+            "target_type": target_type,
+            "seed_profile_source": seed_profile_source,
+            "required_families": required_families,
+            "optional_families": optional_families,
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
+            "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "archive_valid_count": int(filtered_meta.get("archive_valid_count") or 0),
+            "archive_invalid_count": int(filtered_meta.get("archive_invalid_count") or 0),
+            "archive_valid_ratio": archive_valid_ratio,
+        }
+        try:
+            seed_quality_path.write_text(json.dumps(seed_quality_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
         self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = {
             "counts": {
                 "repo_examples": len(repo_seed_files),
@@ -3606,11 +3716,15 @@ EOF
             "seed_max_file_bytes": int(filtered_meta.get("seed_max_file_bytes") or self._seed_max_file_bytes()),
             "seed_radamsa_max_file_bytes": int(filtered_meta.get("seed_radamsa_max_file_bytes") or self._seed_radamsa_max_file_bytes()),
             "seed_max_total_bytes": int(filtered_meta.get("seed_max_total_bytes") or self._seed_max_total_bytes()),
+            "archive_valid_count": int(filtered_meta.get("archive_valid_count") or 0),
+            "archive_invalid_count": int(filtered_meta.get("archive_invalid_count") or 0),
+            "archive_valid_ratio": archive_valid_ratio,
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
             "seed_exploration_path": str(seed_exploration_path.relative_to(self.repo_root)) if seed_exploration_path.is_file() else "",
             "seed_check_path": str(seed_check_path.relative_to(self.repo_root)) if seed_check_path.is_file() else "",
+            "seed_quality_path": str(seed_quality_path.relative_to(self.repo_root)) if seed_quality_path.is_file() else "",
         }
         if not seed_exploration_path.is_file():
             print(f"[warn] seed exploration summary missing for {fuzzer_name}: {seed_exploration_path.relative_to(self.repo_root)}")

@@ -258,6 +258,14 @@ def test_run_codex_command_prompt_uses_real_repo_root_in_native_mode(
     assert "mounted at /repo" not in prompt
 
 
+def test_compact_text_for_opencode_does_not_truncate() -> None:
+    src = "\n".join(f"line-{i}" for i in range(1, 401))
+    out = ch._compact_text_for_opencode(src, max_lines=10, max_chars=200)
+    assert out == src
+    assert "... [truncated] ..." not in out
+    assert "lines omitted" not in out
+
+
 def test_run_codex_command_materializes_long_inputs_to_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -306,5 +314,337 @@ def test_run_codex_command_materializes_long_inputs_to_files(
     context_file = helper.working_dir / ".git" / "sherpa-opencode" / "additional_context.txt"
     assert task_file.is_file()
     assert context_file.is_file()
-    assert len(task_file.read_text(encoding="utf-8").splitlines()) <= 50
-    assert len(context_file.read_text(encoding="utf-8").splitlines()) <= 50
+    task_lines = task_file.read_text(encoding="utf-8").splitlines()
+    ctx_lines = context_file.read_text(encoding="utf-8").splitlines()
+    assert len(task_lines) == 220
+    assert len(ctx_lines) == 260
+    assert task_lines[-1] == "task line 219"
+    assert ctx_lines[-1] == "context line 259"
+
+
+def test_run_codex_command_injects_global_policy_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert ".git/sherpa-opencode/opencode_policy.md" in prompt
+    policy_file = helper.working_dir / ".git" / "sherpa-opencode" / "opencode_policy.md"
+    assert policy_file.is_file()
+
+
+def test_run_codex_command_policy_missing_falls_back_without_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("SHERPA_OPENCODE_POLICY_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_OPENCODE_POLICY_PATH", str(tmp_path / "missing-policy.md"))
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert ".git/sherpa-opencode/opencode_policy.md" not in prompt
+
+
+def test_run_codex_command_can_disable_policy_injection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+    policy_path = tmp_path / "custom-policy.md"
+    policy_path.write_text("policy text\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_OPENCODE_POLICY_PATH", str(policy_path))
+    monkeypatch.setenv("SHERPA_OPENCODE_POLICY_ENABLED", "0")
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert ".git/sherpa-opencode/opencode_policy.md" not in prompt
+
+
+def test_run_codex_command_injects_stage_skill_when_requested(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert "Follow the stage contract for done content exactly." in prompt
+    assert "Example: `echo fuzz/build.py > done`" not in prompt
+    assert ".git/sherpa-opencode/stage_skill_plan.md" in prompt
+    skill_file = helper.working_dir / ".git" / "sherpa-opencode" / "stage_skill_plan.md"
+    assert skill_file.is_file()
+
+
+def test_run_codex_command_stage_skill_missing_falls_back_when_not_strict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_STRICT", "0")
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_PATH", str(tmp_path / "missing-skills-root"))
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = args[0]
+        done_path.write_text("fuzz/PLAN.md\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/PLAN.md"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    cmd = captured.get("cmd")
+    assert isinstance(cmd, list)
+    prompt = str(cmd[-1])
+    assert ".git/sherpa-opencode/stage_skill_plan.md" not in prompt
+
+
+def test_run_codex_command_stage_skill_missing_raises_when_strict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_STRICT", "1")
+    monkeypatch.setenv("SHERPA_OPENCODE_STAGE_SKILLS_PATH", str(tmp_path / "missing-skills-root"))
+
+    with pytest.raises(RuntimeError, match="stage skill missing"):
+        helper.run_codex_command(
+            "produce fuzz plan",
+            stage_skill="plan",
+            max_attempts=1,
+            max_cli_retries=1,
+            timeout=3,
+        )
+
+
+def test_run_codex_command_reuses_session_between_plan_and_synthesize(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls: list[list[str]] = []
+
+    def _fake_popen(*args, **kwargs):
+        cmd = list(args[0])
+        calls.append(cmd)
+        done_path.write_text("fuzz/out/\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        return "" if diff_calls["n"] in {1, 3} else "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out1 = helper.run_codex_command(
+        "plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+    out2 = helper.run_codex_command(
+        "synthesize",
+        stage_skill="synthesize",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out1 is not None
+    assert out2 is not None
+    assert len(calls) == 2
+    assert "--continue" not in calls[0]
+    assert "--continue" in calls[1]
+    state_path = helper.working_dir / ".git" / "sherpa-opencode" / "session_state.json"
+    assert state_path.is_file()
+    state = ch.json.loads(state_path.read_text(encoding="utf-8"))
+    groups = state.get("session_groups") or {}
+    assert "planning_synth" in groups
+
+
+def test_run_codex_command_fix_build_does_not_reuse_planning_synth_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls: list[list[str]] = []
+
+    def _fake_popen(*args, **kwargs):
+        cmd = list(args[0])
+        calls.append(cmd)
+        done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        return "" if diff_calls["n"] in {1, 3} else "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out1 = helper.run_codex_command(
+        "plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+    out2 = helper.run_codex_command(
+        "fix build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out1 is not None
+    assert out2 is not None
+    assert len(calls) == 2
+    assert "--continue" not in calls[0]
+    assert "--continue" not in calls[1]

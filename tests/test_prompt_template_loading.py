@@ -20,13 +20,13 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     assert "synthesize_with_hint" in templates
     assert "synthesize_complete_scaffold" in templates
     assert "fix_build_execute" in templates
+    assert "fix_crash_harness_error" in templates
+    assert "fix_crash_upstream_bug" in templates
+    assert "plan_fix_targets_schema" in templates
     assert "./done" in templates["plan_with_hint"]
     assert "./done" in templates["synthesize_with_hint"]
     assert "./done" in templates["synthesize_complete_scaffold"]
     assert "./done" in templates["fix_build_execute"]
-    assert "./done" in templates["fix_crash_harness_error"]
-    assert "./done" in templates["fix_crash_upstream_bug"]
-    assert "./done" in templates["plan_fix_targets_schema"]
     assert "TEMPLATE:" not in templates["plan_with_hint"]
 
 
@@ -37,63 +37,38 @@ def test_render_opencode_prompt_replaces_placeholders():
     assert "{{hint}}" not in out
 
 
-def test_plan_prompt_hardens_targets_schema_on_first_attempt():
+def test_plan_prompt_references_stage_skill_and_schema_contract():
     workflow_common.load_opencode_prompt_templates.cache_clear()
     out = workflow_common.render_opencode_prompt("plan_with_hint", hint="schema-check")
 
-    assert "MUST be plain JSON" in out
-    assert "MUST be a JSON array" in out
-    assert "Never wrap the array inside another object" in out
-    assert '"lang": "c-cpp"' in out
-    assert '"target_type": "parser"' in out
-    assert "Put the best runtime target first" in out
-    assert "Do not put compile-only, constexpr-only, detail/helper" in out
+    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in out
+    assert "strict-schema `fuzz/targets.json`" in out
+    assert "`name`, `api`, `lang`, `target_type`, `seed_profile`" in out
+    assert "Keep runtime-viable/public entrypoints first." in out
 
 
-def test_synthesize_prompts_require_observed_target_alignment():
+def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     workflow_common.load_opencode_prompt_templates.cache_clear()
     synth = workflow_common.render_opencode_prompt("synthesize_with_hint", hint="runtime-first")
     scaffold = workflow_common.render_opencode_prompt("synthesize_complete_scaffold", missing_items="- fuzz/build.py")
 
-    assert "fuzz/observed_target.json" in synth
-    assert "fuzz/repo_understanding.json" in synth
-    assert "fuzz/build_runtime_facts.json" in synth
-    assert "must agree on one final external/library API" in synth
-    assert "`Harness file: ...`" in synth
-    assert "local helper/checker/wrapper" in synth
-    assert "Do not optimize for early artifact output" in synth
-    assert "MANDATORY OUTPUT CHECKLIST" in synth
-    assert "If blocked, still create minimal valid versions" in synth
-    assert "First create minimal skeleton artifacts immediately" not in synth
-    assert "You may use a repository-provided fuzz target only when" in synth
-    assert "drift only when repository facts prove it is not directly fuzzable" in synth
-    assert "`rejected_targets`" in synth
-    assert "near-miss candidates and why they were rejected" in synth
-    assert "enumerate at least 3 concrete seed families" in synth
-    assert "actual corpus example or planned corpus file pattern" in synth
-    assert "do not use `-lfuzzer`" in synth
-    assert "input-size guard" in synth
-    assert "if (size > 8192) return 0;" in synth
-    assert "FIRST-PASS QUALITY GATE" in synth
-    assert "you MUST declare matching vcpkg ports" in synth
-    assert "Never keep contradictory \"feature disabled but still linked\" states" in synth
-    assert "STATIC_LIB_NAMES = ['libarchive.a', 'libarchive_static.a']" in synth
-    assert "SEARCH_PATHS = ['build/libarchive/', '.libs/', 'libarchive/build/']" in synth
-    assert "def find_static_lib(repo_root, lib_name_pattern):" in synth
-    assert "DEFAULT_CMAKE_ARGS = [" in synth
-    assert "\"-DENABLE_TEST=OFF\"" in synth
-    assert "\"-DENABLE_INSTALL=OFF\"" in synth
-    assert "fuzz/observed_target.json" in scaffold
-    assert "fuzz/repo_understanding.json" in scaffold
+    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in synth
+    assert "`fuzz/repo_understanding.json`" in synth
+    assert "`fuzz/build_strategy.json`" in synth
+    assert "`fuzz/build_runtime_facts.json`" in synth
+    assert "DEFAULT_CMAKE_ARGS" in synth
+    assert "-DENABLE_TEST=OFF" in synth
+    assert "-DENABLE_INSTALL=OFF" in synth
+    assert "read-only exploration commands are allowed" in synth.lower()
+    assert "Do NOT run build/execute commands." in synth
+
+    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
+    assert "partial scaffold" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
-    assert "MANDATORY OUTPUT CHECKLIST" in scaffold
-    assert "If `fuzz/build_strategy.json` is missing" in scaffold
-    assert "never reference missing scaffold files" in scaffold
-    assert "record the rejected original target and repository-grounded reason" in scaffold
-    assert "avoid high-level repository summaries with no execution consequences" in scaffold
+    assert "missing items" in scaffold.lower()
 
 
-def test_fix_build_prompt_prefers_target_alignment_and_concrete_seed_repairs():
+def test_fix_build_prompt_references_policy_and_context():
     workflow_common.load_opencode_prompt_templates.cache_clear()
     out = workflow_common.render_opencode_prompt(
         "fix_build_execute",
@@ -101,14 +76,94 @@ def test_fix_build_prompt_prefers_target_alignment_and_concrete_seed_repairs():
         codex_hint="tighten scaffold",
     )
 
-    assert "If the selected target and observed target disagree" in out
-    assert "repair that mismatch before incremental build tweaks" in out
-    assert "rejected alternatives" in out
-    assert "concrete seed families tied to target semantics" in out
-    assert "If `fuzz/build_runtime_facts.json` is missing or weak" in out
-    assert "forbidden link flags" in out
-    assert "input-size guard" in out
-    assert "cannot find -l..." in out
-    assert "MUST create or update `fuzz/system_packages.txt` in the same attempt" in out
-    assert "First repair pass must be build-ready" in out
-    assert "Prefer a reusable helper (`find_static_lib`)" in out
+    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in out
+    assert "fuzz/build_full.log" in out
+    assert "tighten scaffold" in out
+    assert "only modify files under `fuzz/` and `./done`" in out
+
+
+def test_global_policy_document_contains_core_rules():
+    policy = (
+        ROOT
+        / "harness_generator"
+        / "src"
+        / "langchain_agent"
+        / "prompts"
+        / "opencode_global_policy.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Default to minimal linking" in policy
+    assert "Do not hardcode a single build artifact path." in policy
+    assert "Allowed: read-only inspection commands" in policy
+    assert "Forbidden: `name = \"LLVMFuzzerTestOneInput\"`." in policy
+
+
+def test_stage_skills_include_exact_build_template_block():
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    required_stages = ["synthesize", "fix_build"]
+    for stage in required_stages:
+        text = (skill_root / stage / "SKILL.md").read_text(encoding="utf-8")
+        assert 'DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]' in text
+        assert "def find_static_lib(repo_root):" in text
+        assert '["find", str(repo_root), "-name", "*.a", "-type", "f"]' in text
+        assert "capture_output=True, text=True, timeout=60" in text
+        assert 'for p in result.stdout.strip().split("\\n"):' in text
+        assert 'if "test" not in p.name.lower() and p.exists():' in text
+
+
+def test_synthesize_skills_require_harness_output_and_self_check():
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    synth = (skill_root / "synthesize" / "SKILL.md").read_text(encoding="utf-8")
+    complete = (skill_root / "synthesize_complete_scaffold" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "harness-first contract" in synth
+    assert "harness file count is >= 1" in synth
+    assert "Harness file:` points to an existing harness file under `fuzz/`." in synth
+    assert "chosen_target_api" in synth
+    assert "chosen_target_reason" in synth
+    assert "fuzzer_entry_strategy" in synth
+    assert "evidence" in synth
+    assert "minimal valid template" in synth
+    assert "must be a target API identifier" in synth
+    assert "forbidden examples: `fuzz/xxx_fuzz.cc`" in synth
+    assert "build_system` must not be `unknown`" in synth
+    assert "evidence` must be a non-empty string array" in synth
+    assert "never use shell substitutions like `$(nproc)`" in synth
+    assert '["-j", str(os.cpu_count() or 1)]' in synth
+    assert "def build_fuzzers():" in synth
+    assert "static_lib = find_static_lib(BUILD_DIR) or find_static_lib(REPO_ROOT)" in synth
+    assert '"clang++"' in synth
+    assert "-fsanitize=address,undefined,fuzzer" in synth
+    assert '"cmake", "-S", str(REPO_ROOT), "-B", str(BUILD_DIR)' in synth
+
+    assert "if harness source is missing" in complete
+    assert "if harness was missing before this step, harness exists after this step." in complete
+    assert "repo_understanding.json" in complete
+    assert "repair it in place" in complete
+    assert "minimal valid shape example" in complete
+    assert "semantically invalid" in complete
+    assert "not a harness file path" in complete
+    assert 'build_system.lower() != "unknown"' in complete
+    assert "`$(nproc)`" in complete
+    assert '["-j", str(os.cpu_count() or 1)]' in complete
+
+
+def test_other_stage_skills_include_runtime_contract_clauses():
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    plan = (skill_root / "plan" / "SKILL.md").read_text(encoding="utf-8")
+    plan_fix = (skill_root / "plan_fix_targets_schema" / "SKILL.md").read_text(encoding="utf-8")
+    fix_build = (skill_root / "fix_build" / "SKILL.md").read_text(encoding="utf-8")
+    fix_crash_h = (skill_root / "fix_crash_harness_error" / "SKILL.md").read_text(encoding="utf-8")
+    fix_crash_u = (skill_root / "fix_crash_upstream_bug" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
+    assert "`api` must describe a target API identifier" in plan
+    assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
+    assert "semantic reminder: do not rewrite `api` to harness file paths" in plan_fix
+    assert "canonical vcpkg examples" in fix_build
+    assert "`zlib`, `bzip2`, `liblzma`" in fix_build
+    assert "do not bypass workflow acceptance" in fix_build
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
+    assert "do not bypass acceptance by tampering" in fix_crash_h
+    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
+    assert "do not bypass acceptance by tampering" in fix_crash_u

@@ -71,12 +71,14 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_counts_raw: dict[str, int]
     coverage_seed_counts_filtered: dict[str, int]
     coverage_seed_noise_rejected_count: int
+    coverage_missing_execution_targets: list[str]
     coverage_seed_family_coverage: dict[str, Any]
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
     selected_targets_path: str
+    execution_plan_path: str
     repo_understanding_path: str
     build_strategy_path: str
     build_mode: str
@@ -359,6 +361,124 @@ def _opencode_done_path(repo_root: Path) -> Path:
     return repo_root / "done"
 
 
+def _opencode_feedback_dir(repo_root: Path) -> Path:
+    return repo_root / ".git" / "sherpa-opencode" / "feedback"
+
+
+def _feedback_group_for_stage(stage: str) -> str:
+    s = str(stage or "").strip().lower()
+    if s in {"plan", "plan_fix_targets_schema", "synthesize", "synthesize_complete_scaffold"}:
+        return "planning_synth"
+    if s == "fix_build":
+        return "fix_build"
+    if s in {"fix_crash_harness_error", "fix_crash_upstream_bug"}:
+        return "fix_crash"
+    return s or "default"
+
+
+def _feedback_file_for_stage(repo_root: Path, stage: str) -> Path:
+    safe = re.sub(r"[^a-z0-9_.-]+", "-", str(stage or "unknown").strip().lower()).strip("-") or "unknown"
+    return _opencode_feedback_dir(repo_root) / f"{safe}.md"
+
+
+def _feedback_text_limits() -> tuple[int, int]:
+    raw_lines = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_LINES") or "120").strip()
+    raw_chars = (os.environ.get("SHERPA_OPENCODE_FEEDBACK_MAX_CHARS") or "12000").strip()
+    try:
+        max_lines = max(20, min(int(raw_lines), 600))
+    except Exception:
+        max_lines = 120
+    try:
+        max_chars = max(512, min(int(raw_chars), 200000))
+    except Exception:
+        max_chars = 12000
+    return max_lines, max_chars
+
+
+def _trim_feedback_text(text: str) -> str:
+    src = str(text or "").strip()
+    if not src:
+        return ""
+    max_lines, max_chars = _feedback_text_limits()
+    lines = src.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    out = "\n".join(lines).strip()
+    if len(out) > max_chars:
+        out = out[-max_chars:].lstrip()
+    return out
+
+
+def _write_stage_feedback(
+    repo_root: Path,
+    *,
+    stage: str,
+    error_text: str,
+    state: dict[str, Any] | None = None,
+) -> str:
+    state = state or {}
+    parts: list[str] = [
+        f"# Stage Failure Feedback: {stage}",
+        "",
+        f"- stage: {stage}",
+        f"- group: {_feedback_group_for_stage(stage)}",
+        f"- ts: {int(time.time())}",
+    ]
+    for k in ("restart_to_plan_reason", "build_error_kind", "build_error_code", "run_error_kind"):
+        v = str(state.get(k) or "").strip()
+        if v:
+            parts.append(f"- {k}: {v}")
+    err = _trim_feedback_text(error_text)
+    if err:
+        parts.extend(["", "## Error", "", "```text", err, "```"])
+    stdout_tail = _trim_feedback_text(str(state.get("build_stdout_tail") or ""))
+    stderr_tail = _trim_feedback_text(str(state.get("build_stderr_tail") or ""))
+    if stdout_tail:
+        parts.extend(["", "## Build Stdout Tail", "", "```text", stdout_tail, "```"])
+    if stderr_tail:
+        parts.extend(["", "## Build Stderr Tail", "", "```text", stderr_tail, "```"])
+    body = "\n".join(parts).strip() + "\n"
+    path = _feedback_file_for_stage(repo_root, stage)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8", errors="replace")
+        return str(path)
+    except Exception:
+        return ""
+
+
+def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) -> str:
+    group_name = str(group or "").strip().lower()
+    stage_groups = {
+        "plan": _feedback_group_for_stage("plan"),
+        "plan_fix_targets_schema": _feedback_group_for_stage("plan_fix_targets_schema"),
+        "synthesize": _feedback_group_for_stage("synthesize"),
+        "synthesize_complete_scaffold": _feedback_group_for_stage("synthesize_complete_scaffold"),
+        "fix_build": _feedback_group_for_stage("fix_build"),
+        "fix_crash_harness_error": _feedback_group_for_stage("fix_crash_harness_error"),
+        "fix_crash_upstream_bug": _feedback_group_for_stage("fix_crash_upstream_bug"),
+    }
+    picked: list[Path] = []
+    for stage, g in stage_groups.items():
+        if g != group_name:
+            continue
+        p = _feedback_file_for_stage(repo_root, stage)
+        if p.is_file():
+            picked.append(p)
+    if not picked:
+        return ""
+    picked.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    texts: list[str] = []
+    for p in picked[: max(1, int(limit))]:
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            txt = ""
+        if txt:
+            texts.append(f"=== {p.name} ===\n{_trim_feedback_text(txt)}")
+    return "\n\n".join(texts).strip()
+
+
 def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
     done_path = _opencode_done_path(repo_root)
     if not done_path.exists():
@@ -543,12 +663,41 @@ def _selected_targets_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "selected_targets.json"
 
 
+def _execution_plan_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "execution_plan.json"
+
+
 def _observed_target_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "observed_target.json"
 
 
+def _execution_targets_max() -> int:
+    raw = (os.environ.get("SHERPA_EXECUTION_TARGETS_MAX") or "3").strip()
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        return 3
+
+
+def _execution_targets_min_required() -> int:
+    raw = (os.environ.get("SHERPA_EXECUTION_TARGETS_MIN_REQUIRED") or "2").strip()
+    try:
+        return max(1, min(int(raw), 8))
+    except Exception:
+        return 2
+
+
+def _runtime_viability_rank(value: str) -> int:
+    lowered = str(value or "").strip().lower()
+    if lowered == "high":
+        return 2
+    if lowered == "medium":
+        return 1
+    return 0
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
         target_name = str(item.get("name") or "").strip()
         api = str(item.get("api") or target_name).strip()
@@ -566,7 +715,7 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             )
             selection_rationale = selection_rationale or auto_rationale
             runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
-        out.append(
+        ranked_items.append(
             {
                 "target_name": target_name,
                 "name": target_name,
@@ -585,6 +734,22 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
             }
         )
+    ranked_items.sort(
+        key=lambda row: (
+            -int(row.get("depth_score") or 0),
+            -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
+            str(row.get("target_name") or ""),
+        )
+    )
+    out: list[dict[str, Any]] = []
+    max_targets = _execution_targets_max()
+    for idx, row in enumerate(ranked_items):
+        row["execution_priority"] = int(idx + 1) if idx < max_targets else 0
+        target_type = str(row.get("target_type") or "").strip().lower()
+        row["must_run"] = bool(
+            idx < max_targets and (idx == 0 or target_type in {"archive", "parser", "decoder"})
+        )
+        out.append(row)
     return out
 
 
@@ -607,6 +772,59 @@ def _load_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def _build_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    selected = list(selected_doc or _load_selected_targets_doc(repo_root))
+    max_targets = _execution_targets_max()
+    min_required = _execution_targets_min_required()
+    execution_targets: list[dict[str, Any]] = []
+    for item in selected:
+        prio = int(item.get("execution_priority") or 0)
+        if prio <= 0 or prio > max_targets:
+            continue
+        target_name = str(item.get("target_name") or item.get("name") or "").strip()
+        expected_bin = str(item.get("wrapper_fuzzer_name") or target_name).strip()
+        execution_targets.append(
+            {
+                "target_name": target_name,
+                "expected_fuzzer_name": expected_bin,
+                "api": str(item.get("api") or "").strip(),
+                "seed_profile": str(item.get("seed_profile") or "").strip(),
+                "target_type": str(item.get("target_type") or "").strip(),
+                "must_run": bool(item.get("must_run") or False),
+                "execution_priority": prio,
+            }
+        )
+    execution_targets.sort(key=lambda row: int(row.get("execution_priority") or 999))
+    execution_targets = execution_targets[:max_targets]
+    required_floor = max(1, min_required)
+    required_built = min(max(required_floor, 1), max(1, len(execution_targets))) if execution_targets else 1
+    return {
+        "schema_version": 1,
+        "max_targets": max_targets,
+        "min_required_built_targets": required_built,
+        "execution_targets": execution_targets,
+    }
+
+
+def _write_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]]:
+    path = _execution_plan_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = _build_execution_plan_doc(repo_root, selected_doc=selected_doc)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
+    path = _execution_plan_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def _write_observed_target_doc(
@@ -1129,7 +1347,12 @@ def _write_build_template_cache_doc(repo_root: Path, doc: dict[str, Any]) -> str
     return str(path)
 
 
-def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | None = None) -> str:
+def _cache_successful_build_template(
+    repo_root: Path,
+    *,
+    binaries: list[Path] | None = None,
+    target_build_matrix: list[dict[str, Any]] | None = None,
+) -> str:
     fuzz_dir = repo_root / "fuzz"
     build_py = fuzz_dir / "build.py"
     if not build_py.is_file():
@@ -1140,11 +1363,12 @@ def _cache_successful_build_template(repo_root: Path, *, binaries: list[Path] | 
         return ""
     strategy = _load_build_strategy_doc(repo_root)
     doc: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "saved_at": int(time.time()),
         "build_py": build_text,
         "build_strategy": strategy if isinstance(strategy, dict) else {},
         "binary_names": [p.name for p in (binaries or []) if isinstance(p, Path)],
+        "target_build_matrix": list(target_build_matrix or []),
     }
     try:
         return _write_build_template_cache_doc(repo_root, doc)
@@ -2305,6 +2529,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if report_tail:
             injected_ctx += "\n=== re failure report tail ===\n" + report_tail + "\n"
         hint = (hint + "\n\n" + injected_ctx).strip() if hint else injected_ctx
+    planning_feedback = _collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)
+    if planning_feedback:
+        feedback_hint = "Recent planning/synthesis failures (use these to avoid repeating the same mistakes):\n" + planning_feedback
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     if not _has_codex_key():
         out = {
             **state,
@@ -2319,6 +2547,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prompt = _render_opencode_prompt("plan_with_hint", hint=hint)
             gen.patcher.run_codex_command(
                 prompt,
+                stage_skill="plan",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -2342,6 +2571,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
             gen.patcher.run_codex_command(
                 prompt,
+                stage_skill="plan_fix_targets_schema",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -2386,8 +2616,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
         primary_target = _select_primary_target(gen.repo_root)
         selected_targets_path = ""
+        execution_plan_path = ""
         try:
             selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
+            execution_plan_path, _ = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
         except Exception:
             selected_targets_doc = []
         new_target_name = str(primary_target.get("name") or "")
@@ -2463,6 +2695,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
             "selected_targets_path": selected_targets_path,
+            "execution_plan_path": execution_plan_path,
             "coverage_target_name": new_target_name or prev_target_name,
             "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
@@ -2493,6 +2726,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
+        _write_stage_feedback(
+            gen.repo_root,
+            stage="plan",
+            error_text=str(e),
+            state=cast(dict[str, Any], state),
+        )
         out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -2549,6 +2788,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         if "selected_targets.json" not in hint:
             hint = ((hint.strip() + "\n\n") if hint.strip() else "") + selected_target_soft_hint
+    planning_feedback = _collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)
+    if planning_feedback:
+        feedback_hint = (
+            "Recent planning/synthesis failures from previous attempts "
+            "(use these to avoid repeating the same mistakes):\n"
+            + planning_feedback
+        )
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     restored_from_cache = False
     try:
         restored_from_cache = _restore_cached_build_template_if_missing(gen.repo_root)
@@ -2775,6 +3022,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context,
+            stage_skill="synthesize_complete_scaffold",
             timeout=min(remaining, 300),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2787,6 +3035,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2818,6 +3067,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2877,6 +3127,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
+            stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -2938,6 +3189,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             gen.patcher.run_codex_command(
                 prompt,
                 additional_context=ctx or None,
+                stage_skill="synthesize",
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
@@ -2987,7 +3239,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 _run_synthesize_completion(remaining_after_direct)
 
         if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(10):
-            raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
+            remaining_for_harness_repair = _remaining_time_budget_sec(state, min_timeout=0)
+            if remaining_for_harness_repair > 0:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "synthesize: harness missing after grace wait; running forced harness repair",
+                )
+                _run_required_scaffold_repair(remaining_for_harness_repair)
+            if not _has_min_synthesis_outputs() and not _synthesis_grace_wait(3):
+                raise HarnessGeneratorError("synthesize incomplete: missing harness source under fuzz/")
         if not _has_required_synthesis_outputs():
             try:
                 required_grace_sec = max(0, min(int((os.environ.get("SHERPA_SYNTHESIZE_REQUIRED_GRACE_SEC") or "8").strip()), 60))
@@ -3107,6 +3367,12 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
+        _write_stage_feedback(
+            gen.repo_root,
+            stage="synthesize",
+            error_text=str(e),
+            state=cast(dict[str, Any], state),
+        )
         out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -3507,6 +3773,60 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             return next_state
 
+        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
+        built_names = {p.name for p in final_bins}
+        built_stems = {Path(name).stem for name in built_names}
+        target_build_matrix: list[dict[str, Any]] = []
+        built_execution_targets = 0
+        for item in execution_targets:
+            expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
+            matched = expected in built_names or Path(expected).stem in built_stems
+            if matched:
+                built_execution_targets += 1
+            target_build_matrix.append(
+                {
+                    "target_name": str(item.get("target_name") or ""),
+                    "expected_fuzzer_name": expected,
+                    "must_run": bool(item.get("must_run") or False),
+                    "built": bool(matched),
+                }
+            )
+        min_required_built = int(execution_plan_doc.get("min_required_built_targets") or _execution_targets_min_required())
+        if execution_targets and len(execution_targets) > 1 and built_execution_targets < min_required_built:
+            missing_targets = [
+                str(item.get("target_name") or item.get("expected_fuzzer_name") or "")
+                for item in target_build_matrix
+                if not bool(item.get("built"))
+            ]
+            next_state["last_error"] = (
+                "partial_build_undercoverage: built "
+                f"{built_execution_targets}/{len(execution_targets)} execution targets "
+                f"(required>={min_required_built}); missing={','.join([x for x in missing_targets if x]) or 'unknown'}"
+            )
+            next_state["message"] = "build undercoverage: execution target gate not met"
+            next_state["build_error_kind"] = "source"
+            next_state["build_error_code"] = "partial_build_undercoverage"
+            next_state["restart_to_plan"] = False
+            next_state["restart_to_plan_reason"] = ""
+            next_state["restart_to_plan_stage"] = ""
+            next_state["restart_to_plan_error_text"] = ""
+            next_state["restart_to_plan_report_path"] = ""
+            next_state["build_gate_reason"] = "partial_build_undercoverage"
+            next_state["built_targets"] = sorted(built_names)
+            next_state["missing_targets"] = missing_targets
+            next_state["target_build_matrix"] = target_build_matrix
+            _wf_log(
+                cast(dict[str, Any], next_state),
+                "<- build gate partial_build_undercoverage "
+                f"built={built_execution_targets}/{len(execution_targets)} required={min_required_built} "
+                f"dt={_fmt_dt(time.perf_counter()-t0)}",
+            )
+            return next_state
+
         next_state["build_error_signature"] = ""
         next_state["build_error_signature_before"] = prev_sig
         next_state["build_error_signature_after"] = ""
@@ -3551,9 +3871,21 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 return next_state
 
-        cache_path = _cache_successful_build_template(gen.repo_root, binaries=final_bins)
+        cache_path = _cache_successful_build_template(
+            gen.repo_root,
+            binaries=final_bins,
+            target_build_matrix=target_build_matrix,
+        )
         if cache_path:
             next_state["build_template_cache_path"] = cache_path
+        next_state["built_targets"] = sorted(built_names)
+        next_state["missing_targets"] = [
+            str(item.get("target_name") or item.get("expected_fuzzer_name") or "")
+            for item in target_build_matrix
+            if not bool(item.get("built"))
+        ]
+        next_state["target_build_matrix"] = target_build_matrix
+        next_state["build_gate_reason"] = "ok"
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
@@ -4969,6 +5301,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context or None,
+            stage_skill="fix_build",
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -5152,9 +5485,31 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         repo_examples_rejected_count = 0
         repo_examples_accepted_count = 0
         seed_noise_rejected_count = 0
+        missing_execution_targets: list[str] = []
         seed_family_coverage_state: dict[str, Any] = {}
+        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
+        bins_by_name = {p.name: p for p in bins}
+        bins_by_stem = {p.stem: p for p in bins}
+        seed_fuzzers: list[Path] = []
+        if execution_targets:
+            for item in execution_targets:
+                expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
+                candidate = bins_by_name.get(expected) or bins_by_stem.get(Path(expected).stem)
+                if candidate is not None:
+                    if candidate not in seed_fuzzers:
+                        seed_fuzzers.append(candidate)
+                else:
+                    missing_name = str(item.get("target_name") or expected)
+                    if missing_name and missing_name not in missing_execution_targets:
+                        missing_execution_targets.append(missing_name)
+        if not seed_fuzzers:
+            seed_fuzzers = list(bins)
         try:
-            for bin_path in bins:
+            for bin_path in seed_fuzzers:
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
                 if remaining_for_seed <= 0:
                     return _time_budget_exceeded_state(state, step_name="run")
@@ -5620,6 +5975,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_counts_raw": seed_count_raw_total,
             "coverage_seed_counts_filtered": seed_count_filtered_total,
             "coverage_seed_noise_rejected_count": seed_noise_rejected_count,
+            "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
             "coverage_repo_examples_filtered": repo_examples_filtered,
             "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
@@ -5671,6 +6027,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             quality_flags.append("target_runtime_mismatch")
         if list(out.get("coverage_seed_families_missing") or []):
             quality_flags.append("seed_family_undercovered")
+        if list(out.get("coverage_missing_execution_targets") or []):
+            quality_flags.append("missing_execution_targets")
         raw_total = int((out.get("coverage_seed_counts_raw") or {}).get("total") or 0)
         noise_rejected = int(out.get("coverage_seed_noise_rejected_count") or 0)
         if noise_rejected > 0 and (raw_total <= 0 or float(noise_rejected) / float(max(raw_total, 1)) >= 0.25):
@@ -6055,6 +6413,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context or None,
+            stage_skill=("fix_crash_harness_error" if harness_error else "fix_crash_upstream_bug"),
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
