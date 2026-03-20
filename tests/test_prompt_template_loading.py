@@ -80,6 +80,7 @@ def test_fix_build_prompt_references_policy_and_context():
     assert "fuzz/build_full.log" in out
     assert "tighten scaffold" in out
     assert "only modify files under `fuzz/` and `./done`" in out
+    assert "pure no-op is invalid" in out
 
 
 def test_global_policy_document_contains_core_rules():
