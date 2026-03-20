@@ -1621,6 +1621,13 @@ def _run_stop_on_first_crash() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _run_parallel_early_stop_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED") or "0").strip().lower()
+    if not raw:
+        return False
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
     return cast(FuzzWorkflowRuntimeState, _wf_common.time_budget_exceeded_state(cast(dict[str, Any], state), step_name=step_name))
 
@@ -5424,10 +5431,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         except Exception:
             max_parallel = 2
         stop_on_first_crash = _run_stop_on_first_crash()
-        if stop_on_first_crash and len(bins) > 1:
-            # Run sequentially so a proven crash can terminate the stage
-            # immediately instead of leaving sibling fuzzers consuming the full
-            # run budget before the stage result is written back.
+        parallel_early_stop = _run_parallel_early_stop_enabled()
+        if stop_on_first_crash and len(bins) > 1 and not parallel_early_stop:
+            # Compatibility mode: force serial when parallel early stop is disabled.
             max_parallel = 1
         if len(bins) <= 1:
             max_parallel = 1
@@ -5438,7 +5444,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             cast(dict[str, Any], state),
             (
                 f"run: fuzzers={len(bins)} parallel={max_parallel} "
-                f"stop_on_first_crash={int(stop_on_first_crash)}"
+                f"stop_on_first_crash={int(stop_on_first_crash)} "
+                f"parallel_early_stop={int(parallel_early_stop)}"
             ),
         )
 
@@ -5650,6 +5657,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 else:
                     with ThreadPoolExecutor(max_workers=len(batch)) as pool:
                         futures = {pool.submit(_run_one, bin_path): bin_path for bin_path in batch}
+                        batch_should_stop = False
                         for fut in as_completed(futures):
                             bin_path = futures[fut]
                             try:
@@ -5657,6 +5665,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                 run_results[name] = run
                                 finalized_fuzzers.add(name)
                                 run_children_exit_count += 1
+                                if (
+                                    stop_on_first_crash
+                                    and parallel_early_stop
+                                    and run.crash_found
+                                ):
+                                    terminator = getattr(gen, "terminate_active_run_processes", None)
+                                    if callable(terminator):
+                                        try:
+                                            terminator(reason=f"first_crash:{name}")
+                                        except Exception:
+                                            pass
+                                    for pending_fut in futures:
+                                        if pending_fut is not fut:
+                                            pending_fut.cancel()
+                                    batch_should_stop = True
+                                    break
                             except Exception as e:
                                 run_exec_errors[bin_path.name] = str(e)
                                 finalized_fuzzers.add(bin_path.name)
@@ -5667,6 +5691,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     run_terminal_reason = detected_kind
                                     if detected_idle > 0:
                                         run_idle_seconds = detected_idle
+                        if batch_should_stop:
+                            pending_bins = []
                 if stop_on_first_crash and any(run.crash_found for run in run_results.values()):
                     pending_bins = []
                     break

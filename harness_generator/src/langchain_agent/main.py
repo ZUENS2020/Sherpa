@@ -4,6 +4,7 @@ from fastapi import FastAPI, Body, HTTPException, Response
 from pydantic import BaseModel
 import json
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -1022,24 +1023,111 @@ def _k8s_stage_wait_timeout_sec(
     stage: str,
     total_time_budget_sec: int,
     run_time_budget_sec: int,
+    run_fuzzer_count: int = 1,
+    run_parallelism: int = 1,
 ) -> int:
-    """Compute outer k8s-job timeout with explicit grace to avoid false timeouts."""
+    """Compute k8s stage wait timeout.
+
+    For run stage this is multi-round aware:
+    - finite run budget: use total run budget + grace.
+    - unlimited run budget: estimate rounds from fuzzer_count/parallelism and
+      multiply by per-round unlimited budget.
+    """
     try:
-        grace_run = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "300"))
+        grace_run = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "900"))
     except Exception:
-        grace_run = 300
+        grace_run = 900
     try:
         grace_default = int(os.environ.get("SHERPA_K8S_STAGE_TIMEOUT_GRACE_SEC", "180"))
     except Exception:
         grace_default = 180
+    try:
+        inter_round_buffer_sec = int(
+            os.environ.get("SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC", "120")
+        )
+    except Exception:
+        inter_round_buffer_sec = 120
+    try:
+        run_unlimited_round_budget = int(
+            os.environ.get("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
+        )
+    except Exception:
+        run_unlimited_round_budget = 7200
+    try:
+        run_timeout_cap_sec = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_MAX_SEC", "0"))
+    except Exception:
+        run_timeout_cap_sec = 0
+
     grace_run = max(60, grace_run)
     grace_default = max(30, grace_default)
+    inter_round_buffer_sec = max(0, inter_round_buffer_sec)
+    run_unlimited_round_budget = max(300, run_unlimited_round_budget)
 
     total_base = total_time_budget_sec if total_time_budget_sec > 0 else 7200
-    run_base = run_time_budget_sec if run_time_budget_sec > 0 else total_base
-    base = run_base if stage == "run" else total_base
-    grace = grace_run if stage == "run" else grace_default
-    return max(300, base + grace)
+    if stage != "run":
+        return max(300, total_base + grace_default)
+
+    if run_time_budget_sec > 0:
+        run_base = run_time_budget_sec
+    else:
+        safe_parallel = max(1, run_parallelism)
+        safe_fuzzer_count = max(1, run_fuzzer_count)
+        round_count = max(1, math.ceil(safe_fuzzer_count / safe_parallel))
+        run_base = (round_count * run_unlimited_round_budget) + (
+            max(0, round_count - 1) * inter_round_buffer_sec
+        )
+    wait_timeout = max(300, run_base + grace_run)
+    if run_timeout_cap_sec > 0:
+        wait_timeout = min(wait_timeout, run_timeout_cap_sec)
+    return wait_timeout
+
+
+def _estimate_run_fuzzer_count(repo_root: str) -> int:
+    raw = str(repo_root or "").strip()
+    if not raw:
+        return 1
+    root = Path(raw)
+    if not root.exists():
+        return 1
+
+    fuzz_out = root / "fuzz" / "out"
+    try:
+        if fuzz_out.is_dir():
+            count = 0
+            for p in fuzz_out.iterdir():
+                if not p.is_file():
+                    continue
+                if os.access(str(p), os.X_OK) or p.suffix.lower() == ".exe":
+                    count += 1
+            if count > 0:
+                return count
+    except Exception:
+        pass
+
+    execution_plan = root / "fuzz" / "execution_plan.json"
+    try:
+        if execution_plan.is_file():
+            doc = json.loads(execution_plan.read_text(encoding="utf-8", errors="replace"))
+            targets = doc.get("execution_targets")
+            if isinstance(targets, list):
+                count = len([t for t in targets if isinstance(t, dict)])
+                if count > 0:
+                    return count
+    except Exception:
+        pass
+    return 1
+
+
+def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
+    raw = str(
+        (stage_ctx or {}).get("run_parallel_fuzzers_override")
+        or os.environ.get("SHERPA_PARALLEL_FUZZERS")
+        or "2"
+    ).strip()
+    try:
+        return max(1, min(int(raw), 64))
+    except Exception:
+        return 2
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
@@ -2456,10 +2544,17 @@ def _run_fuzz_job(
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
                     }
+                    run_fuzzer_count = 1
+                    run_parallelism = 1
+                    if stage == "run":
+                        run_fuzzer_count = _estimate_run_fuzzer_count(current_repo_root or "")
+                        run_parallelism = _estimate_run_parallelism(stage_ctx)
                     wait_timeout = _k8s_stage_wait_timeout_sec(
                         stage=stage,
                         total_time_budget_sec=total_time_budget_value,
                         run_time_budget_sec=run_time_budget_value,
+                        run_fuzzer_count=run_fuzzer_count,
+                        run_parallelism=run_parallelism,
                     )
                     stage_result: object
                     stage_node_name: str = ""

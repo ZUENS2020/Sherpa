@@ -100,3 +100,60 @@ def test_execute_k8s_job_failed_run_classifies_pod_and_persists_failure_artifact
     assert "oom_killed" in error_path.read_text(encoding="utf-8")
     assert result_path.is_file()
     assert deleted == ["job-name-2"]
+
+
+def test_k8s_stage_wait_timeout_run_unlimited_is_round_aware(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "600")
+    monkeypatch.setenv("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
+    monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC", "120")
+
+    timeout = web_main._k8s_stage_wait_timeout_sec(
+        stage="run",
+        total_time_budget_sec=0,
+        run_time_budget_sec=0,
+        run_fuzzer_count=5,
+        run_parallelism=2,
+    )
+
+    # ceil(5/2)=3 rounds => 3*7200 + 2*120 + 600
+    assert timeout == 22440
+
+
+def test_k8s_stage_wait_timeout_run_finite_budget_not_multiplied(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "600")
+
+    timeout = web_main._k8s_stage_wait_timeout_sec(
+        stage="run",
+        total_time_budget_sec=0,
+        run_time_budget_sec=1800,
+        run_fuzzer_count=8,
+        run_parallelism=2,
+    )
+
+    assert timeout == 2400
+
+
+def test_estimate_run_fuzzer_count_prefers_fuzz_out_executables(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    out_dir = repo_root / "fuzz" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    f1 = out_dir / "a_fuzz"
+    f2 = out_dir / "b_fuzz"
+    f1.write_text("x", encoding="utf-8")
+    f2.write_text("x", encoding="utf-8")
+    f1.chmod(0o755)
+    f2.chmod(0o755)
+
+    assert web_main._estimate_run_fuzzer_count(str(repo_root)) == 2
+
+
+def test_estimate_run_fuzzer_count_falls_back_to_execution_plan(tmp_path: Path):
+    repo_root = tmp_path / "repo"
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        '{"execution_targets":[{"target_name":"a"},{"target_name":"b"},{"target_name":"c"}]}',
+        encoding="utf-8",
+    )
+
+    assert web_main._estimate_run_fuzzer_count(str(repo_root)) == 3
