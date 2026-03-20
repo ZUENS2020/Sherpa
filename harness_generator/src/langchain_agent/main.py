@@ -1,6 +1,7 @@
 # main.py
 from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import hashlib
@@ -46,6 +47,13 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LangChain Agent API", version="1.0", lifespan=_lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 #创建线程池
 _MAX_WORKERS = int(os.environ.get("SHERPA_WEB_MAX_WORKERS", "5"))
