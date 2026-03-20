@@ -133,6 +133,7 @@ if __name__ == "__main__":
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
 - scaffold aligns with `fuzz/execution_plan.json` when present.
 - build script does not hardcode a single guessed static-library path.
+- when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]` before broader edits.
 - `fuzz/README.md` field `Harness file:` points to an existing harness file under `fuzz/`.
 - `fuzz/repo_understanding.json` contains all required non-empty keys:
   `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`, and non-empty `evidence`.

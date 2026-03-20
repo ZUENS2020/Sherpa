@@ -648,3 +648,120 @@ def test_run_codex_command_fix_build_does_not_reuse_planning_synth_session(
     assert len(calls) == 2
     assert "--continue" not in calls[0]
     assert "--continue" not in calls[1]
+
+
+def test_run_codex_command_keeps_session_after_no_diff_for_same_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls: list[list[str]] = []
+
+    def _fake_popen(*args, **kwargs):
+        calls.append(list(args[0]))
+        done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+    diff_values = ["", "", "", "", "M fuzz/build.py", "M fuzz/build.py"]
+    diff_seq = {"i": 0}
+
+    def _fake_git_diff_head() -> str:
+        idx = diff_seq["i"]
+        diff_seq["i"] += 1
+        if idx < len(diff_values):
+            return diff_values[idx]
+        return "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+
+    out1 = helper.run_codex_command(
+        "fix build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+    out2 = helper.run_codex_command(
+        "fix build again",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out1 is None
+    assert out2 is not None
+    assert len(calls) == 2
+    assert "--continue" not in calls[0]
+    assert "--continue" in calls[1]
+
+
+def test_run_codex_command_injects_session_memory_into_additional_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    captured: dict[str, object] = {}
+
+    state_path = helper.working_dir / ".git" / "sherpa-opencode" / "session_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        ch.json.dumps(
+            {
+                "session_groups": {
+                    "fix_build": {
+                        "has_session": True,
+                        "recent_attempts": [
+                            {
+                                "ts": 1,
+                                "status": "retry_no_diff",
+                                "changed_paths": ["fuzz/build.py"],
+                                "error": "link failed",
+                            }
+                        ],
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def _fake_popen(*args, **kwargs):
+        captured["cmd"] = list(args[0])
+        done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "fix build",
+        additional_context="current failure context",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    assert done_path.is_file()
+    ctx = (helper.working_dir / ".git" / "sherpa-opencode" / "additional_context.txt").read_text(encoding="utf-8")
+    assert "SESSION MEMORY (recent attempts in this session group)" in ctx
+    assert "status=retry_no_diff" in ctx
+    assert "changed_paths=fuzz/build.py" in ctx

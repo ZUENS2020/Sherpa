@@ -21,6 +21,7 @@ Fix the upstream bug so the same crashing input no longer reproduces the fault.
 - clear, minimal code delta.
 - must produce textual code changes; pure no-op is invalid.
 - do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
+- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
 - Allowed: read-only commands only.

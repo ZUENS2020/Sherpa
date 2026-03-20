@@ -16,6 +16,7 @@ Goal:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - `fuzz/targets.json` must be plain JSON array with at least one item.
 - Each item must include non-empty strings: `name`, `api`, `lang`, `target_type`, `seed_profile`.
 - `lang` must be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`.
@@ -53,6 +54,7 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
 - `fuzz/README.md` must include:
@@ -97,6 +99,7 @@ Required outputs:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Preserve existing scaffold unless a minimal fix is needed.
 - Keep `fuzz/observed_target.json` alignment when present.
 - Ensure README required fields are present and consistent.
@@ -119,7 +122,10 @@ Task:
 Constraints:
 - only modify files under `fuzz/` and `./done`
 - read-only exploration commands are allowed
+- extract concrete failing file paths from diagnostics and issue explicit `Read and fix <path>[:line]` actions
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
+- when diagnostics still fail, pure no-op is invalid; produce a concrete patch
+- if the same error signature repeats, change strategy instead of repeating identical edits
 - keep `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` consistent
 - if missing dependencies are indicated by build evidence, update `fuzz/system_packages.txt` with canonical vcpkg names
 - keep build output aligned with `fuzz/execution_plan.json` target coverage (do not regress to single-target build when multi-target execution is required)
@@ -145,6 +151,7 @@ Constraints:
 - keep fixes minimal
 - do not run build/execute commands
 - read-only exploration commands are allowed
+- when crash/diagnostics include concrete file paths, issue explicit `Read and fix <path>[:line]` actions
 
 MANDATORY:
 - create `./done`
@@ -161,6 +168,7 @@ Constraints:
 - do not disable harness behavior
 - do not run build/execute commands
 - read-only exploration commands are allowed
+- when crash/diagnostics include concrete file paths, issue explicit `Read and fix <path>[:line]` actions
 
 MANDATORY:
 - create `./done`
@@ -185,6 +193,7 @@ Required schema:
 Constraints:
 - do not run build/execute commands
 - read-only exploration commands are allowed
+- when schema errors point to concrete files/lines, issue explicit `Read and fix <path>[:line]` actions
 
 Current validation error:
 {{schema_error}}

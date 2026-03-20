@@ -27,6 +27,7 @@ Repair `fuzz/targets.json` so it passes strict schema validation.
 - JSON parses successfully.
 - schema fields and enum values are valid for all entries.
 - array remains non-empty.
+- when schema diagnostics include concrete file/line references, surface explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
 - Allowed: read-only commands only.

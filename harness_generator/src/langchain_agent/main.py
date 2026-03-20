@@ -1,6 +1,7 @@
 # main.py
 from __future__ import annotations
 from fastapi import FastAPI, Body, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import hashlib
@@ -10,13 +11,15 @@ import re
 import shutil
 import resource
 import subprocess
+import sys
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 import threading
 import time
 import queue
 import uuid
 from datetime import datetime, timezone
-from contextlib import redirect_stdout, redirect_stderr, asynccontextmanager
+from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
 import base64
@@ -46,6 +49,13 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LangChain Agent API", version="1.0", lifespan=_lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 #创建线程池
 _MAX_WORKERS = int(os.environ.get("SHERPA_WEB_MAX_WORKERS", "5"))
@@ -79,6 +89,9 @@ _SENSITIVE_KV_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASS))\s*=\s*([^\s,;]+)"
 )
 _AUTH_BEARER_RE = re.compile(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)")
+
+_ACTIVE_JOB_STDOUT_TEE: ContextVar[object | None] = ContextVar("ACTIVE_JOB_STDOUT_TEE", default=None)
+_ACTIVE_JOB_STDERR_TEE: ContextVar[object | None] = ContextVar("ACTIVE_JOB_STDERR_TEE", default=None)
 
 
 def _redact_sensitive_text(text: str) -> str:
@@ -1461,6 +1474,51 @@ class _Tee(StringIO):
             super().close()
 
 
+class _JobAwareStream:
+    def __init__(self, original, *, stream_kind: str) -> None:
+        self._original = original
+        self._stream_kind = stream_kind
+
+    def _active_tee(self):
+        if self._stream_kind == "stdout":
+            return _ACTIVE_JOB_STDOUT_TEE.get()
+        return _ACTIVE_JOB_STDERR_TEE.get()
+
+    def write(self, s: str) -> int:
+        txt = str(s or "")
+        tee = self._active_tee()
+        if tee is not None and txt:
+            try:
+                tee.write(txt)
+            except Exception:
+                pass
+        try:
+            return int(self._original.write(txt))
+        except Exception:
+            return len(txt)
+
+    def flush(self) -> None:
+        tee = self._active_tee()
+        if tee is not None:
+            try:
+                tee.flush()
+            except Exception:
+                pass
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name: str):
+        return getattr(self._original, name)
+
+
+if not isinstance(sys.stdout, _JobAwareStream):
+    sys.stdout = _JobAwareStream(sys.stdout, stream_kind="stdout")
+if not isinstance(sys.stderr, _JobAwareStream):
+    sys.stderr = _JobAwareStream(sys.stderr, stream_kind="stderr")
+
+
 def _iso_time(ts: float | None) -> str | None:
     if ts is None:
         return None
@@ -2393,68 +2451,69 @@ def _run_fuzz_job(
     log_file = _job_log_path(job_id)
     _job_update(job_id, log_file=str(log_file))
     tee = _Tee(job_id, log_file=log_file)
+    out_token = _ACTIVE_JOB_STDOUT_TEE.set(tee)
+    err_token = _ACTIVE_JOB_STDERR_TEE.set(tee)
     try:
-        with redirect_stdout(tee), redirect_stderr(tee):
-            print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
-            if _is_cancel_requested(job_id):
-                raise RuntimeError(cancel_error)
-            print(f"[job {job_id}] about to dispatch k8s worker...")
-            docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
-            total_time_budget_value = (
-                request.total_time_budget
-                if request.total_time_budget is not None
-                else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
-            )
-            run_time_budget_value = (
-                request.run_time_budget
-                if request.run_time_budget is not None
-                else total_time_budget_value
-            )
-            total_time_budget_value = int(total_time_budget_value)
-            run_time_budget_value = int(run_time_budget_value)
-            if total_time_budget_value < 0:
-                raise RuntimeError("total_time_budget must be >= 0")
-            if run_time_budget_value < 0:
-                raise RuntimeError("run_time_budget must be >= 0")
-            coverage_loop_max_rounds = 0
-            max_fix_rounds = 0
-            same_error_max_retries = 0
-            total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
-            run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
-            openai_key = (
-                os.environ.get("OPENAI_API_KEY")
-                or cfg.openai_api_key
-                or ""
-            ).strip()
-            opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
-            openai_model = (
-                os.environ.get("OPENAI_MODEL")
-                or opencode_model_env
-                or "deepseek-reasoner"
-            ).strip()
-            if openai_key:
-                model_value = request.model or opencode_model_env or openai_model
-            else:
-                model_value = request.model or cfg.openrouter_model
-            runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
-            print(
-                f"[job {job_id}] params runtime={runtime_mode} "
-                f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
-                f"max_tokens={request.max_tokens} model={model_value} "
-                f"coverage_loop_max_rounds={coverage_loop_max_rounds} "
-                f"max_fix_rounds={max_fix_rounds} "
-                f"same_error_max_retries={same_error_max_retries}"
-            )
-            print(f"[job {job_id}] log_file={log_file}")
-            mode = _executor_mode()
-            docker_image = None if mode == "k8s_job" else docker_image_value
-            print(
-                f"[job {job_id}] executor_mode={mode} "
-                f"docker_image={docker_image if docker_image else '(native)'}"
-            )
-            if _is_cancel_requested(job_id):
-                raise RuntimeError(cancel_error)
-            try:
+        print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
+        if _is_cancel_requested(job_id):
+            raise RuntimeError(cancel_error)
+        print(f"[job {job_id}] about to dispatch k8s worker...")
+        docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
+        total_time_budget_value = (
+            request.total_time_budget
+            if request.total_time_budget is not None
+            else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
+        )
+        run_time_budget_value = (
+            request.run_time_budget
+            if request.run_time_budget is not None
+            else total_time_budget_value
+        )
+        total_time_budget_value = int(total_time_budget_value)
+        run_time_budget_value = int(run_time_budget_value)
+        if total_time_budget_value < 0:
+            raise RuntimeError("total_time_budget must be >= 0")
+        if run_time_budget_value < 0:
+            raise RuntimeError("run_time_budget must be >= 0")
+        coverage_loop_max_rounds = 0
+        max_fix_rounds = 0
+        same_error_max_retries = 0
+        total_budget_log = "unlimited" if total_time_budget_value == 0 else f"{total_time_budget_value}s"
+        run_budget_log = "unlimited" if run_time_budget_value == 0 else f"{run_time_budget_value}s"
+        openai_key = (
+            os.environ.get("OPENAI_API_KEY")
+            or cfg.openai_api_key
+            or ""
+        ).strip()
+        opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
+        openai_model = (
+            os.environ.get("OPENAI_MODEL")
+            or opencode_model_env
+            or "deepseek-reasoner"
+        ).strip()
+        if openai_key:
+            model_value = request.model or opencode_model_env or openai_model
+        else:
+            model_value = request.model or cfg.openrouter_model
+        runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
+        print(
+            f"[job {job_id}] params runtime={runtime_mode} "
+            f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
+            f"max_tokens={request.max_tokens} model={model_value} "
+            f"coverage_loop_max_rounds={coverage_loop_max_rounds} "
+            f"max_fix_rounds={max_fix_rounds} "
+            f"same_error_max_retries={same_error_max_retries}"
+        )
+        print(f"[job {job_id}] log_file={log_file}")
+        mode = _executor_mode()
+        docker_image = None if mode == "k8s_job" else docker_image_value
+        print(
+            f"[job {job_id}] executor_mode={mode} "
+            f"docker_image={docker_image if docker_image else '(native)'}"
+        )
+        if _is_cancel_requested(job_id):
+            raise RuntimeError(cancel_error)
+        try:
                 start_step = _normalize_resume_step(resume_from_step) if resumed else "plan"
                 stage_results: list[dict[str, object]] = []
                 stage_job_names: list[str] = []
@@ -2714,29 +2773,29 @@ def _run_fuzz_job(
                 res["stage_results"] = stage_results
                 res["stage_job_names"] = stage_job_names
                 print(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
-            except Exception as fuzz_err:
-                print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
-                import traceback
-                traceback.print_exc()
-                raise
-            if _is_cancel_requested(job_id):
-                _job_update(
-                    job_id,
-                    status="error",
-                    error=cancel_error,
-                    result=None,
-                    recoverable=False,
-                    last_resume_finished_at=time.time() if resumed else None,
-                )
-                return
+        except Exception as fuzz_err:
+            print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
+            import traceback
+            traceback.print_exc()
+            raise
+        if _is_cancel_requested(job_id):
             _job_update(
                 job_id,
-                status=("resumed" if resumed else "success"),
-                result=res,
+                status="error",
+                error=cancel_error,
+                result=None,
                 recoverable=False,
-                resume_error_code=None,
                 last_resume_finished_at=time.time() if resumed else None,
             )
+            return
+        _job_update(
+            job_id,
+            status=("resumed" if resumed else "success"),
+            result=res,
+            recoverable=False,
+            resume_error_code=None,
+            last_resume_finished_at=time.time() if resumed else None,
+        )
     except Exception as e:
         if _is_cancel_requested(job_id):
             fail_status = "error"
@@ -2762,6 +2821,8 @@ def _run_fuzz_job(
             last_resume_finished_at=time.time() if resumed else None,
         )
     finally:
+        _ACTIVE_JOB_STDOUT_TEE.reset(out_token)
+        _ACTIVE_JOB_STDERR_TEE.reset(err_token)
         try:
             tee.close()
         except Exception:
@@ -3065,90 +3126,91 @@ async def task_api(request: task_model = Body(...)):
         log_file = _job_log_path(job_id)
         _job_update(job_id, log_file=str(log_file))
         tee = _Tee(job_id, log_file=log_file)
+        out_token = _ACTIVE_JOB_STDOUT_TEE.set(tee)
+        err_token = _ACTIVE_JOB_STDERR_TEE.set(tee)
         had_error = False
         child_ids: list[str] = []
         try:
-            with redirect_stdout(tee), redirect_stderr(tee):
-                print(f"[task {job_id}] start (jobs={len(request.jobs)})")
-                if _is_cancel_requested(job_id):
-                    raise RuntimeError(cancel_error)
-                if request.auto_init:
-                    with _INIT_LOCK:
-                        if _is_cancel_requested(job_id):
-                            raise RuntimeError(cancel_error)
-                        auto_init_oss_fuzz = (
-                            (os.environ.get("SHERPA_AUTO_INIT_OSS_FUZZ", "0") or "")
-                            .strip()
-                            .lower()
-                            in {"1", "true", "yes", "on"}
+            print(f"[task {job_id}] start (jobs={len(request.jobs)})")
+            if _is_cancel_requested(job_id):
+                raise RuntimeError(cancel_error)
+            if request.auto_init:
+                with _INIT_LOCK:
+                    if _is_cancel_requested(job_id):
+                        raise RuntimeError(cancel_error)
+                    auto_init_oss_fuzz = (
+                        (os.environ.get("SHERPA_AUTO_INIT_OSS_FUZZ", "0") or "")
+                        .strip()
+                        .lower()
+                        in {"1", "true", "yes", "on"}
+                    )
+                    # Native k8s staged runtime does not require oss-fuzz checkout.
+                    # Force-disable auto-init here to avoid unrelated git clone failures.
+                    if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
+                        auto_init_oss_fuzz = False
+                        print("[task] skip oss-fuzz auto-init in k8s native runtime")
+                    if auto_init_oss_fuzz:
+                        repo_url = (
+                            (request.oss_fuzz_repo_url or "").strip()
+                            or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
+                            or "https://github.com/google/oss-fuzz.git"
                         )
-                        # Native k8s staged runtime does not require oss-fuzz checkout.
-                        # Force-disable auto-init here to avoid unrelated git clone failures.
-                        if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
-                            auto_init_oss_fuzz = False
-                            print("[task] skip oss-fuzz auto-init in k8s native runtime")
-                        if auto_init_oss_fuzz:
-                            repo_url = (
-                                (request.oss_fuzz_repo_url or "").strip()
-                                or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                                or "https://github.com/google/oss-fuzz.git"
-                            )
-                            target_dir = Path(
-                                (cfg.oss_fuzz_dir or "").strip()
-                                or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
-                                or str(_REPO_ROOT / "oss-fuzz")
-                            ).expanduser().resolve()
-                            print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
-                            _ensure_oss_fuzz_checkout(
-                                repo_url=repo_url,
-                                target_dir=target_dir,
-                                force=request.force_clone,
-                            )
-                        else:
-                            print("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
+                        target_dir = Path(
+                            (cfg.oss_fuzz_dir or "").strip()
+                            or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
+                            or str(_REPO_ROOT / "oss-fuzz")
+                        ).expanduser().resolve()
+                        print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
+                        _ensure_oss_fuzz_checkout(
+                            repo_url=repo_url,
+                            target_dir=target_dir,
+                            force=request.force_clone,
+                        )
+                    else:
+                        print("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
 
-                        should_build_images = request.build_images
-                        if should_build_images:
-                            if _executor_mode() == "k8s_job":
-                                print("[task] skip prebuild images in k8s native runtime mode")
-                                should_build_images = False
-                        if should_build_images:
-                            # Only build if any job uses Docker (explicit or default config).
-                            use_docker_jobs = any(
-                                (j.docker if j.docker is not None else cfg.fuzz_use_docker)
-                                for j in request.jobs
-                            )
-                            if use_docker_jobs:
-                                from fuzz_unharnessed_repo import DOCKERFILE_FUZZ_CPP, DOCKERFILE_FUZZ_JAVA
-                                images = request.images
-                                if not images:
-                                    # Only prebuild explicitly requested non-auto images.
-                                    # 'auto' images are built lazily by the workflow once language is known.
-                                    inferred: set[str] = set()
-                                    for j in request.jobs:
-                                        img = (j.docker_image or "").strip().lower()
-                                        if img in {"cpp", "c", "cxx"}:
-                                            inferred.add("cpp")
-                                        elif img in {"java", "jazzer"}:
-                                            inferred.add("java")
-                                    images = sorted(inferred)
-                                if not images:
-                                    print("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
-                                for img in images:
-                                    name = (img or "").strip().lower()
-                                    if name in {"cpp", "c", "cxx"}:
-                                        tag = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
-                                        print(f"[task] ensure image {tag}")
-                                        _ensure_docker_image(tag, DOCKERFILE_FUZZ_CPP, force=request.force_build)
-                                    elif name in {"java", "jazzer"}:
-                                        tag = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
-                                        print(f"[task] ensure image {tag}")
-                                        _ensure_docker_image(tag, DOCKERFILE_FUZZ_JAVA, force=request.force_build)
-                                    else:
-                                        print(f"[task] skip unknown image hint: {img}")
-            # Submit child jobs outside parent stdout/stderr redirection.
-            # redirect_stdout is process-global; keeping it active here can clobber
-            # child job log redirection and break frontend progress tracking.
+                    should_build_images = request.build_images
+                    if should_build_images:
+                        if _executor_mode() == "k8s_job":
+                            print("[task] skip prebuild images in k8s native runtime mode")
+                            should_build_images = False
+                    if should_build_images:
+                        # Only build if any job uses Docker (explicit or default config).
+                        use_docker_jobs = any(
+                            (j.docker if j.docker is not None else cfg.fuzz_use_docker)
+                            for j in request.jobs
+                        )
+                        if use_docker_jobs:
+                            from fuzz_unharnessed_repo import DOCKERFILE_FUZZ_CPP, DOCKERFILE_FUZZ_JAVA
+                            images = request.images
+                            if not images:
+                                # Only prebuild explicitly requested non-auto images.
+                                # 'auto' images are built lazily by the workflow once language is known.
+                                inferred: set[str] = set()
+                                for j in request.jobs:
+                                    img = (j.docker_image or "").strip().lower()
+                                    if img in {"cpp", "c", "cxx"}:
+                                        inferred.add("cpp")
+                                    elif img in {"java", "jazzer"}:
+                                        inferred.add("java")
+                                images = sorted(inferred)
+                            if not images:
+                                print("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
+                            for img in images:
+                                name = (img or "").strip().lower()
+                                if name in {"cpp", "c", "cxx"}:
+                                    tag = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
+                                    print(f"[task] ensure image {tag}")
+                                    _ensure_docker_image(tag, DOCKERFILE_FUZZ_CPP, force=request.force_build)
+                                elif name in {"java", "jazzer"}:
+                                    tag = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
+                                    print(f"[task] ensure image {tag}")
+                                    _ensure_docker_image(tag, DOCKERFILE_FUZZ_JAVA, force=request.force_build)
+                                else:
+                                    print(f"[task] skip unknown image hint: {img}")
+            # Submit child jobs after parent setup logs are written.
+            # Each job now uses ContextVar-based log routing, so concurrent jobs
+            # remain isolated without process-global stdout/stderr switching.
             for job in request.jobs:
                 if _is_cancel_requested(job_id):
                     break
@@ -3172,6 +3234,8 @@ async def task_api(request: task_model = Body(...)):
             had_error = True
             _job_update(job_id, status="error", error=(cancel_error if _is_cancel_requested(job_id) else str(e)))
         finally:
+            _ACTIVE_JOB_STDOUT_TEE.reset(out_token)
+            _ACTIVE_JOB_STDERR_TEE.reset(err_token)
             try:
                 tee.close()
             except Exception:

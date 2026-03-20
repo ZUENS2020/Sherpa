@@ -264,6 +264,81 @@ def test_build_gate_allows_declared_optional_ports_with_alias(tmp_path: Path, mo
     assert out["build_error_code"] == ""
 
 
+def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(1, "", "/usr/bin/ld: cannot find -lzstd\n")],
+        bin_results=[],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 1
+    assert bool(out["last_error"])
+    assert out["restart_to_plan"] is False
+    assert workflow_graph._route_after_build_state(out) == "fix_build"
+
+
+def test_build_infra_failure_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(1, "", "dial tcp: lookup github.com: no such host\n")],
+        bin_results=[],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 1
+    assert out["restart_to_plan"] is True
+    assert workflow_graph._route_after_build_state(out) == "plan"
+
+
+def test_stage_feedback_contains_structured_summary(tmp_path: Path):
+    feedback_path = workflow_graph._write_stage_feedback(
+        tmp_path,
+        stage="fix_build",
+        error_text="link failed",
+        state={
+            "build_error_code": "missing_system_packages_declared",
+            "build_error_signature_short": "abc123def456",
+            "fix_action_type": "opencode",
+            "fix_build_last_diff_paths": ["fuzz/build.py", "fuzz/system_packages.txt"],
+            "build_stdout_tail": "stdout-tail",
+            "build_stderr_tail": "stderr-tail",
+        },
+    )
+    assert feedback_path
+    body = Path(feedback_path).read_text(encoding="utf-8")
+    assert "## Structured Summary" in body
+    assert '"error_code": "missing_system_packages_declared"' in body
+    assert '"signature": "abc123def456"' in body
+    assert '"action_taken": "opencode"' in body
+    assert '"fuzz/build.py"' in body
+
+
+def test_build_file_targeted_fix_lines_extracts_actionable_paths():
+    lines = workflow_graph._build_file_targeted_fix_lines(
+        "",
+        "",
+        "fuzz/libarchive_fuzzer.cc:22:10: error: no member named 'unique_ptr' in namespace 'std'",
+    )
+    assert lines
+    joined = "\n".join(lines)
+    assert "Read and fix `fuzz/libarchive_fuzzer.cc:22`" in joined
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
