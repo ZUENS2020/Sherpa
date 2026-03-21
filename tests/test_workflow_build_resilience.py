@@ -944,6 +944,61 @@ def test_fix_build_injects_previous_failed_attempts_context(tmp_path: Path, monk
     assert "\"changed_paths_count\": 0" in ctx
 
 
+def test_fix_build_context_is_slim_and_capped(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    huge_blob = "X" * 40000
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    monkeypatch.setattr(workflow_graph, "_load_build_strategy_doc", lambda _root: {"build_system": "cmake", "huge_blob": huge_blob})
+    monkeypatch.setattr(workflow_graph, "_load_build_runtime_facts_doc", lambda _root: {"build_mode": "library_link", "required_outputs": ["out/a", "out/b"], "huge_blob": huge_blob})
+    monkeypatch.setattr(workflow_graph, "_load_repo_understanding_doc", lambda _root: {"build_system": "cmake", "chosen_target_api": "foo_parse", "fuzzer_entry_strategy": "sanitizer_fuzzer", "huge_blob": huge_blob})
+    monkeypatch.setenv("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS", "2000")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_CONTEXT_MAX_HISTORY", "1")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **kwargs):
+            captured["ctx"] = str(kwargs.get("additional_context") or "")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed: unresolved symbols in harness",
+        "build_stdout_tail": "stdout line\n" * 80,
+        "build_stderr_tail": "stderr line\n" * 120,
+        "fix_build_attempt_history": [
+            {
+                "attempt_index": 2,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "sig-2",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            },
+            {
+                "attempt_index": 3,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "sig-3",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            },
+        ],
+    }
+
+    workflow_graph._node_fix_build(state)
+    ctx = captured.get("ctx") or ""
+    assert len(ctx) <= 2000
+    assert "=== structured_error ===" in ctx
+    assert "=== previous_failed_attempts ===" in ctx
+    assert "=== context_file_refs ===" in ctx
+    assert "=== fuzz/build_strategy.json ===" not in ctx
+    assert "huge_blob" not in ctx
+
+
 def test_fix_build_rule_missing_zlib_link_flag_prefers_explicit_archive(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

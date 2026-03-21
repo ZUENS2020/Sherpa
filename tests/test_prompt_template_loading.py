@@ -83,6 +83,7 @@ def test_fix_build_prompt_references_policy_and_context():
     assert "only modify files under `fuzz/` and `./done`" in out
     assert "read `previous_failed_attempts` from context first" in out
     assert "pure no-op is invalid" in out
+    assert "stale `./done` without fresh code diff is invalid" in out
     assert "Read and fix <path>[:line]" in out
     assert "replacing internal/private API usage with public/stable APIs" in out
     assert "write one key modified path under `fuzz/` into `./done`" in out
@@ -173,6 +174,7 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "`zlib`, `bzip2`, `liblzma`" in fix_build
     assert "do not bypass workflow acceptance" in fix_build
     assert "read and use `previous_failed_attempts` from context" in fix_build
+    assert "stale `./done` without fresh diff is invalid" in fix_build
     assert "replace those usages with public/stable APIs first" in fix_build
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
     assert "do not bypass acceptance by tampering" in fix_crash_h
