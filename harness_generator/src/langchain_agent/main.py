@@ -2045,7 +2045,6 @@ def _job_execs_per_sec(job: dict) -> float | None:
             text = _read_log_tail(Path(log_file), max_chars=65536)
     return _extract_execs_per_sec_from_text(text)
 
-
 def _collect_exec_rates_for_system(fuzz_jobs: list[dict], now: float) -> list[float]:
     rates: list[float] = []
 
@@ -2077,8 +2076,6 @@ def _collect_exec_rates_for_system(fuzz_jobs: list[dict], now: float) -> list[fl
             return window_rates
 
     return rates
-
-
 def _percentile(values: list[float], q: float) -> float | None:
     if not values:
         return None

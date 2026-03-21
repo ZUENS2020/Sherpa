@@ -757,7 +757,6 @@ def test_system_status_execs_per_sec_reads_run_log_metrics(tmp_path: Path):
     doc = response.json()
     assert doc["tasks_tab_metrics"]["execs_per_sec"] == "9.1"
 
-
 def test_system_status_execs_per_sec_falls_back_to_recent_success_window(tmp_path: Path):
     job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
     log_path = tmp_path / f"{job_id}.log"
@@ -786,8 +785,6 @@ def test_system_status_execs_per_sec_falls_back_to_recent_success_window(tmp_pat
     assert response.status_code == 200
     doc = response.json()
     assert doc["tasks_tab_metrics"]["execs_per_sec"] == "12.4"
-
-
 def test_system_status_llm_token_usage_requires_real_token_fields(tmp_path: Path):
     job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
     log_path = tmp_path / f"{job_id}.log"
