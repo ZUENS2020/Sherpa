@@ -44,7 +44,6 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 {
   "build_system": "cmake",
   "chosen_target_api": "archive_read_open1",
-  "chosen_target_api": "archive_read_open1",
   "chosen_target_reason": "runtime-reachable parser entrypoint",
   "fuzzer_entry_strategy": "sanitizer_fuzzer",
   "evidence": [
@@ -126,11 +125,13 @@ if __name__ == "__main__":
   - `build_fuzzers()` must call `find_static_lib()` directly; defining it without calling it is invalid.
   - `build_fuzzers()` must produce a concrete fuzzer executable under `fuzz/out/`.
   - if `fuzz/execution_plan.json` lists multiple execution targets, `build_fuzzers()` should compile/link multiple fuzzers accordingly.
+  - prefer public/stable APIs in generated harness code; avoid internal/private namespaces (for example `detail`, `_internal`, `impl`) unless concrete repository evidence proves no public entrypoint exists.
 
 ## Acceptance Criteria
 - harness-first contract: create harness source file before completing build/json/readme scaffold.
 - all required scaffold files exist.
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
+- harness code uses public/stable APIs by default; internal/private-only API usage requires explicit evidence in `fuzz/repo_understanding.json` `evidence`.
 - scaffold aligns with `fuzz/execution_plan.json` when present.
 - build script does not hardcode a single guessed static-library path.
 - when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]` before broader edits.

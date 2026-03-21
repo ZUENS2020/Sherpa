@@ -36,20 +36,24 @@ def find_static_lib(repo_root):
 - canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
 - if editing `fuzz/repo_understanding.json`, keep `chosen_target_api` as API identifier (not `fuzz/*.cc`-style path), keep `build_system != unknown`, and keep `evidence` as non-empty string array.
 - when execution plan requires multiple targets, do not "fix" build by dropping to single-target-only output.
+- when build diagnostics indicate internal/private API usage errors, replace those usages with public/stable APIs first; do not patch by switching to other private symbols.
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
 - must produce textual code changes when current diagnostics are still failing; pure no-op is invalid.
+- stale `./done` without fresh diff is invalid and must not be treated as successful completion.
+- read and use `previous_failed_attempts` from context to avoid repeating already-failed approaches.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.
 - build result remains aligned with execution-plan target coverage constraints.
 - do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
 - when the same error repeats, change strategy instead of repeating the same patch.
 - when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
+- when diagnostics include concrete symbol/file/line errors, tie each edit to those locations before broader refactors.
 
 ## Command Policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
 ## Done Sentinel Contract
-- write `fuzz/build.py` into `./done`.
+- write one key modified path under `fuzz/` into `./done`.

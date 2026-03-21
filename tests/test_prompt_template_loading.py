@@ -17,16 +17,16 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     templates = workflow_common.load_opencode_prompt_templates()
 
     assert "plan_with_hint" in templates
+    assert "plan_repair_build_with_hint" in templates
+    assert "plan_repair_crash_with_hint" in templates
     assert "synthesize_with_hint" in templates
+    assert "synthesize_repair_build_with_hint" in templates
+    assert "synthesize_repair_crash_with_hint" in templates
     assert "synthesize_complete_scaffold" in templates
-    assert "fix_build_execute" in templates
-    assert "fix_crash_harness_error" in templates
-    assert "fix_crash_upstream_bug" in templates
     assert "plan_fix_targets_schema" in templates
     assert "./done" in templates["plan_with_hint"]
     assert "./done" in templates["synthesize_with_hint"]
     assert "./done" in templates["synthesize_complete_scaffold"]
-    assert "./done" in templates["fix_build_execute"]
     assert "TEMPLATE:" not in templates["plan_with_hint"]
 
 
@@ -47,6 +47,17 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "Keep runtime-viable/public entrypoints first." in out
 
 
+def test_repair_plan_prompts_are_split_by_origin() -> None:
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    build_repair = workflow_common.render_opencode_prompt("plan_repair_build_with_hint", hint="build-diag")
+    crash_repair = workflow_common.render_opencode_prompt("plan_repair_crash_with_hint", hint="crash-diag")
+
+    assert "build-stage failure" in build_repair
+    assert "crash/repro stage failure" in crash_repair
+    assert "build-diag" in build_repair
+    assert "crash-diag" in crash_repair
+
+
 def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     workflow_common.load_opencode_prompt_templates.cache_clear()
     synth = workflow_common.render_opencode_prompt("synthesize_with_hint", hint="runtime-first")
@@ -61,27 +72,19 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "-DENABLE_INSTALL=OFF" in synth
     assert "read-only exploration commands are allowed" in synth.lower()
     assert "Do NOT run build/execute commands." in synth
+    assert "Prefer public/stable repository APIs for harness logic." in synth
 
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
     assert "missing items" in scaffold.lower()
 
-
-def test_fix_build_prompt_references_policy_and_context():
-    workflow_common.load_opencode_prompt_templates.cache_clear()
-    out = workflow_common.render_opencode_prompt(
-        "fix_build_execute",
-        build_log_file="fuzz/build_full.log",
-        codex_hint="tighten scaffold",
-    )
-
-    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in out
-    assert "fuzz/build_full.log" in out
-    assert "tighten scaffold" in out
-    assert "only modify files under `fuzz/` and `./done`" in out
-    assert "pure no-op is invalid" in out
-    assert "Read and fix <path>[:line]" in out
+    synth_build_repair = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")
+    synth_crash_repair = workflow_common.render_opencode_prompt("synthesize_repair_crash_with_hint", hint="crash-fail")
+    assert "after a build-stage failure" in synth_build_repair
+    assert "after a crash/repro-stage failure" in synth_crash_repair
+    assert "build-fail" in synth_build_repair
+    assert "crash-fail" in synth_crash_repair
 
 
 def test_global_policy_document_contains_core_rules():
@@ -157,20 +160,16 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
     plan = (skill_root / "plan" / "SKILL.md").read_text(encoding="utf-8")
     plan_fix = (skill_root / "plan_fix_targets_schema" / "SKILL.md").read_text(encoding="utf-8")
-    fix_build = (skill_root / "fix_build" / "SKILL.md").read_text(encoding="utf-8")
-    fix_crash_h = (skill_root / "fix_crash_harness_error" / "SKILL.md").read_text(encoding="utf-8")
-    fix_crash_u = (skill_root / "fix_crash_upstream_bug" / "SKILL.md").read_text(encoding="utf-8")
+    plan_repair_build = (skill_root / "plan_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    plan_repair_crash = (skill_root / "plan_repair_crash" / "SKILL.md").read_text(encoding="utf-8")
+    synth_repair_build = (skill_root / "synthesize_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    synth_repair_crash = (skill_root / "synthesize_repair_crash" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
     assert "`api` must describe a target API identifier" in plan
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan_fix
     assert "semantic reminder: do not rewrite `api` to harness file paths" in plan_fix
-    assert "canonical vcpkg examples" in fix_build
-    assert "`zlib`, `bzip2`, `liblzma`" in fix_build
-    assert "do not bypass workflow acceptance" in fix_build
-    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
-    assert "do not bypass acceptance by tampering" in fix_crash_h
-    assert "Read and fix <path>[:line]" in fix_crash_h
-    assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
-    assert "do not bypass acceptance by tampering" in fix_crash_u
-    assert "Read and fix <path>[:line]" in fix_crash_u
+    assert "build-stage failure" in plan_repair_build
+    assert "crash/repro-stage failure" in plan_repair_crash
+    assert "build-failure-driven" in synth_repair_build
+    assert "crash/repro evidence" in synth_repair_crash

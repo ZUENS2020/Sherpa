@@ -167,7 +167,7 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert gen.commands[1][-1] == "--clean"
 
 
-def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_gate_missing_optional_ports_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -197,7 +197,7 @@ def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, m
     assert "system_packages.txt" in out["last_error"]
     assert out["build_error_kind"] == "source"
     assert out["build_error_code"] == "missing_system_packages_declared"
-    assert workflow_graph._route_after_build_state(out) == "fix_build"
+    assert workflow_graph._route_after_build_state(out) == "plan"
 
 
 def test_build_gate_allows_declared_optional_ports(tmp_path: Path, monkeypatch, _no_sleep):
@@ -264,7 +264,7 @@ def test_build_gate_allows_declared_optional_ports_with_alias(tmp_path: Path, mo
     assert out["build_error_code"] == ""
 
 
-def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_source_failure_routes_to_plan_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -282,7 +282,7 @@ def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path
     assert out["build_rc"] == 1
     assert bool(out["last_error"])
     assert out["restart_to_plan"] is False
-    assert workflow_graph._route_after_build_state(out) == "fix_build"
+    assert workflow_graph._route_after_build_state(out) == "plan"
 
 
 def test_build_infra_failure_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
@@ -329,14 +329,16 @@ def test_stage_feedback_contains_structured_summary(tmp_path: Path):
 
 
 def test_build_file_targeted_fix_lines_extracts_actionable_paths():
+    repo_root = Path("/tmp/sherpa-repo")
     lines = workflow_graph._build_file_targeted_fix_lines(
+        repo_root,
         "",
         "",
         "fuzz/libarchive_fuzzer.cc:22:10: error: no member named 'unique_ptr' in namespace 'std'",
     )
     assert lines
     joined = "\n".join(lines)
-    assert "Read and fix `fuzz/libarchive_fuzzer.cc:22`" in joined
+    assert "/fuzz/libarchive_fuzzer.cc:22`" in joined
 
 
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
@@ -465,7 +467,7 @@ def test_route_after_build_routes_infra_error_to_plan() -> None:
     assert route == "plan"
 
 
-def test_route_after_build_sends_source_error_to_fix_build() -> None:
+def test_route_after_build_sends_source_error_to_plan() -> None:
     route = workflow_graph._route_after_build_state(
         {
             "failed": False,
@@ -473,7 +475,19 @@ def test_route_after_build_sends_source_error_to_fix_build() -> None:
             "build_error_kind": "source",
         }
     )
-    assert route == "fix_build"
+    assert route == "plan"
+
+
+def test_route_after_fix_build_sends_repeated_same_signature_back_to_plan(monkeypatch) -> None:
+    monkeypatch.setenv("SHERPA_FIX_BUILD_SAME_SIGNATURE_TO_PLAN", "3")
+    route = workflow_graph._route_after_fix_build_state(
+        {
+            "failed": False,
+            "last_error": "build failed rc=1",
+            "same_build_error_repeats": 3,
+        }
+    )
+    assert route == "plan"
 
 
 def test_opencode_cli_retries_default_and_bounds(monkeypatch) -> None:
@@ -680,8 +694,10 @@ def test_fix_build_stops_after_noop_streak_threshold(tmp_path: Path, monkeypatch
     }
 
     out = workflow_graph._node_fix_build(state)
-    assert out["message"] == "opencode fixed build"
-    assert out["last_error"] == ""
+    assert out["message"] == "fix_build no-op streak exceeded; restarting from plan"
+    assert out["restart_to_plan"] is True
+    assert out["fix_build_terminal_reason"] == "fix_build_noop_streak_exceeded"
+    assert "no-op streak exceeded" in out["last_error"]
 
 
 def test_fix_build_noop_streak_resets_after_effective_change(tmp_path: Path, monkeypatch):
@@ -889,7 +905,155 @@ def test_fix_build_feedback_history_appended_and_trimmed(tmp_path: Path, monkeyp
     out = workflow_graph._node_fix_build(state)
     hist = out.get("fix_build_attempt_history") or []
     assert len(hist) == 2
-    assert hist[-1]["outcome"] == "llm_fixed"
+    assert hist[-1]["outcome"] == "llm_noop"
+
+
+def test_fix_build_injects_previous_failed_attempts_context(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **kwargs):
+            captured["ctx"] = str(kwargs.get("additional_context") or "")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed: cannot find -lzstd",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+        "fix_build_attempt_history": [
+            {
+                "attempt_index": 3,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "abcd1234",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            }
+        ],
+    }
+
+    workflow_graph._node_fix_build(state)
+    ctx = captured.get("ctx") or ""
+    assert "=== previous_failed_attempts ===" in ctx
+    assert "\"attempt\": 3" in ctx
+    assert "\"outcome\": \"llm_noop\"" in ctx
+    assert "\"changed_paths_count\": 0" in ctx
+
+
+def test_fix_build_context_is_slim_and_capped(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    huge_blob = "X" * 40000
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    monkeypatch.setattr(workflow_graph, "_load_build_strategy_doc", lambda _root: {"build_system": "cmake", "huge_blob": huge_blob})
+    monkeypatch.setattr(workflow_graph, "_load_build_runtime_facts_doc", lambda _root: {"build_mode": "library_link", "required_outputs": ["out/a", "out/b"], "huge_blob": huge_blob})
+    monkeypatch.setattr(workflow_graph, "_load_repo_understanding_doc", lambda _root: {"build_system": "cmake", "chosen_target_api": "foo_parse", "fuzzer_entry_strategy": "sanitizer_fuzzer", "huge_blob": huge_blob})
+    monkeypatch.setenv("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS", "2000")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_CONTEXT_MAX_HISTORY", "1")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_STDERR_MAX_CHARS", "800")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_STDOUT_MAX_CHARS", "600")
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **kwargs):
+            captured["ctx"] = str(kwargs.get("additional_context") or "")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed: unresolved symbols in harness",
+        "build_stdout_tail": "stdout line\n" * 80,
+        "build_stderr_tail": "stderr line\n" * 120,
+        "fix_build_attempt_history": [
+            {
+                "attempt_index": 2,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "sig-2",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            },
+            {
+                "attempt_index": 3,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "sig-3",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            },
+        ],
+    }
+
+    workflow_graph._node_fix_build(state)
+    ctx = captured.get("ctx") or ""
+    assert len(ctx) <= 4000
+    assert "=== structured_error ===" in ctx
+    assert "=== previous_failed_attempts ===" in ctx
+    assert "=== context_file_refs ===" in ctx
+    assert "=== build stderr diagnostics ===" in ctx
+    assert "=== fuzz/build_strategy.json ===" not in ctx
+    assert "huge_blob" not in ctx
+
+
+def test_fix_build_context_denoises_stdout_and_keeps_stderr_signal(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **kwargs):
+            captured["ctx"] = str(kwargs.get("additional_context") or "")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    monkeypatch.setenv("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS", "12000")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_STDERR_MAX_CHARS", "6000")
+    monkeypatch.setenv("SHERPA_FIX_BUILD_STDOUT_MAX_CHARS", "2000")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+
+    stderr_block = (
+        "fatal error: fmt/base.h: No such file or directory\n"
+        "Traceback (most recent call last):\n"
+        "subprocess.CalledProcessError: Command '['clang++']' returned non-zero exit status 1.\n"
+    )
+    stdout_noise = "\n".join([f"[{i}%] Built target abc" for i in range(1, 80)])
+    state = {
+        "generator": gen,
+        "last_error": "build failed rc=1",
+        "build_stdout_tail": stdout_noise + "\nexec /usr/local/bin/python build.py\n",
+        "build_stderr_tail": stderr_block + "\n\n" + stderr_block,
+    }
+
+    workflow_graph._node_fix_build(state)
+    ctx = captured.get("ctx") or ""
+    assert "=== build stderr diagnostics ===" in ctx
+    assert "fatal error: fmt/base.h: No such file or directory" in ctx
+    assert "Built target abc" not in ctx
+    assert "exec /usr/local/bin/python build.py" in ctx
+    diag_section = ctx.split("=== build stderr diagnostics ===", 1)[1].split("=== structured_error ===", 1)[0]
+    assert diag_section.count("fatal error: fmt/base.h: No such file or directory") == 2
+
+
+def test_fix_build_targeted_actions_use_absolute_paths(tmp_path: Path):
+    repo_root = tmp_path
+    rel_hit_text = "fuzz/h1.cc:12: error: unknown type name"
+    abs_hit_text = f"{repo_root}/include/fmt/base.h:658: note: declaration here"
+    lines = workflow_graph._build_file_targeted_fix_lines(repo_root, rel_hit_text, "", abs_hit_text)
+    assert lines
+    assert lines[0] == "Prioritize file-targeted fixes from diagnostics:"
+    joined = "\n".join(lines[1:])
+    assert f"{repo_root}/fuzz/h1.cc:12" in joined
+    assert f"{repo_root}/include/fmt/base.h:658" in joined
 
 
 def test_fix_build_rule_missing_zlib_link_flag_prefers_explicit_archive(tmp_path: Path, monkeypatch):

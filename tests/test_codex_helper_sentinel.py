@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -119,6 +121,49 @@ def test_run_codex_command_succeeds_only_when_done_and_diff_exist(monkeypatch: p
 
     assert out is not None
     assert done_path.is_file()
+
+
+def test_run_codex_command_ignores_stale_done_until_fresh_sentinel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls = {"n": 0}
+
+    def _fake_popen(*args, **kwargs):
+        calls["n"] += 1
+        proc = _FakeProc(stdout_text="")
+        proc.returncode = 0
+        if calls["n"] == 1:
+            done_path.write_text("stale-done\n", encoding="utf-8")
+            old = time.time() - 3600
+            os.utime(done_path, (old, old))
+        else:
+            done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+
+    def _fake_git_diff_head() -> str:
+        if done_path.exists() and "fuzz/build.py" in done_path.read_text(encoding="utf-8", errors="replace"):
+            return "M fuzz/build.py"
+        return ""
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz build script",
+        max_attempts=2,
+        max_cli_retries=1,
+        timeout=10,
+        initial_backoff=0,
+    )
+
+    assert calls["n"] == 2
+    assert out is not None
+    assert done_path.read_text(encoding="utf-8", errors="replace").strip() == "fuzz/build.py"
 
 
 def test_run_codex_command_idle_timeout_retries_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
