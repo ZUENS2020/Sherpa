@@ -215,17 +215,15 @@ Kubernetes stage 元数据位于：
 
 当前文档入口与接口说明以以下文件为准：
 
-- [docs/README.md](/Users/zuens2020/Documents/Sherpa/docs/README.md)
-- [docs/API_REFERENCE.md](/Users/zuens2020/Documents/Sherpa/docs/API_REFERENCE.md)
-- [docs/CODEBASE_TECHNICAL_ANALYSIS.md](/Users/zuens2020/Documents/Sherpa/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
-- [docs/COMPETITION_TECHNICAL_BRIEF.md](/Users/zuens2020/Documents/Sherpa/docs/COMPETITION_TECHNICAL_BRIEF.md)
-- [docs/STANDARD_CHANGE_PROCESS.md](/Users/zuens2020/Documents/Sherpa/docs/STANDARD_CHANGE_PROCESS.md)
+- [docs/README.md](docs/README.md)
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
+- [docs/CODEBASE_TECHNICAL_ANALYSIS.md](docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+- [docs/STANDARD_CHANGE_PROCESS.md](docs/STANDARD_CHANGE_PROCESS.md)
 
-如果你要接前端，优先看 `docs/API_REFERENCE.md`，它按当前后端真实返回字段整理了 `/api/task`、`/api/tasks`、`/api/system` 和配置接口。
+如果你要接前端，优先看 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)，它按当前后端真实返回字段整理了 `/api/task`、`/api/tasks`、`/api/system` 和配置接口。
 
 ## 推荐阅读顺序
 
-1. [文档入口](/docs/README.md)
-2. [代码级技术分析](/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
-3. [比赛展示版技术解读](/docs/COMPETITION_TECHNICAL_BRIEF.md)
-4. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
+1. [文档入口](docs/README.md)
+2. [代码级技术分析](docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+3. [标准变更流程](docs/STANDARD_CHANGE_PROCESS.md)
