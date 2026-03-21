@@ -32,6 +32,7 @@ harness_generator/
 - 调度 stage job
 - 记录任务、子任务、日志与状态
 - 根据 `workflow_recommended_next` 决定下一阶段，而不是固定死链路
+- 向前端暴露 `/api/task`、`/api/tasks`、`/api/system`、`/api/config` 等接口；接口口径以 `docs/API_REFERENCE.md` 为准
 
 ### `src/langchain_agent/workflow_graph.py`
 - 定义工作流节点与路由

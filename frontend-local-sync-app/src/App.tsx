@@ -26,7 +26,7 @@ import {
 } from 'recharts';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('tasks');
+  const [activeTab, setActiveTab] = useState('overview');
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
     return localStorage.getItem('sherpaApiBaseUrl') || 'https://dev.zuens2020.work';
   });
@@ -63,6 +63,9 @@ export default function App() {
   const agentHealthMatrix = Array.isArray(systemStatus?.telemetry?.agent_health_matrix)
     ? systemStatus.telemetry.agent_health_matrix
     : [];
+  const fastapiGatewayRaw = String(systemStatus?.telemetry?.fastapi_gateway || '--');
+  const fastapiGatewaySliMatch = fastapiGatewayRaw.match(/^\s*([\d.]+%\s*SLI)\b/i);
+  const fastapiGatewayDisplay = fastapiGatewaySliMatch?.[1] || fastapiGatewayRaw.split('·')[0].trim() || fastapiGatewayRaw;
   const runningTasks = normalizedTasks.filter((t: any) => t.status === 'RUNNING');
   const failedTasks = normalizedTasks.filter((t: any) => t.status === 'FAILED' || t.status === 'ERROR');
   const totalTasks = normalizedTasks.length;
@@ -507,11 +510,11 @@ export default function App() {
                         <p className="mb-1 font-label text-[10px] font-bold tracking-widest text-zinc-500 uppercase">
                           FastAPI Gateway
                         </p>
-                        <div className="flex items-baseline justify-between">
-                          <span className="font-mono text-xl font-bold italic uppercase">
-                            {systemStatus?.telemetry?.fastapi_gateway || '--'}
+                        <div className="space-y-1">
+                          <span className="block font-mono text-xl font-bold italic uppercase leading-none">
+                            {fastapiGatewayDisplay}
                           </span>
-                          <span className="font-mono text-[10px] font-bold text-emerald-500 uppercase">
+                          <span className="block font-mono text-[10px] font-bold text-emerald-500 uppercase">
                             {systemStatus?.telemetry?.fastapi_status || '--'}
                           </span>
                         </div>
@@ -571,19 +574,19 @@ export default function App() {
                           itemStyle={{ fontSize: 12, fontFamily: 'monospace' }}
                           labelStyle={{ color: '#a1a1aa', fontSize: 10, marginBottom: 4 }}
                         />
-                        <Line name="Harnesses" yAxisId="left" type="monotone" dataKey="throughput" stroke="#047857" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#047857', stroke: '#fff' }} />
-                        <Line name="Crash Rate" yAxisId="right" type="monotone" dataKey="latency" stroke="#ea580c" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#ea580c', stroke: '#fff' }} />
+                        <Line name="Throughput" yAxisId="left" type="monotone" dataKey="throughput" stroke="#047857" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#047857', stroke: '#fff' }} />
+                        <Line name="Latency" yAxisId="right" type="monotone" dataKey="latency" stroke="#ea580c" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#ea580c', stroke: '#fff' }} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
                   <div className="mt-4 flex items-center gap-6">
                     <div className="flex items-center gap-2">
                       <div className="h-2 w-2 bg-emerald-700"></div>
-                      <span className="font-mono text-[10px] font-bold text-zinc-500 uppercase">Harnesses (k/s)</span>
+                      <span className="font-mono text-[10px] font-bold text-zinc-500 uppercase">Throughput (jobs / 4h)</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="h-2 w-2 bg-orange-600"></div>
-                      <span className="font-mono text-[10px] font-bold text-zinc-500 uppercase">Crash Rate (c/s)</span>
+                      <span className="font-mono text-[10px] font-bold text-zinc-500 uppercase">Latency (ms)</span>
                     </div>
                   </div>
                 </div>
@@ -767,7 +770,7 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <div className="h-1.5 w-1.5 bg-emerald-500"></div>
                         <span className="font-mono text-[9px] tracking-tighter uppercase">
-                          {`Running Jobs: ${runningTasks.length}`}
+                          {`Running Jobs: ${systemStatus?.overview?.main_tasks_running || runningTasks.length}`}
                         </span>
                       </div>
                     </div>
