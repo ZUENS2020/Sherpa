@@ -11,12 +11,14 @@ LEGACY = ROOT / "harness_generator" / "src" / "fuzz_unharnessed_repo.py"
 def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
     text = WF.read_text(encoding="utf-8")
     expected = [
-        'stage_skill="plan"',
         'stage_skill="plan_fix_targets_schema"',
-        'stage_skill="synthesize"',
         'stage_skill="synthesize_complete_scaffold"',
-        'stage_skill="fix_build"',
-        'stage_skill=("fix_crash_harness_error" if harness_error else "fix_crash_upstream_bug")',
+        'plan_stage_skill = "plan"',
+        'synth_stage_skill = "synthesize"',
+        'plan_stage_skill = "plan_repair_build"',
+        'plan_stage_skill = "plan_repair_crash"',
+        'synth_stage_skill = "synthesize_repair_build"',
+        'synth_stage_skill = "synthesize_repair_crash"',
     ]
     for token in expected:
         assert token in text
@@ -29,9 +31,10 @@ def test_main_workflow_stage_skills_exist() -> None:
         "plan_fix_targets_schema",
         "synthesize",
         "synthesize_complete_scaffold",
-        "fix_build",
-        "fix_crash_harness_error",
-        "fix_crash_upstream_bug",
+        "plan_repair_build",
+        "plan_repair_crash",
+        "synthesize_repair_build",
+        "synthesize_repair_crash",
         "seed_generation",
     ]
     for stage in required:
@@ -65,9 +68,12 @@ def test_workflow_plan_and_synthesize_use_group_feedback_context() -> None:
     assert 'stage="synthesize"' in text
 
 
-def test_workflow_fix_build_route_map_contains_self_loop() -> None:
+def test_workflow_build_failures_route_to_plan_without_fix_nodes() -> None:
     text = WF.read_text(encoding="utf-8")
-    assert '"fix_build": "fix_build"' in text
+    assert 'return "plan"' in text
+    assert '"fix_build": "fix_build"' not in text
+    assert 'graph.add_node("fix_build", _node_fix_build)' not in text
+    assert 'graph.add_node("fix_crash", _node_fix_crash)' not in text
 
 
 def test_workflow_synthesize_uses_configurable_opencode_attempts() -> None:

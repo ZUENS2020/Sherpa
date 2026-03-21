@@ -197,7 +197,16 @@ def _resolve_stage_session_group(stage_skill: str) -> str:
     stage = str(stage_skill or "").strip()
     if not stage:
         return "default"
-    if stage in {"plan", "plan_fix_targets_schema", "synthesize", "synthesize_complete_scaffold"}:
+    if stage in {
+        "plan",
+        "plan_fix_targets_schema",
+        "synthesize",
+        "synthesize_complete_scaffold",
+        "plan_repair_build",
+        "synthesize_repair_build",
+        "plan_repair_crash",
+        "synthesize_repair_crash",
+    }:
         return "planning_synth"
     if stage == "fix_build":
         return "fix_build"
