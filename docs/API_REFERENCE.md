@@ -1,6 +1,6 @@
 # Sherpa API Reference
 
-Last updated: 2026-03-20  
+Last updated: 2026-03-21
 Backend source of truth: `harness_generator/src/langchain_agent/main.py`
 
 ## 1. Base Information
@@ -39,6 +39,17 @@ For task submission budget fields:
 
 - `-1` means unlimited (converted to internal `0`)
 - `0` is also treated as unlimited internally
+
+### 2.4 Frontend dynamic fields
+
+The dashboard consumes these backend blocks directly:
+
+- `overview`
+- `telemetry`
+- `execution.summary`
+- `tasks_tab_metrics`
+
+The backend does not inject demo placeholders. Missing metrics must be returned as `null` or a safe empty value.
 
 ## 3. Configuration APIs
 
@@ -197,8 +208,11 @@ Frontend dynamic blocks:
 
 Metric contract:
 
-- Values are computed from live in-memory job/runtime data only.
-- Backend does not inject demo placeholders.
+- Values are computed from live job/runtime data only.
+- `fastapi_gateway` is SLI-only and intentionally omits p95 / rps.
+- `llm_token_usage` only uses real token accounting fields; if none exist, it is `null`.
+- `tasks_tab_metrics.execs_per_sec` is derived from run-stage metrics/logs, not from task count.
+- `repos_queued` tracks queued main tasks.
 - If a metric has no reliable source at query time, it is returned as `null`.
 
 Example (abridged):
@@ -224,7 +238,7 @@ Example (abridged):
     "llm_token_status": null,
     "k8s_pod_capacity": "61% CAP",
     "k8s_pod_status": "Normal",
-    "fastapi_gateway": null,
+    "fastapi_gateway": "100.00% SLI",
     "fastapi_status": "UP",
     "agent_health_matrix": [1, 0, 1],
     "performance_series": [{ "time": "00:00", "throughput": 33, "latency": 45 }]
@@ -247,6 +261,29 @@ Example (abridged):
   }
 }
 ```
+
+Field details:
+
+- `overview.avg_fuzz_time`: rolling average fuzz runtime for successful or active jobs.
+- `overview.active_agents`: current active main task count shown in the dashboard.
+- `overview.cluster_health`: aggregate health score derived from failure rate, load and error ratio.
+- `overview.crash_triage_rate`: recent crash-handling throughput signal.
+- `overview.harnesses_synthesized`: synthesized harness count metric.
+- `overview.avg_coverage`: average coverage percentage when available.
+- `telemetry.llm_token_usage`: hourly token usage summary, only if real token fields exist.
+- `telemetry.k8s_pod_capacity`: cluster resource pressure indicator.
+- `telemetry.fastapi_gateway`: FastAPI gateway SLI only.
+- `telemetry.fastapi_status`: gateway health text (`UP`, `DEGRADED`, `ERROR`).
+- `telemetry.agent_health_matrix`: compact binary health grid used by the UI.
+- `telemetry.performance_series`: time series rendered as throughput/latency charts.
+- `execution.summary.failure_rate`: recent failure ratio for completed jobs.
+- `execution.summary.fuzzing_jobs_24h`: 24h fuzz job count.
+- `execution.summary.cluster_load_peak`: peak cluster load summary.
+- `execution.summary.repos_queued`: queued main-task count.
+- `tasks_tab_metrics.total_jobs`: task list total count.
+- `tasks_tab_metrics.execs_per_sec`: run-stage exec/s rollup.
+- `tasks_tab_metrics.success_rate`: task success ratio.
+- `tasks_tab_metrics.failed_tasks`: failed task count.
 
 ## 5.2 GET `/api/metrics`
 
@@ -311,10 +348,13 @@ Request schema:
 Field notes:
 
 - `code_url` required per job
+- `jobs` is an array of parent task entries; each entry may spawn one or more fuzz children internally.
 - Budget aliases:
   - `total_duration` -> `total_time_budget`
   - `single_duration` -> `run_time_budget`
   - `-1` means unlimited
+- `max_tokens = 0` means no explicit token cap.
+- `unlimited_round_limit` maps to the run-stage unlimited round cap used by the backend worker.
 - In current k8s native mode, docker controls are kept for compatibility but not used as runtime selector.
 
 Success response:
@@ -386,6 +426,10 @@ Response:
 Returns list for task board.
 
 - Query `limit` default `50`, clamped to `[1, 200]`
+- `repo` remains the backend job repo label; the frontend may display a derived repo name for readability.
+- `stage` is the current phase shown in the task row.
+- `active_child_status` mirrors the most recent child state and is useful when a parent task fan-outs to fuzz jobs.
+- `progress` is a soft indicator; it is not a strict completion percentage.
 
 Response:
 

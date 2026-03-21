@@ -43,3 +43,4 @@ flowchart LR
 - `docs/k8s/DEPLOYMENT_DETAILED.md`
 - `docs/k8s/MAPPING.md`
 - `docs/k8s/RUNBOOK.md`
+- `docs/API_REFERENCE.md`

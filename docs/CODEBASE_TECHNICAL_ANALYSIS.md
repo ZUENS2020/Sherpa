@@ -40,6 +40,11 @@ flowchart LR
 - Postgres job store 读写
 - 动态生成 Kubernetes worker Job manifest
 - 聚合 stage 结果并对外暴露 `/api/*`
+- 聚合前端使用的动态接口块：
+  - `overview`
+  - `telemetry`
+  - `execution.summary`
+  - `tasks_tab_metrics`
 
 代码层面可以把它理解为“控制面”。
 
@@ -172,6 +177,13 @@ flowchart TD
 - timeout
 - OOM
 
+当前 `run` 的默认执行方式是：
+
+- seed 生成串行
+- fuzzer 运行按 batch 并行
+- 默认并行度为 5，可通过 `SHERPA_PARALLEL_FUZZERS` 或 stage 上下文覆盖
+- 首崩早停依赖 `stop_on_first_crash` 与 `parallel_early_stop`
+
 ### `coverage-analysis`
 
 把 `run` 阶段的信号转成下一步动作。当前策略不是“无脑 replan”，而是：
@@ -257,7 +269,18 @@ worker Job 由 `main.py` 动态生成 manifest。当前 manifest 会显式注入
 - 临时文件默认写入 `/tmp` 或 `/tmp/sherpa-runtime`
 - 共享卷通过 initContainer/权限初始化保证可写
 
-## 8. 状态产物与可观测性
+### 8. API 与前端联动
+
+当前前端不是静态展示，而是直接消费以下接口：
+
+- `GET /api/tasks`：任务列表与任务卡片
+- `GET /api/system`：Overview 面板的动态指标
+- `GET /api/task/{job_id}`：任务详情与 child job 视图
+- `PUT /api/config`：配置面板保存 API base URL
+
+这些接口按当前代码真实返回字段设计，文档层不再保留 demo 占位值。
+
+## 9. 状态产物与可观测性
 
 每个任务的可观测信息主要分为三层：
 
@@ -327,4 +350,4 @@ worker Job 由 `main.py` 动态生成 manifest。当前 manifest 会显式注入
 - 运行资源策略需要在“可调度”和“避免 OOM”之间取平衡
 - summary/coverage 某些消费层字段仍有继续收紧空间
 
-但从当前代码形态看，Sherpa 已经具备了比赛展示所需的完整主线：目标规划、生成、修复、运行、分析、复现、可观测性与部署闭环。
+但从当前代码形态看，Sherpa 已经具备了完整主线：目标规划、生成、修复、运行、分析、复现、可观测性与部署闭环。

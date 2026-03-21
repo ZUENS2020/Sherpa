@@ -735,6 +735,60 @@ def test_system_status_contains_dynamic_frontend_blocks():
     assert doc["telemetry"].get("fastapi_gateway") is not None
 
 
+def test_system_status_execs_per_sec_reads_run_log_metrics(tmp_path: Path):
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "[run] warming up",
+                "stat::average_exec_per_sec: 7681",
+                "stat::average_exec_per_sec: 9123",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    web_main._job_update(job_id, status="running", log_file=str(log_path), log="")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["tasks_tab_metrics"]["execs_per_sec"] == "9.1"
+
+
+def test_system_status_llm_token_usage_requires_real_token_fields(tmp_path: Path):
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    log_path.write_text("[run] no token stats here\n", encoding="utf-8")
+    web_main._job_update(job_id, status="success", finished_at=time.time(), updated_at=time.time(), log_file=str(log_path), log="")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["telemetry"]["llm_token_usage"] is None
+    assert doc["telemetry"]["llm_token_status"] == "--"
+
+
+def test_system_status_separates_main_task_and_child_job_counts():
+    task_job = web_main._create_job("task", "batch")
+    child_job = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(task_job, status="queued")
+    web_main._job_update(child_job, status="queued")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["overview"]["main_tasks_queued"] == "1"
+    assert doc["overview"]["child_jobs_queued"] == "1"
+    assert doc["execution"]["summary"]["repos_queued"] == "1"
+
+
 def test_api_metrics_contains_job_counters():
     task_id = web_main._create_job("task", "batch")
     child_a = web_main._create_job("fuzz", "https://github.com/example/repo-a.git")

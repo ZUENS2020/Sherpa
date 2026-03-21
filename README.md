@@ -211,9 +211,19 @@ Kubernetes stage 元数据位于：
 - `run` / `repro_crash` 默认禁止 AI 改写源码参与验证结果判断
 - `dev` 是集成验证分支，`main` 只接受来自 `dev` 的变更
 
+## 文档与 API
+
+当前文档入口与接口说明以以下文件为准：
+
+- [docs/README.md](docs/README.md)
+- [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
+- [docs/CODEBASE_TECHNICAL_ANALYSIS.md](docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+- [docs/STANDARD_CHANGE_PROCESS.md](docs/STANDARD_CHANGE_PROCESS.md)
+
+如果你要接前端，优先看 [docs/API_REFERENCE.md](docs/API_REFERENCE.md)，它按当前后端真实返回字段整理了 `/api/task`、`/api/tasks`、`/api/system` 和配置接口。
+
 ## 推荐阅读顺序
 
-1. [文档入口](/docs/README.md)
-2. [代码级技术分析](/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
-3. [比赛展示版技术解读](/docs/COMPETITION_TECHNICAL_BRIEF.md)
-4. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
+1. [文档入口](docs/README.md)
+2. [代码级技术分析](docs/CODEBASE_TECHNICAL_ANALYSIS.md)
+3. [标准变更流程](docs/STANDARD_CHANGE_PROCESS.md)
