@@ -131,8 +131,8 @@ def validate_targets_json(repo_root: Path) -> tuple[bool, str]:
 def summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) -> dict[str, str]:
     combined = "\n".join(x for x in [last_error, stdout_tail, stderr_tail] if x).strip()
     low = combined.lower()
-    error_type = "unknown"
-    if any(k in low for k in ["missing fuzz/build.py", "no such file", "cannot find", "not found"]):
+    error_type = "build_failure_generic"
+    if any(k in low for k in ["missing fuzz/build.py", "no such file", "file not found"]):
         error_type = "missing_file"
     elif any(k in low for k in ["undefined reference", "ld:", "linker", "collect2"]):
         error_type = "link_error"
