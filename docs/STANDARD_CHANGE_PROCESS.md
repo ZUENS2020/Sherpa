@@ -43,6 +43,7 @@
 - build/fix_build 规则
 - k8s 运行时行为
 - 部署方式
+- API 契约（尤其是前端直接消费的 `/api/system`、`/api/tasks`、`/api/task/{id}`）
 
 ## 不推荐做法
 

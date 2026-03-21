@@ -1,6 +1,6 @@
 # main.py
 from __future__ import annotations
-from fastapi import FastAPI, Body, HTTPException, Response
+from fastapi import FastAPI, Body, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -18,10 +18,12 @@ import threading
 import time
 import queue
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
+from urllib.parse import urlparse
 import base64
 import yaml
 from fuzz_relative_functions import fuzz_logic
@@ -57,6 +59,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _http_metrics_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(getattr(response, "status_code", 500))
+        return response
+    finally:
+        elapsed_ms = max(0.0, (time.perf_counter() - start) * 1000.0)
+        now_ts = time.time()
+        with _HTTP_METRICS_LOCK:
+            _HTTP_REQUEST_EVENTS.append((now_ts, elapsed_ms, status_code))
+            cutoff = now_ts - 3600.0
+            while _HTTP_REQUEST_EVENTS and _HTTP_REQUEST_EVENTS[0][0] < cutoff:
+                _HTTP_REQUEST_EVENTS.popleft()
+
 #创建线程池
 _MAX_WORKERS = int(os.environ.get("SHERPA_WEB_MAX_WORKERS", "5"))
 executor = ThreadPoolExecutor(max_workers=max(1, _MAX_WORKERS))
@@ -69,6 +90,9 @@ _INIT_LOCK = threading.Lock()
 _JOB_STORE: JobStore | None = None
 _JOB_FUTURES_LOCK = threading.Lock()
 _JOB_FUTURES: dict[str, Future] = {}
+_K8S_METRICS_API_UNAVAILABLE_UNTIL = 0.0
+_HTTP_METRICS_LOCK = threading.Lock()
+_HTTP_REQUEST_EVENTS: deque[tuple[float, float, int]] = deque()
 
 # In-memory API log retention limit (characters).
 # 0 or negative means unlimited (no truncation).
@@ -848,6 +872,7 @@ def _k8s_get_job_node_name(job_name: str) -> str:
 
 
 def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
+    global _K8S_METRICS_API_UNAVAILABLE_UNTIL
     if not node_name:
         return False, "empty_node"
 
@@ -891,42 +916,148 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
     except Exception:
         max_mem_pct = 95
 
+    def _parse_cpu_to_millicores(raw: str) -> int | None:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        try:
+            if txt.endswith("m"):
+                return int(float(txt[:-1]))
+            return int(float(txt) * 1000.0)
+        except Exception:
+            return None
+
+    def _parse_memory_to_bytes(raw: str) -> int | None:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        units = {
+            "Ki": 1024,
+            "Mi": 1024 ** 2,
+            "Gi": 1024 ** 3,
+            "Ti": 1024 ** 4,
+            "Pi": 1024 ** 5,
+            "Ei": 1024 ** 6,
+            "K": 1000,
+            "M": 1000 ** 2,
+            "G": 1000 ** 3,
+            "T": 1000 ** 4,
+            "P": 1000 ** 5,
+            "E": 1000 ** 6,
+        }
+        for suffix, mul in units.items():
+            if txt.endswith(suffix):
+                try:
+                    return int(float(txt[: -len(suffix)]) * float(mul))
+                except Exception:
+                    return None
+        try:
+            return int(float(txt))
+        except Exception:
+            return None
+
+    # First preference: live usage from metrics-server.
+    now_ts = time.time()
     rc_top, out_top, err_top = _kubectl(["top", "node", node_name, "--no-headers"], timeout=10)
-    if rc_top != 0:
-        detail = (err_top or out_top).strip()
-        if detail:
-            detail_norm = re.sub(r"\s+", " ", detail).strip()
-            # Canonicalize common metrics-server absence into a stable token.
-            if re.search(r"metrics api not available", detail_norm, re.IGNORECASE):
-                return True, "node_ready_no_metrics_warn:metrics_api_not_available"
-            # Avoid confusing "error:" prefixes in warning-only status messages.
-            detail_norm = re.sub(r"^\s*error:\s*", "", detail_norm, flags=re.IGNORECASE)
-            detail_token = re.sub(r"\s+", "_", detail_norm)[:160]
-            return True, f"node_ready_no_metrics_warn:{detail_token}"
-        return True, "node_ready_no_metrics_warn"
-    line = ""
-    for raw in (out_top or "").splitlines():
-        txt = raw.strip()
-        if txt:
-            line = txt
-            break
-    if not line:
-        return True, "node_ready_empty_metrics"
-    parts = line.split()
-    if len(parts) < 5:
-        return True, "node_ready_bad_metrics"
-    cpu_pct_txt = parts[2].rstrip("%")
-    mem_pct_txt = parts[4].rstrip("%")
+    if rc_top == 0:
+        line = ""
+        for raw in (out_top or "").splitlines():
+            txt = raw.strip()
+            if txt:
+                line = txt
+                break
+        if line:
+            parts = line.split()
+            if len(parts) >= 5:
+                cpu_pct_txt = parts[2].rstrip("%")
+                mem_pct_txt = parts[4].rstrip("%")
+                try:
+                    cpu_pct = int(cpu_pct_txt)
+                    mem_pct = int(mem_pct_txt)
+                    if cpu_pct >= max_cpu_pct:
+                        return False, f"node_cpu_busy:{cpu_pct}%"
+                    if mem_pct >= max_mem_pct:
+                        return False, f"node_mem_busy:{mem_pct}%"
+                    return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
+                except Exception:
+                    pass
+
+    # Fallback: request-based capacity check (works without metrics-server).
+    detail = (err_top or out_top).strip()
+    if detail and re.search(r"metrics api not available", re.sub(r"\s+", " ", detail), re.IGNORECASE):
+        try:
+            backoff_sec = int(
+                (os.environ.get("SHERPA_K8S_METRICS_API_UNAVAILABLE_BACKOFF_SEC") or "300").strip()
+            )
+        except Exception:
+            backoff_sec = 300
+        _K8S_METRICS_API_UNAVAILABLE_UNTIL = now_ts + float(max(30, backoff_sec))
+
+    alloc = status_doc.get("allocatable") if isinstance(status_doc, dict) else {}
+    if not isinstance(alloc, dict):
+        alloc = {}
+    alloc_cpu_m = _parse_cpu_to_millicores(str(alloc.get("cpu") or ""))
+    alloc_mem_b = _parse_memory_to_bytes(str(alloc.get("memory") or ""))
+
+    rc_pods, out_pods, err_pods = _kubectl(
+        ["get", "pods", "-A", "--field-selector", f"spec.nodeName={node_name}", "-o", "json"],
+        timeout=20,
+    )
+    if rc_pods != 0:
+        return True, "node_ready_no_metrics_capacity_unknown"
+
     try:
-        cpu_pct = int(cpu_pct_txt)
-        mem_pct = int(mem_pct_txt)
+        pods_doc = json.loads(out_pods)
     except Exception:
-        return True, "node_ready_unparsed_metrics"
-    if cpu_pct >= max_cpu_pct:
-        return False, f"node_cpu_busy:{cpu_pct}%"
-    if mem_pct >= max_mem_pct:
-        return False, f"node_mem_busy:{mem_pct}%"
-    return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
+        return True, "node_ready_no_metrics_capacity_unknown"
+
+    items = pods_doc.get("items") if isinstance(pods_doc, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    req_cpu_m = 0
+    req_mem_b = 0
+    for pod in items:
+        if not isinstance(pod, dict):
+            continue
+        pod_status = pod.get("status") if isinstance(pod.get("status"), dict) else {}
+        phase = str(pod_status.get("phase") or "").strip()
+        if phase in {"Succeeded", "Failed"}:
+            continue
+        pod_spec = pod.get("spec") if isinstance(pod.get("spec"), dict) else {}
+        containers = pod_spec.get("containers")
+        if not isinstance(containers, list):
+            containers = []
+        for c in containers:
+            if not isinstance(c, dict):
+                continue
+            resources = c.get("resources") if isinstance(c.get("resources"), dict) else {}
+            requests = resources.get("requests") if isinstance(resources.get("requests"), dict) else {}
+            cpu_m = _parse_cpu_to_millicores(str(requests.get("cpu") or "0"))
+            mem_b = _parse_memory_to_bytes(str(requests.get("memory") or "0"))
+            if cpu_m is not None and cpu_m > 0:
+                req_cpu_m += cpu_m
+            if mem_b is not None and mem_b > 0:
+                req_mem_b += mem_b
+
+    cpu_req_pct: int | None = None
+    mem_req_pct: int | None = None
+    if alloc_cpu_m and alloc_cpu_m > 0:
+        cpu_req_pct = int((float(req_cpu_m) / float(alloc_cpu_m)) * 100.0)
+    if alloc_mem_b and alloc_mem_b > 0:
+        mem_req_pct = int((float(req_mem_b) / float(alloc_mem_b)) * 100.0)
+
+    if cpu_req_pct is not None and cpu_req_pct >= max_cpu_pct:
+        return False, f"node_cpu_request_busy:{cpu_req_pct}%"
+    if mem_req_pct is not None and mem_req_pct >= max_mem_pct:
+        return False, f"node_mem_request_busy:{mem_req_pct}%"
+
+    if cpu_req_pct is not None or mem_req_pct is not None:
+        cpu_txt = f"{cpu_req_pct}%" if cpu_req_pct is not None else "n/a"
+        mem_txt = f"{mem_req_pct}%" if mem_req_pct is not None else "n/a"
+        return True, f"node_ready_req_cpu={cpu_txt}_req_mem={mem_txt}"
+
+    return True, "node_ready_no_metrics_capacity_unknown"
 
 
 def _execute_k8s_job(
@@ -1036,6 +1167,7 @@ def _k8s_stage_wait_timeout_sec(
     stage: str,
     total_time_budget_sec: int,
     run_time_budget_sec: int,
+    run_unlimited_round_budget_sec: int | None = None,
     run_fuzzer_count: int = 1,
     run_parallelism: int = 1,
 ) -> int:
@@ -1060,12 +1192,15 @@ def _k8s_stage_wait_timeout_sec(
         )
     except Exception:
         inter_round_buffer_sec = 120
-    try:
-        run_unlimited_round_budget = int(
-            os.environ.get("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
-        )
-    except Exception:
-        run_unlimited_round_budget = 7200
+    if run_unlimited_round_budget_sec is None:
+        try:
+            run_unlimited_round_budget = int(
+                os.environ.get("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
+            )
+        except Exception:
+            run_unlimited_round_budget = 7200
+    else:
+        run_unlimited_round_budget = int(run_unlimited_round_budget_sec)
     try:
         run_timeout_cap_sec = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_MAX_SEC", "0"))
     except Exception:
@@ -1135,12 +1270,12 @@ def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
     raw = str(
         (stage_ctx or {}).get("run_parallel_fuzzers_override")
         or os.environ.get("SHERPA_PARALLEL_FUZZERS")
-        or "2"
+        or "5"
     ).strip()
     try:
         return max(1, min(int(raw), 64))
     except Exception:
-        return 2
+        return 5
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
@@ -1681,6 +1816,62 @@ def _phase_for_job(job: dict | None) -> str:
     return status or "unknown"
 
 
+def _status_upper(status: str) -> str:
+    lowered = str(status or "").strip().lower()
+    mapping = {
+        "queued": "QUEUED",
+        "running": "RUNNING",
+        "resuming": "RUNNING",
+        "recoverable": "FAILED",
+        "resume_failed": "FAILED",
+        "success": "SUCCESS",
+        "resumed": "COMPLETED",
+        "error": "ERROR",
+    }
+    return mapping.get(lowered, (str(status or "").strip().upper() or "UNKNOWN"))
+
+
+def _task_display_repo(job: dict | None) -> str | None:
+    if not isinstance(job, dict):
+        return None
+    repo = str(job.get("repo") or "").strip()
+    if repo and repo.lower() != "batch":
+        return repo
+    request = job.get("request") if isinstance(job.get("request"), dict) else {}
+    jobs = request.get("jobs") if isinstance(request, dict) else []
+    if isinstance(jobs, list):
+        repos: list[str] = []
+        for item in jobs:
+            if not isinstance(item, dict):
+                continue
+            code_url = str(item.get("code_url") or "").strip()
+            if code_url:
+                parsed = urlparse(code_url)
+                path = str(parsed.path or "").rstrip("/")
+                slug = path.rsplit("/", 1)[-1] if path else ""
+                if slug.endswith(".git"):
+                    slug = slug[:-4]
+                repos.append(slug or code_url)
+        if repos:
+            if len(set(repos)) == 1:
+                return repos[0]
+            return f"{repos[0]} (+{len(repos) - 1} more)"
+    return repo or None
+
+
+def _task_progress_from_children(derived_status: str, children_status: dict[str, int]) -> int:
+    total = int(children_status.get("total") or 0)
+    if total <= 0:
+        return 100 if derived_status in {"success"} else 0
+    success = int(children_status.get("success") or 0)
+    error = int(children_status.get("error") or 0)
+    done = max(0, min(total, success + error))
+    pct = int(round((float(done) / float(total)) * 100.0))
+    if derived_status in {"running", "queued"}:
+        return max(0, min(99, pct))
+    return max(0, min(100, pct if pct > 0 else (100 if derived_status == "success" else 0)))
+
+
 def _dir_size(path: Path) -> int:
     if not path.exists():
         return 0
@@ -1692,6 +1883,259 @@ def _dir_size(path: Path) -> int:
             except Exception:
                 continue
     return total
+
+
+def _safe_float(raw: object) -> float | None:
+    try:
+        if raw is None:
+            return None
+        v = float(raw)
+        if math.isfinite(v):
+            return v
+    except Exception:
+        return None
+    return None
+
+
+def _status_bucket(raw: str | None) -> str:
+    return _status_for_counter(raw)
+
+
+def _job_duration_seconds(job: dict) -> float | None:
+    start = _safe_float(job.get("started_at"))
+    end = _safe_float(job.get("finished_at"))
+    if start is None or end is None:
+        return None
+    dur = end - start
+    if dur < 0:
+        return None
+    return dur
+
+
+def _format_duration_human(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    sec = max(0, int(round(seconds)))
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h}h {m}m"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _format_percent(value: float | None, digits: int = 1) -> str | None:
+    if value is None:
+        return None
+    return f"{value:.{digits}f}"
+
+
+def _format_trend(current: float | None, previous: float | None, *, unit_suffix: str = "%") -> str | None:
+    if current is None or previous is None:
+        return None
+    delta = current - previous
+    arrow = "▲" if delta >= 0 else "▼"
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.1f}{unit_suffix} {arrow}"
+
+
+def _extract_numeric_values_by_keys(obj: object, keys: set[str], *, max_count: int = 128) -> list[float]:
+    out: list[float] = []
+    stack: list[object] = [obj]
+    while stack and len(out) < max_count:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if str(k) in keys:
+                    fv = _safe_float(v)
+                    if fv is not None:
+                        out.append(fv)
+                        if len(out) >= max_count:
+                            break
+                if isinstance(v, (dict, list, tuple)):
+                    stack.append(v)
+        elif isinstance(cur, (list, tuple)):
+            for v in cur:
+                if isinstance(v, (dict, list, tuple)):
+                    stack.append(v)
+    return out
+
+
+def _count_jobs_in_window(jobs: list[dict], *, field: str, window_start: float, window_end: float) -> int:
+    n = 0
+    for job in jobs:
+        ts = _safe_float(job.get(field))
+        if ts is None:
+            continue
+        if window_start <= ts < window_end:
+            n += 1
+    return n
+
+
+def _performance_series_from_jobs(now: float, fuzz_jobs: list[dict]) -> list[dict[str, object]]:
+    points: list[dict[str, object]] = []
+    # 6 x 4h windows over last 24h + current point.
+    windows = [24, 20, 16, 12, 8, 4, 0]
+    for h in windows:
+        end_ts = now - float(h * 3600)
+        start_ts = end_ts - float(4 * 3600)
+        started = _count_jobs_in_window(
+            fuzz_jobs, field="started_at", window_start=start_ts, window_end=end_ts
+        )
+        finished = [
+            job for job in fuzz_jobs
+            if (ts := _safe_float(job.get("finished_at"))) is not None and start_ts <= ts < end_ts
+        ]
+        durations = [d for d in (_job_duration_seconds(job) for job in finished) if d is not None]
+        avg_latency = (sum(durations) / float(len(durations))) if durations else None
+        points.append(
+            {
+                "time": datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%H:%M"),
+                "throughput": started,
+                "latency": round(avg_latency, 2) if avg_latency is not None else None,
+            }
+        )
+    return points
+
+
+_RUN_EXEC_RATE_RE = re.compile(
+    r"(?:stat::(?:average_)?execs?_per_sec|exec/s)\s*[:=]\s*(?P<value>\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_execs_per_sec_from_text(text: str) -> float | None:
+    if not text:
+        return None
+    latest: float | None = None
+    for line in text.splitlines():
+        m = _RUN_EXEC_RATE_RE.search(line)
+        if not m:
+            continue
+        try:
+            latest = float(m.group("value"))
+        except Exception:
+            continue
+    if latest is None or latest <= 0:
+        return None
+    return latest
+
+
+def _job_execs_per_sec(job: dict) -> float | None:
+    result = job.get("result")
+    if isinstance(result, dict):
+        values = _extract_numeric_values_by_keys(
+            result,
+            {
+                "final_execs_per_sec",
+                "execs_per_sec",
+                "average_exec_per_sec",
+            },
+            max_count=64,
+        )
+        positive_values = [float(v) for v in values if float(v) > 0]
+        if positive_values:
+            return sum(positive_values)
+    text = str(job.get("log") or "")
+    if not text:
+        log_file = str(job.get("log_file") or "").strip()
+        if log_file:
+            text = _read_log_tail(Path(log_file), max_chars=65536)
+    return _extract_execs_per_sec_from_text(text)
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    seq = sorted(values)
+    if len(seq) == 1:
+        return seq[0]
+    q_clamped = max(0.0, min(1.0, q))
+    pos = q_clamped * float(len(seq) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return seq[lo]
+    frac = pos - float(lo)
+    return seq[lo] + (seq[hi] - seq[lo]) * frac
+
+
+def _http_metrics_snapshot(*, now: float, window_sec: float = 300.0) -> dict[str, float | int | None]:
+    cutoff = now - float(max(30.0, window_sec * 2.0))
+    with _HTTP_METRICS_LOCK:
+        while _HTTP_REQUEST_EVENTS and _HTTP_REQUEST_EVENTS[0][0] < cutoff:
+            _HTTP_REQUEST_EVENTS.popleft()
+        events = list(_HTTP_REQUEST_EVENTS)
+
+    current_start = now - window_sec
+    prev_start = now - (window_sec * 2.0)
+    current = [e for e in events if current_start <= e[0] < now]
+    previous = [e for e in events if prev_start <= e[0] < current_start]
+    current_lat = [float(e[1]) for e in current]
+    current_errors = sum(1 for e in current if int(e[2]) >= 500)
+    previous_errors = sum(1 for e in previous if int(e[2]) >= 500)
+
+    current_qps = (float(len(current)) / window_sec) if window_sec > 0 else None
+    previous_qps = (float(len(previous)) / window_sec) if window_sec > 0 else None
+    current_err_ratio = (float(current_errors) / float(len(current)) * 100.0) if current else 0.0
+    previous_err_ratio = (float(previous_errors) / float(len(previous)) * 100.0) if previous else 0.0
+    return {
+        "qps": current_qps,
+        "qps_prev": previous_qps,
+        "lat_p95_ms": _percentile(current_lat, 0.95),
+        "error_ratio_pct": current_err_ratio,
+        "error_ratio_prev_pct": previous_err_ratio,
+        "request_count": len(current),
+    }
+
+
+def _format_tokens_per_hour(tokens_per_hour: float | None) -> str | None:
+    if tokens_per_hour is None:
+        return None
+    v = max(0.0, tokens_per_hour)
+    if v >= 1_000_000.0:
+        return f"{v / 1_000_000.0:.2f}M / hr"
+    if v >= 1_000.0:
+        return f"{v / 1_000.0:.1f}K / hr"
+    return f"{int(round(v))} / hr"
+
+
+def _job_token_estimate(job: dict) -> float | None:
+    result = job.get("result")
+    totals = _extract_numeric_values_by_keys(result, {"total_tokens"}, max_count=16)
+    if totals:
+        return max(0.0, max(totals))
+    prompts = _extract_numeric_values_by_keys(result, {"prompt_tokens", "input_tokens"}, max_count=16)
+    completions = _extract_numeric_values_by_keys(result, {"completion_tokens", "output_tokens"}, max_count=16)
+    if prompts or completions:
+        return max(0.0, (max(prompts) if prompts else 0.0) + (max(completions) if completions else 0.0))
+    return None
+
+
+def _extract_coverage_values(obj: object, *, max_count: int = 256) -> list[float]:
+    keys = {
+        "final_cov",
+        "max_cov",
+        "coverage",
+        "cov",
+        "coverage_percent",
+        "line_coverage",
+        "function_coverage",
+        "branch_coverage",
+    }
+    raw_vals = _extract_numeric_values_by_keys(obj, keys, max_count=max_count)
+    out: list[float] = []
+    for value in raw_vals:
+        if value < 0:
+            continue
+        if value <= 1.0:
+            out.append(value * 100.0)
+            continue
+        if value <= 100.0:
+            out.append(value)
+    return out
 
 
 def _system_status() -> dict:
@@ -1724,6 +2168,223 @@ def _system_status() -> dict:
     cfg = _cfg_get()
     log_dir = _JOB_LOGS_DIR
     memory = _memory_status()
+    fuzz_jobs = [j for j in jobs if str(j.get("kind") or "") == "fuzz"]
+    task_jobs = [j for j in jobs if str(j.get("kind") or "") == "task"]
+
+    def _status_counts(rows: list[dict]) -> dict[str, int]:
+        return {
+            "total": len(rows),
+            "queued": sum(1 for j in rows if _status_bucket(str(j.get("status") or "")) == "queued"),
+            "running": sum(1 for j in rows if _status_bucket(str(j.get("status") or "")) == "running"),
+            "success": sum(1 for j in rows if _status_bucket(str(j.get("status") or "")) == "success"),
+            "error": sum(1 for j in rows if _status_bucket(str(j.get("status") or "")) == "error"),
+        }
+
+    task_counts = _status_counts(task_jobs)
+    fuzz_counts = _status_counts(fuzz_jobs)
+
+    finished_fuzz = [j for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) in {"success", "error"}]
+    success_fuzz = [j for j in finished_fuzz if _status_bucket(str(j.get("status") or "")) == "success"]
+    error_fuzz = [j for j in finished_fuzz if _status_bucket(str(j.get("status") or "")) == "error"]
+    finished_total = len(finished_fuzz)
+    success_rate = (float(len(success_fuzz)) / float(finished_total) * 100.0) if finished_total > 0 else None
+    failure_rate = (float(len(error_fuzz)) / float(finished_total) * 100.0) if finished_total > 0 else None
+
+    durations = [d for d in (_job_duration_seconds(j) for j in finished_fuzz) if d is not None]
+    avg_fuzz_seconds = (sum(durations) / float(len(durations))) if durations else None
+
+    window_sec = 3600.0
+    curr_start = now - window_sec
+    prev_start = now - (2.0 * window_sec)
+    current_finished = [
+        j for j in finished_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and curr_start <= ts < now
+    ]
+    previous_finished = [
+        j for j in finished_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and prev_start <= ts < curr_start
+    ]
+    current_failure_rate = (
+        float(sum(1 for j in current_finished if _status_bucket(str(j.get("status") or "")) == "error"))
+        / float(len(current_finished))
+        * 100.0
+    ) if current_finished else None
+    previous_failure_rate = (
+        float(sum(1 for j in previous_finished if _status_bucket(str(j.get("status") or "")) == "error"))
+        / float(len(previous_finished))
+        * 100.0
+    ) if previous_finished else None
+    current_health = (100.0 - current_failure_rate) if current_failure_rate is not None else None
+    previous_health = (100.0 - previous_failure_rate) if previous_failure_rate is not None else None
+
+    current_errors = sum(
+        1
+        for j in error_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and curr_start <= ts < now
+    )
+    previous_errors = sum(
+        1
+        for j in error_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and prev_start <= ts < curr_start
+    )
+
+    now_24h = now - 86400.0
+    success_24h = sum(
+        1
+        for j in success_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and ts >= now_24h
+    )
+    previous_success_24h = sum(
+        1
+        for j in success_fuzz
+        if (ts := _safe_float(j.get("finished_at"))) is not None and (now_24h - 86400.0) <= ts < now_24h
+    )
+
+    coverage_values: list[float] = []
+    for j in fuzz_jobs:
+        coverage_values.extend(_extract_coverage_values(j.get("result"), max_count=24))
+    avg_coverage = (sum(coverage_values) / float(len(coverage_values))) if coverage_values else None
+
+    running_fuzz = sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "running")
+
+    cgroup_ratio = _safe_float(memory.get("cgroup_usage_ratio"))
+    cluster_load_pct = (max(0.0, min(100.0, cgroup_ratio * 100.0)) if cgroup_ratio is not None else None)
+    http_metrics = _http_metrics_snapshot(now=now, window_sec=300.0)
+    http_error_ratio = _safe_float(http_metrics.get("error_ratio_pct"))
+    http_error_ratio_prev = _safe_float(http_metrics.get("error_ratio_prev_pct"))
+    http_qps = _safe_float(http_metrics.get("qps"))
+    http_p95 = _safe_float(http_metrics.get("lat_p95_ms"))
+
+    performance_series = _performance_series_from_jobs(now, fuzz_jobs)
+    recent_exec_rates: list[float] = []
+    execs_window_sec = 300.0
+    execs_cutoff = now - execs_window_sec
+    for j in fuzz_jobs:
+        status_bucket = _status_bucket(str(j.get("status") or ""))
+        if status_bucket == "running":
+            pass
+        elif status_bucket == "success":
+            finished_at = _safe_float(j.get("finished_at"))
+            if finished_at is None or finished_at < execs_cutoff:
+                continue
+        else:
+            continue
+        rate = _job_execs_per_sec(j)
+        if rate is not None and rate > 0:
+            recent_exec_rates.append(rate)
+    recent_jobs_per_sec = (sum(recent_exec_rates) / 1000.0) if recent_exec_rates else None
+
+    token_window_sec = 3600.0
+    token_cutoff = now - token_window_sec
+    token_sum = 0.0
+    token_count = 0
+    for j in fuzz_jobs:
+        ts = _safe_float(j.get("updated_at")) or _safe_float(j.get("finished_at")) or _safe_float(j.get("created_at"))
+        if ts is None or ts < token_cutoff:
+            continue
+        est = _job_token_estimate(j)
+        if est is None:
+            continue
+        token_sum += est
+        token_count += 1
+    tokens_per_hour = (token_sum / (token_window_sec / 3600.0)) if token_count > 0 else None
+
+    agent_health_matrix: list[int] = []
+    latest_fuzz = sorted(
+        fuzz_jobs,
+        key=lambda j: float(_safe_float(j.get("updated_at")) or 0.0),
+        reverse=True,
+    )[:32]
+    for j in latest_fuzz:
+        agent_health_matrix.append(0 if _status_bucket(str(j.get("status") or "")) == "error" else 1)
+
+    signal_points: list[float] = []
+    if current_health is not None:
+        signal_points.append(current_health)
+    if cluster_load_pct is not None:
+        signal_points.append(max(0.0, 100.0 - cluster_load_pct))
+    if http_error_ratio is not None:
+        signal_points.append(max(0.0, 100.0 - http_error_ratio))
+    composite_health = (sum(signal_points) / float(len(signal_points))) if signal_points else None
+    previous_signal_points: list[float] = []
+    if previous_health is not None:
+        previous_signal_points.append(previous_health)
+    if cluster_load_pct is not None:
+        previous_signal_points.append(max(0.0, 100.0 - cluster_load_pct))
+    if http_error_ratio_prev is not None:
+        previous_signal_points.append(max(0.0, 100.0 - http_error_ratio_prev))
+    composite_health_prev = (
+        (sum(previous_signal_points) / float(len(previous_signal_points))) if previous_signal_points else None
+    )
+
+    gateway_sli = None
+    if http_error_ratio is not None:
+        gateway_sli = max(0.0, min(100.0, 100.0 - http_error_ratio))
+    fastapi_status = "UP"
+    if http_error_ratio is not None and http_error_ratio >= 5.0:
+        fastapi_status = "DEGRADED"
+    if http_error_ratio is not None and http_error_ratio >= 20.0:
+        fastapi_status = "ERROR"
+
+    overview = {
+        "avg_fuzz_time": _format_duration_human(avg_fuzz_seconds),
+        "active_agents": str(running_fuzz),
+        "cluster_health": _format_percent(composite_health, 1),
+        "cluster_health_trend": _format_trend(composite_health, composite_health_prev, unit_suffix="%"),
+        "crash_triage_rate": str(current_errors),
+        "crash_triage_rate_trend": _format_trend(float(current_errors), float(previous_errors), unit_suffix=""),
+        "harnesses_synthesized": str(success_24h),
+        "harnesses_synthesized_trend": _format_trend(float(success_24h), float(previous_success_24h), unit_suffix=""),
+        "avg_coverage": _format_percent(avg_coverage, 2),
+        "avg_coverage_trend": None,
+        "main_tasks_running": str(task_counts["running"]),
+        "main_tasks_queued": str(task_counts["queued"]),
+        "child_jobs_running": str(fuzz_counts["running"]),
+        "child_jobs_queued": str(fuzz_counts["queued"]),
+    }
+    telemetry = {
+        "llm_token_usage": _format_tokens_per_hour(tokens_per_hour),
+        "llm_token_status": ("Active" if token_count > 0 else "--"),
+        "k8s_pod_capacity": (f"{cluster_load_pct:.0f}% CAP" if cluster_load_pct is not None else None),
+        "k8s_pod_status": ("Normal" if cluster_load_pct is not None and cluster_load_pct < 90.0 else ("Expansion Req" if cluster_load_pct is not None else None)),
+        "fastapi_gateway": (f"{gateway_sli:.2f}% SLI" if gateway_sli is not None else None),
+        "fastapi_status": fastapi_status,
+        "agent_health_matrix": agent_health_matrix,
+        "performance_series": performance_series,
+    }
+    execution_summary = {
+        "failure_rate": (f"{failure_rate:.2f}%" if failure_rate is not None else None),
+        "fuzzing_jobs_24h": str(
+            sum(
+                1
+                for j in fuzz_jobs
+                if (ts := _safe_float(j.get("created_at"))) is not None and ts >= now_24h
+            )
+        ),
+        "cluster_load_peak": (f"{cluster_load_pct:.0f}%" if cluster_load_pct is not None else None),
+        "repos_queued": str(task_counts["queued"]),
+        "avg_triage_time_ms": None,
+        "success_ratio": (f"{success_rate:.2f}" if success_rate is not None else None),
+        "main_tasks_running": str(task_counts["running"]),
+        "main_tasks_queued": str(task_counts["queued"]),
+        "child_jobs_running": str(fuzz_counts["running"]),
+        "child_jobs_queued": str(fuzz_counts["queued"]),
+    }
+    task_finished = [
+        j for j in task_jobs
+        if _status_bucket(str(j.get("status") or "")) in {"success", "error"}
+    ]
+    task_success = sum(1 for j in task_finished if _status_bucket(str(j.get("status") or "")) == "success")
+    task_success_rate = (
+        float(task_success) / float(len(task_finished)) * 100.0 if task_finished else None
+    )
+    task_failed = sum(1 for j in task_jobs if _status_bucket(str(j.get("status") or "")) == "error")
+    tasks_tab_metrics = {
+        "total_jobs": str(len(task_jobs)),
+        "execs_per_sec": (f"{recent_jobs_per_sec:.1f}" if recent_jobs_per_sec is not None else None),
+        "success_rate": (f"{task_success_rate:.1f}" if task_success_rate is not None else None),
+        "failed_tasks": str(task_failed),
+    }
     return {
         "ok": True,
         "server_time": now,
@@ -1748,6 +2409,10 @@ def _system_status() -> dict:
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openrouter_model": cfg.openrouter_model,
         },
+        "overview": overview,
+        "telemetry": telemetry,
+        "execution": {"summary": execution_summary},
+        "tasks_tab_metrics": tasks_tab_metrics,
     }
 
 
@@ -1867,6 +2532,10 @@ class fuzz_model(BaseModel):
     time_budget: int | None = None
     total_time_budget: int | None = None
     run_time_budget: int | None = None
+    # Frontend-local compatibility fields
+    total_duration: int | None = None
+    single_duration: int | None = None
+    unlimited_round_limit: int | None = None
     docker: bool | None = None
     docker_image: str | None = None
 
@@ -1898,6 +2567,29 @@ def _resolve_job_docker_policy(request: fuzz_model, cfg: WebPersistentConfig) ->
         or "auto"
     )
     return bool(docker_enabled), docker_image_value
+
+
+def _normalize_budget_value(raw: int | None, *, field_name: str) -> int:
+    if raw is None:
+        raise RuntimeError(f"{field_name} is required")
+    value = int(raw)
+    if value == -1:
+        return 0
+    if value < 0:
+        raise RuntimeError(f"{field_name} must be >= 0 or -1 for unlimited")
+    return value
+
+
+def _normalize_round_limit_value(raw: int | None, *, fallback: int) -> int:
+    if raw is None:
+        value = int(fallback)
+    else:
+        value = int(raw)
+    if value == -1:
+        return 0
+    if value < 0:
+        raise RuntimeError("unlimited_round_limit must be >= 0 or -1 for unlimited")
+    return value
 
 
 def _enforce_docker_only(jobs: list[fuzz_model], cfg: WebPersistentConfig) -> None:
@@ -1953,20 +2645,43 @@ def post_opencode_provider_models(provider: str, request: provider_models_reques
 
 
 @app.put("/api/config")
-def put_config(request: WebPersistentConfig = Body(...)):
-    if int(request.fuzz_time_budget) < 0:
+def put_config(request: dict = Body(...)):
+    if not isinstance(request, dict):
+        raise HTTPException(status_code=400, detail="config payload must be a JSON object")
+
+    current = _cfg_get()
+    payload = current.model_dump()
+    lightweight_only_keys = {"apiBaseUrl", "api_base_url"}
+    request_keys = set(request.keys())
+    is_lightweight_update = bool(request_keys) and request_keys.issubset(lightweight_only_keys)
+
+    if is_lightweight_update:
+        api_base_url = str(request.get("apiBaseUrl") or request.get("api_base_url") or "").strip()
+        payload["api_base_url"] = api_base_url
+    else:
+        merged = dict(payload)
+        for key, value in request.items():
+            if key == "apiBaseUrl":
+                merged["api_base_url"] = value
+            else:
+                merged[key] = value
+        try:
+            validated = WebPersistentConfig(**merged)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"invalid config payload: {exc}") from exc
+        payload = validated.model_dump()
+
+    candidate = WebPersistentConfig(**payload)
+    if int(candidate.fuzz_time_budget) < 0:
         raise HTTPException(
             status_code=400,
             detail="fuzz_time_budget must be >= 0 (0 means unlimited).",
         )
-    if int(request.sherpa_run_unlimited_round_budget_sec) < 0:
+    if int(candidate.sherpa_run_unlimited_round_budget_sec) < 0:
         raise HTTPException(
             status_code=400,
             detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
         )
-
-    current = _cfg_get()
-    payload = request.model_dump()
 
     # Frontend no longer controls provider/API fields.
     controlled_fields = (
@@ -2371,11 +3086,18 @@ def _list_tasks(limit: int = 50) -> list[dict]:
             (c for c in child_jobs if _status_for_parent(str(c.get("status") or "")) in {"running", "queued"}),
             child_jobs[0] if child_jobs else None,
         )
+        stage_value = _phase_for_job(active_child) if active_child else _phase_for_job(job)
+        progress_value = _task_progress_from_children(derived_status, children_status)
+        status_upper = _status_upper(derived_status)
         tasks.append(
             {
                 "job_id": job.get("job_id"),
-                "status": derived_status,
-                "repo": job.get("repo"),
+                "id": job.get("job_id"),
+                "status": status_upper,
+                "status_raw": derived_status,
+                "stage": str(stage_value or "").upper() or "UNKNOWN",
+                "repo": _task_display_repo(job),
+                "repo_raw": job.get("repo"),
                 "created_at": job.get("created_at"),
                 "created_at_iso": _iso_time(job.get("created_at")),
                 "updated_at": job.get("updated_at"),
@@ -2393,8 +3115,9 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "result": job.get("result"),
                 "children_status": children_status,
                 "child_count": children_status.get("total", 0),
+                "progress": progress_value,
                 "active_child_id": active_child.get("job_id") if active_child else None,
-                "active_child_status": active_child.get("status") if active_child else None,
+                "active_child_status": _status_upper(str(active_child.get("status") or "")) if active_child else None,
                 "active_child_phase": _phase_for_job(active_child) if active_child else None,
             }
         )
@@ -2459,22 +3182,30 @@ def _run_fuzz_job(
             raise RuntimeError(cancel_error)
         print(f"[job {job_id}] about to dispatch k8s worker...")
         docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
-        total_time_budget_value = (
+        total_budget_src = (
             request.total_time_budget
             if request.total_time_budget is not None
-            else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
+            else (
+                request.total_duration
+                if request.total_duration is not None
+                else (request.time_budget if request.time_budget is not None else cfg.fuzz_time_budget)
+            )
         )
-        run_time_budget_value = (
+        run_budget_src = (
             request.run_time_budget
             if request.run_time_budget is not None
-            else total_time_budget_value
+            else (
+                request.single_duration
+                if request.single_duration is not None
+                else total_budget_src
+            )
         )
-        total_time_budget_value = int(total_time_budget_value)
-        run_time_budget_value = int(run_time_budget_value)
-        if total_time_budget_value < 0:
-            raise RuntimeError("total_time_budget must be >= 0")
-        if run_time_budget_value < 0:
-            raise RuntimeError("run_time_budget must be >= 0")
+        total_time_budget_value = _normalize_budget_value(total_budget_src, field_name="total_time_budget")
+        run_time_budget_value = _normalize_budget_value(run_budget_src, field_name="run_time_budget")
+        unlimited_round_limit_value = _normalize_round_limit_value(
+            request.unlimited_round_limit,
+            fallback=int(cfg.sherpa_run_unlimited_round_budget_sec),
+        )
         coverage_loop_max_rounds = 0
         max_fix_rounds = 0
         same_error_max_retries = 0
@@ -2499,6 +3230,7 @@ def _run_fuzz_job(
         print(
             f"[job {job_id}] params runtime={runtime_mode} "
             f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
+            f"unlimited_round_limit={unlimited_round_limit_value if unlimited_round_limit_value > 0 else 'unlimited'} "
             f"max_tokens={request.max_tokens} model={model_value} "
             f"coverage_loop_max_rounds={coverage_loop_max_rounds} "
             f"max_fix_rounds={max_fix_rounds} "
@@ -2570,7 +3302,12 @@ def _run_fuzz_job(
                                 f"[job {job_id}] stage {stage} skip node pinning ({current_node_name}): {node_check_reason}"
                             )
                         else:
-                            print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}")
+                            if node_check_reason in {"node_ready", "node_ready_no_metrics"}:
+                                print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
+                            else:
+                                print(
+                                    f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}"
+                                )
 
                     payload = {
                         "job_id": job_id,
@@ -2599,6 +3336,7 @@ def _run_fuzz_job(
                         "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
                         "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
                         "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
+                        "run_unlimited_round_budget_sec": int(unlimited_round_limit_value),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -2612,6 +3350,7 @@ def _run_fuzz_job(
                         stage=stage,
                         total_time_budget_sec=total_time_budget_value,
                         run_time_budget_sec=run_time_budget_value,
+                        run_unlimited_round_budget_sec=unlimited_round_limit_value,
                         run_fuzzer_count=run_fuzzer_count,
                         run_parallelism=run_parallelism,
                     )

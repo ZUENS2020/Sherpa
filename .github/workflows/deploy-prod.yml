@@ -20,6 +20,7 @@ env:
   RESET_PROD_BEFORE_DEPLOY: "false"
   PROD_SHARED_ROOT: /shared/prod
   PROD_OUTPUT_DIR: /home/deploy/output/prod
+  INSTALL_METRICS_SERVER: "true"
 
 concurrency:
   group: deploy-prod-${{ github.ref }}
@@ -225,6 +226,79 @@ jobs:
         shell: bash
         run: |
           echo "Skip deploy steps because Kubernetes is unreachable from this runner."
+
+      - name: Install and verify metrics-server
+        if: steps.kube_preflight.outputs.reachable == 'true' && env.INSTALL_METRICS_SERVER == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if kubectl top nodes >/tmp/metrics-top.log 2>&1; then
+            echo "::notice::metrics-server already healthy; skip reinstall"
+            exit 0
+          fi
+
+          manifest_urls=(
+            "https://ghfast.top/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://mirror.ghproxy.com/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.moeyy.xyz/https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+            "https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml"
+          )
+          applied=0
+          for u in "${manifest_urls[@]}"; do
+            if curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 120 -fsSL "$u" -o /tmp/metrics-server-components.yaml; then
+              kubectl apply -f /tmp/metrics-server-components.yaml
+              applied=1
+              break
+            fi
+          done
+          if [[ "$applied" != "1" ]]; then
+            echo "::error::Failed to download metrics-server manifest"
+            exit 1
+          fi
+
+          current_image="$(kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+          tag="$(printf '%s' "${current_image}" | sed -E 's|.*:([^:]+)$|\1|')"
+          if [[ -z "${tag}" || "${tag}" == "${current_image}" ]]; then
+            tag="v0.8.1"
+          fi
+          image_candidates=(
+            "registry.cn-hangzhou.aliyuncs.com/google_containers/metrics-server:${tag}"
+            "registry.aliyuncs.com/google_containers/metrics-server:${tag}"
+            "k8s.m.daocloud.io/metrics-server/metrics-server:${tag}"
+            "registry.k8s.io/metrics-server/metrics-server:${tag}"
+          )
+
+          kubectl -n kube-system set args deployment/metrics-server \
+            --containers=metrics-server \
+            -- \
+            --cert-dir=/tmp \
+            --secure-port=10250 \
+            --kubelet-preferred-address-types=InternalIP,Hostname,ExternalIP \
+            --kubelet-use-node-status-port \
+            --metric-resolution=15s \
+            --kubelet-insecure-tls || true
+
+          rollout_metrics_server() {
+            kubectl -n kube-system get pods -l k8s-app=metrics-server \
+              -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.deletionTimestamp}{"\n"}{end}' | \
+              awk '$2!=""{print $1}' | \
+              xargs -r -I{} kubectl -n kube-system delete pod {} --force --grace-period=0 --wait=false || true
+            for img in "${image_candidates[@]}"; do
+              echo "[metrics-server] trying image: ${img}"
+              kubectl -n kube-system set image deployment/metrics-server metrics-server="${img}" || true
+              if kubectl -n kube-system rollout status deployment/metrics-server --timeout=300s; then
+                return 0
+              fi
+              echo "::warning::metrics-server rollout failed with image ${img}; trying next mirror"
+              kubectl -n kube-system get pods -l k8s-app=metrics-server -o wide || true
+              kubectl -n kube-system describe pod -l k8s-app=metrics-server | tail -n 120 || true
+            done
+            return 1
+          }
+
+          rollout_metrics_server
+          kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=240s
+          kubectl top nodes
 
       - name: Guardrail (prod no reset)
         if: steps.kube_preflight.outputs.reachable == 'true'

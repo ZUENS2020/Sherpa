@@ -45,5 +45,3 @@ frontend-next/node_modules/
 frontend-next/.next/
 frontend-next/coverage/
 
-# test frontend
-frontend-local-sync-app/

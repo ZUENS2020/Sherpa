@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#f3f3f3"/>
+    </linearGradient>
+    <!-- Main mountain: two-tone left/right face -->
+    <linearGradient id="mtnLeft" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#43a047"/>
+      <stop offset="100%" style="stop-color:#4caf50"/>
+    </linearGradient>
+    <linearGradient id="mtnRight" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#388e3c"/>
+      <stop offset="100%" style="stop-color:#2e7d32"/>
+    </linearGradient>
+    <!-- Back mountain: muted gray-green -->
+    <linearGradient id="mtnBackL" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#c8d8c8"/>
+      <stop offset="100%" style="stop-color:#b8ccb8"/>
+    </linearGradient>
+    <linearGradient id="mtnBackR" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#aec4ae"/>
+      <stop offset="100%" style="stop-color:#9ab89a"/>
+    </linearGradient>
+    <clipPath id="roundedClip">
+      <rect width="120" height="120" rx="22" ry="22"/>
+    </clipPath>
+  </defs>
+
+  <rect width="120" height="120" rx="22" ry="22" fill="url(#bg)"/>
+
+  <g clip-path="url(#roundedClip)">
+
+    <!-- Back mountain left face -->
+    <polygon points="78,94 98,54 98,94" fill="url(#mtnBackL)" opacity="0.55"/>
+    <!-- Back mountain right face -->
+    <polygon points="78,94 98,54 114,94" fill="url(#mtnBackR)" opacity="0.55"/>
+
+    <!-- Main mountain left face (lighter green, catches light) -->
+    <polygon points="60,17 22,94 60,94" fill="url(#mtnLeft)"/>
+    <!-- Main mountain right face (darker green, shadow) -->
+    <polygon points="60,17 60,94 98,94" fill="url(#mtnRight)"/>
+
+    <!-- Center ridge line -->
+    <line x1="60" y1="17" x2="60" y2="94" stroke="#2e7d32" stroke-width="0.6" opacity="0.4"/>
+
+    <!-- Snow cap: clean triangle -->
+    <polygon points="60,17 48,46 72,46" fill="white" opacity="0.95"/>
+    <!-- Snow shadow line -->
+    <line x1="48" y1="46" x2="72" y2="46" stroke="#ddd" stroke-width="1"/>
+    <!-- Snow left shading -->
+    <polygon points="60,17 48,46 60,46" fill="#e8f4e8" opacity="0.4"/>
+
+    <!-- Gold trim stripe (costume reference) -->
+    <line x1="34" y1="72" x2="86" y2="72" stroke="#f5c518" stroke-width="2" opacity="0.7"/>
+
+    <!-- Orange route: clean two-segment path up left face -->
+    <polyline points="30,94 46,72 60,46"
+              fill="none" stroke="#f97316" stroke-width="2.2"
+              stroke-dasharray="4.5,3.5" stroke-linecap="square"/>
+
+    <!-- Waypoint nodes (square) -->
+    <rect x="43" y="69" width="6" height="6" rx="1.2" fill="#f97316" stroke="white" stroke-width="1"/>
+
+    <!-- Summit -->
+    <rect x="57" y="43" width="6" height="6" rx="1.2" fill="#f97316" stroke="white" stroke-width="1"/>
+
+    <!-- Ground baseline -->
+    <rect x="14" y="94" width="92" height="1.5" rx="0.75" fill="#aaa" opacity="0.3"/>
+
+    <!-- SHERPA label -->
+    <text x="60" y="110"
+          font-family="'Courier New', monospace"
+          font-size="8.5" font-weight="bold"
+          letter-spacing="3"
+          fill="#555" opacity="0.55"
+          text-anchor="middle">SHERPA</text>
+
+  </g>
+
+  <rect width="120" height="120" rx="22" ry="22" fill="none" stroke="#e0e0e0" stroke-width="1"/>
+</svg>

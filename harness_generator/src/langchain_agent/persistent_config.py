@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 _OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
@@ -58,6 +58,7 @@ def _default_opencode_providers() -> list[OpencodeProviderConfig]:
 
 
 class WebPersistentConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
     # Chat (OpenRouter / OpenAI-compatible)
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
@@ -89,6 +90,7 @@ class WebPersistentConfig(BaseModel):
     sherpa_docker_https_proxy: str = ""
     sherpa_docker_no_proxy: str = ""
     sherpa_docker_proxy_host: str = "host.docker.internal"
+    api_base_url: str = Field(default="", alias="apiBaseUrl")
 
     version: int = Field(default=1, description="Schema version")
 

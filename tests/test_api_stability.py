@@ -59,6 +59,7 @@ def _isolate_runtime_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(web_main, "_JOB_STORE", store)
     monkeypatch.setattr(web_main, "_init_job_store", lambda: None)
     web_main._cfg_set(WebPersistentConfig())
+    monkeypatch.setattr(web_main, "_K8S_METRICS_API_UNAVAILABLE_UNTIL", 0.0)
 
     monkeypatch.setattr(web_main, "executor", _ImmediateExecutor())
     monkeypatch.setattr(web_main, "save_config", lambda cfg: None)
@@ -286,6 +287,15 @@ def test_put_config_accepts_unlimited_budget_zero():
     assert response.status_code == 200
     cfg = web_main._cfg_get()
     assert cfg.fuzz_time_budget == 0
+
+
+def test_put_config_accepts_lightweight_api_base_url_payload():
+    with TestClient(web_main.app) as client:
+        response = client.put("/api/config", json={"apiBaseUrl": "http://localhost:8001"})
+
+    assert response.status_code == 200
+    cfg = web_main._cfg_get()
+    assert cfg.api_base_url == "http://localhost:8001"
 
 
 def test_put_config_rejects_negative_budget():
@@ -569,6 +579,38 @@ def test_task_detail_preserves_run_metadata_in_result(monkeypatch):
     assert result.get("run_children_exit_count") == 2
 
 
+def test_task_api_accepts_duration_alias_fields_and_unlimited_mapping(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_fuzz_logic(*args, **kwargs):
+        captured["time_budget"] = kwargs.get("time_budget")
+        captured["run_time_budget"] = kwargs.get("run_time_budget")
+        return {"ok": True}
+
+    monkeypatch.setattr(web_main, "fuzz_logic", _fake_fuzz_logic)
+
+    with TestClient(web_main.app) as client:
+        response = client.post(
+            "/api/task",
+            json={
+                "jobs": [
+                    {
+                        "code_url": "https://github.com/example/repo.git",
+                        "total_duration": -1,
+                        "single_duration": -1,
+                        "max_tokens": 0,
+                        "unlimited_round_limit": 7200,
+                    }
+                ],
+                "auto_init": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured.get("time_budget") == 0
+    assert captured.get("run_time_budget") == 0
+
+
 def test_list_tasks_returns_recent_tasks_with_child_summary():
     task_old = web_main._create_job("task", "batch")
     time.sleep(0.001)
@@ -584,7 +626,11 @@ def test_list_tasks_returns_recent_tasks_with_child_summary():
     items = response.json()["items"]
     assert len(items) == 2
     assert items[0]["job_id"] == task_new
-    assert items[0]["status"] == "running"
+    assert items[0]["status"] == "RUNNING"
+    assert items[0]["status_raw"] == "running"
+    assert items[0]["id"] == task_new
+    assert items[0]["stage"] == "RUNNING"
+    assert isinstance(items[0]["progress"], int)
     assert items[0]["child_count"] == 1
     assert items[0]["children_status"]["running"] == 1
     assert items[1]["job_id"] == task_old
@@ -628,6 +674,121 @@ def test_list_tasks_exposes_error_code_for_task_and_children():
     assert listing[0]["phase"] == "error"
 
 
+def test_list_tasks_displays_real_repo_for_batch_tasks():
+    task_id = web_main._create_job("task", "batch")
+    web_main._job_update(
+        task_id,
+        request={
+            "jobs": [
+                {"code_url": "https://github.com/example/repo-a.git"},
+                {"code_url": "https://github.com/example/repo-b.git"},
+            ]
+        },
+    )
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["repo"] == "repo-a (+1 more)"
+    assert listing[0]["repo_raw"] == "batch"
+
+
+def test_system_status_contains_dynamic_frontend_blocks():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(task_id, status="running", children=[child_id])
+    now = time.time()
+    web_main._job_update(
+        child_id,
+        status="success",
+        finished_at=now,
+        updated_at=now,
+        result={
+            "coverage_percent": 63.2,
+            "llm_usage": {"prompt_tokens": 1200, "completion_tokens": 800},
+        },
+        request={"max_tokens": 1000},
+    )
+
+    with TestClient(web_main.app) as client:
+        _ = client.get("/api/tasks")
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert "overview" in doc
+    assert "telemetry" in doc
+    assert "execution" in doc and "summary" in doc["execution"]
+    assert "tasks_tab_metrics" in doc
+    assert "total_jobs" in doc["tasks_tab_metrics"]
+    assert "success_rate" in doc["tasks_tab_metrics"]
+    assert isinstance(doc["telemetry"].get("performance_series"), list)
+    # No hardcoded placeholder constants should leak from /api/system.
+    assert doc["overview"].get("avg_fuzz_time") != "42m"
+    assert doc["overview"].get("avg_coverage") != "68.4"
+    assert doc["telemetry"].get("llm_token_usage") != "N/A"
+    assert doc["execution"]["summary"].get("avg_triage_time_ms") != "482"
+    assert doc["overview"].get("cluster_health") is not None
+    assert doc["overview"].get("avg_coverage") is not None
+    assert doc["telemetry"].get("llm_token_usage") is not None
+    assert doc["telemetry"].get("fastapi_gateway") is not None
+
+
+def test_system_status_execs_per_sec_reads_run_log_metrics(tmp_path: Path):
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "[run] warming up",
+                "stat::average_exec_per_sec: 7681",
+                "stat::average_exec_per_sec: 9123",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    web_main._job_update(job_id, status="running", log_file=str(log_path), log="")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["tasks_tab_metrics"]["execs_per_sec"] == "9.1"
+
+
+def test_system_status_llm_token_usage_requires_real_token_fields(tmp_path: Path):
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    log_path.write_text("[run] no token stats here\n", encoding="utf-8")
+    web_main._job_update(job_id, status="success", finished_at=time.time(), updated_at=time.time(), log_file=str(log_path), log="")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["telemetry"]["llm_token_usage"] is None
+    assert doc["telemetry"]["llm_token_status"] == "--"
+
+
+def test_system_status_separates_main_task_and_child_job_counts():
+    task_job = web_main._create_job("task", "batch")
+    child_job = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(task_job, status="queued")
+    web_main._job_update(child_job, status="queued")
+
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["overview"]["main_tasks_queued"] == "1"
+    assert doc["overview"]["child_jobs_queued"] == "1"
+    assert doc["execution"]["summary"]["repos_queued"] == "1"
+
+
 def test_api_metrics_contains_job_counters():
     task_id = web_main._create_job("task", "batch")
     child_a = web_main._create_job("fuzz", "https://github.com/example/repo-a.git")
@@ -646,6 +807,80 @@ def test_api_metrics_contains_job_counters():
     assert 'sherpa_jobs_status{status="running"} ' in body
     assert 'sherpa_jobs_status{status="error"} ' in body
     assert "sherpa_jobs_failure_rate_window " in body
+
+
+def test_k8s_node_can_run_job_falls_back_to_request_capacity_when_metrics_unavailable(monkeypatch):
+    node_doc = {
+        "spec": {"unschedulable": False},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"cpu": "4", "memory": "8Gi"},
+        },
+    }
+    pods_doc = {
+        "items": [
+            {
+                "status": {"phase": "Running"},
+                "spec": {
+                    "containers": [
+                        {"resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}},
+                        {"resources": {"requests": {"cpu": "250m", "memory": "256Mi"}}},
+                    ]
+                },
+            }
+        ]
+    }
+
+    def _fake_kubectl(args, *, input_text=None, timeout=30):
+        if args[:3] == ["get", "node", "node-a"]:
+            return 0, web_main.json.dumps(node_doc), ""
+        if args[:3] == ["top", "node", "node-a"]:
+            return 1, "", "error: Metrics API not available"
+        if args[:3] == ["get", "pods", "-A"]:
+            return 0, web_main.json.dumps(pods_doc), ""
+        raise AssertionError(f"unexpected kubectl args: {args}")
+
+    monkeypatch.setattr(web_main, "_kubectl", _fake_kubectl)
+    ok, reason = web_main._k8s_node_can_run_job("node-a")
+    assert ok is True
+    assert reason.startswith("node_ready_req_cpu=")
+    assert "req_mem=" in reason
+
+
+def test_k8s_node_can_run_job_rejects_high_request_pressure_without_metrics(monkeypatch):
+    node_doc = {
+        "spec": {"unschedulable": False},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "allocatable": {"cpu": "2", "memory": "1Gi"},
+        },
+    }
+    pods_doc = {
+        "items": [
+            {
+                "status": {"phase": "Running"},
+                "spec": {
+                    "containers": [
+                        {"resources": {"requests": {"cpu": "1900m", "memory": "900Mi"}}},
+                    ]
+                },
+            }
+        ]
+    }
+
+    def _fake_kubectl(args, *, input_text=None, timeout=30):
+        if args[:3] == ["get", "node", "node-b"]:
+            return 0, web_main.json.dumps(node_doc), ""
+        if args[:3] == ["top", "node", "node-b"]:
+            return 1, "", "error: Metrics API not available"
+        if args[:3] == ["get", "pods", "-A"]:
+            return 0, web_main.json.dumps(pods_doc), ""
+        raise AssertionError(f"unexpected kubectl args: {args}")
+
+    monkeypatch.setattr(web_main, "_kubectl", _fake_kubectl)
+    ok, reason = web_main._k8s_node_can_run_job("node-b")
+    assert ok is False
+    assert reason == "node_cpu_request_busy:95%"
 
 
 def test_resume_task_resumes_recoverable_child_job(monkeypatch, tmp_path: Path):
