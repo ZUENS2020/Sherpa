@@ -41,6 +41,7 @@ def find_static_lib(repo_root):
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
 - must produce textual code changes when current diagnostics are still failing; pure no-op is invalid.
+- stale `./done` without fresh diff is invalid and must not be treated as successful completion.
 - read and use `previous_failed_attempts` from context to avoid repeating already-failed approaches.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.

@@ -1328,6 +1328,22 @@ def _fix_build_feedback_history_limit() -> int:
         return 6
 
 
+def _fix_build_context_max_chars() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS") or "12000").strip()
+    try:
+        return max(2000, min(int(raw), 200000))
+    except Exception:
+        return 12000
+
+
+def _fix_build_context_history_limit() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_CONTEXT_MAX_HISTORY") or "3").strip()
+    try:
+        return max(1, min(int(raw), 20))
+    except Exception:
+        return 3
+
+
 def _fix_build_ruleset() -> str:
     raw = (os.environ.get("SHERPA_FIX_BUILD_RULESET") or "extended").strip().lower()
     if raw in {"legacy", "extended"}:
@@ -1365,6 +1381,13 @@ def _fix_build_same_signature_plan_threshold() -> int:
         return max(1, min(int(raw), 20))
     except Exception:
         return 3
+
+
+def _contains_cjk_text(text: str) -> bool:
+    try:
+        return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+    except Exception:
+        return False
 
 
 def _synthesize_activity_watch_paths() -> list[str]:
@@ -4033,6 +4056,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     max_noop_streak = _fix_build_max_noop_streak()
     max_fix_attempts = _effective_max_fix_rounds(state)
     history_limit = _fix_build_feedback_history_limit()
+    context_history_limit = _fix_build_context_history_limit()
+    context_max_chars = _fix_build_context_max_chars()
     error_sig = (state.get("build_error_signature_short") or "").strip()
     if not error_sig:
         error_sig = _sha256_text("\n".join([last_error, stdout_tail, stderr_tail]))[:12]
@@ -5303,8 +5328,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     llm = _llm_or_none()
     codex_hint = (state.get("codex_hint") or "").strip()
 
+    targeted_fix_lines = _build_file_targeted_fix_lines(last_error, stdout_tail, stderr_tail)
     if not codex_hint:
-        targeted_fix_lines = _build_file_targeted_fix_lines(last_error, stdout_tail, stderr_tail)
         if llm is not None:
             coordinator_prompt = (
                 "You are coordinating OpenCode to fix a fuzz harness build.\n"
@@ -5312,6 +5337,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "Requirements for your output:\n"
                 "- Output JSON only: {\"codex_hint\": \"...\"}\n"
                 "- codex_hint must be 1-10 lines, concrete and minimal.\n"
+                "- codex_hint must be in English only.\n"
                 "- Extract concrete failing file paths from diagnostics when possible.\n"
                 "- Include at least one line in the form: `Read and fix <path>[:line]` when file evidence exists.\n"
                 "- Tell OpenCode to only change files under fuzz/.\n"
@@ -5334,6 +5360,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 obj = _extract_json_object(text) or {}
                 codex_hint = str(obj.get("codex_hint") or "").strip()
             except Exception:
+                codex_hint = ""
+            if codex_hint and _contains_cjk_text(codex_hint):
                 codex_hint = ""
 
         if not codex_hint:
@@ -5373,43 +5401,98 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 + "\nPrevious attempts were no-op; this attempt MUST produce at least one meaningful change under fuzz/."
             )
 
-    # Now call OpenCode with a purpose-built prompt including diagnostics.
-    context_parts: list[str] = []
-    if build_log_file:
-        context_parts.append("=== full build log file ===\n" + build_log_file)
-    context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
-    if recent_history:
-        context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
-        previous_failed_attempts: list[dict[str, Any]] = []
-        for row in recent_history[-history_limit:]:
-            outcome = str(row.get("outcome") or "").strip()
-            if not outcome:
+    # Build a compact, error-first context for fix_build to avoid information overload.
+    def _tail_lines(text: str, n: int = 120) -> str:
+        lines = str(text or "").replace("\r", "\n").splitlines()
+        return "\n".join(lines[-n:]).strip()
+
+    def _pack_context_blocks(blocks: list[str], *, max_chars: int) -> str:
+        packed: list[str] = []
+        current_len = 0
+        for raw in blocks:
+            block = str(raw or "").strip()
+            if not block:
                 continue
-            previous_failed_attempts.append(
-                {
-                    "attempt": int(row.get("attempt_index") or 0),
-                    "outcome": outcome,
-                    "changed_paths_count": int(row.get("changed_paths_count") or 0),
-                    "signature": str(row.get("classified_signature") or "").strip(),
-                    "error_code": str(row.get("build_error_code") or "").strip(),
-                    "reason": str(row.get("rejection_reason") or "").strip(),
-                }
-            )
-        if previous_failed_attempts:
-            context_parts.append("=== previous_failed_attempts ===\n" + json.dumps(previous_failed_attempts, ensure_ascii=False, indent=2))
-    if build_strategy_doc:
-        context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
-    if build_runtime_facts_doc:
-        context_parts.append("=== fuzz/build_runtime_facts.json ===\n" + json.dumps(build_runtime_facts_doc, ensure_ascii=False, indent=2))
-    if repo_understanding_doc:
-        context_parts.append("=== fuzz/repo_understanding.json ===\n" + json.dumps(repo_understanding_doc, ensure_ascii=False, indent=2))
+            sep = 2 if packed else 0
+            need = sep + len(block)
+            if current_len + need <= max_chars:
+                packed.append(block)
+                current_len += need
+                continue
+            remaining = max_chars - current_len - sep
+            if remaining > 256:
+                clipped = block[: max(0, remaining - 18)].rstrip() + "\n...[truncated]..."
+                packed.append(clipped)
+            break
+        return "\n\n".join(packed).strip()
+
+    explicit_actions = [
+        line.strip()
+        for line in codex_hint.splitlines()
+        if line.strip().lower().startswith("read and fix ")
+    ]
+    if not explicit_actions:
+        explicit_actions = [line.strip() for line in targeted_fix_lines if line.strip()]
+
+    previous_failed_attempts: list[dict[str, Any]] = []
+    for row in recent_history[-context_history_limit:]:
+        outcome = str(row.get("outcome") or "").strip()
+        if not outcome:
+            continue
+        previous_failed_attempts.append(
+            {
+                "attempt": int(row.get("attempt_index") or 0),
+                "outcome": outcome,
+                "changed_paths_count": int(row.get("changed_paths_count") or 0),
+                "signature": str(row.get("classified_signature") or "").strip(),
+                "error_code": str(row.get("build_error_code") or "").strip(),
+                "reason": str(row.get("rejection_reason") or "").strip(),
+            }
+        )
+
+    file_refs: dict[str, Any] = {}
+    if build_log_file:
+        file_refs["build_log_file"] = build_log_file
+    if isinstance(build_strategy_doc, dict):
+        file_refs["fuzz/build_strategy.json"] = {
+            "build_system": str(build_strategy_doc.get("build_system") or ""),
+            "build_mode": str(build_strategy_doc.get("build_mode") or ""),
+            "fuzzer_entry_strategy": str(build_strategy_doc.get("fuzzer_entry_strategy") or ""),
+            "library_targets": list(build_strategy_doc.get("library_targets") or [])[:5],
+        }
+    if isinstance(build_runtime_facts_doc, dict):
+        file_refs["fuzz/build_runtime_facts.json"] = {
+            "build_system": str(build_runtime_facts_doc.get("build_system") or ""),
+            "build_mode": str(build_runtime_facts_doc.get("build_mode") or ""),
+            "required_outputs": list(build_runtime_facts_doc.get("required_outputs") or [])[:5],
+        }
+    if isinstance(repo_understanding_doc, dict):
+        file_refs["fuzz/repo_understanding.json"] = {
+            "build_system": str(repo_understanding_doc.get("build_system") or ""),
+            "chosen_target_api": str(repo_understanding_doc.get("chosen_target_api") or ""),
+            "fuzzer_entry_strategy": str(repo_understanding_doc.get("fuzzer_entry_strategy") or ""),
+        }
+
+    context_blocks: list[str] = [
+        "=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2),
+    ]
+    if explicit_actions:
+        context_blocks.append("=== targeted_file_actions ===\n" + "\n".join(f"- {line}" for line in explicit_actions))
+    if previous_failed_attempts:
+        context_blocks.append(
+            "=== previous_failed_attempts ===\n"
+            + json.dumps(previous_failed_attempts, ensure_ascii=False, indent=2)
+        )
+    if file_refs:
+        context_blocks.append("=== context_file_refs ===\n" + json.dumps(file_refs, ensure_ascii=False, indent=2))
     if last_error:
-        context_parts.append("=== last_error ===\n" + last_error)
-    if stdout_tail:
-        context_parts.append("=== build stdout (tail) ===\n" + stdout_tail)
+        context_blocks.append("=== last_error ===\n" + _tail_lines(last_error, n=80))
     if stderr_tail:
-        context_parts.append("=== build stderr (tail) ===\n" + stderr_tail)
-    context = "\n\n".join(context_parts)
+        context_blocks.append("=== build stderr tail ===\n" + _tail_lines(stderr_tail, n=120))
+    if stdout_tail:
+        context_blocks.append("=== build stdout tail ===\n" + _tail_lines(stdout_tail, n=80))
+
+    context = _pack_context_blocks(context_blocks, max_chars=context_max_chars)
 
     prompt = _render_opencode_prompt(
         "fix_build_execute",

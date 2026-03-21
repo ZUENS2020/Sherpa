@@ -128,6 +128,7 @@ Constraints:
 - when diagnostics point to API misuse, prioritize replacing internal/private API usage with public/stable APIs from repository headers or docs
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
 - when diagnostics still fail, pure no-op is invalid; produce a concrete patch
+- stale `./done` without fresh code diff is invalid and does not count as success
 - if the same error signature repeats, change strategy instead of repeating identical edits
 - keep `fuzz/repo_understanding.json`, `fuzz/build_strategy.json`, and `fuzz/build_runtime_facts.json` consistent
 - if missing dependencies are indicated by build evidence, update `fuzz/system_packages.txt` with canonical vcpkg names

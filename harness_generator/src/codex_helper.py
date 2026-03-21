@@ -1284,7 +1284,10 @@ class CodexHelper:
         for attempt in range(1, max_attempts + 1):
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 
-            done_path.unlink(missing_ok=True)
+            try:
+                done_path.unlink(missing_ok=True)
+            except Exception as e:
+                LOGGER.warning("[OpenCodeHelper] failed to clear pre-attempt done flag: %s", e)
 
             # Baseline diff for this run: later passes may already have a diff
             # from earlier steps (e.g., Pass A creates fuzz/PLAN.md). We only
@@ -1444,6 +1447,7 @@ class CodexHelper:
                     ) from e
 
                 start_time = time.time()
+                attempt_started_at = start_time
                 saw_retry_error = False
                 last_heartbeat = 0.0
                 last_activity_ts = start_time
@@ -1554,10 +1558,31 @@ class CodexHelper:
                             print(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         if done_path.exists():
-                            LOGGER.info("[OpenCodeHelper] done flag detected")
-                            print("[OpenCodeHelper] done flag detected; terminating")
-                            _kill_proc()
-                            break
+                            stale_done = False
+                            done_mtime = 0.0
+                            try:
+                                done_mtime = float(done_path.stat().st_mtime)
+                                stale_done = done_mtime < (attempt_started_at - 1e-3)
+                            except Exception:
+                                stale_done = False
+                            if stale_done:
+                                LOGGER.warning(
+                                    "[OpenCodeHelper] stale done flag detected (mtime=%.3f < attempt_start=%.3f); removing and continuing",
+                                    done_mtime,
+                                    attempt_started_at,
+                                )
+                                print("[OpenCodeHelper] stale done flag detected; removing and continuing")
+                                try:
+                                    done_path.unlink(missing_ok=True)
+                                except Exception as e:
+                                    raise RuntimeError(
+                                        f"stale done flag could not be removed: {done_path} ({e})"
+                                    ) from e
+                            else:
+                                LOGGER.info("[OpenCodeHelper] done flag detected")
+                                print("[OpenCodeHelper] done flag detected; terminating")
+                                _kill_proc()
+                                break
 
                         # Try to get output without blocking.
                         try:
