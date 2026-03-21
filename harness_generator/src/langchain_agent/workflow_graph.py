@@ -1190,7 +1190,9 @@ def _extract_actionable_build_locations(
 ) -> list[dict[str, str]]:
     text = "\n".join([str(last_error or ""), str(stdout_tail or ""), str(stderr_tail or "")])
     lines = text.splitlines()
-    path_re = re.compile(r"(?P<path>(?:\./)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:cxx|cpp|cc|c|hpp|h|py|java))(?:[:(](?P<line>\d+))?")
+    path_re = re.compile(
+        r"(?P<path>(?:/|(?:\./))?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:cxx|cpp|cc|c|hpp|h|py|java))(?:[:(](?P<line>\d+))?"
+    )
     out: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for line in lines:
@@ -1216,6 +1218,7 @@ def _extract_actionable_build_locations(
 
 
 def _build_file_targeted_fix_lines(
+    repo_root: Path,
     last_error: str,
     stdout_tail: str,
     stderr_tail: str,
@@ -1226,9 +1229,16 @@ def _build_file_targeted_fix_lines(
     full_diag = "\n".join([str(last_error or ""), str(stdout_tail or ""), str(stderr_tail or "")]).lower()
     lines: list[str] = ["Prioritize file-targeted fixes from diagnostics:"]
     for item in hits:
-        path = item.get("path") or ""
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        path = raw_path.replace("\\", "/")
+        if path.startswith("/"):
+            abs_path = path
+        else:
+            abs_path = str((repo_root / path.lstrip("./")).resolve())
         ln = item.get("line") or ""
-        loc = f"{path}:{ln}" if ln else path
+        loc = f"{abs_path}:{ln}" if ln else abs_path
         if "include" in full_diag and ("not declared" in full_diag or "not a member" in full_diag or "undeclared" in full_diag):
             lines.append(f"- Read and fix `{loc}` (header/symbol declaration mismatch; add the required include or declaration).")
         elif "undefined reference" in full_diag or "cannot find -l" in full_diag:
@@ -1329,11 +1339,35 @@ def _fix_build_feedback_history_limit() -> int:
 
 
 def _fix_build_context_max_chars() -> int:
-    raw = (os.environ.get("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS") or "12000").strip()
+    raw = (os.environ.get("SHERPA_FIX_BUILD_CONTEXT_MAX_CHARS") or "65536").strip()
     try:
-        return max(2000, min(int(raw), 200000))
+        return max(4000, min(int(raw), 300000))
+    except Exception:
+        return 65536
+
+
+def _fix_build_stdout_max_chars() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_STDOUT_MAX_CHARS") or "12000").strip()
+    try:
+        return max(1000, min(int(raw), 120000))
     except Exception:
         return 12000
+
+
+def _fix_build_stderr_max_chars() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_STDERR_MAX_CHARS") or "42000").strip()
+    try:
+        return max(2000, min(int(raw), 220000))
+    except Exception:
+        return 42000
+
+
+def _fix_build_keep_recent_errors() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_KEEP_RECENT_ERRORS") or "3").strip()
+    try:
+        return max(1, min(int(raw), 12))
+    except Exception:
+        return 3
 
 
 def _fix_build_context_history_limit() -> int:
@@ -5318,7 +5352,8 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
-    summary = _summarize_build_error(last_error, stdout_tail, stderr_tail)
+    stdout_for_summary = re.sub(r"(?m)^\[\s*\d+%]\s+Built target\s+.*$", "", stdout_tail).strip()
+    summary = _summarize_build_error(last_error, stdout_for_summary, stderr_tail)
     recent_history = history[-history_limit:] if history else []
     build_strategy_doc = _load_build_strategy_doc(gen.repo_root)
     build_runtime_facts_doc = _load_build_runtime_facts_doc(gen.repo_root)
@@ -5328,7 +5363,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     llm = _llm_or_none()
     codex_hint = (state.get("codex_hint") or "").strip()
 
-    targeted_fix_lines = _build_file_targeted_fix_lines(last_error, stdout_tail, stderr_tail)
+    targeted_fix_lines = _build_file_targeted_fix_lines(gen.repo_root, last_error, stdout_tail, stderr_tail)
     if not codex_hint:
         if llm is not None:
             coordinator_prompt = (
@@ -5401,30 +5436,63 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 + "\nPrevious attempts were no-op; this attempt MUST produce at least one meaningful change under fuzz/."
             )
 
-    # Build a compact, error-first context for fix_build to avoid information overload.
+    # Build an error-heavy, noise-reduced context for fix_build.
     def _tail_lines(text: str, n: int = 120) -> str:
         lines = str(text or "").replace("\r", "\n").splitlines()
         return "\n".join(lines[-n:]).strip()
 
-    def _pack_context_blocks(blocks: list[str], *, max_chars: int) -> str:
-        packed: list[str] = []
-        current_len = 0
-        for raw in blocks:
-            block = str(raw or "").strip()
-            if not block:
+    def _tail_chars(text: str, max_chars: int) -> str:
+        s = str(text or "").strip()
+        if max_chars <= 0 or len(s) <= max_chars:
+            return s
+        return s[-max_chars:]
+
+    def _denoise_build_stdout(text: str) -> str:
+        lines = str(text or "").replace("\r", "\n").splitlines()
+        if not lines:
+            return ""
+        noise_patterns = [
+            re.compile(r"^\[\s*\d+%]\s+Built target\s+", re.IGNORECASE),
+            re.compile(r"^--\s*Configuring done\b", re.IGNORECASE),
+            re.compile(r"^--\s*Generating done\b", re.IGNORECASE),
+            re.compile(r"^--\s*Build files have been written to:\b", re.IGNORECASE),
+            re.compile(r"^\s*done\s*$", re.IGNORECASE),
+        ]
+        kept: list[str] = []
+        for ln in lines:
+            raw = ln.rstrip("\n")
+            if any(p.search(raw.strip()) for p in noise_patterns):
                 continue
-            sep = 2 if packed else 0
-            need = sep + len(block)
-            if current_len + need <= max_chars:
-                packed.append(block)
-                current_len += need
-                continue
-            remaining = max_chars - current_len - sep
-            if remaining > 256:
-                clipped = block[: max(0, remaining - 18)].rstrip() + "\n...[truncated]..."
-                packed.append(clipped)
-            break
-        return "\n\n".join(packed).strip()
+            kept.append(raw)
+        return "\n".join(kept).strip()
+
+    def _dedupe_stderr_blocks(text: str, keep_recent: int) -> str:
+        raw = str(text or "").replace("\r", "\n").strip()
+        if not raw:
+            return ""
+        blocks = [b.strip() for b in re.split(r"\n{2,}", raw) if b.strip()]
+        if not blocks:
+            return raw
+
+        seen_first: dict[str, int] = {}
+        seen_latest: dict[str, int] = {}
+        for i, block in enumerate(blocks):
+            first_line = next((ln.strip().lower() for ln in block.splitlines() if ln.strip()), "")
+            key = first_line[:220] or block[:220].lower()
+            if key not in seen_first:
+                seen_first[key] = i
+            seen_latest[key] = i
+
+        selected: list[int] = []
+        for key, first_idx in seen_first.items():
+            selected.append(first_idx)
+            last_idx = seen_latest.get(key, first_idx)
+            if last_idx != first_idx:
+                selected.append(last_idx)
+        selected = sorted(set(selected))
+        if keep_recent > 0 and len(selected) > keep_recent * 2:
+            selected = selected[-(keep_recent * 2) :]
+        return "\n\n".join(blocks[i] for i in selected).strip()
 
     explicit_actions = [
         line.strip()
@@ -5473,26 +5541,58 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fuzzer_entry_strategy": str(repo_understanding_doc.get("fuzzer_entry_strategy") or ""),
         }
 
-    context_blocks: list[str] = [
-        "=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2),
-    ]
-    if explicit_actions:
-        context_blocks.append("=== targeted_file_actions ===\n" + "\n".join(f"- {line}" for line in explicit_actions))
-    if previous_failed_attempts:
-        context_blocks.append(
-            "=== previous_failed_attempts ===\n"
-            + json.dumps(previous_failed_attempts, ensure_ascii=False, indent=2)
-        )
-    if file_refs:
-        context_blocks.append("=== context_file_refs ===\n" + json.dumps(file_refs, ensure_ascii=False, indent=2))
-    if last_error:
-        context_blocks.append("=== last_error ===\n" + _tail_lines(last_error, n=80))
-    if stderr_tail:
-        context_blocks.append("=== build stderr tail ===\n" + _tail_lines(stderr_tail, n=120))
-    if stdout_tail:
-        context_blocks.append("=== build stdout tail ===\n" + _tail_lines(stdout_tail, n=80))
+    stderr_text = _tail_chars(
+        _dedupe_stderr_blocks(stderr_tail, keep_recent=_fix_build_keep_recent_errors()),
+        _fix_build_stderr_max_chars(),
+    )
+    stdout_text = _tail_chars(_denoise_build_stdout(stdout_tail), _fix_build_stdout_max_chars())
 
-    context = _pack_context_blocks(context_blocks, max_chars=context_max_chars)
+    p0_blocks: list[str] = []
+    if stderr_text:
+        p0_blocks.append("=== build stderr diagnostics ===\n" + stderr_text)
+
+    p1_blocks: list[str] = ["=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2)]
+    if last_error:
+        p1_blocks.append("=== last_error ===\n" + _tail_lines(last_error, n=80))
+
+    p2_blocks: list[str] = []
+    if previous_failed_attempts:
+        p2_blocks.append(
+            "=== previous_failed_attempts ===\n" + json.dumps(previous_failed_attempts, ensure_ascii=False, indent=2)
+        )
+    p3_blocks: list[str] = []
+    if stdout_text:
+        p3_blocks.append("=== build stdout relevant ===\n" + stdout_text)
+    p4_blocks: list[str] = []
+    if explicit_actions:
+        p4_blocks.append("=== targeted_file_actions ===\n" + "\n".join(f"- {line}" for line in explicit_actions))
+    if file_refs:
+        p4_blocks.append("=== context_file_refs ===\n" + json.dumps(file_refs, ensure_ascii=False, indent=2))
+
+    mandatory = p0_blocks + p1_blocks
+    optional = p2_blocks + p3_blocks + p4_blocks
+
+    packed: list[str] = []
+    current_len = 0
+    for block in mandatory:
+        b = str(block or "").strip()
+        if not b:
+            continue
+        sep = 2 if packed else 0
+        packed.append(b)
+        current_len += len(b) + sep
+    for block in optional:
+        b = str(block or "").strip()
+        if not b:
+            continue
+        sep = 2 if packed else 0
+        if current_len + len(b) + sep > context_max_chars:
+            continue
+        packed.append(b)
+        current_len += len(b) + sep
+    context = "\n\n".join(packed).strip()
+    if len(context) > context_max_chars:
+        context = context[:context_max_chars]
 
     prompt = _render_opencode_prompt(
         "fix_build_execute",
