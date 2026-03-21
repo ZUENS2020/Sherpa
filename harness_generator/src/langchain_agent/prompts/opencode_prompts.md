@@ -122,6 +122,7 @@ Task:
 Constraints:
 - only modify files under `fuzz/` and `./done`
 - read-only exploration commands are allowed
+- read `previous_failed_attempts` from context first and avoid repeating already-failed no-op patterns
 - extract concrete failing file paths from diagnostics and issue explicit `Read and fix <path>[:line]` actions
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
 - when diagnostics still fail, pure no-op is invalid; produce a concrete patch
@@ -135,7 +136,7 @@ Coordinator instruction:
 
 MANDATORY:
 - create `./done`
-- write `fuzz/build.py` into `./done` (single line)
+- write one key modified path under `fuzz/` into `./done` (single line)
 <!-- END TEMPLATE -->
 
 <!-- TEMPLATE: fix_crash_harness_error -->

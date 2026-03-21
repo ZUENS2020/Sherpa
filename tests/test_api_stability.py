@@ -757,7 +757,34 @@ def test_system_status_execs_per_sec_reads_run_log_metrics(tmp_path: Path):
     doc = response.json()
     assert doc["tasks_tab_metrics"]["execs_per_sec"] == "9.1"
 
+def test_system_status_execs_per_sec_falls_back_to_recent_success_window(tmp_path: Path):
+    job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    log_path = tmp_path / f"{job_id}.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "[run] completed",
+                "stat::average_exec_per_sec: 12450",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    now = time.time()
+    web_main._job_update(
+        job_id,
+        status="success",
+        finished_at=now - 7200,  # 2h ago: outside 5m window but inside fallback window
+        updated_at=now - 7200,
+        log_file=str(log_path),
+        log="",
+    )
 
+    with TestClient(web_main.app) as client:
+        response = client.get("/api/system")
+
+    assert response.status_code == 200
+    doc = response.json()
+    assert doc["tasks_tab_metrics"]["execs_per_sec"] == "12.4"
 def test_system_status_llm_token_usage_requires_real_token_fields(tmp_path: Path):
     job_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
     log_path = tmp_path / f"{job_id}.log"

@@ -680,8 +680,10 @@ def test_fix_build_stops_after_noop_streak_threshold(tmp_path: Path, monkeypatch
     }
 
     out = workflow_graph._node_fix_build(state)
-    assert out["message"] == "opencode fixed build"
-    assert out["last_error"] == ""
+    assert out["message"] == "fix_build no-op streak exceeded; restarting from plan"
+    assert out["restart_to_plan"] is True
+    assert out["fix_build_terminal_reason"] == "fix_build_noop_streak_exceeded"
+    assert "no-op streak exceeded" in out["last_error"]
 
 
 def test_fix_build_noop_streak_resets_after_effective_change(tmp_path: Path, monkeypatch):
@@ -889,7 +891,45 @@ def test_fix_build_feedback_history_appended_and_trimmed(tmp_path: Path, monkeyp
     out = workflow_graph._node_fix_build(state)
     hist = out.get("fix_build_attempt_history") or []
     assert len(hist) == 2
-    assert hist[-1]["outcome"] == "llm_fixed"
+    assert hist[-1]["outcome"] == "llm_noop"
+
+
+def test_fix_build_injects_previous_failed_attempts_context(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('same')\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **kwargs):
+            captured["ctx"] = str(kwargs.get("additional_context") or "")
+            (tmp_path / "done").write_text("fuzz/build.py\n", encoding="utf-8")
+
+    monkeypatch.setattr(workflow_graph, "_llm_or_none", lambda: None)
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    state = {
+        "generator": gen,
+        "last_error": "build failed: cannot find -lzstd",
+        "build_stdout_tail": "",
+        "build_stderr_tail": "",
+        "fix_build_attempt_history": [
+            {
+                "attempt_index": 3,
+                "outcome": "llm_noop",
+                "build_error_code": "missing_link_symbols",
+                "classified_signature": "abcd1234",
+                "changed_paths_count": 0,
+                "rejection_reason": "no changes",
+            }
+        ],
+    }
+
+    workflow_graph._node_fix_build(state)
+    ctx = captured.get("ctx") or ""
+    assert "=== previous_failed_attempts ===" in ctx
+    assert "\"attempt\": 3" in ctx
+    assert "\"outcome\": \"llm_noop\"" in ctx
+    assert "\"changed_paths_count\": 0" in ctx
 
 
 def test_fix_build_rule_missing_zlib_link_flag_prefers_explicit_archive(tmp_path: Path, monkeypatch):
