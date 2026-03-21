@@ -476,6 +476,18 @@ def test_route_after_build_sends_source_error_to_fix_build() -> None:
     assert route == "fix_build"
 
 
+def test_route_after_fix_build_sends_repeated_same_signature_back_to_plan(monkeypatch) -> None:
+    monkeypatch.setenv("SHERPA_FIX_BUILD_SAME_SIGNATURE_TO_PLAN", "3")
+    route = workflow_graph._route_after_fix_build_state(
+        {
+            "failed": False,
+            "last_error": "build failed rc=1",
+            "same_build_error_repeats": 3,
+        }
+    )
+    assert route == "plan"
+
+
 def test_opencode_cli_retries_default_and_bounds(monkeypatch) -> None:
     monkeypatch.delenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", raising=False)
     assert workflow_graph._opencode_cli_retries() == 2

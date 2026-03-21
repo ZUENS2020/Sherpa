@@ -63,3 +63,14 @@ def test_workflow_plan_and_synthesize_use_group_feedback_context() -> None:
     assert "_write_stage_feedback(" in text
     assert 'stage="plan"' in text
     assert 'stage="synthesize"' in text
+
+
+def test_workflow_fix_build_route_map_contains_self_loop() -> None:
+    text = WF.read_text(encoding="utf-8")
+    assert '"fix_build": "fix_build"' in text
+
+
+def test_workflow_synthesize_uses_configurable_opencode_attempts() -> None:
+    text = WF.read_text(encoding="utf-8")
+    assert "def _synthesize_opencode_attempts() -> int:" in text
+    assert "max_attempts=_synthesize_opencode_attempts()" in text

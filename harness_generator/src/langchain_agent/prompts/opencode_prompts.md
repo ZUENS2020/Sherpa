@@ -57,6 +57,7 @@ Stage requirements:
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
+- Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
 - `fuzz/README.md` must include:
   - `Selected target: ...`
   - `Final target: ...`
@@ -124,6 +125,7 @@ Constraints:
 - read-only exploration commands are allowed
 - read `previous_failed_attempts` from context first and avoid repeating already-failed no-op patterns
 - extract concrete failing file paths from diagnostics and issue explicit `Read and fix <path>[:line]` actions
+- when diagnostics point to API misuse, prioritize replacing internal/private API usage with public/stable APIs from repository headers or docs
 - keep changes minimal and evidence-driven from `{{build_log_file}}`
 - when diagnostics still fail, pure no-op is invalid; produce a concrete patch
 - if the same error signature repeats, change strategy instead of repeating identical edits
