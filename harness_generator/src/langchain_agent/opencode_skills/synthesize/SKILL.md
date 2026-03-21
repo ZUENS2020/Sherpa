@@ -44,7 +44,6 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 {
   "build_system": "cmake",
   "chosen_target_api": "archive_read_open1",
-  "chosen_target_api": "archive_read_open1",
   "chosen_target_reason": "runtime-reachable parser entrypoint",
   "fuzzer_entry_strategy": "sanitizer_fuzzer",
   "evidence": [

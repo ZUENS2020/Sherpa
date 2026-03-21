@@ -2046,6 +2046,39 @@ def _job_execs_per_sec(job: dict) -> float | None:
     return _extract_execs_per_sec_from_text(text)
 
 
+def _collect_exec_rates_for_system(fuzz_jobs: list[dict], now: float) -> list[float]:
+    rates: list[float] = []
+
+    # Always prefer currently running fuzz jobs when real run metrics are present.
+    for j in fuzz_jobs:
+        if _status_bucket(str(j.get("status") or "")) != "running":
+            continue
+        rate = _job_execs_per_sec(j)
+        if rate is not None and rate > 0:
+            rates.append(rate)
+    if rates:
+        return rates
+
+    # If no running metrics are available, fall back to recent successful jobs
+    # with progressively wider windows. Keep this real-data-only (no estimation).
+    for window_sec in (300.0, 3600.0, 21600.0, 86400.0):
+        cutoff = now - window_sec
+        window_rates: list[float] = []
+        for j in fuzz_jobs:
+            if _status_bucket(str(j.get("status") or "")) != "success":
+                continue
+            finished_at = _safe_float(j.get("finished_at"))
+            if finished_at is None or finished_at < cutoff:
+                continue
+            rate = _job_execs_per_sec(j)
+            if rate is not None and rate > 0:
+                window_rates.append(rate)
+        if window_rates:
+            return window_rates
+
+    return rates
+
+
 def _percentile(values: list[float], q: float) -> float | None:
     if not values:
         return None
@@ -2256,22 +2289,7 @@ def _system_status() -> dict:
     http_p95 = _safe_float(http_metrics.get("lat_p95_ms"))
 
     performance_series = _performance_series_from_jobs(now, fuzz_jobs)
-    recent_exec_rates: list[float] = []
-    execs_window_sec = 300.0
-    execs_cutoff = now - execs_window_sec
-    for j in fuzz_jobs:
-        status_bucket = _status_bucket(str(j.get("status") or ""))
-        if status_bucket == "running":
-            pass
-        elif status_bucket == "success":
-            finished_at = _safe_float(j.get("finished_at"))
-            if finished_at is None or finished_at < execs_cutoff:
-                continue
-        else:
-            continue
-        rate = _job_execs_per_sec(j)
-        if rate is not None and rate > 0:
-            recent_exec_rates.append(rate)
+    recent_exec_rates = _collect_exec_rates_for_system(fuzz_jobs, now)
     recent_jobs_per_sec = (sum(recent_exec_rates) / 1000.0) if recent_exec_rates else None
 
     token_window_sec = 3600.0

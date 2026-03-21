@@ -40,6 +40,7 @@ def find_static_lib(repo_root):
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.
 - must produce textual code changes when current diagnostics are still failing; pure no-op is invalid.
+- read and use `previous_failed_attempts` from context to avoid repeating already-failed approaches.
 - no edits outside `fuzz/` (except `./done`).
 - strategy/understanding files remain aligned with build behavior.
 - build result remains aligned with execution-plan target coverage constraints.
@@ -52,4 +53,4 @@ def find_static_lib(repo_root):
 - Forbidden: build/execute commands.
 
 ## Done Sentinel Contract
-- write `fuzz/build.py` into `./done`.
+- write one key modified path under `fuzz/` into `./done`.

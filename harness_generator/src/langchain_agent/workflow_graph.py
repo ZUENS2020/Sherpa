@@ -4329,7 +4329,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fuzz/corpus/",
             "fuzz/build/",
         )
-        skip_names = {"fuzz/build_full.log"}
+        skip_names = {"fuzz/build_full.log", "done"}
         for current_root, dirnames, filenames in os.walk(repo_root, topdown=True):
             try:
                 root_rel = str(Path(current_root).relative_to(repo_root)).replace("\\", "/")
@@ -5351,7 +5351,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 codex_hint.strip()
                 + "\nThe current scaffold lacks grounded repository understanding. Repair `fuzz/repo_understanding.json` first with concrete build facts and evidence, then make `fuzz/build.py` match it."
             )
-        if recent_history and any(str(x.get("outcome") or "") == "noop" for x in recent_history):
+        if recent_history and any("noop" in str(x.get("outcome") or "") for x in recent_history):
             codex_hint = (
                 codex_hint.strip()
                 + "\nPrevious attempts were no-op; this attempt MUST produce at least one meaningful change under fuzz/."
@@ -5364,6 +5364,23 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     context_parts.append("=== structured_error ===\n" + json.dumps(summary, ensure_ascii=False, indent=2))
     if recent_history:
         context_parts.append("=== fix_build_attempt_history (recent) ===\n" + json.dumps(recent_history, ensure_ascii=False, indent=2))
+        previous_failed_attempts: list[dict[str, Any]] = []
+        for row in recent_history[-history_limit:]:
+            outcome = str(row.get("outcome") or "").strip()
+            if not outcome:
+                continue
+            previous_failed_attempts.append(
+                {
+                    "attempt": int(row.get("attempt_index") or 0),
+                    "outcome": outcome,
+                    "changed_paths_count": int(row.get("changed_paths_count") or 0),
+                    "signature": str(row.get("classified_signature") or "").strip(),
+                    "error_code": str(row.get("build_error_code") or "").strip(),
+                    "reason": str(row.get("rejection_reason") or "").strip(),
+                }
+            )
+        if previous_failed_attempts:
+            context_parts.append("=== previous_failed_attempts ===\n" + json.dumps(previous_failed_attempts, ensure_ascii=False, indent=2))
     if build_strategy_doc:
         context_parts.append("=== fuzz/build_strategy.json ===\n" + json.dumps(build_strategy_doc, ensure_ascii=False, indent=2))
     if build_runtime_facts_doc:
@@ -5400,26 +5417,41 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             for p in (set(baseline_step_hashes.keys()) | set(post_step_hashes.keys()))
             if baseline_step_hashes.get(p) != post_step_hashes.get(p)
         )
-        changed_paths_count = len(changed_paths)
+        effective_changed_paths = [p for p in changed_paths if str(p).strip().replace("\\", "/") != "done"]
+        changed_paths_count = len(effective_changed_paths)
+        llm_outcome = "llm_fixed" if changed_paths_count > 0 else "llm_noop"
         updated_history, updated_rule_hits = _append_attempt(
-            "llm_fixed",
+            llm_outcome,
             changed_paths_count=changed_paths_count,
         )
+        next_noop_streak = prev_noop_streak + 1 if changed_paths_count == 0 else 0
+        message = "opencode fixed build" if changed_paths_count > 0 else "opencode returned without code changes"
+        last_error_text = "" if changed_paths_count > 0 else (last_error or "fix_build produced no file changes")
+        fix_effect = "advanced" if changed_paths_count > 0 else "stalled"
         out = {
             **state,
             "last_step": "fix_build",
-            "last_error": "",
+            "last_error": last_error_text,
             "codex_hint": "",
-            "message": "opencode fixed build",
-            "fix_build_noop_streak": 0,
+            "message": message,
+            "fix_build_noop_streak": next_noop_streak,
             "fix_build_attempt_history": updated_history,
             "fix_build_rule_hits": updated_rule_hits,
             "fix_build_terminal_reason": "",
-            "fix_build_last_diff_paths": changed_paths,
+            "fix_build_last_diff_paths": effective_changed_paths,
             "fix_action_type": "opencode",
-            "fix_effect": "advanced",
+            "fix_effect": fix_effect,
         }
-        if _requires_env_rebuild(changed_paths):
+        if changed_paths_count == 0 and next_noop_streak >= max_noop_streak:
+            out["failed"] = False
+            out["fix_build_terminal_reason"] = "fix_build_noop_streak_exceeded"
+            out["last_error"] = f"fix_build no-op streak exceeded ({max_noop_streak}); restart from plan"
+            out["message"] = "fix_build no-op streak exceeded; restarting from plan"
+            out["restart_to_plan"] = True
+            out["restart_to_plan_reason"] = "fix_build_noop_streak_exceeded"
+            out["restart_to_plan_stage"] = "fix_build"
+            out["restart_to_plan_error_text"] = str(out.get("last_error") or "")
+        if changed_paths_count > 0 and _requires_env_rebuild(effective_changed_paths):
             out["message"] = "opencode fixed build (requires env rebuild)"
             out["fix_effect"] = "requires_env_rebuild"
             out["fix_build_terminal_reason"] = "requires_env_rebuild"
