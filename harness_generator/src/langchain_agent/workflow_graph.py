@@ -1344,11 +1344,27 @@ def _run_idle_timeout_sec() -> int:
 
 
 def _synthesize_opencode_idle_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "900").strip()
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "300").strip()
     try:
         return max(0, min(int(raw), 86_400))
     except Exception:
-        return 900
+        return 300
+
+
+def _synthesize_opencode_attempts() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_SYNTH_MAX_ATTEMPTS") or "2").strip()
+    try:
+        return max(1, min(int(raw), 4))
+    except Exception:
+        return 2
+
+
+def _fix_build_same_signature_plan_threshold() -> int:
+    raw = (os.environ.get("SHERPA_FIX_BUILD_SAME_SIGNATURE_TO_PLAN") or "3").strip()
+    try:
+        return max(1, min(int(raw), 20))
+    except Exception:
+        return 3
 
 
 def _synthesize_activity_watch_paths() -> list[str]:
@@ -3107,7 +3123,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             additional_context=context,
             stage_skill="synthesize_complete_scaffold",
             timeout=min(remaining, 300),
-            max_attempts=1,
+            max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
         )
         _wf_log(cast(dict[str, Any], state), "synthesize: applied post-validation build.py repair for path/link issue")
@@ -3120,7 +3136,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             additional_context=_completion_context() or None,
             stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
-            max_attempts=1,
+            max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
@@ -3152,7 +3168,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             additional_context=_completion_context() or None,
             stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
-            max_attempts=1,
+            max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
@@ -3212,7 +3228,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             additional_context=_completion_context() or None,
             stage_skill="synthesize_complete_scaffold",
             timeout=timeout,
-            max_attempts=1,
+            max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
@@ -3274,7 +3290,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 additional_context=ctx or None,
                 stage_skill="synthesize",
                 timeout=_remaining_time_budget_sec(state),
-                max_attempts=1,
+                max_attempts=_synthesize_opencode_attempts(),
                 max_cli_retries=_opencode_cli_retries(),
                 idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
                 activity_watch_paths=_synthesize_activity_watch_paths(),
@@ -7270,6 +7286,8 @@ def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
 def _route_after_fix_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         return "plan"
+    if int(state.get("same_build_error_repeats") or 0) >= _fix_build_same_signature_plan_threshold():
+        return "plan"
     terminal_reason = (state.get("fix_build_terminal_reason") or "").strip()
     if terminal_reason == "requires_env_rebuild":
         return "build"
@@ -7434,6 +7452,8 @@ def build_fuzz_workflow() -> StateGraph:
     def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
         if bool(state.get("restart_to_plan")):
             return "plan"
+        if int(state.get("same_build_error_repeats") or 0) >= _fix_build_same_signature_plan_threshold():
+            return "plan"
         terminal_reason = (state.get("fix_build_terminal_reason") or "").strip()
         if terminal_reason == "requires_env_rebuild":
             return "build"
@@ -7500,7 +7520,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "fix_build",
         _route_after_fix_build,
-        {"build": "build", "plan": "plan", "stop": END},
+        {"fix_build": "fix_build", "build": "build", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "run",

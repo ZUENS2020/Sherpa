@@ -56,6 +56,7 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     assert "do not bypass workflow acceptance" in fix_build
     assert "read and use `previous_failed_attempts` from context" in fix_build
     assert "Read and fix <path>[:line]" in fix_build
+    assert "replace those usages with public/stable APIs first" in fix_build
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_h
     assert "do not bypass acceptance by tampering" in fix_crash_h
     assert "Read and fix <path>[:line]" in fix_crash_h
