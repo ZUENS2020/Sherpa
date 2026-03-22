@@ -16,6 +16,10 @@ Generate high-signal warm-up corpus files for the current harness, with real rep
 - `seed_check_<fuzzer>.json`
 
 ## Key File Templates
+- Global seed filtering behavior defaults to `soft` mode:
+  - preserve semantically distinct seeds and avoid over-compressing corpus diversity
+  - still avoid oversized files and exact-content duplicates
+  - malformed-only growth is discouraged when required families are missing
 - For `archive-container` profiles:
   - import real archive samples first from:
     - `contrib/oss-fuzz/corpus.zip`
@@ -30,6 +34,7 @@ Generate high-signal warm-up corpus files for the current harness, with real rep
 - required family buckets are covered or explicitly documented as missing with reason.
 - corpus is not dominated by malformed archive samples.
 - archive-focused corpus includes valid real samples before synthetic edge cases.
+- when filtering is `soft`, retain family-diverse samples instead of aggressively collapsing near variants.
 - when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
 
 ## Command Policy
