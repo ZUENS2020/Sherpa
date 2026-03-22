@@ -1,30 +1,30 @@
 # Sherpa API Reference
 
-Last updated: 2026-03-21
+Last updated: 2026-03-22
 Backend source of truth: `harness_generator/src/langchain_agent/main.py`
 
 ## 1. Base Information
 
-- Base URL (dev): `https://dev.zuens2020.work`
+- Base URL (dev): `https://dev.zuens2020.work/`
 - API prefix: `/api`
 - Content type:
-  - Request: `application/json` (except metrics endpoint)
-  - Response: `application/json` (except `/api/metrics`)
-- Auth: currently no API auth
-- CORS: enabled for all origins (`allow_origins=["*"]`, methods `*`, headers `*`)
+  - Request: `application/json`（`/api/metrics` 除外）
+  - Response: `application/json`（`/api/metrics` 返回 Prometheus 文本）
+- Auth: 当前无 API 鉴权
+- CORS: 允许全部来源
 
 ## 2. Common Semantics
 
 ### 2.1 Time fields
 
-Most task/job payloads include Unix timestamps (seconds) and ISO UTC mirrors:
+大部分 task/job payload 同时提供 Unix 秒时间戳和 ISO UTC 字符串：
 
 - `*_at`: float seconds
-- `*_at_iso`: ISO-8601 UTC string (or `null`)
+- `*_at_iso`: ISO-8601 UTC string，或 `null`
 
-### 2.2 Status mapping used by task list
+### 2.2 Task status mapping
 
-Internal status is normalized to uppercase API status:
+后台内部状态会规范化成大写 API 状态：
 
 - `queued` -> `QUEUED`
 - `running`, `resuming` -> `RUNNING`
@@ -35,122 +35,78 @@ Internal status is normalized to uppercase API status:
 
 ### 2.3 Unlimited budget convention
 
-For task submission budget fields:
+预算字段里：
 
-- `-1` means unlimited (converted to internal `0`)
-- `0` is also treated as unlimited internally
+- `-1` 表示无限
+- `0` 也会在内部被视为无限
 
-### 2.4 Frontend dynamic fields
+### 2.4 Frontend dynamic blocks
 
-The dashboard consumes these backend blocks directly:
+前端仪表盘直接消费以下后端块：
 
 - `overview`
 - `telemetry`
 - `execution.summary`
 - `tasks_tab_metrics`
 
-The backend does not inject demo placeholders. Missing metrics must be returned as `null` or a safe empty value.
+如果某个指标当前没有可靠来源，后端返回 `null` 或安全空值，而不是 demo 占位数据。
 
 ## 3. Configuration APIs
 
-## 3.1 GET `/api/config`
+### 3.1 GET `/api/config`
 
-Returns current runtime config (public/sanitized):
+返回当前运行时配置的公开视图。
 
-- Secret fields are masked/blanked:
-  - `openai_api_key`, `openrouter_api_key`, provider `api_key`
-- Secret set flags are provided:
-  - `openai_api_key_set`, `openrouter_api_key_set`, `api_key_set`
-- Docker fields are forced for UI compatibility:
-  - `fuzz_use_docker=false`, `fuzz_docker_image=""`
+要点：
 
-Example:
+- secret 字段会被清空或掩码：
+  - `openai_api_key`
+  - `openrouter_api_key`
+  - provider `api_key`
+- secret 是否存在会通过 `*_set` 标记给前端
+- `fuzz_use_docker`、`fuzz_docker_image` 会保留给 UI 兼容，但在当前 native k8s 模式下不是主要运行开关
 
-```json
-{
-  "openrouter_api_key": "",
-  "openrouter_api_key_set": false,
-  "openrouter_base_url": "https://openrouter.ai/api/v1",
-  "openrouter_model": "anthropic/claude-3.5-sonnet",
-  "openai_api_key": "",
-  "openai_api_key_set": true,
-  "openai_base_url": "https://api.minimaxi.com/anthropic/v1",
-  "openai_model": "MiniMax-M2.7-highspeed",
-  "opencode_model": "MiniMax-M2.7-highspeed",
-  "opencode_providers": [
-    {
-      "name": "minimax",
-      "enabled": true,
-      "base_url": "https://api.minimaxi.com/anthropic/v1",
-      "api_key": "",
-      "api_key_set": true,
-      "clear_api_key": false,
-      "models": ["MiniMax-M2.7-highspeed"],
-      "headers": {},
-      "options": {}
-    }
-  ],
-  "fuzz_time_budget": 900,
-  "sherpa_run_unlimited_round_budget_sec": 7200,
-  "fuzz_use_docker": false,
-  "fuzz_docker_image": "",
-  "oss_fuzz_dir": "",
-  "sherpa_git_mirrors": "",
-  "sherpa_docker_http_proxy": "",
-  "sherpa_docker_https_proxy": "",
-  "sherpa_docker_no_proxy": "",
-  "sherpa_docker_proxy_host": "host.docker.internal",
-  "apiBaseUrl": "",
-  "version": 1
-}
-```
+### 3.2 PUT `/api/config`
 
-## 3.2 PUT `/api/config`
+支持两种写法：
 
-Supports two write modes.
-
-1) Lightweight mode (for frontend settings only):  
-Request contains only one of:
-
-- `apiBaseUrl`
-- `api_base_url`
-
-Example:
+1. 轻量模式，只更新前端设置：
 
 ```json
 { "apiBaseUrl": "https://dev.zuens2020.work" }
 ```
 
-2) Full config mode:  
-Request is merged into current config and validated by `WebPersistentConfig`.
+或：
 
-Important behavior:
+```json
+{ "api_base_url": "https://dev.zuens2020.work" }
+```
 
-- `openai_api_key` / `openrouter_api_key` / provider API keys are not accepted from frontend payload as authoritative control fields in this route.
-- `fuzz_time_budget` must be `>= 0`.
-- `sherpa_run_unlimited_round_budget_sec` must be `>= 0`.
-- config file is persisted to `config/web_config.json`.
+2. 完整配置模式：
 
-Success response:
+- 请求体会与当前配置合并后再校验
+- `fuzz_time_budget >= 0`
+- `sherpa_run_unlimited_round_budget_sec >= 0`
+- secret 控制字段不会由前端作为最终可信来源
+
+成功响应：
 
 ```json
 { "ok": true }
 ```
 
-Error response:
+错误响应：
 
-- `400` invalid payload or invalid numeric constraints
-- `500` persistence failure
+- `400`：payload 无效或数值约束不合法
+- `500`：持久化失败
 
-## 4. OpenCode Provider Model Discovery APIs
+## 4. OpenCode Provider Model Discovery
 
-## 4.1 GET `/api/opencode/providers/{provider}/models`
+### 4.1 GET `/api/opencode/providers/{provider}/models`
 
-Path param:
+查询 provider 的可用模型列表。
 
-- `provider`: currently normalized alias maps to `minimax`
-
-Response:
+常见返回：
 
 ```json
 {
@@ -161,19 +117,15 @@ Response:
 }
 ```
 
-Notes:
+`source` 可能是：
 
-- `source` is one of: `remote`, `builtin`, `none`
-- `warning` is optional and may explain fallback reason
+- `remote`
+- `builtin`
+- `none`
 
-Errors:
+### 4.2 POST `/api/opencode/providers/{provider}/models`
 
-- `400` provider empty/invalid
-- `404` unsupported provider
-
-## 4.2 POST `/api/opencode/providers/{provider}/models`
-
-Same behavior as GET, but allows temporary override input:
+与 GET 行为相同，但允许临时覆盖：
 
 ```json
 {
@@ -184,115 +136,60 @@ Same behavior as GET, but allows temporary override input:
 
 ## 5. System and Health APIs
 
-## 5.1 GET `/api/system`
+### 5.1 GET `/api/system`
 
-Returns backend runtime status plus frontend-facing overview blocks.
+返回后端运行状态与前端仪表盘用的动态块。
 
-Top-level fields:
+顶层字段通常包括：
 
-- `ok`, `server_time`, `server_time_iso`, `uptime_sec`
-- `jobs`: `{ total, queued, running, success, error }`
-- `jobs_by_kind`: object map (e.g. `task`, `fuzz`)
-- `workers`: `{ max }`
-- `active_jobs`: concise active job list
-- `logs`: log directory metadata
-- `memory`: process/cgroup memory telemetry
-- `config`: selected public runtime config
-
-Frontend dynamic blocks:
-
+- `ok`
+- `server_time`
+- `server_time_iso`
+- `uptime_sec`
+- `jobs`
+- `jobs_by_kind`
+- `workers`
+- `active_jobs`
+- `logs`
+- `memory`
+- `config`
 - `overview`
 - `telemetry`
-- `execution.summary`
+- `execution`
 - `tasks_tab_metrics`
 
-Metric contract:
+#### 动态块语义
 
-- Values are computed from live job/runtime data only.
-- `fastapi_gateway` is SLI-only and intentionally omits p95 / rps.
-- `llm_token_usage` only uses real token accounting fields; if none exist, it is `null`.
-- `tasks_tab_metrics.execs_per_sec` is derived from run-stage metrics/logs, not from task count.
-- `repos_queued` tracks queued main tasks.
-- If a metric has no reliable source at query time, it is returned as `null`.
+- `overview.avg_fuzz_time`：成功或活跃任务的平均 fuzz 时长
+- `overview.active_agents`：当前活跃主任务数
+- `overview.cluster_health`：综合健康分
+- `overview.crash_triage_rate`：近期 crash triage 吞吐
+- `overview.harnesses_synthesized`：已合成 harness 统计
+- `overview.avg_coverage`：可用时的平均覆盖率
+- `telemetry.llm_token_usage`：只使用真实 token 统计；如果没有真实字段，返回 `null`
+- `telemetry.k8s_pod_capacity`：集群资源压力
+- `telemetry.fastapi_gateway`：FastAPI 网关 SLI
+- `telemetry.fastapi_status`：网关状态文本
+- `telemetry.agent_health_matrix`：紧凑健康矩阵
+- `telemetry.performance_series`：吞吐 / 延迟时序图
+- `execution.summary.failure_rate`：近期失败率
+- `execution.summary.fuzzing_jobs_24h`：24h fuzz 任务数
+- `execution.summary.cluster_load_peak`：峰值负载
+- `execution.summary.repos_queued`：队列中的主任务数
+- `tasks_tab_metrics.total_jobs`：任务面板总数
+- `tasks_tab_metrics.execs_per_sec`：run 阶段的 exec/s 汇总
+- `tasks_tab_metrics.success_rate`：任务成功率
+- `tasks_tab_metrics.failed_tasks`：失败任务数
 
-Example (abridged):
+### 5.2 GET `/api/metrics`
 
-```json
-{
-  "ok": true,
-  "jobs": { "total": 4, "queued": 0, "running": 1, "success": 2, "error": 1 },
-  "overview": {
-    "avg_fuzz_time": "17m 8s",
-    "active_agents": "1",
-    "cluster_health": "80.0",
-    "cluster_health_trend": "+5.0% ▲",
-    "crash_triage_rate": "1",
-    "crash_triage_rate_trend": "-1.0 ▼",
-    "harnesses_synthesized": "2",
-    "harnesses_synthesized_trend": "+1.0 ▲",
-    "avg_coverage": null,
-    "avg_coverage_trend": null
-  },
-  "telemetry": {
-    "llm_token_usage": null,
-    "llm_token_status": null,
-    "k8s_pod_capacity": "61% CAP",
-    "k8s_pod_status": "Normal",
-    "fastapi_gateway": "100.00% SLI",
-    "fastapi_status": "UP",
-    "agent_health_matrix": [1, 0, 1],
-    "performance_series": [{ "time": "00:00", "throughput": 33, "latency": 45 }]
-  },
-  "execution": {
-    "summary": {
-      "failure_rate": "33.33%",
-      "fuzzing_jobs_24h": "4",
-      "cluster_load_peak": "61%",
-      "repos_queued": "0",
-      "avg_triage_time_ms": null,
-      "success_ratio": "66.67"
-    }
-  },
-  "tasks_tab_metrics": {
-    "total_jobs": "4",
-    "execs_per_sec": "84.0",
-    "success_rate": "66.7",
-    "failed_tasks": "01"
-  }
-}
-```
+Prometheus plaintext 端点。
 
-Field details:
-
-- `overview.avg_fuzz_time`: rolling average fuzz runtime for successful or active jobs.
-- `overview.active_agents`: current active main task count shown in the dashboard.
-- `overview.cluster_health`: aggregate health score derived from failure rate, load and error ratio.
-- `overview.crash_triage_rate`: recent crash-handling throughput signal.
-- `overview.harnesses_synthesized`: synthesized harness count metric.
-- `overview.avg_coverage`: average coverage percentage when available.
-- `telemetry.llm_token_usage`: hourly token usage summary, only if real token fields exist.
-- `telemetry.k8s_pod_capacity`: cluster resource pressure indicator.
-- `telemetry.fastapi_gateway`: FastAPI gateway SLI only.
-- `telemetry.fastapi_status`: gateway health text (`UP`, `DEGRADED`, `ERROR`).
-- `telemetry.agent_health_matrix`: compact binary health grid used by the UI.
-- `telemetry.performance_series`: time series rendered as throughput/latency charts.
-- `execution.summary.failure_rate`: recent failure ratio for completed jobs.
-- `execution.summary.fuzzing_jobs_24h`: 24h fuzz job count.
-- `execution.summary.cluster_load_peak`: peak cluster load summary.
-- `execution.summary.repos_queued`: queued main-task count.
-- `tasks_tab_metrics.total_jobs`: task list total count.
-- `tasks_tab_metrics.execs_per_sec`: run-stage exec/s rollup.
-- `tasks_tab_metrics.success_rate`: task success ratio.
-- `tasks_tab_metrics.failed_tasks`: failed task count.
-
-## 5.2 GET `/api/metrics`
-
-Prometheus plaintext endpoint.  
-Response media type:
+返回媒体类型：
 
 - `text/plain; version=0.0.4; charset=utf-8`
 
-Includes metrics such as:
+常见指标：
 
 - `sherpa_jobs_total`
 - `sherpa_jobs_status{status="..."}`
@@ -300,9 +197,9 @@ Includes metrics such as:
 - `sherpa_process_resident_memory_bytes`
 - `sherpa_cgroup_memory_*`
 
-## 5.3 GET `/api/health`
+### 5.3 GET `/api/health`
 
-Simple liveness:
+简单存活检查：
 
 ```json
 { "ok": true }
@@ -310,11 +207,11 @@ Simple liveness:
 
 ## 6. Task APIs
 
-## 6.1 POST `/api/task`
+### 6.1 POST `/api/task`
 
-Creates one parent task job (`kind=task`), then submits child fuzz jobs for each item in `jobs`.
+创建一个 parent task（`kind=task`），再为每个 job 创建 child fuzz jobs。
 
-Request schema:
+#### Request schema
 
 ```json
 {
@@ -345,93 +242,81 @@ Request schema:
 }
 ```
 
-Field notes:
+#### 约定
 
-- `code_url` required per job
-- `jobs` is an array of parent task entries; each entry may spawn one or more fuzz children internally.
-- Budget aliases:
-  - `total_duration` -> `total_time_budget`
-  - `single_duration` -> `run_time_budget`
-  - `-1` means unlimited
-- `max_tokens = 0` means no explicit token cap.
-- `unlimited_round_limit` maps to the run-stage unlimited round cap used by the backend worker.
-- In current k8s native mode, docker controls are kept for compatibility but not used as runtime selector.
+- `code_url` 是每个 job 必填
+- `total_duration` 会映射到内部总预算字段
+- `single_duration` 会映射到内部单轮预算字段
+- `-1` 表示无限，后台会按无限预算处理
+- `max_tokens=0` 表示不设置显式 token 上限
+- `unlimited_round_limit` 是 run 阶段无限轮次的上限桥接字段
 
-Success response:
+#### Success response
 
 ```json
 { "job_id": "task-parent-id", "status": "queued" }
 ```
 
-## 6.2 GET `/api/task/{job_id}`
+### 6.2 GET `/api/task/{job_id}`
 
-Returns a derived view for a parent task:
+返回 parent task 视图。
 
-- If `job_id` not found: `{ "error": "job_not_found" }`
-- If id is not a `task` kind: `{ "error": "job_not_task" }`
-- Else returns parent task object with:
-  - normalized `status` (`running/success/error`)
-  - `children_status`: `{ total, queued, running, success, error }`
-  - `children`: child job detailed snapshots
-  - error metadata: `error_code`, `error_kind`, `error_signature`
-  - phase metadata: `phase`, `runtime_mode`
+#### Error cases
 
-Note: these two error cases are returned as JSON body (not HTTP 404/400).
+- `{ "error": "job_not_found" }`
+- `{ "error": "job_not_task" }`
 
-## 6.3 POST `/api/task/{job_id}/resume`
+#### 成功返回
 
-Resumes a stopped/failed job.
+包含：
 
-- If `{job_id}` is fuzz kind: resumes that fuzz job
-- Else task kind: tries to resume resumable child fuzz jobs
+- `status`
+- `children_status`
+- `children`
+- `phase`
+- `runtime_mode`
+- `error_code`
+- `error_kind`
+- `error_signature`
 
-Response:
+### 6.3 POST `/api/task/{job_id}/resume`
 
-```json
-{
-  "job_id": "id",
-  "kind": "task",
-  "accepted": true,
-  "reason": "resuming",
-  "resume_attempts": 2,
-  "status": "resuming"
-}
-```
+恢复暂停或失败任务。
 
-## 6.4 POST `/api/task/{job_id}/stop`
+- fuzz kind：恢复该 fuzz job
+- task kind：尝试恢复可恢复的 child fuzz jobs
 
-Requests cancellation.
+### 6.4 POST `/api/task/{job_id}/stop`
 
-- Task kind: cancels parent + iterates children
-- Fuzz kind: cancels single fuzz
+请求取消任务。
 
-Response:
+- task kind：取消 parent + 迭代 children
+- fuzz kind：取消单个 fuzz
 
-```json
-{
-  "job_id": "id",
-  "kind": "task",
-  "accepted": true,
-  "reason": "stopped",
-  "status": "error",
-  "details": {
-    "accepted": true,
-    "reason": "stopped"
-  }
-}
-```
+### 6.5 GET `/api/tasks`
 
-## 6.5 GET `/api/tasks?limit={n}`
+返回任务列表，供任务面板轮询。
 
-Returns list for task board.
+#### Query
 
-- Query `limit` default `50`, clamped to `[1, 200]`
-- `repo` remains the backend job repo label; the frontend may display a derived repo name for readability.
-- `stage` is the current phase shown in the task row.
-- `active_child_status` mirrors the most recent child state and is useful when a parent task fan-outs to fuzz jobs.
-- `progress` is a soft indicator; it is not a strict completion percentage.
+- `limit`：默认 `50`，会被 clamp 到 `[1, 200]`
 
-Response:
+#### 单项字段
+
+- `job_id` / `id`
+- `repo`
+- `status`
+- `status_raw`
+- `stage`
+- `phase`
+- `progress`
+- `children_status`
+- `active_child_status`
+- `active_child_phase`
+
+`repo` 只是后端保存的仓库标签，前端可以根据需要显示仓库名或 URL 的派生值。
+
+#### 典型响应
 
 ```json
 {
@@ -471,9 +356,9 @@ Response:
 
 ## 7. Service Root
 
-## 7.1 GET `/`
+### GET `/`
 
-Simple service descriptor:
+简单服务描述：
 
 ```json
 {
@@ -485,16 +370,16 @@ Simple service descriptor:
 
 ## 8. Frontend Polling Recommendation
 
-For dashboard-style frontend:
+对于仪表盘式前端：
 
-1. Poll `/api/tasks` every 5s for task table/state.
-2. Poll `/api/system` every 5s for overview and metrics cards.
-3. Use `status` (uppercase) + `stage` for main display.
-4. Use `progress` only as soft indicator; derive strict completion from status.
+1. 每 5 秒轮询 `/api/tasks`
+2. 每 5 秒轮询 `/api/system`
+3. 主列表使用 `status`（大写）+ `stage`
+4. `progress` 只作为软指标，不要把它当成严格完成度
 
 ## 9. cURL Examples
 
-Submit task:
+### 提交任务
 
 ```bash
 curl -X POST "https://dev.zuens2020.work/api/task" \
@@ -510,22 +395,14 @@ curl -X POST "https://dev.zuens2020.work/api/task" \
   }'
 ```
 
-List tasks:
+### 查看任务列表
 
 ```bash
 curl "https://dev.zuens2020.work/api/tasks?limit=50"
 ```
 
-System status:
+### 查看系统状态
 
 ```bash
 curl "https://dev.zuens2020.work/api/system"
-```
-
-Lightweight config save:
-
-```bash
-curl -X PUT "https://dev.zuens2020.work/api/config" \
-  -H "Content-Type: application/json" \
-  -d '{"apiBaseUrl":"https://dev.zuens2020.work"}'
 ```
