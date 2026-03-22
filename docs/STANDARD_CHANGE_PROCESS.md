@@ -19,15 +19,19 @@
 ## 变更前最低检查
 
 ### 代码变更
+
 - `python -m py_compile` 覆盖改动模块
 - 对应 pytest 子集通过
 
 ### 前端变更
+
 - `npm test`
 - `npm run build`
 
 ### 工作流变更
+
 至少做一条真实仓库验证，优先：
+
 - `libyaml`
 - `fmt`
 - `zlib`
@@ -40,10 +44,12 @@
 - stage 路由
 - `targets.json` schema
 - seed 生成规则
-- build/fix_build 规则
+- build / repair / crash-triage 规则
 - k8s 运行时行为
 - 部署方式
-- API 契约（尤其是前端直接消费的 `/api/system`、`/api/tasks`、`/api/task/{id}`）
+- API 契约，尤其是前端直接消费的 `/api/system`、`/api/tasks`、`/api/task/{id}`
+
+如果这类修改会影响技术学习材料，还需要同步 `docs/TECHNICAL_DEEP_DIVE.md`。
 
 ## 不推荐做法
 
