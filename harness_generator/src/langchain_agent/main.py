@@ -326,6 +326,10 @@ def _k8s_worker_resources() -> dict[str, dict[str, str]] | None:
     return resources
 
 
+def _k8s_worker_memory_limit() -> str:
+    return (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi") or "").strip()
+
+
 def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -538,6 +542,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                 {"name": "OPENCODE_MODEL", "value": normalized_model},
                                 {"name": "OPENAI_MODEL", "value": raw_model},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
+                                {"name": "SHERPA_K8S_JOB_MEMORY_LIMIT", "value": _k8s_worker_memory_limit()},
                                 *_k8s_git_env_items(),
                             ],
                             "envFrom": [*_k8s_proxy_env_from_items()],
