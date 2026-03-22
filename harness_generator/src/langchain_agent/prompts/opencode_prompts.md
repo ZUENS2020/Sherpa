@@ -284,6 +284,53 @@ MANDATORY:
 - write the key modified file path into `./done`
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: crash_triage_with_hint -->
+You are OpenCode. Classify crash root-cause using provided crash evidence.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Task:
+- classify crash into exactly one label: `harness_bug` | `upstream_bug` | `inconclusive`
+- use crash logs/reports as primary evidence
+- do NOT modify source code in this stage
+
+Constraints:
+- read-only exploration commands are allowed
+- do not run build/execute commands
+- produce `crash_triage.json` with fields: `label`, `confidence`, `reason`, `evidence`
+- `evidence` must be a non-empty array of concrete signal lines from logs/reports
+- keep all instructions and outputs in English
+
+Hint:
+{{hint}}
+
+MANDATORY:
+- create `./done`
+- write `crash_triage.json` into `./done`
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: fix_harness_after_run -->
+You are OpenCode. The crash was triaged as a harness bug.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Task:
+- fix fuzz harness/build glue so malformed inputs do not crash due to harness misuse
+- keep fix minimal and evidence-driven
+
+Constraints:
+- only modify files under `fuzz/` and `./done`
+- do not run build/execute commands
+- read-only exploration commands are allowed
+- when diagnostics include file paths, issue explicit `Read and fix <path>[:line]` actions
+- stale `./done` without fresh code diff is invalid
+- pure no-op is invalid
+
+MANDATORY:
+- create `./done`
+- write one key modified path under `fuzz/` into `./done`
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: fix_crash_upstream_bug -->
 You are OpenCode. Fix the upstream bug so the same crashing input no longer crashes.
 Follow the STAGE SKILL loaded by the runner as primary instructions.

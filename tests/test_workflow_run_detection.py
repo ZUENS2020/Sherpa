@@ -420,7 +420,7 @@ def test_route_after_run_routes_crash_to_repro_stage():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": True}
     )
-    assert route == "re-build"
+    assert route == "crash-triage"
 
 
 def test_route_after_run_routes_clean_result_to_coverage_analysis():
@@ -683,7 +683,7 @@ def test_route_after_re_build_routes_to_plan_on_failure():
     assert route == "plan"
 
 
-def test_route_after_re_run_routes_to_fix_crash_on_success():
+def test_route_after_re_run_routes_to_stop_on_success():
     route = workflow_graph._route_after_re_run_state(
         {
             "failed": False,
@@ -693,7 +693,7 @@ def test_route_after_re_run_routes_to_fix_crash_on_success():
             "restart_to_plan": False,
         }
     )
-    assert route == "fix_crash"
+    assert route == "stop"
 
 
 def test_route_after_re_run_routes_to_plan_on_failure():
@@ -713,8 +713,14 @@ def test_route_after_re_run_routes_to_plan_on_failure():
 def test_apply_stage_stop_guard_always_stops_when_targeted():
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "run", "re-build") == "stop"
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-build"}, "re-build", "plan") == "stop"
-    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-run"}, "re-run", "fix_crash") == "stop"
-    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "re-run", "fix_crash") == "fix_crash"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "crash-triage"}, "crash-triage", "fix-harness") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "crash-triage", "fix-harness") == "fix-harness"
+
+
+def test_route_after_crash_triage_routes_by_label():
+    assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "harness_bug"}) == "fix-harness"
+    assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "upstream_bug"}) == "re-build"
+    assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "inconclusive"}) == "plan"
 
 
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
