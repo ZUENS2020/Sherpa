@@ -980,6 +980,13 @@ def _normalized_format_shape(text: str) -> str:
     return lowered.strip()
 
 
+def _seed_filter_mode() -> str:
+    raw = (os.environ.get("SHERPA_SEED_FILTER_MODE") or "soft").strip().lower()
+    if raw in {"strict", "soft", "off"}:
+        return raw
+    return "soft"
+
+
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
     profile = str(seed_profile or "").strip().lower()
     text = " ".join(p for p in parts if p).lower()
@@ -3421,6 +3428,7 @@ EOF
         required_families: list[str],
         target_markers: list[str] | None = None,
     ) -> dict[str, object]:
+        filter_mode = _seed_filter_mode()
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
         raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": len(files)}
         for path in files:
@@ -3440,16 +3448,41 @@ EOF
         archive_magic_only_rejected_count = 0
         archive_malformed_pruned_count = 0
         family_caps: dict[str, int] = {}
+        family_members: dict[str, int] = {}
+        path_families: dict[Path, set[str]] = {}
         content_hashes: set[str] = set()
         shape_hashes: set[str] = set()
+        shape_group_counts: dict[str, int] = {}
         archive_malformed_marks: dict[Path, bool] = {}
-        textual_mode = seed_profile == "parser-format" and _is_fmt_format_target(*(target_markers or []))
+        textual_mode = seed_profile in {
+            "parser-format",
+            "parser-token",
+            "parser-structure",
+            "parser-numeric",
+            "document-text",
+            "serializer-structured",
+        }
         max_file = self._seed_max_file_bytes()
         max_radamsa_file = self._seed_radamsa_max_file_bytes()
         max_total = self._seed_max_total_bytes()
+        required_family_set = set(required_families)
+        base_total = max(1, len(files))
+        strict_required_cap = 3
+        strict_optional_cap = 2
+        soft_required_cap = max(6, min(24, base_total // 3))
+        soft_optional_cap = max(4, min(16, base_total // 4))
+        filtered_by_rule_breakdown = {
+            "size": 0,
+            "hash": 0,
+            "shape": 0,
+            "family": 0,
+            "noise": 0,
+            "total_bytes": 0,
+        }
         kept: list[Path] = []
         for path in files:
             reject = False
+            reject_reason = ""
             try:
                 size = int(path.stat().st_size)
             except Exception:
@@ -3461,15 +3494,40 @@ EOF
             if size <= 0:
                 reject = True
                 oversized_rejected += 1
+                reject_reason = "size"
             if not reject and size > max_file:
                 reject = True
                 oversized_rejected += 1
+                reject_reason = "size"
             if not reject and path.name.startswith("radamsa_") and size > max_radamsa_file:
                 reject = True
                 oversized_rejected += 1
-            if textual_mode and not _looks_textual_seed(path):
+                reject_reason = "size"
+            if (
+                not reject
+                and textual_mode
+                and filter_mode == "strict"
+                and not _looks_textual_seed(path)
+            ):
                 reject = True
                 noise_rejected += 1
+                reject_reason = "noise"
+            elif (
+                not reject
+                and textual_mode
+                and filter_mode == "soft"
+                and not _looks_textual_seed(path)
+            ):
+                # Soft mode: keep weak textual samples unless they are mostly binary noise.
+                printable = 0
+                for b in data[:2048]:
+                    if b in (9, 10, 13) or 32 <= b <= 126:
+                        printable += 1
+                printable_ratio = float(printable) / float(max(1, min(len(data), 2048)))
+                if printable_ratio < 0.25:
+                    reject = True
+                    noise_rejected += 1
+                    reject_reason = "noise"
             if (
                 not reject
                 and seed_profile == "archive-container"
@@ -3479,6 +3537,7 @@ EOF
                     reject = True
                     noise_rejected += 1
                     archive_magic_only_rejected_count += 1
+                    reject_reason = "noise"
                 elif path.suffix.lower() in {".zip", ".tar", ".gz", ".bz2", ".xz", ".bin", ".dat"}:
                     if self._archive_seed_is_semantically_valid(path, data):
                         archive_valid_count += 1
@@ -3486,29 +3545,53 @@ EOF
                         archive_invalid_count += 1
                         reject = True
                         noise_rejected += 1
+                        reject_reason = "noise"
             digest = hashlib.sha256(data).hexdigest()
             if not reject and digest in content_hashes:
                 reject = True
+                reject_reason = "hash"
             if not reject:
                 content_hashes.add(digest)
-            if textual_mode and not reject:
-                shape = _normalized_format_shape(data.decode("utf-8", errors="replace")[:512])
-                if shape and shape in shape_hashes:
-                    reject = True
-                if shape:
-                    shape_hashes.add(shape)
             families = _classify_seed_family(path)
-            if not reject and families:
+            if (
+                textual_mode
+                and seed_profile not in {"parser-format", "parser-numeric"}
+                and not reject
+                and filter_mode != "off"
+            ):
+                shape = _normalized_format_shape(data.decode("utf-8", errors="replace")[:512])
+                if shape:
+                    if filter_mode == "strict":
+                        if shape in shape_hashes:
+                            reject = True
+                            reject_reason = "shape"
+                        shape_hashes.add(shape)
+                    else:
+                        source_key = "repo" if path.name.startswith("repo_") else ("radamsa" if path.name.startswith("radamsa_") else "ai")
+                        family_key = ",".join(sorted(families)) if families else "_none"
+                        group_key = f"{source_key}|{family_key}|{shape}"
+                        group_count = shape_group_counts.get(group_key, 0)
+                        if group_count >= 3:
+                            reject = True
+                            reject_reason = "shape"
+                        shape_group_counts[group_key] = group_count + 1
+            if not reject and families and filter_mode != "off":
                 cap_hit = False
                 for family in sorted(families):
                     current = family_caps.get(family, 0)
-                    cap = 3 if family in set(required_families) else 2
+                    if filter_mode == "strict":
+                        cap = strict_required_cap if family in required_family_set else strict_optional_cap
+                    else:
+                        cap = soft_required_cap if family in required_family_set else soft_optional_cap
                     if current >= cap:
                         cap_hit = True
                         break
                 if cap_hit:
                     reject = True
+                    reject_reason = "family"
             if reject:
+                if reject_reason in filtered_by_rule_breakdown:
+                    filtered_by_rule_breakdown[reject_reason] += 1
                 try:
                     path.unlink()
                 except Exception:
@@ -3522,11 +3605,13 @@ EOF
                 filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
                 continue
             kept.append(path)
+            path_families[path] = set(families)
             archive_malformed_marks[path] = (
                 seed_profile == "archive-container" and self._is_archive_malformed_candidate(path, data)
             )
             for family in families:
                 family_caps[family] = family_caps.get(family, 0) + 1
+                family_members[family] = family_members.get(family, 0) + 1
         if seed_profile == "archive-container" and kept:
             max_malformed_ratio = self._seed_archive_max_malformed_ratio()
 
@@ -3560,6 +3645,7 @@ EOF
                 archive_malformed_pruned_count += 1
                 total_pruned_count += 1
                 total_pruned_bytes += max(0, victim_size)
+                filtered_by_rule_breakdown["total_bytes"] += 1
                 kept = [p for p in kept if p != victim]
                 if victim.name.startswith("repo_"):
                     filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
@@ -3569,6 +3655,9 @@ EOF
                     filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
                 filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
                 archive_malformed_marks.pop(victim, None)
+                for fam in path_families.get(victim, set()):
+                    family_members[fam] = max(0, family_members.get(fam, 0) - 1)
+                path_families.pop(victim, None)
                 malformed_paths = _current_malformed_paths()
         if kept:
             total_bytes = 0
@@ -3595,6 +3684,12 @@ EOF
                 for path, sz in sorted(sized, key=_priority):
                     if total_bytes <= max_total:
                         break
+                    path_family_set = path_families.get(path, set())
+                    if required_family_set and any(
+                        fam in required_family_set and family_members.get(fam, 0) <= 1
+                        for fam in path_family_set
+                    ):
+                        continue
                     try:
                         path.unlink()
                     except Exception:
@@ -3602,6 +3697,7 @@ EOF
                     total_bytes = max(0, total_bytes - sz)
                     total_pruned_count += 1
                     total_pruned_bytes += sz
+                    filtered_by_rule_breakdown["total_bytes"] += 1
                     if path.name.startswith("repo_"):
                         filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
                     elif path.name.startswith("radamsa_"):
@@ -3609,14 +3705,25 @@ EOF
                     else:
                         filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
                     filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
+                    for fam in path_family_set:
+                        family_members[fam] = max(0, family_members.get(fam, 0) - 1)
+                    path_families.pop(path, None)
+        retention_ratio_ai = float(filtered_counts.get("ai") or 0) / float(max(1, int(raw_counts.get("ai") or 0)))
+        retention_ratio_radamsa = float(filtered_counts.get("radamsa") or 0) / float(max(1, int(raw_counts.get("radamsa") or 0)))
+        retention_ratio_repo = float(filtered_counts.get("repo_examples") or 0) / float(max(1, int(raw_counts.get("repo_examples") or 0)))
         archive_malformed_count = sum(1 for p in kept if archive_malformed_marks.get(p, False))
         return {
+            "seed_filter_mode": filter_mode,
             "seed_counts_raw": raw_counts,
             "seed_counts_filtered": filtered_counts,
             "seed_noise_rejected_count": noise_rejected,
             "seed_oversized_rejected_count": oversized_rejected,
             "seed_total_pruned_count": total_pruned_count,
             "seed_total_pruned_bytes": total_pruned_bytes,
+            "filtered_by_rule_breakdown": filtered_by_rule_breakdown,
+            "retention_ratio_ai": retention_ratio_ai,
+            "retention_ratio_radamsa": retention_ratio_radamsa,
+            "retention_ratio_repo": retention_ratio_repo,
             "seed_max_file_bytes": max_file,
             "seed_radamsa_max_file_bytes": max_radamsa_file,
             "seed_max_total_bytes": max_total,
@@ -3715,6 +3822,9 @@ EOF
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
             missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
 
+            Active seed filter mode:
+            - `{_seed_filter_mode()}` (default soft; keep semantic diversity while still removing exact duplicates and oversized files)
+
             Corpus size goal:
             - Aim for at least {target_corpus_files} total seed files in `{corpus_dir.relative_to(self.repo_root)}` after your edits.
             - Aim for at least {per_family_target} semantically different seed files for each required family where feasible.
@@ -3746,6 +3856,7 @@ EOF
             - If this is a textual DSL or textual parser target, prefer readable text seeds that directly exercise the observed target grammar/path.
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
+            - Soft filtering keeps diverse seeds; do not assume near variants will always be removed.
             - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
@@ -3836,11 +3947,16 @@ EOF
             "seed_profile_source": seed_profile_source,
             "required_families": required_families,
             "optional_families": optional_families,
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
             "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
+            "retention_ratio_ai": float(filtered_meta.get("retention_ratio_ai") or 0.0),
+            "retention_ratio_radamsa": float(filtered_meta.get("retention_ratio_radamsa") or 0.0),
+            "retention_ratio_repo": float(filtered_meta.get("retention_ratio_repo") or 0.0),
             "archive_valid_count": int(filtered_meta.get("archive_valid_count") or 0),
             "archive_invalid_count": int(filtered_meta.get("archive_invalid_count") or 0),
             "archive_magic_only_rejected_count": int(filtered_meta.get("archive_magic_only_rejected_count") or 0),
@@ -3874,6 +3990,11 @@ EOF
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
             "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
+            "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
+            "retention_ratio_ai": float(filtered_meta.get("retention_ratio_ai") or 0.0),
+            "retention_ratio_radamsa": float(filtered_meta.get("retention_ratio_radamsa") or 0.0),
+            "retention_ratio_repo": float(filtered_meta.get("retention_ratio_repo") or 0.0),
             "seed_total_pruned_count": int(filtered_meta.get("seed_total_pruned_count") or 0),
             "seed_total_pruned_bytes": int(filtered_meta.get("seed_total_pruned_bytes") or 0),
             "seed_max_file_bytes": int(filtered_meta.get("seed_max_file_bytes") or self._seed_max_file_bytes()),
