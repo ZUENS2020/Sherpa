@@ -24,6 +24,8 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     assert "synthesize_repair_crash_with_hint" in templates
     assert "synthesize_complete_scaffold" in templates
     assert "plan_fix_targets_schema" in templates
+    assert "crash_triage_with_hint" in templates
+    assert "fix_harness_after_run" in templates
     assert "./done" in templates["plan_with_hint"]
     assert "./done" in templates["synthesize_with_hint"]
     assert "./done" in templates["synthesize_complete_scaffold"]
@@ -85,6 +87,11 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "after a crash/repro-stage failure" in synth_crash_repair
     assert "build-fail" in synth_build_repair
     assert "crash-fail" in synth_crash_repair
+
+    triage = workflow_common.render_opencode_prompt("crash_triage_with_hint", hint="triage-this")
+    assert "classify crash into exactly one label" in triage
+    assert "crash_triage.json" in triage
+    assert "triage-this" in triage
 
 
 def test_global_policy_document_contains_core_rules():

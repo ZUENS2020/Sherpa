@@ -1697,6 +1697,8 @@ _RESUMABLE_WORKFLOW_STEPS = {
     "build",
     "fix_build",
     "run",
+    "crash-triage",
+    "fix-harness",
     "coverage-analysis",
     "improve-harness",
     "re-build",
@@ -1709,6 +1711,8 @@ _STAGED_WORKFLOW_STEPS = (
     "synthesize",
     "build",
     "run",
+    "crash-triage",
+    "fix-harness",
     "coverage-analysis",
     "improve-harness",
     "re-build",
@@ -1720,6 +1724,10 @@ def _normalize_resume_step(raw: str | None) -> str:
     s = str(raw or "").strip().lower()
     if s == "repro_crash":
         return "re-build"
+    if s in {"crash_triage", "crash-triage"}:
+        return "crash-triage"
+    if s in {"fix_harness", "fix-harness"}:
+        return "fix-harness"
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
     return "plan"
@@ -3542,9 +3550,25 @@ def _run_fuzz_job(
                 last_resume_finished_at=time.time() if resumed else None,
             )
             return
+        res_failed = bool(isinstance(res, dict) and res.get("failed"))
+        run_terminal_reason = str((res.get("run_terminal_reason") if isinstance(res, dict) else "") or "").strip()
+        final_status = ("resumed" if resumed else "success")
+        final_error = None
+        if res_failed:
+            final_status = "error"
+            final_error = str(
+                (
+                    res.get("last_error")
+                    if isinstance(res, dict)
+                    else ""
+                )
+                or run_terminal_reason
+                or "workflow_failed"
+            ).strip()
         _job_update(
             job_id,
-            status=("resumed" if resumed else "success"),
+            status=final_status,
+            error=final_error,
             result=res,
             recoverable=False,
             resume_error_code=None,

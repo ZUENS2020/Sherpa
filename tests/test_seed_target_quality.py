@@ -293,3 +293,66 @@ def test_filter_seed_corpus_prunes_total_bytes_preferring_radamsa(tmp_path: Path
     assert "repo_01.txt" in kept_files
     assert "radamsa_01.txt" not in kept_files
     assert int(filtered["seed_total_pruned_count"]) >= 1
+
+
+def test_filter_seed_corpus_soft_mode_keeps_family_variants(tmp_path: Path, monkeypatch):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "format_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(8):
+        (corpus_dir / f"seed_{idx:02d}.txt").write_text(f"{{{idx}}}\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SEED_FILTER_MODE", "soft")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="parser-format",
+        required_families=["positional_arguments"],
+        target_markers=["format parser"],
+    )
+
+    kept_files = sorted(p.name for p in corpus_dir.iterdir() if p.is_file())
+    assert len(kept_files) >= 3
+    assert filtered["seed_filter_mode"] == "soft"
+    assert float(filtered["retention_ratio_ai"]) > 0.3
+
+
+def test_filter_seed_corpus_off_mode_disables_shape_and_family_rejects(tmp_path: Path, monkeypatch):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "format_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(8):
+        (corpus_dir / f"seed_{idx:02d}.txt").write_text(f"{{{idx}}}\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SEED_FILTER_MODE", "off")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="parser-format",
+        required_families=["positional_arguments"],
+        target_markers=["format parser"],
+    )
+
+    kept_files = sorted(p.name for p in corpus_dir.iterdir() if p.is_file())
+    assert len(kept_files) == 8
+    assert filtered["seed_filter_mode"] == "off"
+    assert int(filtered["filtered_by_rule_breakdown"]["shape"]) == 0
+    assert int(filtered["filtered_by_rule_breakdown"]["family"]) == 0
+
+
+def test_filter_seed_corpus_parser_numeric_disables_shape_dedup(tmp_path: Path, monkeypatch):
+    corpus_dir = tmp_path / "fuzz" / "corpus" / "numeric_fuzzer"
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(8):
+        (corpus_dir / f"seed_{idx:02d}.txt").write_text(f"id={idx}\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SEED_FILTER_MODE", "strict")
+    gen = _make_generator(tmp_path)
+
+    filtered = gen._filter_seed_corpus(
+        corpus_dir,
+        seed_profile="parser-numeric",
+        required_families=["delimiter_fragments"],
+        target_markers=["numeric parser"],
+    )
+
+    kept_files = sorted(p.name for p in corpus_dir.iterdir() if p.is_file())
+    assert len(kept_files) >= 3
+    assert int(filtered["filtered_by_rule_breakdown"]["shape"]) == 0
