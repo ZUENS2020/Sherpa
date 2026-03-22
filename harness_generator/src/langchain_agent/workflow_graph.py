@@ -155,6 +155,13 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_repro_rc: int
     crash_repro_report_path: str
     crash_repro_json_path: str
+    crash_triage_done: bool
+    crash_triage_label: str
+    crash_triage_confidence: float
+    crash_triage_reason: str
+    crash_triage_signal_lines: list[str]
+    crash_triage_report_path: str
+    crash_triage_json_path: str
     re_build_done: bool
     re_build_ok: bool
     re_build_rc: int
@@ -172,6 +179,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     restart_to_plan_error_text: str
     restart_to_plan_report_path: str
     restart_to_plan_count: int
+    fix_harness_attempts: int
     next: str
     fix_patch_path: str
     fix_patch_files: list[str]
@@ -388,6 +396,8 @@ def _feedback_group_for_stage(stage: str) -> str:
         return "planning_synth"
     if s == "fix_build":
         return "fix_build"
+    if s in {"crash_triage", "fix_harness_after_run"}:
+        return "crash_triage"
     if s in {"fix_crash_harness_error", "fix_crash_upstream_bug"}:
         return "fix_crash"
     return s or "default"
@@ -498,6 +508,8 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
         "plan_repair_crash": _feedback_group_for_stage("plan_repair_crash"),
         "synthesize_repair_crash": _feedback_group_for_stage("synthesize_repair_crash"),
         "fix_build": _feedback_group_for_stage("fix_build"),
+        "crash_triage": _feedback_group_for_stage("crash_triage"),
+        "fix_harness_after_run": _feedback_group_for_stage("fix_harness_after_run"),
         "fix_crash_harness_error": _feedback_group_for_stage("fix_crash_harness_error"),
         "fix_crash_upstream_bug": _feedback_group_for_stage("fix_crash_upstream_bug"),
     }
@@ -540,12 +552,12 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
     restart_stage = str(state.get("restart_to_plan_stage") or "").strip().lower()
     if restart_stage == "build":
         return "build"
-    if restart_stage in {"run", "re-build", "re-run", "fix_crash"}:
+    if restart_stage in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
         return "crash"
     last_step = str(state.get("last_step") or "").strip().lower()
     if last_step == "build":
         return "build"
-    if last_step in {"run", "re-build", "re-run", "fix_crash"}:
+    if last_step in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
         return "crash"
     if bool(state.get("crash_found")):
         return "crash"
@@ -2500,6 +2512,13 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "crash_repro_rc": int(state.get("crash_repro_rc") or 0),
             "crash_repro_report_path": str(state.get("crash_repro_report_path") or ""),
             "crash_repro_json_path": str(state.get("crash_repro_json_path") or ""),
+            "crash_triage_done": bool(state.get("crash_triage_done") or False),
+            "crash_triage_label": str(state.get("crash_triage_label") or ""),
+            "crash_triage_confidence": float(state.get("crash_triage_confidence") or 0.0),
+            "crash_triage_reason": str(state.get("crash_triage_reason") or ""),
+            "crash_triage_signal_lines": list(state.get("crash_triage_signal_lines") or []),
+            "crash_triage_report_path": str(state.get("crash_triage_report_path") or ""),
+            "crash_triage_json_path": str(state.get("crash_triage_json_path") or ""),
             "re_build_done": bool(state.get("re_build_done") or False),
             "re_build_ok": bool(state.get("re_build_ok") or False),
             "re_build_rc": int(state.get("re_build_rc") or 0),
@@ -2517,6 +2536,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "restart_to_plan_error_text": str(state.get("restart_to_plan_error_text") or ""),
             "restart_to_plan_report_path": str(state.get("restart_to_plan_report_path") or ""),
             "restart_to_plan_count": int(state.get("restart_to_plan_count") or 0),
+            "fix_harness_attempts": int(state.get("fix_harness_attempts") or 0),
             "plan_fix_on_crash": True,
             "plan_max_fix_rounds": 0,
             "repair_mode": bool(state.get("repair_mode") or False),
@@ -2560,7 +2580,19 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     # Restore crash context from previous run stage when repro/fix is resumed
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
-    if resume_step in {"plan", "synthesize", "build", "run", "coverage-analysis", "improve-harness", "repro_crash", "re-build", "re-run"}:
+    if resume_step in {
+        "plan",
+        "synthesize",
+        "build",
+        "run",
+        "crash-triage",
+        "fix-harness",
+        "coverage-analysis",
+        "improve-harness",
+        "repro_crash",
+        "re-build",
+        "re-run",
+    }:
         try:
             repro_doc = _read_repro_context(generator.repo_root)
             if isinstance(repro_doc, dict):
@@ -7077,6 +7109,250 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         return out
 
 
+def _normalize_crash_triage_label(raw: str) -> str:
+    val = str(raw or "").strip().lower()
+    if val in {"harness_bug", "upstream_bug", "inconclusive"}:
+        return val
+    if val in {"harness", "harness-error", "harness_error"}:
+        return "harness_bug"
+    if val in {"upstream", "upstream-error", "upstream_error", "library_bug"}:
+        return "upstream_bug"
+    return "inconclusive"
+
+
+def _heuristic_crash_triage(*, info_text: str, analysis_text: str, stderr_tail: str) -> tuple[str, float, str, list[str]]:
+    blob = "\n".join([info_text or "", analysis_text or "", stderr_tail or ""]).lower()
+    signals: list[str] = []
+    if "harness error" in blob:
+        signals.append("crash_analysis indicates HARNESS ERROR")
+    if "terminate called after throwing" in blob or "format_error" in blob:
+        signals.append("uncaught C++ exception found in reproducer output")
+    if "addresssanitizer" in blob or "heap-buffer-overflow" in blob or "use-after-free" in blob:
+        signals.append("sanitizer memory-safety signal observed")
+    if signals and any("sanitizer memory-safety signal observed" in s for s in signals):
+        return "upstream_bug", 0.72, "memory-safety sanitizer signature suggests upstream defect", signals
+    if signals and any("harness" in s.lower() or "uncaught" in s.lower() for s in signals):
+        return "harness_bug", 0.78, "uncaught exception / harness misuse signal found", signals
+    return "inconclusive", 0.35, "no high-confidence harness/upstream signal", signals
+
+
+def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "crash-triage")
+    if stop_now:
+        return state
+
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> crash-triage")
+
+    repo_root = gen.repo_root
+    crash_info = repo_root / "crash_info.md"
+    crash_analysis = repo_root / "crash_analysis.md"
+    triage_json_path = repo_root / "crash_triage.json"
+    triage_md_path = repo_root / "crash_triage.md"
+    re_build_report = repo_root / "re_build_report.md"
+    re_run_report = repo_root / "re_run_report.md"
+
+    info_text = crash_info.read_text(encoding="utf-8", errors="replace") if crash_info.is_file() else ""
+    analysis_text = crash_analysis.read_text(encoding="utf-8", errors="replace") if crash_analysis.is_file() else ""
+    re_build_text = re_build_report.read_text(encoding="utf-8", errors="replace") if re_build_report.is_file() else ""
+    re_run_text = re_run_report.read_text(encoding="utf-8", errors="replace") if re_run_report.is_file() else ""
+    stderr_tail = str(state.get("repair_stderr_tail") or "")[:4000]
+
+    prompt = _render_opencode_prompt("crash_triage_with_hint", hint=str(state.get("codex_hint") or ""))
+    context_parts = [
+        f"last_fuzzer: {str(state.get('last_fuzzer') or '').strip()}",
+        f"last_crash_artifact: {str(state.get('last_crash_artifact') or '').strip()}",
+        f"crash_signature: {str(state.get('crash_signature') or '').strip()}",
+    ]
+    if info_text:
+        context_parts.append("=== crash_info.md ===\n" + info_text)
+    if analysis_text:
+        context_parts.append("=== crash_analysis.md ===\n" + analysis_text)
+    if re_build_text:
+        context_parts.append("=== re_build_report.md ===\n" + _trim_feedback_text(re_build_text))
+    if re_run_text:
+        context_parts.append("=== re_run_report.md ===\n" + _trim_feedback_text(re_run_text))
+    if stderr_tail:
+        context_parts.append("=== repair_stderr_tail ===\n" + stderr_tail)
+    context = "\n\n".join(context_parts)
+
+    label = "inconclusive"
+    confidence = 0.35
+    reason = "triage output missing; fallback heuristic applied"
+    signal_lines: list[str] = []
+    try:
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context or None,
+            stage_skill="crash_triage",
+            timeout=_remaining_time_budget_sec(state),
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+        )
+        parsed: dict[str, Any] = {}
+        if triage_json_path.is_file():
+            try:
+                parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                parsed = {}
+        label = _normalize_crash_triage_label(parsed.get("label") if isinstance(parsed, dict) else "")
+        raw_conf = parsed.get("confidence") if isinstance(parsed, dict) else None
+        try:
+            confidence = max(0.0, min(float(raw_conf), 1.0))
+        except Exception:
+            confidence = 0.35
+        reason = str(parsed.get("reason") or "").strip() if isinstance(parsed, dict) else ""
+        signal_lines = [str(x).strip() for x in (parsed.get("evidence") or []) if str(x).strip()] if isinstance(parsed, dict) else []
+        if not reason:
+            reason = "triage JSON missing reason; fallback heuristic applied"
+    except Exception as e:
+        reason = f"triage execution failed: {e}"
+
+    if label == "inconclusive" and not signal_lines:
+        h_label, h_conf, h_reason, h_signals = _heuristic_crash_triage(
+            info_text=info_text, analysis_text=analysis_text, stderr_tail=stderr_tail
+        )
+        label, confidence, reason, signal_lines = h_label, h_conf, h_reason, h_signals
+
+    triage_doc = {
+        "label": label,
+        "confidence": confidence,
+        "reason": reason,
+        "evidence": signal_lines,
+        "last_fuzzer": str(state.get("last_fuzzer") or ""),
+        "last_crash_artifact": str(state.get("last_crash_artifact") or ""),
+        "crash_signature": str(state.get("crash_signature") or ""),
+    }
+    triage_json_path.write_text(json.dumps(triage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    triage_md = [
+        "# Crash Triage Report",
+        "",
+        f"- label: {label}",
+        f"- confidence: {confidence:.2f}",
+        f"- reason: {reason}",
+        "",
+        "## Evidence",
+    ]
+    if signal_lines:
+        triage_md.extend([f"- {line}" for line in signal_lines])
+    else:
+        triage_md.append("- (none)")
+    triage_md_path.write_text("\n".join(triage_md) + "\n", encoding="utf-8")
+
+    out = {
+        **state,
+        "last_step": "crash-triage",
+        "last_error": "",
+        "crash_triage_done": True,
+        "crash_triage_label": label,
+        "crash_triage_confidence": float(confidence),
+        "crash_triage_reason": reason,
+        "crash_triage_signal_lines": signal_lines,
+        "crash_triage_report_path": str(triage_md_path),
+        "crash_triage_json_path": str(triage_json_path),
+        "message": f"crash triage classified as {label}",
+    }
+    _wf_log(cast(dict[str, Any], out), f"<- crash-triage label={label} conf={confidence:.2f} dt={_fmt_dt(time.perf_counter()-t0)}")
+    return out
+
+
+def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "fix-harness")
+    if stop_now:
+        return state
+
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> fix-harness")
+
+    repo_root = gen.repo_root
+    snapshot = snapshot_repo_text(repo_root)
+    crash_info = repo_root / "crash_info.md"
+    crash_analysis = repo_root / "crash_analysis.md"
+    triage_json = repo_root / "crash_triage.json"
+    info_text = crash_info.read_text(encoding="utf-8", errors="replace") if crash_info.is_file() else ""
+    analysis_text = crash_analysis.read_text(encoding="utf-8", errors="replace") if crash_analysis.is_file() else ""
+    triage_text = triage_json.read_text(encoding="utf-8", errors="replace") if triage_json.is_file() else ""
+
+    prompt = _render_opencode_prompt("fix_harness_after_run")
+    ctx_parts: list[str] = []
+    if info_text:
+        ctx_parts.append("=== crash_info.md ===\n" + info_text)
+    if analysis_text:
+        ctx_parts.append("=== crash_analysis.md ===\n" + analysis_text)
+    if triage_text:
+        ctx_parts.append("=== crash_triage.json ===\n" + triage_text)
+    if str(state.get("repair_stderr_tail") or "").strip():
+        ctx_parts.append("=== repair_stderr_tail ===\n" + str(state.get("repair_stderr_tail") or ""))
+    context = "\n\n".join(ctx_parts)
+
+    attempts = int(state.get("fix_harness_attempts") or 0) + 1
+    try:
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context or None,
+            stage_skill="fix_crash_harness_error",
+            timeout=_remaining_time_budget_sec(state),
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+        )
+        patch_path = repo_root / "fix.patch"
+        changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
+        patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
+        if not changed_files:
+            out = {
+                **state,
+                "last_step": "fix-harness",
+                "last_error": "fix-harness made no textual file changes",
+                "fix_harness_attempts": attempts,
+                "restart_to_plan": True,
+                "restart_to_plan_reason": "fix_harness_noop",
+                "restart_to_plan_stage": "fix-harness",
+                "restart_to_plan_error_text": "fix-harness no-op",
+                "message": "fix-harness no-op",
+                "fix_patch_path": str(patch_path) if patch_path.exists() else "",
+                "fix_patch_files": [],
+                "fix_patch_bytes": int(patch_bytes),
+            }
+            _wf_log(cast(dict[str, Any], out), f"<- fix-harness err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+        out = {
+            **state,
+            "last_step": "fix-harness",
+            "last_error": "",
+            "fix_harness_attempts": attempts,
+            "restart_to_plan": False,
+            "restart_to_plan_reason": "",
+            "restart_to_plan_stage": "",
+            "restart_to_plan_error_text": "",
+            "message": "harness fix applied",
+            "fix_patch_path": str(patch_path) if patch_path.exists() else "",
+            "fix_patch_files": changed_files,
+            "fix_patch_bytes": int(patch_bytes),
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- fix-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+    except Exception as e:
+        out = {
+            **state,
+            "last_step": "fix-harness",
+            "last_error": str(e),
+            "fix_harness_attempts": attempts,
+            "restart_to_plan": True,
+            "restart_to_plan_reason": "fix_harness_failed",
+            "restart_to_plan_stage": "fix-harness",
+            "restart_to_plan_error_text": str(e),
+            "message": "fix-harness failed",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- fix-harness err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+
 def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -7711,7 +7987,7 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if run_error_kind:
         return "plan"
     if bool(state.get("crash_found")):
-        return "re-build"
+        return "crash-triage"
     return "coverage-analysis"
 
 
@@ -7778,6 +8054,29 @@ def _route_after_fix_crash_state(state: FuzzWorkflowRuntimeState) -> str:
     return "build"
 
 
+def _route_after_crash_triage_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if bool(state.get("restart_to_plan")):
+        return "plan"
+    label = _normalize_crash_triage_label(str(state.get("crash_triage_label") or ""))
+    if label == "harness_bug":
+        return "fix-harness"
+    if label == "upstream_bug":
+        return "re-build"
+    return "plan"
+
+
+def _route_after_fix_harness_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if bool(state.get("restart_to_plan")):
+        return "plan"
+    if (state.get("last_error") or "").strip():
+        return "plan"
+    return "build"
+
+
 def _re_restart_limit() -> int:
     raw = (os.environ.get("SHERPA_RESTART_FROM_PLAN_MAX") or "1").strip()
     try:
@@ -7828,6 +8127,10 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_build_state(state)
     if last_step == "run":
         return _route_after_run_state(state)
+    if last_step == "crash-triage":
+        return _route_after_crash_triage_state(state)
+    if last_step == "fix-harness":
+        return _route_after_fix_harness_state(state)
     if last_step == "coverage-analysis":
         return _route_after_coverage_analysis_state(state)
     if last_step == "improve-harness":
@@ -7848,6 +8151,8 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "synthesize",
         "build",
         "run",
+        "crash-triage",
+        "fix-harness",
         "coverage-analysis",
         "improve-harness",
         "re-build",
@@ -7887,6 +8192,8 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("re-run", _node_re_run)
     graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("run", _node_run)
+    graph.add_node("crash-triage", _node_crash_triage)
+    graph.add_node("fix-harness", _node_fix_harness_after_run)
 
     graph.set_entry_point("init")
 
@@ -7914,6 +8221,14 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
 
+    def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_crash_triage_state(state)
+        return _apply_stage_stop_guard(state, "crash-triage", nxt)
+
+    def _route_after_fix_harness(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_fix_harness_state(state)
+        return _apply_stage_stop_guard(state, "fix-harness", nxt)
+
     def _route_after_coverage_analysis(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_coverage_analysis_state(state)
         return _apply_stage_stop_guard(state, "coverage-analysis", nxt)
@@ -7938,6 +8253,8 @@ def build_fuzz_workflow() -> StateGraph:
             "synthesize": "synthesize",
             "build": "build",
             "run": "run",
+            "crash-triage": "crash-triage",
+            "fix-harness": "fix-harness",
             "coverage-analysis": "coverage-analysis",
             "improve-harness": "improve-harness",
             "re-build": "re-build",
@@ -7958,10 +8275,20 @@ def build_fuzz_workflow() -> StateGraph:
         _route_after_run,
         {
             "coverage-analysis": "coverage-analysis",
-            "re-build": "re-build",
+            "crash-triage": "crash-triage",
             "plan": "plan",
             "stop": END,
         },
+    )
+    graph.add_conditional_edges(
+        "crash-triage",
+        _route_after_crash_triage,
+        {"fix-harness": "fix-harness", "re-build": "re-build", "plan": "plan", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "fix-harness",
+        _route_after_fix_harness,
+        {"build": "build", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "coverage-analysis",
@@ -8141,6 +8468,12 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "crash_repro_rc": int(out.get("crash_repro_rc") or 0),
         "crash_repro_report_path": str(out.get("crash_repro_report_path") or ""),
         "crash_repro_json_path": str(out.get("crash_repro_json_path") or ""),
+        "crash_triage_done": bool(out.get("crash_triage_done") or False),
+        "crash_triage_label": str(out.get("crash_triage_label") or ""),
+        "crash_triage_confidence": float(out.get("crash_triage_confidence") or 0.0),
+        "crash_triage_reason": str(out.get("crash_triage_reason") or ""),
+        "crash_triage_report_path": str(out.get("crash_triage_report_path") or ""),
+        "crash_triage_json_path": str(out.get("crash_triage_json_path") or ""),
         "re_build_done": bool(out.get("re_build_done") or False),
         "re_build_ok": bool(out.get("re_build_ok") or False),
         "re_build_rc": int(out.get("re_build_rc") or 0),

@@ -44,6 +44,7 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     fix_build = _load("fix_build")
     fix_crash_h = _load("fix_crash_harness_error")
     fix_crash_u = _load("fix_crash_upstream_bug")
+    crash_triage = _load("crash_triage")
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
     assert "`api` must describe a target API identifier" in plan
@@ -64,6 +65,11 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     assert "must produce textual code changes; pure no-op is invalid." in fix_crash_u
     assert "do not bypass acceptance by tampering" in fix_crash_u
     assert "Read and fix <path>[:line]" in fix_crash_u
+    assert "classification-only" in crash_triage
+    assert "harness_bug" in crash_triage
+    assert "upstream_bug" in crash_triage
+    assert "inconclusive" in crash_triage
+    assert "crash_triage.json" in crash_triage
 
 
 def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:

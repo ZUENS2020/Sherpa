@@ -16,10 +16,15 @@
 4. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
    - 描述 `codex/* -> dev -> main` 的标准验证和发布路径。
 
+5. [原版 K8s 主控/Worker 集群部署](/docs/k8s/ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md)
+   - 面向 kubeadm，说明如何把多台服务器组成集群并部署 Sherpa。
+
 ## 其他保留文档
 
 - `/docs/k8s/`
   - 部署、运维、发布门禁、Cloudflare、Runbook 等操作型文档。
+- `/docs/k8s/ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md`
+  - 原版 Kubernetes 主控/Worker 集群部署步骤。
 - `/docs/`
   - 后端工具链与交接类资料。
 
