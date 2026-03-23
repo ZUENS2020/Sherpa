@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/banner.svg" alt="Sherpa Banner" width="100%" />
+</p>
+
 # Sherpa
 
 Sherpa is an automated fuzz orchestration system for public repositories. A user submits a repository URL, and Sherpa drives the repository through planning, scaffold synthesis, build, seed bootstrap, fuzz execution, coverage-guided improvement, crash triage, and crash repro.
