@@ -1,33 +1,52 @@
-# Zlib E2E 验证模板
+# Zlib E2E Validation Template
 
-## 目标
-验证以下问题是否已被当前代码主线修复：
+This document is a reusable template for validating a full Sherpa run against a
+real repository. The filename is historical, but the template applies to any
+repository-level smoke test.
 
-- target 不再优先落到浅层 `adler32` 类 utility target
-- `repo_examples` 不再把 `.c/.h/.html` 当 seed
-- `build/fix_build` 对 `LLVMFuzzerTestOneInput` 与 `-lz` 问题分类更准确
+## Goal
 
-## 建议记录项
+Use one end-to-end job to confirm that the current workflow can:
 
-- 任务 ID
-- `fuzz/targets.json`
-- 实际落成的 harness
+- pick targets reasonably,
+- materialize harnesses and build scaffolding,
+- build runnable fuzzers,
+- generate usable seed corpus,
+- run the fuzzers,
+- and emit the expected artifacts.
+
+## Suggested Fields To Record
+
+- Job ID
+- Repository URL
+- Selected targets
+- Generated harness files
+- `fuzz/execution_plan.json`
+- `fuzz/harness_index.json`
 - `run_summary.json`
-- `coverage_loop.target_depth_class`
-- `coverage_loop.repo_examples_*`
-- 最终 `build_error_code` / `final_build_error_code`
+- terminal stage and stop reason
+- any crash or coverage-analysis outputs
 
-## 结果记录模板
+## Result Template
 
 ```text
 job_id:
-selected_target:
-selected_depth_class:
+repository:
+selected_targets:
+harness_files:
 seed_profile:
-repo_examples_accepted_count:
-repo_examples_rejected_count:
+execution_plan_targets:
+built_targets:
 terminal_reason:
 coverage_stop_reason:
-final_build_error_code:
+crash_detected:
 notes:
 ```
+
+## Interpretation
+
+Use this template to answer three questions:
+
+1. Did the workflow create a coherent target-to-harness mapping?
+2. Did the build and run stages operate on the same target set?
+3. Did the task terminate with meaningful artifacts instead of silent looping?

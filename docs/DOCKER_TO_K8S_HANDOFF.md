@@ -1,44 +1,28 @@
-# 从旧 Docker 执行模型到当前 K8s 原生执行模型
+# Docker-to-K8s Handoff Notes
 
-Sherpa 历史上曾存在“外层在 k8s，内层再 `docker run opencode`”的执行方式。当前主线已经切换到：
+This file is historical context explaining the move away from older execution assumptions. It is not the current runtime manual.
 
-- 调度层：Kubernetes
-- worker 执行层：原生 `opencode`
-- 任务状态：Postgres + output 目录
+## Current Runtime Reality
 
-## 当前执行模型
+Sherpa now assumes:
 
-```mermaid
-flowchart LR
-  API["sherpa-web"] --> JOB["k8s stage job"]
-  JOB --> CLI["opencode (native)"]
-  JOB --> PY["python workflow"]
-  JOB --> OUT["/shared/output"]
-```
+- Kubernetes as the primary staged execution environment
+- native worker execution inside stage pods
+- shared output rooted at `/shared/output`
+- long-lived control-plane services plus short-lived stage jobs
 
-## 旧模型的主要问题
+## Why This Historical Note Still Exists
 
-- 依赖 Docker CLI
-- k8s worker 与 Docker 镜像变量语义分裂
-- 排障链路更长
-- 镜像构建与运行时行为不一致
+Some older discussions and artifacts may still refer to:
 
-## 当前模型的优点
+- inner Docker assumptions
+- migration checkpoints
+- pre-Kubernetes execution patterns
 
-- stage pod 内直接运行 `opencode`
-- 无需 inner Docker
-- 日志更直观
-- 配置更少
-- 更适合按阶段 Job 调度
+This file remains only to explain that those assumptions are no longer the reference model.
 
-## 当前仍保留 Docker 的范围
+## Use These Instead
 
-- 本地开发与镜像构建
-- 非 `k8s_job` 路径的旧兼容逻辑
-- 容器镜像自身构建流程
-
-## 当前不应再出现在运行时文档中的旧说法
-
-- “worker 会再起一个 opencode 容器”
-- “必须依赖 Docker CLI 才能执行 stage”
-- “GitNexus 是当前线上主流程的一部分”
+- [README.md](README.md)
+- [k8s/DEPLOY.md](k8s/DEPLOY.md)
+- [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)

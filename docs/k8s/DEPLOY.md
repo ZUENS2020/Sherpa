@@ -1,33 +1,52 @@
-# K8s 部署说明（简版）
+# Kubernetes Deploy Guide
 
-## 常用覆盖层
+This is the current short-form deployment guide for Sherpa on Kubernetes.
 
-- 开发环境：`k8s/overlays/dev`
-- 生产环境：`k8s/overlays/prod`
+## 1. What Gets Deployed
 
-## 核心组件
+Long-lived services:
 
-- `sherpa-web`
-- `frontend-next`
-- `postgres`
+- backend API service
+- frontend UI service
+- Postgres
 
-## 部署步骤
+Short-lived workloads:
 
-1. 构建并导入 `sherpa-web` 镜像
-2. 构建并导入 `frontend-next` 镜像
-3. `kubectl apply -k` 对应 overlay
-4. 等待 rollout 完成
-5. 用真实仓库任务做 smoke test
+- one Kubernetes Job per workflow stage
 
-## smoke test 推荐仓库
+## 2. Expected Runtime Shape
 
-- `https://github.com/yaml/libyaml.git`
+- executor mode should be `k8s_job`
+- output root should be shared and visible to stage jobs and the backend
+- backend and worker runtime images must be version-aligned
+- non-root execution is the default assumption
+
+## 3. Basic Deploy Flow
+
+1. build or reference the target backend/frontend images
+2. apply the appropriate overlay or manifests
+3. wait for long-lived services to become ready
+4. verify configuration and worker image references
+5. submit a real repository task as smoke test
+
+## 4. Smoke Test Repositories
+
+Recommended:
+
 - `https://github.com/fmtlib/fmt.git`
+- `https://github.com/yaml/libyaml.git`
 - `https://github.com/madler/zlib.git`
+- `https://github.com/libarchive/libarchive.git`
 
-## 成功标准
+## 5. Success Criteria
 
-- `plan` 不再依赖 Docker CLI
-- `run` 能生成 seed 并写入 `run_summary.json`
-- plateau 任务在预算内正常收口
-- crash 任务能进入 `re-build/re-run`
+- task submission succeeds
+- stage jobs are created and complete or fail with persisted reports
+- `/api/tasks` and `/api/system` reflect live state
+- task artifacts appear under `/shared/output`
+
+## 6. Read Next
+
+- [DEPLOYMENT_DETAILED.md](DEPLOYMENT_DETAILED.md)
+- [RUNBOOK.md](RUNBOOK.md)
+- [MAPPING.md](MAPPING.md)

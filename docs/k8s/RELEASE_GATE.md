@@ -1,29 +1,50 @@
-# 发布门禁
+# Release Gate
 
-## 必过项
+This document defines the minimum checks required before promoting a change from
+development validation to production release.
 
-### 后端
-- `python -m py_compile` 覆盖改动模块
-- 关键 pytest 子集通过
+## Required Checks
 
-### 前端
-- `npm test`
+### Backend
+
+- `python -m py_compile` for the modules touched by the change
+- Relevant `pytest` subsets for the changed workflow, API, or quality logic
+
+### Frontend
+
 - `npm run build`
+- Any test or lint step required by the changed frontend package
 
-### 部署前核对
-- k8s worker 不依赖 Docker CLI
-- `run_summary.json` 字段与当前实现一致
-- 文档已同步更新
+### Deployment Readiness
 
-## 建议 smoke test
+- Dev deployment uses the expected image tags
+- Worker image pinning and config are aligned
+- API fields consumed by the frontend are still present and documented
+- Docs are updated when workflow or API behavior changes
 
-至少验证：
-- 一条 parser 类仓库：`libyaml` 或 `fmt`
-- 一条 build/fix_build 易出问题仓库：`zlib` 或 `libarchive`
+## Recommended Smoke Tests
 
-## 拒绝发布条件
+Before promoting `dev` to `main`, validate at least:
 
-- `run` 仍然无限空转到 dispatch limit
-- `replan` 无实质变化仍被视为成功
-- `repo_examples` 继续大量吸收源码文件
-- k8s worker 回退到 inner Docker 执行
+- One parser-focused repository, such as `libyaml` or `fmt`
+- One build-sensitive repository, such as `zlib` or `libarchive`
+
+The goal is to cover both the planning/synthesis path and the build/run/crash
+artifact path.
+
+## Reject Release If
+
+- Stage jobs are looping without meaningful state change
+- Coverage improvement keeps replanning without producing a strategy change
+- Seed generation regresses into source-file ingestion or excessive noise
+- The worker falls back to unsupported execution assumptions
+- The deployed image version cannot be proven from the running cluster state
+
+## Evidence To Keep
+
+For each release candidate, retain:
+
+- PR link
+- Validation commands and result summary
+- One successful dev task ID
+- Any rollback note if the change touches workflow routing or deployment logic

@@ -1,36 +1,44 @@
-# 组件映射
+# Kubernetes Mapping
 
-## 运行时映射
+This file maps Sherpa concepts to current runtime objects.
 
-| 逻辑组件 | 当前实现 |
+## 1. Runtime Object Mapping
+
+| Logical component | Current implementation |
 |---|---|
-| API | `sherpa-web` Deployment |
-| UI | `frontend-next` Deployment |
-| 状态存储 | Postgres |
-| 阶段执行 | Kubernetes Job |
-| 工作目录 | `/shared/output` |
-| 聚合日志 | `/app/job-logs/jobs/*.log` |
+| API / control plane | backend Deployment / service |
+| UI | frontend Deployment / service |
+| state store | Postgres |
+| stage execution | Kubernetes Job |
+| task output root | `/shared/output` |
+| aggregated job logs | `/app/job-logs/jobs/*.log` |
 
-## 状态文件映射
+## 2. Important Artifact Mapping
 
-| 文件 | 作用 |
+| Path or file | Meaning |
 |---|---|
-| `fuzz/PLAN.md` | plan 输出 |
-| `fuzz/targets.json` | target 列表与元数据 |
-| `fuzz/target_analysis.json` | 工具辅助 target 分析 |
-| `run_summary.json` | 本轮汇总状态 |
-| `repro_context.json` | crash 复现上下文 |
-| `stage-*.json` | 单阶段结果 |
+| `fuzz/PLAN.md` | planning artifact |
+| `fuzz/targets.json` | candidate targets |
+| `fuzz/selected_targets.json` | selected targets with execution metadata |
+| `fuzz/execution_plan.json` | execution-target contract |
+| `fuzz/harness_index.json` | target-to-harness mapping |
+| `run_summary.json` | task-level run summary |
+| `repro_context.json` | crash repro context |
+| `stage-*.json` | stage result record |
 
-## 当前阶段路由
+## 3. Current Mainline Routing
 
-| 阶段 | 可能下一步 |
+| Stage | Possible next stage |
 |---|---|
 | `plan` | `synthesize` |
 | `synthesize` | `build` |
-| `build` | `run` / `fix_build` / `build`(env rebuild) |
-| `run` | `coverage-analysis` / `re-build` / `stop` |
-| `coverage-analysis` | `improve-harness` / `stop` |
-| `improve-harness` | `build` / `plan` / `stop` |
-| `re-build` | `re-run` / `plan` |
-| `re-run` | `stop` / `plan` |
+| `build` | `run` or `plan` |
+| `run` | `coverage-analysis`, `crash-triage`, or `plan` depending on outcome |
+| `coverage-analysis` | `improve-harness` or `stop` |
+| `improve-harness` | `build`, `plan`, or `stop` |
+| `crash-triage` | `fix-harness`, `re-build`, `plan`, or `stop` |
+| `fix-harness` | `build` or `plan` |
+| `re-build` | `re-run`, `plan`, or `stop` |
+| `re-run` | `plan` or `stop` |
+
+This table describes the documented current mainline behavior, not every compatibility branch left in code.
