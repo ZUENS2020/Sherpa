@@ -211,6 +211,8 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_ft"] == 654
     assert detail["final_corpus_files"] == 12
     assert detail["final_execs_per_sec"] == 777
+    assert isinstance(out.get("coverage_seed_feedback"), dict)
+    assert isinstance(out.get("coverage_harness_feedback"), dict)
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
@@ -654,6 +656,9 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert out["coverage_improve_mode"] == "in_place"
     assert "seed_quality_flags" in out["coverage_improve_reason"]
     assert out["coverage_target_api"] == "fmt::println"
+    assert out["coverage_quality_oracle"] == "quality_degraded"
+    assert isinstance(out.get("coverage_seed_feedback"), dict)
+    assert isinstance(out.get("coverage_harness_feedback"), dict)
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():

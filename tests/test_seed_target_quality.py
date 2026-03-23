@@ -160,6 +160,10 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     assert "low_retention" in flags
     assert "missing_required_families" in flags
     assert "repo_examples_missing" in flags
+    assert isinstance(quality.get("seed_score"), float)
+    assert 0.0 <= float(quality.get("seed_score") or 0.0) <= 1.0
+    components = dict(quality.get("seed_score_components") or {})
+    assert {"coverage_potential", "validity", "novelty", "redundancy_penalty"}.issubset(set(components.keys()))
 
 
 def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
