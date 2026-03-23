@@ -1,33 +1,33 @@
-# K8s Migration Checklist
+# K8s 迁移检查清单
 
-This file is retained as historical migration context. It is not the current deployment manual.
+该文件仅保留为历史迁移背景，不再是当前部署手册。
 
-Primary current docs:
+当前主要文档请查看：
 
 - [k8s/DEPLOY.md](k8s/DEPLOY.md)
 - [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)
 - [k8s/RUNBOOK.md](k8s/RUNBOOK.md)
 
-## Historical Migration Outcome
+## 历史迁移结果
 
-The migration objective has already been achieved at a high level:
+从高层角度看，迁移目标已经达成：
 
-- staged Kubernetes job execution exists
-- output and logs are persisted outside pod lifetime
-- frontend/backend services are separated from stage jobs
-- coverage improvement and crash repro are part of the workflow model
+- 已具备分阶段的 Kubernetes Job 执行模型
+- 输出与日志可以脱离 Pod 生命周期独立持久化
+- 前后端服务与阶段作业已解耦
+- 覆盖率改进与崩溃复现已经纳入工作流模型
 
-## What To Validate After Changes
+## 变更后需要验证什么
 
-When making infrastructure or workflow changes, validate:
+当基础设施或工作流发生变更时，应验证：
 
-- stage jobs still produce `stage-*.json` and `stage-*.error.txt`
-- task workspaces still land under `/shared/output`
-- `/api/tasks` and `/api/system` still reflect live task state correctly
-- at least one real repository task can complete the mainline path
+- 阶段作业仍会产出 `stage-*.json` 与 `stage-*.error.txt`
+- 任务工作目录仍落在 `/shared/output`
+- `/api/tasks` 与 `/api/system` 仍能正确反映实时任务状态
+- 至少一个真实仓库任务能够跑通主线链路
 
-## What This File No Longer Tries To Do
+## 本文件不再尝试描述的内容
 
-- it does not describe the current workflow stage graph in detail
-- it does not document deployment commands
-- it does not define release criteria
+- 不再详细说明当前工作流阶段图
+- 不再记录部署命令
+- 不再定义发布准入标准

@@ -1,21 +1,21 @@
-# Sherpa API Reference
+# Sherpa API 参考
 
-Last updated: 2026-03-23
-Backend source of truth: `harness_generator/src/langchain_agent/main.py`
+最后更新：2026-03-23
+后端事实来源：`harness_generator/src/langchain_agent/main.py`
 
-## 1. Base Information
+## 1. 基础信息
 
-- dev base URL: `https://dev.zuens2020.work`
-- API prefix: `/api`
-- request/response content type: JSON unless otherwise noted
-- authentication: no API auth layer is currently documented in code
-- CORS: allow-all
+- dev 基础地址：`https://dev.zuens2020.work`
+- API 前缀：`/api`
+- 请求 / 响应内容类型：除非特别说明，否则为 JSON
+- 鉴权：当前代码中尚未记录独立的 API 鉴权层
+- CORS：全开放
 
-## 2. Common Semantics
+## 2. 通用语义
 
-### Status normalization
+### 状态归一化
 
-Task-facing APIs normalize internal statuses into uppercase values:
+面向任务的 API 会把内部状态归一成大写值：
 
 - `QUEUED`
 - `RUNNING`
@@ -24,37 +24,37 @@ Task-facing APIs normalize internal statuses into uppercase values:
 - `FAILED`
 - `ERROR`
 
-### Time fields
+### 时间字段
 
-Most task payloads expose both raw timestamps and ISO strings:
+大多数任务载荷同时暴露原始时间戳与 ISO 字符串：
 
 - `*_at`
 - `*_at_iso`
 
-### Unlimited budgets
+### 无限预算
 
-Current conventions:
+当前约定：
 
-- `-1` is accepted by the request layer as unlimited intent
-- `0` is used internally as unlimited for time-budget style fields
+- 请求层接受 `-1` 表示“无限”意图
+- 对时间预算类字段，内部使用 `0` 表示无限
 
-## 3. Configuration APIs
+## 3. 配置 API
 
 ### GET `/api/config`
 
-Returns the current persisted runtime-facing configuration view.
+返回当前持久化的运行时配置视图。
 
-Notes:
+说明：
 
-- secret fields are hidden or blanked
-- `*_set` style flags indicate whether secrets exist
-- some Docker-related fields still exist for compatibility, but current staged K8s runtime is native-oriented
+- secret 字段会被隐藏或清空
+- `*_set` 风格字段表示对应 secret 是否已存在
+- 部分 Docker 相关字段仍保留用于兼容，但当前分阶段 K8s 运行时以原生执行为主
 
 ### PUT `/api/config`
 
-Supported forms:
+支持以下形式。
 
-#### Lightweight frontend update
+#### 轻量前端更新
 
 ```json
 {
@@ -62,7 +62,7 @@ Supported forms:
 }
 ```
 
-or
+或者：
 
 ```json
 {
@@ -70,28 +70,28 @@ or
 }
 ```
 
-#### Full config update
+#### 完整配置更新
 
-The backend merges the request with current config, validates it, preserves provider secret ownership, and persists the result.
+后端会将请求与现有配置合并，完成校验、保留 provider secret 所有权后再持久化。
 
-Validation rules visible in code:
+代码中可见的校验规则：
 
 - `fuzz_time_budget >= 0`
 - `sherpa_run_unlimited_round_budget_sec >= 0`
 
-Success response:
+成功响应：
 
 ```json
 { "ok": true }
 ```
 
-## 4. System APIs
+## 4. 系统 API
 
 ### GET `/api/system`
 
-Returns system-wide runtime and dashboard aggregates.
+返回系统级运行时与仪表盘聚合信息。
 
-Top-level blocks:
+顶层字段块：
 
 - `ok`
 - `server_time`
@@ -111,7 +111,7 @@ Top-level blocks:
 
 #### `overview`
 
-Current fields in code:
+代码中的当前字段：
 
 - `avg_fuzz_time`
 - `active_agents`
@@ -130,7 +130,7 @@ Current fields in code:
 
 #### `telemetry`
 
-Current fields in code:
+代码中的当前字段：
 
 - `llm_token_usage`
 - `llm_token_status`
@@ -141,13 +141,13 @@ Current fields in code:
 - `agent_health_matrix`
 - `performance_series`
 
-Important note:
+重要说明：
 
-- `llm_token_usage` only uses real token-derived job data; if no usable token field exists, it may be `null`
+- `llm_token_usage` 仅使用真实 token 衍生的作业数据；如果没有可用 token 字段，则可能为 `null`
 
 #### `execution.summary`
 
-Current fields:
+当前字段：
 
 - `failure_rate`
 - `fuzzing_jobs_24h`
@@ -162,38 +162,38 @@ Current fields:
 
 #### `tasks_tab_metrics`
 
-Current fields:
+当前字段：
 
 - `total_jobs`
 - `execs_per_sec`
 - `success_rate`
 - `failed_tasks`
 
-`execs_per_sec` is derived from recent run-stage exec-rate aggregation, not from a static config value.
+`execs_per_sec` 来源于近期 run 阶段执行速率聚合，而不是静态配置值。
 
 ### GET `/api/metrics`
 
-Prometheus plaintext endpoint.
+Prometheus 纯文本指标端点。
 
-Media type:
+媒体类型：
 
 - `text/plain; version=0.0.4; charset=utf-8`
 
 ### GET `/api/health`
 
-Simple liveness endpoint:
+简单存活探针：
 
 ```json
 { "ok": true }
 ```
 
-## 5. Task APIs
+## 5. 任务 API
 
 ### POST `/api/task`
 
-Creates one parent task (`kind=task`) and one child fuzz job for each submitted job entry.
+为每个提交的 job 条目创建一个父任务（`kind=task`）以及一个子 fuzz job。
 
-Request shape:
+请求格式：
 
 ```json
 {
@@ -224,14 +224,14 @@ Request shape:
 }
 ```
 
-Behavior notes:
+行为说明：
 
-- `code_url` is the critical per-job field
-- `total_duration` and `single_duration` are compatibility aliases used by the frontend
-- `unlimited_round_limit` is accepted and bridged into runtime budget semantics
-- `max_tokens=0` means no explicit token cap
+- `code_url` 是每个 job 中最关键的字段
+- `total_duration` 与 `single_duration` 是前端仍在使用的兼容别名
+- `unlimited_round_limit` 会被接受并桥接到运行时预算语义
+- `max_tokens=0` 表示没有显式 token 上限
 
-Success response:
+成功响应：
 
 ```json
 {
@@ -242,9 +242,9 @@ Success response:
 
 ### GET `/api/task/{job_id}`
 
-Returns the parent-task view if `job_id` is a task.
+若 `job_id` 对应任务，则返回父任务视图。
 
-Possible error responses:
+可能的错误响应：
 
 ```json
 { "error": "job_not_found" }
@@ -254,7 +254,7 @@ Possible error responses:
 { "error": "job_not_task" }
 ```
 
-Current response content includes aggregated child state, for example:
+当前响应中会包含聚合后的子任务状态，例如：
 
 - `status`
 - `children_status`
@@ -267,9 +267,9 @@ Current response content includes aggregated child state, for example:
 
 ### POST `/api/task/{job_id}/resume`
 
-Resumes a task or fuzz job depending on the stored `kind`.
+根据持久化的 `kind` 恢复任务或 fuzz job。
 
-Current response includes:
+当前响应包含：
 
 - `job_id`
 - `kind`
@@ -280,9 +280,9 @@ Current response includes:
 
 ### POST `/api/task/{job_id}/stop`
 
-Requests cancellation of a task or fuzz job.
+请求取消一个任务或 fuzz job。
 
-Current response includes:
+当前响应包含：
 
 - `job_id`
 - `kind`
@@ -291,17 +291,17 @@ Current response includes:
 - `status`
 - `details`
 
-## 6. Task List API
+## 6. 任务列表 API
 
 ### GET `/api/tasks`
 
-Returns parent task rows for the task table.
+返回任务表使用的父任务行。
 
-Query:
+查询参数：
 
-- `limit` default `50`, clamped to `[1, 200]`
+- `limit` 默认 `50`，会被约束在 `[1, 200]`
 
-Current item fields:
+当前条目字段：
 
 - `job_id`
 - `id`
@@ -332,7 +332,7 @@ Current item fields:
 - `active_child_status`
 - `active_child_phase`
 
-Response shape:
+响应格式：
 
 ```json
 {
@@ -349,15 +349,15 @@ Response shape:
 }
 ```
 
-Notes:
+说明：
 
-- this endpoint lists parent tasks, not every fuzz child
-- `repo` is a display label; frontend may derive a repository name from it
-- `progress` is an aggregate task signal, not a strict workflow percentage
+- 该端点列出的是父任务，而不是每个子 fuzz job
+- `repo` 是展示标签；前端可能会进一步从中推导仓库名
+- `progress` 是聚合任务信号，并非严格的工作流百分比
 
-## 7. Frontend-Relevant Semantics
+## 7. 与前端相关的语义
 
-The local/Next frontends primarily depend on:
+本地 / Next 前端主要依赖以下接口：
 
 - `POST /api/task`
 - `POST /api/task/{job_id}/stop`
@@ -365,12 +365,12 @@ The local/Next frontends primarily depend on:
 - `GET /api/system`
 - `PUT /api/config`
 
-Recommended polling model:
+推荐轮询模型：
 
-1. poll `/api/tasks`
-2. poll `/api/system`
-3. fetch `/api/task/{job_id}` for task detail drill-down when needed
+1. 轮询 `/api/tasks`
+2. 轮询 `/api/system`
+3. 在需要查看详情时，再请求 `/api/task/{job_id}`
 
-## 8. Source-of-Truth Reminder
+## 8. 事实来源提醒
 
-This document describes current code behavior. If a field here and the implementation diverge, `harness_generator/src/langchain_agent/main.py` is authoritative.
+本文档描述的是当前代码行为。如果这里的字段与实现不一致，应以 `harness_generator/src/langchain_agent/main.py` 为准。

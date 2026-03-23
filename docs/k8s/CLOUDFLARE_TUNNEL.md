@@ -1,11 +1,11 @@
-# Cloudflare Tunnel
+# Cloudflare Tunnel 说明
 
-本文档只记录当前外网接入方式，不涉及工作流内部执行。
+本文档仅记录当前外网接入方式，不涉及工作流内部执行逻辑。
 
 ## 作用
 
-- 为 dev/prod 暴露固定域名
-- 把入口流量导到 Kubernetes Ingress / Service
+- 为 dev / prod 暴露固定域名
+- 将入口流量转发到 Kubernetes Ingress / Service
 
 ## 当前原则
 
@@ -15,6 +15,6 @@
 
 ## 验证点
 
-- 域名可访问前端
-- 前端能请求 `sherpa-web`
-- 提交任务后日志可持续刷新
+- 域名可以访问前端
+- 前端能够请求 `sherpa-web`
+- 提交任务后日志可以持续刷新

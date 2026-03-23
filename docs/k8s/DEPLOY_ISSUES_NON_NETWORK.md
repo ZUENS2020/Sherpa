@@ -1,24 +1,22 @@
-# Deployment Issues (Historical Notes)
+# 部署问题（历史记录）
 
-This file is retained only as historical context for past deployment failures.
-It is not an operational runbook.
+本文件仅作为过去部署故障的历史背景保留，不是当前运行手册。
 
-## Historical Themes
+## 历史共性问题
 
-Previous deployment incidents were usually caused by one of these classes:
+过去的部署事故通常来自以下几类原因：
 
-- Runtime image missing required tools
-- Worker assumptions drifting from the actual execution model
-- Long-running stage loops hiding a workflow logic problem
-- Artifact or output paths not matching what the control plane expected
+- 运行时镜像缺少必需工具
+- worker 假设与真实执行模型逐渐偏离
+- 长时间运行的阶段循环掩盖了工作流逻辑问题
+- 产物或输出路径与控制面预期不一致
 
-## How To Use This File
+## 如何使用本文件
 
-If you are debugging a current deployment problem, start with:
+如果你在排查当前部署问题，请先阅读：
 
 - [Runbook](RUNBOOK.md)
 - [Deploy](DEPLOY.md)
 - [Deployment Detailed](DEPLOYMENT_DETAILED.md)
 
-Only return to this file if you are comparing a new incident with an older one
-for root-cause analysis.
+只有当你需要把新事故与旧事故做根因对比时，再回到本文。
