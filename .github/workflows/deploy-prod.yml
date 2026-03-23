@@ -876,7 +876,7 @@ jobs:
         run: |
           set -euo pipefail
           worker_cfg_image="$(kubectl -n "${NAMESPACE}" get configmap sherpa-config -o jsonpath='{.data.SHERPA_K8S_WORKER_IMAGE}')"
-          web_deploy_image="$(kubectl -n "${NAMESPACE}" get deployment sherpa-web -o jsonpath='{.spec.template.spec.containers[?(@.name==\"web\")].image}')"
+          web_deploy_image="$(kubectl -n "${NAMESPACE}" get deployment sherpa-web -o jsonpath='{.spec.template.spec.containers[?(@.name=="web")].image}')"
           echo "::notice::consistency worker_cfg_image=${worker_cfg_image}"
           echo "::notice::consistency web_deploy_image=${web_deploy_image}"
           if [[ "${worker_cfg_image}" != "${WEB_IMAGE}" ]]; then
