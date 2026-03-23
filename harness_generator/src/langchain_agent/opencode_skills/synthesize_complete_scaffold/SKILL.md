@@ -7,10 +7,12 @@ Complete only missing required scaffold items without rewriting unrelated files.
 - current `fuzz/` scaffold
 - missing items list from coordinator
 - `fuzz/execution_plan.json` (if present)
+- `fuzz/harness_index.json` (if present)
 
 ## Required Outputs
 - missing required files completed under `fuzz/`
 - if harness source is missing, create at least one harness source file under `fuzz/` before only-doc/json fixes
+- refresh `fuzz/harness_index.json` so execution targets map to real harness files
 
 ## Key File Templates
 - `fuzz/README.md` required fields:
@@ -54,6 +56,7 @@ Complete only missing required scaffold items without rewriting unrelated files.
 - existing harness/build assets are preserved unless minimal changes are required.
 - no guessed paths/targets are introduced.
 - repaired scaffold remains consistent with `fuzz/execution_plan.json` when that file exists.
+- `fuzz/harness_index.json` is updated and contains no missing execution-target mappings.
 
 ## Command Policy
 - Allowed: read-only commands only.

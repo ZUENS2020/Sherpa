@@ -5,6 +5,7 @@ Repair planning artifacts after a crash/repro-stage failure.
 
 ## Required Inputs
 - `repair_*` diagnostics from coordinator context
+- `repair_error_digest` from coordinator context (if provided)
 - crash/repro summaries and report tails (if provided)
 - `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json` (if present)
 
@@ -12,6 +13,7 @@ Repair planning artifacts after a crash/repro-stage failure.
 - updated `fuzz/PLAN.md`
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
+- strategy note that keeps `fuzz/harness_index.json` mappable (no orphan execution targets)
 
 ## Acceptance Criteria
 - plan explicitly addresses crash-path failure diagnostics.
