@@ -551,18 +551,22 @@ def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
 
 def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
     explicit = str(state.get("repair_origin_stage") or "").strip().lower()
-    if explicit in {"build", "crash"}:
+    if explicit in {"build", "crash", "coverage"}:
         return explicit
     restart_stage = str(state.get("restart_to_plan_stage") or "").strip().lower()
     if restart_stage == "build":
         return "build"
     if restart_stage in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
         return "crash"
+    if restart_stage in {"coverage-analysis", "improve-harness"}:
+        return "coverage"
     last_step = str(state.get("last_step") or "").strip().lower()
     if last_step == "build":
         return "build"
     if last_step in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
         return "crash"
+    if last_step in {"coverage-analysis", "improve-harness"}:
+        return "coverage"
     if bool(state.get("crash_found")):
         return "crash"
     return "build"
@@ -3103,6 +3107,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if repair_origin_stage == "crash":
                 plan_template_name = "plan_repair_crash_with_hint"
                 plan_stage_skill = "plan_repair_crash"
+            elif repair_origin_stage == "coverage":
+                plan_template_name = "plan_repair_coverage_with_hint"
+                plan_stage_skill = "plan_repair_coverage"
             else:
                 plan_template_name = "plan_repair_build_with_hint"
                 plan_stage_skill = "plan_repair_build"
@@ -3331,7 +3338,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     hint = (state.get("codex_hint") or "").strip()
     repair_mode = bool(state.get("repair_mode") or False)
     repair_origin_stage = str(state.get("repair_origin_stage") or "").strip().lower()
-    if repair_origin_stage not in {"build", "crash"}:
+    if repair_origin_stage not in {"build", "crash", "coverage"}:
         repair_origin_stage = _infer_repair_origin_stage(cast(dict[str, Any], state))
     antlr_context_path = str(state.get("antlr_context_path") or "").strip()
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
@@ -3788,6 +3795,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             if repair_origin_stage == "crash":
                 synth_template_name = "synthesize_repair_crash_with_hint"
                 synth_stage_skill = "synthesize_repair_crash"
+            elif repair_origin_stage == "coverage":
+                synth_template_name = "synthesize_repair_coverage_with_hint"
+                synth_stage_skill = "synthesize_repair_coverage"
             else:
                 synth_template_name = "synthesize_repair_build_with_hint"
                 synth_stage_skill = "synthesize_repair_build"
@@ -7287,6 +7297,9 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
 
 
 def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
     state, stop_now = _enter_step(state, "improve-harness")
     if stop_now:
         return state
@@ -7324,48 +7337,114 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
-                "覆盖率闭环改进任务（重新选 target）：\n"
-                "- 当前 target 已连续多轮进入平台期，且 coverage/features 未继续提升。\n"
-                "- 允许重新评估 targets.json，并重新选择更可能提高覆盖率或发现漏洞的 target。\n"
-                "- 结合 fuzz/target_analysis.json 与 fuzz/antlr_plan_context.json 重新规划。\n"
-                f"- 当前 target: {target_name or 'unknown'}\n"
-                f"- 当前 target api: {target_api or selected_target_api or 'unknown'}\n"
-                f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
-                f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
-                f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
-                f"- replan 原因: {replan_reason or cov_reason or 'coverage plateau'}\n"
-                "- 如果当前 target 属于 shallow，优先选择 medium/deep 候选，不要再次落到 checksum/hash/helper/bound/combine/version/copy 类浅目标。\n"
-                "- 优先考虑 decode/inflate/deflate/parse/read/load/scan/archive/stream 这类更深入口。"
+                "Coverage-loop improvement task (replan target):\n"
+                "- The current target has plateaued across consecutive rounds and coverage/features are no longer improving.\n"
+                "- Re-evaluate `fuzz/targets.json` and select targets more likely to improve coverage or reveal bugs.\n"
+                "- Use `fuzz/target_analysis.json` and `fuzz/antlr_plan_context.json` as primary evidence.\n"
+                f"- Current target: {target_name or 'unknown'}\n"
+                f"- Current target API: {target_api or selected_target_api or 'unknown'}\n"
+                f"- Current seed_profile: {seed_profile or 'generic'}\n"
+                f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
+                f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
+                f"- Replan reason: {replan_reason or cov_reason or 'coverage plateau'}\n"
+                "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
+                "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream."
             )
         else:
             hint = (
-                "覆盖率闭环改进任务（当前 target 原地改进）：\n"
-                "- 只允许修改当前 fuzzer 相关的 fuzz/ 下文件，不要改业务源码。\n"
-                "- 不要修改 targets.json，不要新增第二个 target。\n"
-                "- 优先补 seed 生成、dictionary、输入建模、调用顺序、边界值与 corpus bootstrap。\n"
-                "- 保持可构建与可运行。\n"
-                f"- 当前 target: {target_name or 'unknown'}\n"
-                f"- 当前 target api: {target_api or selected_target_api or 'unknown'}\n"
-                f"- 当前 seed_profile: {seed_profile or 'generic'}\n"
-                f"- seed quality flags: {', '.join(quality_flags) if quality_flags else 'none'}\n"
-                f"- required seed families: {', '.join(seed_families_required) if seed_families_required else 'none'}\n"
-                f"- covered seed families: {', '.join(seed_families_covered) if seed_families_covered else 'none'}\n"
-                f"- missing seed families: {', '.join(seed_families_missing) if seed_families_missing else 'none'}\n"
-                f"- seed raw counts: {seed_counts_raw or {}}\n"
-                f"- seed filtered counts: {seed_counts_filtered or {}}\n"
-                f"- seed noise rejected: {seed_noise_rejected_count}\n"
-                f"- seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
-                f"- 当前深度: {depth_class or 'unknown'} (score={depth_score})\n"
-                f"- 当前选择原因: {selection_bias_reason or 'n/a'}\n"
-                f"- 诊断: {cov_reason}"
+                "Coverage-loop improvement task (in-place target repair):\n"
+                "- Modify only fuzzer-related files under `fuzz/`; do not edit upstream product source.\n"
+                "- Do not modify `fuzz/targets.json` and do not add a second target in this mode.\n"
+                "- Prioritize seed generation, dictionary, input modeling, call ordering, boundary cases, and corpus bootstrap.\n"
+                "- Keep the scaffold buildable and runnable for the next build/run cycle.\n"
+                f"- Current target: {target_name or 'unknown'}\n"
+                f"- Current target API: {target_api or selected_target_api or 'unknown'}\n"
+                f"- Current seed_profile: {seed_profile or 'generic'}\n"
+                f"- Seed quality flags: {', '.join(quality_flags) if quality_flags else 'none'}\n"
+                f"- Required seed families: {', '.join(seed_families_required) if seed_families_required else 'none'}\n"
+                f"- Covered seed families: {', '.join(seed_families_covered) if seed_families_covered else 'none'}\n"
+                f"- Missing seed families: {', '.join(seed_families_missing) if seed_families_missing else 'none'}\n"
+                f"- Seed raw counts: {seed_counts_raw or {}}\n"
+                f"- Seed filtered counts: {seed_counts_filtered or {}}\n"
+                f"- Seed noise rejected: {seed_noise_rejected_count}\n"
+                f"- Seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
+                f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
+                f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
+                f"- Diagnostic summary: {cov_reason}"
             )
+        opencode_applied = False
+        if improve_mode == "in_place":
+            if not _has_codex_key():
+                out = {
+                    **state,
+                    "last_step": "improve-harness",
+                    "last_error": "Missing OPENAI_API_KEY for improve-harness in-place repair",
+                    "message": "improve-harness failed",
+                }
+                _wf_log(cast(dict[str, Any], out), f"<- improve-harness err=missing-key dt={_fmt_dt(time.perf_counter()-t0)}")
+                return out
+            prompt = _render_opencode_prompt("improve_harness_in_place_with_hint", hint=hint)
+            ctx_parts: list[str] = []
+            try:
+                exec_plan = gen.repo_root / "fuzz" / "execution_plan.json"
+                harness_index = gen.repo_root / "fuzz" / "harness_index.json"
+                if exec_plan.is_file():
+                    ctx_parts.append("=== fuzz/execution_plan.json ===\n" + exec_plan.read_text(encoding="utf-8", errors="replace"))
+                if harness_index.is_file():
+                    ctx_parts.append("=== fuzz/harness_index.json ===\n" + harness_index.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+            gen.patcher.run_codex_command(
+                prompt,
+                additional_context=("\n\n".join(ctx_parts) if ctx_parts else None),
+                stage_skill="improve_harness_in_place",
+                timeout=_remaining_time_budget_sec(state),
+                max_attempts=1,
+                max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+                activity_watch_paths=_synthesize_activity_watch_paths(),
+            )
+            opencode_applied = True
         out = {
             **state,
             "last_step": "improve-harness",
             "last_error": "",
             "codex_hint": hint,
             "coverage_improve_mode": improve_mode,
-            "message": "improve-harness prepared plan hint",
+            "repair_mode": bool(replan_required),
+            "repair_origin_stage": "coverage" if replan_required else str(state.get("repair_origin_stage") or ""),
+            "repair_error_kind": "coverage_plateau" if replan_required else str(state.get("repair_error_kind") or ""),
+            "repair_error_code": "coverage_replan_required" if replan_required else str(state.get("repair_error_code") or ""),
+            "repair_signature": (
+                f"coverage:{target_name or target_api or 'unknown'}:{int(state.get('coverage_plateau_streak') or 0)}"
+                if replan_required
+                else str(state.get("repair_signature") or "")
+            ),
+            "repair_error_digest": (
+                {
+                    "origin": "coverage",
+                    "improve_mode": improve_mode,
+                    "replan_required": True,
+                    "target_name": target_name or "",
+                    "target_api": target_api or selected_target_api or "",
+                    "seed_profile": seed_profile or "",
+                    "depth_class": depth_class or "",
+                    "depth_score": depth_score,
+                    "selection_bias_reason": selection_bias_reason or "",
+                    "replan_reason": replan_reason or cov_reason or "",
+                    "quality_flags": quality_flags,
+                    "seed_families_required": seed_families_required,
+                    "seed_families_covered": seed_families_covered,
+                    "seed_families_missing": seed_families_missing,
+                    "seed_counts_raw": seed_counts_raw,
+                    "seed_counts_filtered": seed_counts_filtered,
+                    "seed_noise_rejected_count": seed_noise_rejected_count,
+                    "seed_quality": seed_quality,
+                }
+                if replan_required
+                else dict(state.get("repair_error_digest") or {})
+            ),
+            "message": "improve-harness in-place edits applied" if opencode_applied else "improve-harness prepared plan hint",
         }
         _wf_log(cast(dict[str, Any], out), f"<- improve-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -8401,7 +8480,9 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     if not (state.get("last_error") or "").strip():
         return "run"
-    return "plan"
+    if str(state.get("build_error_kind") or "").strip().lower() == "infra":
+        return "plan"
+    return "fix_build"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
@@ -8409,7 +8490,7 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
     if run_error_kind:
-        return "plan"
+        return "fix_crash"
     if bool(state.get("crash_found")):
         return "crash-triage"
     return "coverage-analysis"
@@ -8517,7 +8598,7 @@ def _route_after_re_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "plan"
+        return "fix_crash"
     if bool(state.get("re_build_done")) and bool(state.get("re_build_ok")):
         return "re-run"
     return "stop"
@@ -8531,9 +8612,9 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "plan"
+        return "fix_crash"
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
-        return "plan"
+        return "fix_crash"
     return "stop"
 
 
@@ -8549,8 +8630,12 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_synthesize_state(state)
     if last_step == "build":
         return _route_after_build_state(state)
+    if last_step == "fix_build":
+        return _route_after_fix_build_state(state)
     if last_step == "run":
         return _route_after_run_state(state)
+    if last_step == "fix_crash":
+        return _route_after_fix_crash_state(state)
     if last_step == "crash-triage":
         return _route_after_crash_triage_state(state)
     if last_step == "fix-harness":
@@ -8574,7 +8659,9 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "plan",
         "synthesize",
         "build",
+        "fix_build",
         "run",
+        "fix_crash",
         "crash-triage",
         "fix-harness",
         "coverage-analysis",
@@ -8583,8 +8670,6 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "re-run",
         "repro_crash",
     }
-    if raw in {"fix_build", "fix_crash"}:
-        raw = "plan"
     if raw == "repro_crash":
         raw = "re-build"
     if raw in allowed:
@@ -8610,12 +8695,14 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
+    graph.add_node("fix_build", _node_fix_build)
     graph.add_node("coverage-analysis", _node_coverage_analysis)
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
     graph.add_node("re-run", _node_re_run)
     graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("run", _node_run)
+    graph.add_node("fix_crash", _node_fix_crash)
     graph.add_node("crash-triage", _node_crash_triage)
     graph.add_node("fix-harness", _node_fix_harness_after_run)
 
@@ -8644,6 +8731,14 @@ def build_fuzz_workflow() -> StateGraph:
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
+
+    def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_fix_build_state(state)
+        return _apply_stage_stop_guard(state, "fix_build", nxt)
+
+    def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_fix_crash_state(state)
+        return _apply_stage_stop_guard(state, "fix_crash", nxt)
 
     def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_crash_triage_state(state)
@@ -8676,7 +8771,9 @@ def build_fuzz_workflow() -> StateGraph:
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
+            "fix_build": "fix_build",
             "run": "run",
+            "fix_crash": "fix_crash",
             "crash-triage": "crash-triage",
             "fix-harness": "fix-harness",
             "coverage-analysis": "coverage-analysis",
@@ -8692,7 +8789,12 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "build",
         _route_after_build,
-        {"run": "run", "plan": "plan", "stop": END},
+        {"run": "run", "plan": "plan", "fix_build": "fix_build", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "fix_build",
+        _route_after_fix_build,
+        {"build": "build", "fix_build": "fix_build", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "run",
@@ -8700,9 +8802,15 @@ def build_fuzz_workflow() -> StateGraph:
         {
             "coverage-analysis": "coverage-analysis",
             "crash-triage": "crash-triage",
+            "fix_crash": "fix_crash",
             "plan": "plan",
             "stop": END,
         },
+    )
+    graph.add_conditional_edges(
+        "fix_crash",
+        _route_after_fix_crash,
+        {"build": "build", "fix_crash": "fix_crash", "stop": END},
     )
     graph.add_conditional_edges(
         "crash-triage",
@@ -8724,9 +8832,9 @@ def build_fuzz_workflow() -> StateGraph:
         _route_after_improve_harness,
         {"plan": "plan", "stop": END},
     )
-    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
-    graph.add_conditional_edges("re-run", _route_after_re_run, {"plan": "plan", "stop": END})
-    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
+    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("re-run", _route_after_re_run, {"fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
 
     return graph
 
@@ -8757,8 +8865,6 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     resume_step = (inp.resume_from_step or "").strip().lower()
     if resume_step == "repro_crash":
         resume_step = "re-build"
-    if resume_step in {"fix_build", "fix_crash"}:
-        resume_step = "plan"
     resume_root = str(inp.resume_repo_root or "").strip()
     stop_after_step = (inp.stop_after_step or "").strip().lower()
     _wf_log(

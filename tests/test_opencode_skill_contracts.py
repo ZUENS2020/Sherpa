@@ -86,8 +86,11 @@ def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:
 def test_repair_skills_include_api_surface_exception_contract() -> None:
     plan_repair_build = _load("plan_repair_build")
     plan_repair_crash = _load("plan_repair_crash")
+    plan_repair_coverage = _load("plan_repair_coverage")
+    improve_in_place = _load("improve_harness_in_place")
     synth_repair_build = _load("synthesize_repair_build")
     synth_repair_crash = _load("synthesize_repair_crash")
+    synth_repair_coverage = _load("synthesize_repair_coverage")
     fix_crash_h = _load("fix_crash_harness_error")
 
     assert "api_surface_exception" in plan_repair_build
@@ -98,6 +101,12 @@ def test_repair_skills_include_api_surface_exception_contract() -> None:
     assert "non_public_api_usage" in synth_repair_crash
     assert "strategy change" in plan_repair_build.lower()
     assert "strategy change" in plan_repair_crash.lower()
+    assert "coverage diagnostics" in plan_repair_coverage.lower()
+    assert "strategy-diff" in plan_repair_coverage.lower()
     assert "fuzz/harness_index.json" in synth_repair_build
     assert "fuzz/harness_index.json" in synth_repair_crash
+    assert "coverage-repair-driven" in synth_repair_coverage
+    assert "strategy change" in synth_repair_coverage.lower()
+    assert "without switching targets" in improve_in_place
+    assert "no doc-only patch in this stage" in improve_in_place
     assert "api_surface_exception" in fix_crash_h

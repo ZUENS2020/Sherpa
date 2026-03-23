@@ -167,7 +167,7 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert gen.commands[1][-1] == "--clean"
 
 
-def test_build_gate_missing_optional_ports_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -197,7 +197,7 @@ def test_build_gate_missing_optional_ports_routes_to_plan(tmp_path: Path, monkey
     assert "system_packages.txt" in out["last_error"]
     assert out["build_error_kind"] == "source"
     assert out["build_error_code"] == "missing_system_packages_declared"
-    assert workflow_graph._route_after_build_state(out) == "plan"
+    assert workflow_graph._route_after_build_state(out) == "fix_build"
 
 
 def test_build_gate_allows_declared_optional_ports(tmp_path: Path, monkeypatch, _no_sleep):
@@ -264,7 +264,7 @@ def test_build_gate_allows_declared_optional_ports_with_alias(tmp_path: Path, mo
     assert out["build_error_code"] == ""
 
 
-def test_build_source_failure_routes_to_plan_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -282,7 +282,7 @@ def test_build_source_failure_routes_to_plan_without_restart(tmp_path: Path, mon
     assert out["build_rc"] == 1
     assert bool(out["last_error"])
     assert out["restart_to_plan"] is False
-    assert workflow_graph._route_after_build_state(out) == "plan"
+    assert workflow_graph._route_after_build_state(out) == "fix_build"
 
 
 def test_build_infra_failure_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
@@ -525,7 +525,7 @@ def test_route_after_build_routes_infra_error_to_plan() -> None:
     assert route == "plan"
 
 
-def test_route_after_build_sends_source_error_to_plan() -> None:
+def test_route_after_build_sends_source_error_to_fix_build() -> None:
     route = workflow_graph._route_after_build_state(
         {
             "failed": False,
@@ -533,7 +533,7 @@ def test_route_after_build_sends_source_error_to_plan() -> None:
             "build_error_kind": "source",
         }
     )
-    assert route == "plan"
+    assert route == "fix_build"
 
 
 def test_route_after_fix_build_sends_repeated_same_signature_back_to_plan(monkeypatch) -> None:
