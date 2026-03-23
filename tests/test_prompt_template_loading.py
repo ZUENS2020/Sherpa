@@ -58,6 +58,10 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "crash/repro stage failure" in crash_repair
     assert "build-diag" in build_repair
     assert "crash-diag" in crash_repair
+    assert "api_surface_exception" in build_repair
+    assert "non_public_api_usage" in build_repair
+    assert "api_surface_exception" in crash_repair
+    assert "non_public_api_usage" in crash_repair
 
 
 def test_synthesize_prompts_keep_stage_contracts_but_are_short():
@@ -87,6 +91,10 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "after a crash/repro-stage failure" in synth_crash_repair
     assert "build-fail" in synth_build_repair
     assert "crash-fail" in synth_crash_repair
+    assert "api_surface_exception" in synth_build_repair
+    assert "non_public_api_usage" in synth_build_repair
+    assert "api_surface_exception" in synth_crash_repair
+    assert "non_public_api_usage" in synth_crash_repair
 
     triage = workflow_common.render_opencode_prompt("crash_triage_with_hint", hint="triage-this")
     assert "classify crash into exactly one label" in triage
@@ -180,3 +188,7 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "crash/repro-stage failure" in plan_repair_crash
     assert "build-failure-driven" in synth_repair_build
     assert "crash/repro evidence" in synth_repair_crash
+    assert "api_surface_exception" in plan_repair_build
+    assert "api_surface_exception" in plan_repair_crash
+    assert "non_public_api_usage" in synth_repair_build
+    assert "non_public_api_usage" in synth_repair_crash

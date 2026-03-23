@@ -22,6 +22,8 @@ Fix harness/build glue errors so the same crashing input no longer fails due to 
 - must produce textual code changes; pure no-op is invalid.
 - do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
 - when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
+- prefer public/stable APIs in harness code; replace internal/private symbols first.
+- if no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
 
 ## Command Policy
 - Allowed: read-only commands only.

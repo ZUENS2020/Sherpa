@@ -1661,6 +1661,158 @@ def _repo_understanding_is_complete(doc: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+_NON_PUBLIC_API_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("detail_namespace", re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*::detail::[A-Za-z_][A-Za-z0-9_]*")),
+    ("detail_namespace_short", re.compile(r"\bdetail::[A-Za-z_][A-Za-z0-9_]*")),
+    ("internal_namespace", re.compile(r"\binternal::[A-Za-z_][A-Za-z0-9_]*")),
+    ("impl_namespace", re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*::impl::[A-Za-z_][A-Za-z0-9_]*")),
+    ("private_namespace", re.compile(r"\bprivate::[A-Za-z_][A-Za-z0-9_]*")),
+    ("internal_symbol_suffix", re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*_internal\b")),
+)
+
+
+def _iter_harness_source_files(repo_root: Path) -> list[Path]:
+    fuzz_dir = repo_root / "fuzz"
+    if not fuzz_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for p in fuzz_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            rel = str(p.relative_to(fuzz_dir)).replace("\\", "/")
+        except Exception:
+            continue
+        if rel.startswith(("out/", "corpus/", "build/")):
+            continue
+        if p.suffix.lower() not in {".c", ".cc", ".cpp", ".cxx", ".java"}:
+            continue
+        out.append(p)
+    return out
+
+
+def _parse_api_surface_exception(doc: dict[str, Any]) -> tuple[bool, str, set[str], bool]:
+    raw = doc.get("api_surface_exception")
+    if raw is None:
+        return True, "", set(), False
+    if not isinstance(raw, dict):
+        return False, "api_surface_exception must be an object when provided", set(), False
+    reason = str(raw.get("reason") or "").strip()
+    evidence = raw.get("evidence")
+    if not reason:
+        return False, "api_surface_exception.reason must be non-empty", set(), False
+    if not isinstance(evidence, list) or not any(str(item or "").strip() for item in evidence):
+        return False, "api_surface_exception.evidence must be a non-empty string array", set(), False
+    approved_symbols: set[str] = set()
+    raw_symbols = raw.get("approved_symbols")
+    if isinstance(raw_symbols, list):
+        for item in raw_symbols:
+            symbol = str(item or "").strip()
+            if symbol:
+                approved_symbols.add(symbol)
+    return True, "", approved_symbols, True
+
+
+def _validate_harness_api_surface(
+    repo_root: Path,
+    *,
+    repo_understanding_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    doc = repo_understanding_doc if isinstance(repo_understanding_doc, dict) else _load_repo_understanding_doc(repo_root)
+    exception_ok, exception_reason, approved_symbols, exception_present = _parse_api_surface_exception(doc)
+    violations: list[dict[str, Any]] = []
+    for src in _iter_harness_source_files(repo_root):
+        try:
+            text = src.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        try:
+            rel = str(src.relative_to(repo_root)).replace("\\", "/")
+        except Exception:
+            rel = str(src)
+        for idx, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("//", "/*", "*")):
+                continue
+            for rule_name, pattern in _NON_PUBLIC_API_PATTERNS:
+                for match in pattern.finditer(line):
+                    symbol = str(match.group(0) or "").strip()
+                    if not symbol:
+                        continue
+                    if approved_symbols and symbol in approved_symbols:
+                        continue
+                    violations.append(
+                        {
+                            "file": rel,
+                            "line": idx,
+                            "symbol": symbol,
+                            "rule": rule_name,
+                        }
+                    )
+                    if len(violations) >= 64:
+                        break
+                if len(violations) >= 64:
+                    break
+            if len(violations) >= 64:
+                break
+    if violations and not exception_ok:
+        return {
+            "ok": False,
+            "error_code": "non_public_api_usage",
+            "error_kind": "harness_api_surface_violation",
+            "reason": (
+                "non-public API usage detected and api_surface_exception is invalid: "
+                + exception_reason
+            ),
+            "violations": violations,
+            "exception_present": exception_present,
+            "exception_valid": False,
+        }
+    if violations and exception_ok and not exception_present:
+        return {
+            "ok": False,
+            "error_code": "non_public_api_usage",
+            "error_kind": "harness_api_surface_violation",
+            "reason": (
+                "non-public API usage detected in harness. Prefer public API first; "
+                "if no public alternative exists, add api_surface_exception with non-empty reason/evidence."
+            ),
+            "violations": violations,
+            "exception_present": False,
+            "exception_valid": False,
+        }
+    return {
+        "ok": True,
+        "error_code": "",
+        "error_kind": "",
+        "reason": "",
+        "violations": [],
+        "exception_present": exception_present,
+        "exception_valid": exception_ok and exception_present,
+    }
+
+
+def _format_api_surface_violation_text(repo_root: Path, validation: dict[str, Any], *, limit: int = 8) -> str:
+    reason = str(validation.get("reason") or "").strip()
+    violations = list(validation.get("violations") or [])
+    lines: list[str] = []
+    if reason:
+        lines.append(reason)
+    lines.append("Read and fix offending harness symbols first:")
+    for item in violations[: max(1, limit)]:
+        rel = str(item.get("file") or "").strip()
+        line_no = int(item.get("line") or 0)
+        symbol = str(item.get("symbol") or "").strip()
+        path_obj = (repo_root / rel).resolve() if rel else repo_root.resolve()
+        loc = f"{path_obj}:{line_no}" if line_no > 0 else str(path_obj)
+        lines.append(f"- Read and fix {loc} (replace `{symbol}` with public/stable API).")
+    lines.append(
+        "If no public alternative exists, add `api_surface_exception` to "
+        "`fuzz/repo_understanding.json` with non-empty `reason` and `evidence`."
+    )
+    return "\n".join(lines).strip()
+
+
 def _load_build_strategy_doc(repo_root: Path) -> dict[str, Any]:
     path = _build_scaffold_path(repo_root)
     if not path.is_file():
@@ -3138,6 +3290,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             repair_lines.append("=== repair stderr tail ===\n" + "\n".join(repair_stderr_tail.splitlines()[-200:]))
         if repair_stdout_tail:
             repair_lines.append("=== repair stdout tail ===\n" + "\n".join(repair_stdout_tail.splitlines()[-120:]))
+        if repair_error_code == "non_public_api_usage":
+            repair_lines.extend(
+                [
+                    "Repair priority: resolve non-public API usage in harness first.",
+                    "Replace internal/private symbols (for example `detail::`, `internal::`, `impl::`) with public/stable APIs.",
+                    "When no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.",
+                ]
+            )
         if repair_recent_attempts:
             repair_lines.append(
                 "=== repair recent attempts ===\n"
@@ -3689,6 +3849,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         repo_understanding_ok, repo_understanding_reason = _repo_understanding_is_complete(repo_understanding)
         if not repo_understanding_ok:
             raise HarnessGeneratorError(f"synthesize incomplete: {repo_understanding_reason}")
+        api_surface_check = _validate_harness_api_surface(
+            gen.repo_root,
+            repo_understanding_doc=repo_understanding,
+        )
+        if not bool(api_surface_check.get("ok")):
+            violation_text = _format_api_surface_violation_text(gen.repo_root, api_surface_check)
+            raise HarnessGeneratorError(
+                "synthesize incomplete: non_public_api_usage: "
+                + violation_text
+            )
         repo_understanding_path = str(_repo_understanding_path(gen.repo_root))
         try:
             build_strategy_path, build_strategy_doc = _write_build_strategy_doc(gen.repo_root)
@@ -4462,7 +4632,65 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
         }
         return "fuzz/system_packages.txt" in normalized
 
+    def _api_surface_guard_out(
+        *,
+        changed_paths_count: int,
+        last_diff_paths: list[str] | None,
+        rule_hit: str = "",
+    ) -> FuzzWorkflowRuntimeState | None:
+        if changed_paths_count <= 0:
+            return None
+        api_surface_check = _validate_harness_api_surface(gen.repo_root)
+        if bool(api_surface_check.get("ok")):
+            return None
+        violation_text = _format_api_surface_violation_text(gen.repo_root, api_surface_check)
+        updated_history, updated_rule_hits = _append_attempt(
+            "rejected_non_public_api_usage",
+            rejection_reason="non_public_api_usage",
+            rule_hit=rule_hit,
+            changed_paths_count=changed_paths_count,
+        )
+        return cast(
+            FuzzWorkflowRuntimeState,
+            {
+                **state,
+                "last_step": "fix_build",
+                "last_error": violation_text,
+                "codex_hint": "",
+                "message": "fix_build rejected due to non-public API usage in harness",
+                "failed": False,
+                "build_error_kind": "source",
+                "build_error_code": "non_public_api_usage",
+                "build_error_signature_short": _sha256_text(violation_text)[:12],
+                "fix_build_noop_streak": 0,
+                "fix_build_attempt_history": updated_history,
+                "fix_build_rule_hits": updated_rule_hits,
+                "fix_build_terminal_reason": "non_public_api_usage",
+                "fix_build_last_diff_paths": list(last_diff_paths or []),
+                "fix_action_type": "rule" if rule_hit else "opencode",
+                "fix_effect": "stalled",
+                "restart_to_plan": True,
+                "restart_to_plan_reason": "non_public_api_usage",
+                "restart_to_plan_stage": "fix_build",
+                "restart_to_plan_error_text": violation_text,
+                "repair_mode": True,
+                "repair_origin_stage": "build",
+                "repair_error_kind": "harness_api_surface_violation",
+                "repair_error_code": "non_public_api_usage",
+                "repair_signature": _sha256_text(violation_text)[:12],
+                "repair_stdout_tail": "",
+                "repair_stderr_tail": violation_text,
+            },
+        )
+
     def _success_out(message: str, *, outcome: str, rule_hit: str = "", changed_paths_count: int = 1, last_diff_paths: list[str] | None = None) -> FuzzWorkflowRuntimeState:
+        guarded = _api_surface_guard_out(
+            changed_paths_count=changed_paths_count,
+            last_diff_paths=last_diff_paths,
+            rule_hit=rule_hit,
+        )
+        if guarded is not None:
+            return guarded
         updated_history, updated_rule_hits = _append_attempt(
             outcome,
             rule_hit=rule_hit,
@@ -5672,6 +5900,12 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 codex_hint.strip()
                 + "\nThe current scaffold lacks grounded repository understanding. Repair `fuzz/repo_understanding.json` first with concrete build facts and evidence, then make `fuzz/build.py` match it."
             )
+        if build_error_code == "non_public_api_usage":
+            codex_hint = (
+                codex_hint.strip()
+                + "\nDiagnostics indicate non-public/internal API usage in harness code. Replace offending symbols with public/stable APIs first."
+                + "\nIf no public API exists, declare `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (and optional `approved_symbols`)."
+            )
         if recent_history and any("noop" in str(x.get("outcome") or "") for x in recent_history):
             codex_hint = (
                 codex_hint.strip()
@@ -5883,6 +6117,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fix_action_type": "opencode",
             "fix_effect": fix_effect,
         }
+        if changed_paths_count > 0:
+            guarded = _api_surface_guard_out(
+                changed_paths_count=changed_paths_count,
+                last_diff_paths=effective_changed_paths,
+                rule_hit="",
+            )
+            if guarded is not None:
+                _wf_log(cast(dict[str, Any], guarded), f"<- fix_build blocked=non-public-api dt={_fmt_dt(time.perf_counter()-t0)}")
+                return guarded
         if changed_paths_count == 0 and next_noop_streak >= max_noop_streak:
             out["failed"] = False
             out["fix_build_terminal_reason"] = "fix_build_noop_streak_exceeded"
@@ -7320,6 +7563,32 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
                 "fix_patch_bytes": int(patch_bytes),
             }
             _wf_log(cast(dict[str, Any], out), f"<- fix-harness err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+        api_surface_check = _validate_harness_api_surface(repo_root)
+        if not bool(api_surface_check.get("ok")):
+            violation_text = _format_api_surface_violation_text(repo_root, api_surface_check)
+            out = {
+                **state,
+                "last_step": "fix-harness",
+                "last_error": violation_text,
+                "fix_harness_attempts": attempts,
+                "restart_to_plan": True,
+                "restart_to_plan_reason": "non_public_api_usage",
+                "restart_to_plan_stage": "fix-harness",
+                "restart_to_plan_error_text": violation_text,
+                "repair_mode": True,
+                "repair_origin_stage": "crash",
+                "repair_error_kind": "harness_api_surface_violation",
+                "repair_error_code": "non_public_api_usage",
+                "repair_signature": _sha256_text(violation_text)[:12],
+                "repair_stdout_tail": "",
+                "repair_stderr_tail": violation_text,
+                "message": "fix-harness blocked by non-public API usage",
+                "fix_patch_path": str(patch_path) if patch_path.exists() else "",
+                "fix_patch_files": changed_files,
+                "fix_patch_bytes": int(patch_bytes),
+            }
+            _wf_log(cast(dict[str, Any], out), f"<- fix-harness err=non-public-api dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
         out = {
             **state,
