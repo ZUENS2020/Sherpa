@@ -109,6 +109,7 @@ Goal:
 
 Coverage-repair focus:
 - read coverage diagnostics first (`seed families`, `quality flags`, `plateau/replan reason`, depth and bias fields)
+- consume `SeedFeedback` and `HarnessFeedback` first; use them to decide seed-modeling vs harness-path changes
 - explicitly state strategy changes versus the latest failed cycle
 - prefer actions that improve reachable parser/decoder/archive behavior depth
 - keep execution targets mappable to real harness files via `fuzz/harness_index.json`
@@ -262,6 +263,7 @@ Required outputs:
 
 Coverage-repair constraints:
 - consume coverage diagnostics first (`seed families`, quality gaps, plateau reason)
+- consume `SeedFeedback` and `HarnessFeedback` first; apply at least one change linked to these signals
 - include and apply at least one material strategy change from previous cycle
 - avoid no-op doc-only edits
 - keep selected/final target, execution plan, and harness index consistent
@@ -294,6 +296,7 @@ Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
 - prioritize the current coverage diagnostic gaps first (seed families, modeling, dictionary, call path).
+- consume `SeedFeedback` and `HarnessFeedback` before editing; include one concrete change tied to these signals.
 - pure doc-only edits are invalid in this stage.
 - include at least one material strategy change vs the previous failed cycle.
 

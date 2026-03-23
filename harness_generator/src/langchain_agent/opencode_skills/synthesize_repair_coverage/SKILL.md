@@ -5,6 +5,7 @@ Repair scaffold files under `fuzz/` for coverage-improvement replan cycles.
 
 ## Required Inputs
 - coverage diagnostics from coordinator context (`coverage_*`, `repair_*`)
+- `SeedFeedback` and `HarnessFeedback` blocks from coordinator context (when provided)
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
 - `fuzz/harness_index.json` (if present)
@@ -20,6 +21,7 @@ Repair scaffold files under `fuzz/` for coverage-improvement replan cycles.
 
 ## Acceptance Criteria
 - edits are coverage-repair-driven (seed/modeling/call-path/depth), not cosmetic.
+- edits explicitly consume `SeedFeedback` and `HarnessFeedback` and link changes to those signals.
 - this cycle must include a strategy change from the previous failed coverage cycle.
 - no doc-only no-op patches; scaffold must materially change where needed.
 - `fuzz/execution_plan.json`, harness files, and `fuzz/harness_index.json` stay consistent.

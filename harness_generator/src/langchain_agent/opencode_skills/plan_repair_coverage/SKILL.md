@@ -5,6 +5,7 @@ Repair planning artifacts after a coverage plateau / replan trigger.
 
 ## Required Inputs
 - coverage diagnostics from coordinator context (`coverage_*`, `repair_*`)
+- `SeedFeedback` and `HarnessFeedback` blocks from coordinator context (when provided)
 - `fuzz/PLAN.md` (if present)
 - `fuzz/targets.json` (if present)
 - `fuzz/execution_plan.json` (if present)
@@ -18,6 +19,7 @@ Repair planning artifacts after a coverage plateau / replan trigger.
 
 ## Acceptance Criteria
 - plan consumes coverage diagnostics first (plateau reason, seed family gaps, quality flags).
+- plan consumes `SeedFeedback` and `HarnessFeedback` first and maps each chosen action to one of these signals.
 - plan describes at least one material strategy change, not a cosmetic rewrite.
 - target choices remain runtime-viable and increase depth potential.
 - plan keeps `fuzz/execution_plan.json` mappable to `fuzz/harness_index.json`.

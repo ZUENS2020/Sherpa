@@ -901,6 +901,75 @@ def _seed_quality_from_run(
             quality_flags.append("archive_seed_validity_low")
         if archive_malformed_ratio > archive_max_malformed_ratio:
             quality_flags.append("archive_seed_malformed_ratio_high")
+
+    required_total = len([x for x in required_families if x])
+    covered_required = len([x for x in required_families if x and x in set(covered_families)])
+    family_coverage_ratio = (
+        float(covered_required) / float(required_total)
+        if required_total > 0
+        else 1.0
+    )
+    archive_validity_component = (
+        max(0.0, min(1.0, float(archive_valid_ratio)))
+        if seed_profile == "archive-container"
+        else 1.0
+    )
+    retention_component = max(0.0, min(1.0, retention_files))
+    validity = max(
+        0.0,
+        min(
+            1.0,
+            0.60 * family_coverage_ratio
+            + 0.25 * archive_validity_component
+            + 0.15 * retention_component,
+        ),
+    )
+
+    cov_gain = max(0, int(final_stats.get("cov") or 0) - inited_cov)
+    ft_gain = max(0, int(final_stats.get("ft") or 0) - inited_ft)
+    early_units_norm = max(0.0, min(1.0, float(max(early_new_units_30s, early_new_units_60s)) / 16.0))
+    coverage_potential = max(
+        0.0,
+        min(
+            1.0,
+            0.45 * max(0.0, min(1.0, float(cov_gain) / 24.0))
+            + 0.30 * max(0.0, min(1.0, float(ft_gain) / 240.0))
+            + 0.25 * early_units_norm,
+        ),
+    )
+
+    novelty = max(
+        0.0,
+        min(
+            1.0,
+            0.50 * max(0.0, min(1.0, float(early_new_units_60s) / 24.0))
+            + 0.30 * family_coverage_ratio
+            + 0.20 * max(0.0, min(1.0, retention_component)),
+        ),
+    )
+
+    redundancy_penalty = 0.0
+    if "high_homogeneity" in quality_flags:
+        redundancy_penalty += 0.45
+    if "low_retention" in quality_flags:
+        redundancy_penalty += 0.20
+    if "low_early_yield" in quality_flags:
+        redundancy_penalty += 0.20
+    if "missing_required_families" in quality_flags:
+        redundancy_penalty += 0.15
+    redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
+
+    alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
+    seed_score = max(
+        0.0,
+        min(
+            1.0,
+            alpha * coverage_potential
+            + beta * validity
+            + gamma * novelty
+            - eta * redundancy_penalty,
+        ),
+    )
     return {
         "initial_corpus_files": initial_corpus_files,
         "initial_corpus_bytes": initial_corpus_bytes,
@@ -921,6 +990,18 @@ def _seed_quality_from_run(
         "archive_min_valid_ratio": archive_min_valid_ratio,
         "archive_malformed_ratio": archive_malformed_ratio,
         "archive_max_malformed_ratio": archive_max_malformed_ratio,
+        "seed_score": float(seed_score),
+        "seed_score_components": {
+            "alpha": alpha,
+            "beta": beta,
+            "gamma": gamma,
+            "eta": eta,
+            "coverage_potential": float(coverage_potential),
+            "validity": float(validity),
+            "novelty": float(novelty),
+            "redundancy_penalty": float(redundancy_penalty),
+            "family_coverage_ratio": float(family_coverage_ratio),
+        },
         "quality_flags": quality_flags,
     }
 
@@ -3921,6 +4002,55 @@ EOF
         archive_malformed_ratio = float(filtered_meta.get("archive_malformed_ratio") or 0.0)
         archive_valid_count = int(filtered_meta.get("archive_valid_count") or 0)
         archive_max_malformed_ratio = float(filtered_meta.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio())
+        seed_family_cov = dict(filtered_meta.get("seed_family_coverage") or {})
+        required_total = max(0, int(seed_family_cov.get("required_total") or 0))
+        covered_required = max(0, int(seed_family_cov.get("covered_required") or 0))
+        family_coverage_ratio = (
+            float(covered_required) / float(required_total)
+            if required_total > 0
+            else 1.0
+        )
+        retention_ai = float(filtered_meta.get("retention_ratio_ai") or 0.0)
+        retention_repo = float(filtered_meta.get("retention_ratio_repo") or 0.0)
+        retention_radamsa = float(filtered_meta.get("retention_ratio_radamsa") or 0.0)
+        retention_blended = max(
+            0.0,
+            min(
+                1.0,
+                0.50 * retention_ai + 0.35 * retention_repo + 0.15 * retention_radamsa,
+            ),
+        )
+        validity_component = (
+            max(0.0, min(1.0, archive_valid_ratio))
+            if seed_profile == "archive-container"
+            else 1.0
+        )
+        novelty_component = max(
+            0.0,
+            min(
+                1.0,
+                0.70 * family_coverage_ratio + 0.30 * retention_blended,
+            ),
+        )
+        redundancy_penalty = 0.0
+        if int(filtered_meta.get("seed_noise_rejected_count") or 0) > 0:
+            redundancy_penalty += 0.25
+        if int((filtered_meta.get("filtered_by_rule_breakdown") or {}).get("shape") or 0) > 0:
+            redundancy_penalty += 0.35
+        if int((filtered_meta.get("filtered_by_rule_breakdown") or {}).get("family") or 0) > 0:
+            redundancy_penalty += 0.25
+        redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
+        alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
+        seed_score_prefuzz = max(
+            0.0,
+            min(
+                1.0,
+                alpha * novelty_component
+                + beta * validity_component
+                + gamma * retention_blended
+                - eta * redundancy_penalty,
+            ),
+        )
         if (
             seed_profile == "archive-container"
             and self._seed_archive_validate_enabled()
@@ -3965,6 +4095,18 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "seed_score": float(seed_score_prefuzz),
+            "seed_score_components": {
+                "alpha": alpha,
+                "beta": beta,
+                "gamma": gamma,
+                "eta": eta,
+                "coverage_potential": float(novelty_component),
+                "validity": float(validity_component),
+                "novelty": float(retention_blended),
+                "redundancy_penalty": float(redundancy_penalty),
+                "family_coverage_ratio": float(family_coverage_ratio),
+            },
         }
         try:
             seed_quality_path.write_text(json.dumps(seed_quality_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -4008,6 +4150,8 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "seed_score": float(seed_quality_doc.get("seed_score") or 0.0),
+            "seed_score_components": dict(seed_quality_doc.get("seed_score_components") or {}),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
             "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
             "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),

@@ -73,6 +73,9 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_noise_rejected_count: int
     coverage_missing_execution_targets: list[str]
     coverage_seed_family_coverage: dict[str, Any]
+    coverage_seed_feedback: dict[str, Any]
+    coverage_harness_feedback: dict[str, Any]
+    coverage_quality_oracle: str
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
@@ -1606,6 +1609,36 @@ def _has_codex_key() -> bool:
     return _wf_common.has_codex_key()
 
 
+def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
+    quality = dict(state.get("coverage_seed_quality") or {})
+    return {
+        "seed_profile": str(state.get("coverage_seed_profile") or ""),
+        "required_families": list(state.get("coverage_seed_families_required") or []),
+        "covered_families": list(state.get("coverage_seed_families_covered") or []),
+        "missing_families": list(state.get("coverage_seed_families_missing") or []),
+        "quality_flags": list(state.get("coverage_quality_flags") or quality.get("quality_flags") or []),
+        "seed_score": float(quality.get("seed_score") or 0.0),
+        "seed_score_components": dict(quality.get("seed_score_components") or {}),
+        "seed_counts_raw": dict(state.get("coverage_seed_counts_raw") or {}),
+        "seed_counts_filtered": dict(state.get("coverage_seed_counts_filtered") or {}),
+        "seed_noise_rejected_count": int(state.get("coverage_seed_noise_rejected_count") or 0),
+        "corpus_sources": list(state.get("coverage_corpus_sources") or []),
+    }
+
+
+def _build_harness_feedback(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "execution_plan_path": str(state.get("execution_plan_path") or ""),
+        "harness_index_path": str(state.get("harness_index_path") or ""),
+        "selected_target_api": str(state.get("selected_target_api") or ""),
+        "coverage_target_api": str(state.get("coverage_target_api") or ""),
+        "missing_execution_targets": list(state.get("coverage_missing_execution_targets") or []),
+        "built_targets": list(state.get("built_targets") or []),
+        "missing_targets": list(state.get("missing_targets") or []),
+        "target_build_matrix": list(state.get("target_build_matrix") or []),
+    }
+
+
 def _slug_from_repo_url(repo_url: str) -> str:
     return _wf_common.slug_from_repo_url(repo_url)
 
@@ -3087,6 +3120,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
         repair_hint = "\n\n".join(part for part in repair_blocks if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
+    seed_feedback = dict(state.get("coverage_seed_feedback") or {})
+    harness_feedback = dict(state.get("coverage_harness_feedback") or {})
+    quality_oracle = str(state.get("coverage_quality_oracle") or "").strip()
+    if seed_feedback or harness_feedback or quality_oracle:
+        feedback_lines: list[str] = ["Coverage feedback signals for planning:"]
+        if quality_oracle:
+            feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        if seed_feedback:
+            feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
+        if harness_feedback:
+            feedback_lines.append("=== HarnessFeedback ===\n" + json.dumps(harness_feedback, ensure_ascii=False, indent=2))
+        feedback_hint = "\n\n".join(feedback_lines)
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     planning_feedback = _collect_feedback_for_group(gen.repo_root, "planning_synth", limit=3)
     if planning_feedback:
         feedback_hint = "Recent planning/synthesis failures (use these to avoid repeating the same mistakes):\n" + planning_feedback
@@ -3436,6 +3482,22 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             )
         repair_hint = "\n\n".join(part for part in repair_lines if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
+    seed_feedback = dict(state.get("coverage_seed_feedback") or {})
+    harness_feedback = dict(state.get("coverage_harness_feedback") or {})
+    quality_oracle = str(state.get("coverage_quality_oracle") or "").strip()
+    if seed_feedback or harness_feedback or quality_oracle:
+        feedback_lines: list[str] = [
+            "Coverage feedback signals for scaffold synthesis:",
+            "- Consume SeedFeedback/HarnessFeedback first, then decide whether to change seed modeling, harness logic, or target mapping.",
+        ]
+        if quality_oracle:
+            feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        if seed_feedback:
+            feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
+        if harness_feedback:
+            feedback_lines.append("=== HarnessFeedback ===\n" + json.dumps(harness_feedback, ensure_ascii=False, indent=2))
+        feedback_hint = "\n\n".join(feedback_lines)
+        hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     restored_from_cache = False
     try:
         restored_from_cache = _restore_cached_build_template_if_missing(gen.repo_root)
@@ -4558,6 +4620,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             next_state["restart_to_plan_error_text"] = ""
             next_state["restart_to_plan_report_path"] = ""
             _mark_build_repair_state(kind="source", code="partial_build_undercoverage", sig=str(next_state.get("build_error_signature_short") or ""))
+            if isinstance(next_state.get("repair_error_digest"), dict):
+                next_state["repair_error_digest"]["oracle"] = "undercoverage_gate"
             next_state["build_gate_reason"] = "partial_build_undercoverage"
             next_state["built_targets"] = sorted(built_names)
             next_state["missing_targets"] = missing_targets
@@ -4619,6 +4683,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 next_state["restart_to_plan_error_text"] = ""
                 next_state["restart_to_plan_report_path"] = ""
                 _mark_build_repair_state(kind="source", code="missing_system_packages_declared", sig=str(next_state.get("build_error_signature_short") or ""))
+                if isinstance(next_state.get("repair_error_digest"), dict):
+                    next_state["repair_error_digest"]["oracle"] = "undercoverage_gate"
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build gate missing-optional-deps "
@@ -6988,6 +7054,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if observed_api in {"println", "fmt::println", "print", "fmt::print", "format", "fmt::format", "format_to", "fmt::format_to", "vformat", "fmt::vformat"}:
             quality_flags.append("generic_wrapper_fallback")
         out["coverage_quality_flags"] = sorted({flag for flag in quality_flags if flag})
+        out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
+        out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
         if run_error_kind:
             last_detail = run_details[-1] if run_details else {}
             attempt_index = int(state.get("repair_attempt_index") or 0) + 1
@@ -7151,9 +7219,16 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     "repo_examples_missing",
                     "seed_family_undercovered",
                     "seed_noise_high",
+                    "missing_execution_targets",
                 }
             )
         )
+        quality_degraded = bool(
+            seed_quality_issue
+            or list(state.get("coverage_missing_execution_targets") or [])
+            or (requested_replan and plateau_no_gain)
+        )
+        quality_oracle = "quality_degraded" if quality_degraded else "ok"
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
@@ -7243,6 +7318,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_covered": seed_families_covered,
                 "seed_families_missing": seed_families_missing,
                 "quality_flags": quality_flags,
+                "quality_oracle": quality_oracle,
                 "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
                 "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
@@ -7269,6 +7345,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_seed_families_covered": seed_families_covered,
             "coverage_seed_families_missing": seed_families_missing,
             "coverage_quality_flags": quality_flags,
+            "coverage_quality_oracle": quality_oracle,
             "coverage_target_depth_score": current_depth_score,
             "coverage_target_depth_class": current_depth_class,
             "coverage_selection_bias_reason": current_selection_bias_reason,
@@ -7285,6 +7362,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "message": "coverage analysis done",
         }
+        out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
+        out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
         _wf_log(
             cast(dict[str, Any], out),
             f"<- coverage-analysis improve={int(should_improve)} {reason} dt={_fmt_dt(time.perf_counter()-t0)}",
@@ -7334,6 +7413,9 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         seed_counts_raw = dict(state.get("coverage_seed_counts_raw") or {})
         seed_counts_filtered = dict(state.get("coverage_seed_counts_filtered") or {})
         seed_noise_rejected_count = int(state.get("coverage_seed_noise_rejected_count") or 0)
+        seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
+        harness_feedback = dict(state.get("coverage_harness_feedback") or _build_harness_feedback(cast(dict[str, Any], state)))
+        quality_oracle = str(state.get("coverage_quality_oracle") or "ok")
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
@@ -7347,6 +7429,9 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Replan reason: {replan_reason or cov_reason or 'coverage plateau'}\n"
+                f"- Quality oracle: {quality_oracle}\n"
+                f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
+                f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
                 "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream."
             )
@@ -7368,6 +7453,9 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Seed filtered counts: {seed_counts_filtered or {}}\n"
                 f"- Seed noise rejected: {seed_noise_rejected_count}\n"
                 f"- Seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
+                f"- Quality oracle: {quality_oracle}\n"
+                f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
+                f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Diagnostic summary: {cov_reason}"
@@ -7440,6 +7528,9 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                     "seed_counts_filtered": seed_counts_filtered,
                     "seed_noise_rejected_count": seed_noise_rejected_count,
                     "seed_quality": seed_quality,
+                    "quality_oracle": quality_oracle,
+                    "seed_feedback": seed_feedback,
+                    "harness_feedback": harness_feedback,
                 }
                 if replan_required
                 else dict(state.get("repair_error_digest") or {})
@@ -8480,9 +8571,7 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     if not (state.get("last_error") or "").strip():
         return "run"
-    if str(state.get("build_error_kind") or "").strip().lower() == "infra":
-        return "plan"
-    return "fix_build"
+    return "plan"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
@@ -8490,7 +8579,7 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
     if run_error_kind:
-        return "fix_crash"
+        return "plan"
     if bool(state.get("crash_found")):
         return "crash-triage"
     return "coverage-analysis"
@@ -8598,7 +8687,7 @@ def _route_after_re_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "fix_crash"
+        return "plan"
     if bool(state.get("re_build_done")) and bool(state.get("re_build_ok")):
         return "re-run"
     return "stop"
@@ -8612,9 +8701,9 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "fix_crash"
+        return "plan"
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
-        return "fix_crash"
+        return "plan"
     return "stop"
 
 
