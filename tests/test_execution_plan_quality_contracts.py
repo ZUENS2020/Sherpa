@@ -15,6 +15,10 @@ def test_workflow_has_execution_plan_helpers_and_build_gate() -> None:
     assert "def _build_execution_plan_doc(" in text
     assert "def _write_execution_plan_doc(" in text
     assert "def _load_execution_plan_doc(" in text
+    assert "def _harness_index_path(repo_root: Path) -> Path:" in text
+    assert "def _build_harness_index_doc(" in text
+    assert "def _write_harness_index_doc(" in text
+    assert "def _validate_execution_plan_harness_consistency(" in text
     assert "partial_build_undercoverage" in text
     assert "SHERPA_EXECUTION_TARGETS_MIN_REQUIRED" in text
     assert "coverage_missing_execution_targets" in text
@@ -23,6 +27,7 @@ def test_workflow_has_execution_plan_helpers_and_build_gate() -> None:
 def test_prompts_and_skills_reference_execution_plan_contract() -> None:
     prompts = PROMPTS.read_text(encoding="utf-8")
     assert "fuzz/execution_plan.json" in prompts
+    assert "fuzz/harness_index.json" in prompts
     assert "execution_priority" in prompts
     assert "must_run" in prompts
 
@@ -34,4 +39,5 @@ def test_prompts_and_skills_reference_execution_plan_contract() -> None:
     assert "min_required_built_targets" in plan
     assert "fuzz/execution_plan.json" in synth
     assert "multiple execution targets" in synth
+    assert "fuzz/harness_index.json" in synth
     assert "fuzz/execution_plan.json" in fix_build

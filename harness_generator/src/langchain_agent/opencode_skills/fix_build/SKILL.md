@@ -37,6 +37,7 @@ def find_static_lib(repo_root):
 - if editing `fuzz/repo_understanding.json`, keep `chosen_target_api` as API identifier (not `fuzz/*.cc`-style path), keep `build_system != unknown`, and keep `evidence` as non-empty string array.
 - when execution plan requires multiple targets, do not "fix" build by dropping to single-target-only output.
 - when build diagnostics indicate internal/private API usage errors, replace those usages with public/stable APIs first; do not patch by switching to other private symbols.
+- if no public alternative exists, record `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
 
 ## Acceptance Criteria
 - fix is evidence-driven and minimal.

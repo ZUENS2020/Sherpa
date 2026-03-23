@@ -24,6 +24,7 @@ def test_synthesize_contract_matches_workflow_hard_checks() -> None:
     assert "`evidence` must be a non-empty string array" in synth
     assert "never use shell substitutions like `$(nproc)`" in synth
     assert '["-j", str(os.cpu_count() or 1)]' in synth
+    assert "`fuzz/harness_index.json`" in synth
 
 
 def test_synthesize_completion_contract_repairs_harness_and_understanding() -> None:
@@ -36,6 +37,7 @@ def test_synthesize_completion_contract_repairs_harness_and_understanding() -> N
     assert "not a harness file path" in complete
     assert 'build_system.lower() != "unknown"' in complete
     assert "if `fuzz/build.py` exists and uses invalid parallel style" in complete
+    assert "`fuzz/harness_index.json`" in complete
 
 
 def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
@@ -79,3 +81,23 @@ def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:
     assert "Avoid hand-crafted magic-only files" in seed
     assert "malformed/truncated seeds <= 30%" in seed
     assert "at least one semantically valid archive sample exists" in seed
+
+
+def test_repair_skills_include_api_surface_exception_contract() -> None:
+    plan_repair_build = _load("plan_repair_build")
+    plan_repair_crash = _load("plan_repair_crash")
+    synth_repair_build = _load("synthesize_repair_build")
+    synth_repair_crash = _load("synthesize_repair_crash")
+    fix_crash_h = _load("fix_crash_harness_error")
+
+    assert "api_surface_exception" in plan_repair_build
+    assert "api_surface_exception" in plan_repair_crash
+    assert "api_surface_exception" in synth_repair_build
+    assert "api_surface_exception" in synth_repair_crash
+    assert "non_public_api_usage" in synth_repair_build
+    assert "non_public_api_usage" in synth_repair_crash
+    assert "strategy change" in plan_repair_build.lower()
+    assert "strategy change" in plan_repair_crash.lower()
+    assert "fuzz/harness_index.json" in synth_repair_build
+    assert "fuzz/harness_index.json" in synth_repair_crash
+    assert "api_surface_exception" in fix_crash_h

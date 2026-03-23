@@ -15,12 +15,17 @@ Repair scaffold files under `fuzz/` for crash/repro-stage failures.
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Acceptance Criteria
 - edits are tied to crash/repro evidence and keep crash-path reachability.
 - selected vs final runtime target relation is explicit and technically justified.
 - when signatures repeat, this round must change strategy.
+- update `fuzz/harness_index.json` so each execution target maps to an existing harness source file.
 - no “fix” by disabling harness behavior or deleting crash-relevant code paths.
+- public/stable APIs are mandatory by default in harness code.
+- if non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
+- when diagnostics contain `non_public_api_usage`, replace offending symbols first before any unrelated edits.
 
 ## Command Policy
 - Allowed: read-only commands only.

@@ -79,6 +79,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     target_analysis_summary: str
     selected_targets_path: str
     execution_plan_path: str
+    harness_index_path: str
     repo_understanding_path: str
     build_strategy_path: str
     build_mode: str
@@ -196,6 +197,9 @@ class FuzzWorkflowState(TypedDict, total=False):
     repair_stdout_tail: str
     repair_stderr_tail: str
     repair_recent_attempts: list[dict[str, Any]]
+    repair_error_digest: dict[str, Any]
+    repair_attempt_index: int
+    repair_strategy_force_change: bool
 
 
 class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
@@ -585,6 +589,9 @@ def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "repair_stderr_tail": str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip(),
         "repair_error_text": error_text,
         "repair_recent_attempts": list(state.get("repair_recent_attempts") or []),
+        "repair_attempt_index": int(state.get("repair_attempt_index") or 0),
+        "repair_strategy_force_change": bool(state.get("repair_strategy_force_change") or False),
+        "repair_error_digest": dict(state.get("repair_error_digest") or {}),
     }
     return snapshot
 
@@ -766,6 +773,10 @@ def _execution_plan_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "execution_plan.json"
 
 
+def _harness_index_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "harness_index.json"
+
+
 def _observed_target_path(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "observed_target.json"
 
@@ -917,6 +928,125 @@ def _write_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]
 
 def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     path = _execution_plan_path(repo_root)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _discover_harness_sources(repo_root: Path) -> list[Path]:
+    fuzz_dir = repo_root / "fuzz"
+    if not fuzz_dir.is_dir():
+        return []
+    out: list[Path] = []
+    try:
+        for p in fuzz_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(fuzz_dir).as_posix()
+            if (
+                rel.startswith("out/")
+                or rel.startswith("corpus/")
+                or rel.startswith("build-work/")
+                or "/CMakeFiles/" in rel
+            ):
+                continue
+            if p.suffix.lower() in {".c", ".cc", ".cpp", ".cxx", ".java"}:
+                out.append(p)
+    except Exception:
+        return []
+    return sorted(out)
+
+
+def _normalize_exec_target_token(value: str) -> str:
+    s = str(value or "").strip().lower()
+    if not s:
+        return ""
+    s = Path(s).name
+    s = re.sub(r"\.(?:c|cc|cpp|cxx|java)$", "", s)
+    s = re.sub(r"_fuzz(?:er)?$", "", s)
+    s = re.sub(r"[^a-z0-9_]+", "_", s).strip("_")
+    return s
+
+
+def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any] | None = None) -> dict[str, Any]:
+    execution_plan = dict(execution_plan_doc or _load_execution_plan_doc(repo_root))
+    execution_targets = [
+        item for item in list(execution_plan.get("execution_targets") or [])
+        if isinstance(item, dict)
+    ]
+    sources = _discover_harness_sources(repo_root)
+    by_norm: dict[str, str] = {}
+    all_harness_rel: list[str] = []
+    for src in sources:
+        rel = src.relative_to(repo_root).as_posix()
+        all_harness_rel.append(rel)
+        norm = _normalize_exec_target_token(src.stem)
+        if norm and norm not in by_norm:
+            by_norm[norm] = rel
+
+    mappings: list[dict[str, Any]] = []
+    missing_targets: list[str] = []
+    used_sources: set[str] = set()
+    for item in execution_targets:
+        target_name = str(item.get("target_name") or "").strip()
+        expected = str(item.get("expected_fuzzer_name") or target_name).strip()
+        api = str(item.get("api") or "").strip()
+        candidates: list[tuple[str, str]] = [
+            (_normalize_exec_target_token(expected), "expected_fuzzer_name"),
+            (_normalize_exec_target_token(target_name), "target_name"),
+            (_normalize_exec_target_token(api), "api"),
+        ]
+        source_path = ""
+        matched_by = ""
+        for normalized, origin in candidates:
+            if not normalized:
+                continue
+            found = by_norm.get(normalized)
+            if found:
+                source_path = found
+                matched_by = origin
+                break
+        if source_path:
+            used_sources.add(source_path)
+        else:
+            label = target_name or expected or api
+            if label:
+                missing_targets.append(label)
+        mappings.append(
+            {
+                "target_name": target_name,
+                "expected_fuzzer_name": expected,
+                "api": api,
+                "must_run": bool(item.get("must_run") or False),
+                "source_path": source_path,
+                "matched_by": matched_by,
+            }
+        )
+
+    extra_harnesses = [rel for rel in all_harness_rel if rel not in used_sources]
+    return {
+        "schema_version": 1,
+        "execution_plan_path": _execution_plan_path(repo_root).relative_to(repo_root).as_posix(),
+        "mappings": mappings,
+        "missing_targets": missing_targets,
+        "extra_harnesses": extra_harnesses,
+    }
+
+
+def _write_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
+    path = _harness_index_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = _build_harness_index_doc(repo_root, execution_plan_doc=execution_plan_doc)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path), doc
+
+
+def _load_harness_index_doc(repo_root: Path) -> dict[str, Any]:
+    path = _harness_index_path(repo_root)
     if not path.is_file():
         return {}
     try:
@@ -1310,6 +1440,8 @@ def _build_file_targeted_fix_lines(
         if not raw_path:
             continue
         path = raw_path.replace("\\", "/")
+        if "/build-work/" in path or "/CMakeFiles/" in path or path.startswith("build-work/"):
+            continue
         if path.startswith("/"):
             abs_path = path
         else:
@@ -1322,7 +1454,123 @@ def _build_file_targeted_fix_lines(
             lines.append(f"- Read and fix `{loc}` (linkage/build glue mismatch; align build.py/link inputs with this source usage).")
         else:
             lines.append(f"- Read and fix `{loc}` based on the failing diagnostic evidence.")
+    return lines if len(lines) > 1 else []
+
+
+def _repair_strategy_repeat_threshold() -> int:
+    raw = (os.environ.get("SHERPA_REPAIR_STRATEGY_REPEAT_THRESHOLD") or "3").strip()
+    try:
+        return max(2, min(int(raw), 10))
+    except Exception:
+        return 3
+
+
+def _extract_repair_symbols(text: str, *, limit: int = 12) -> list[str]:
+    buf = str(text or "")
+    patterns = [
+        re.compile(r"undefined reference to [`'\"]([^`'\"]+)[`'\"]", re.IGNORECASE),
+        re.compile(r"no (?:member|type) named ['`]([^'`]+)['`]", re.IGNORECASE),
+        re.compile(r"cannot find -l([A-Za-z0-9_+.-]+)", re.IGNORECASE),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for pat in patterns:
+        for m in pat.finditer(buf):
+            symbol = str(m.group(1) or "").strip()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append(symbol)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _extract_repair_top_trace(error_text: str, stdout_tail: str, stderr_tail: str, *, limit: int = 12) -> list[str]:
+    lines = []
+    for chunk in (stderr_tail, error_text, stdout_tail):
+        for ln in str(chunk or "").replace("\r", "\n").splitlines():
+            txt = ln.strip()
+            if not txt:
+                continue
+            low = txt.lower()
+            if any(
+                token in low
+                for token in (
+                    "error:",
+                    "fatal:",
+                    "traceback",
+                    "calledprocesserror",
+                    "undefined reference",
+                    "cannot find -l",
+                    "no rule to make target",
+                    "permission denied",
+                )
+            ):
+                lines.append(txt[:500])
+                if len(lines) >= limit:
+                    return lines
     return lines
+
+
+def _build_repair_error_digest(
+    *,
+    repo_root: Path,
+    error_kind: str,
+    error_code: str,
+    signature: str,
+    error_text: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    prev_digest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prev = dict(prev_digest or {})
+    now = int(time.time())
+    prev_sig = str(prev.get("signature") or "").strip()
+    files = _extract_actionable_build_locations(error_text, stdout_tail, stderr_tail, limit=12)
+    failing_files: list[str] = []
+    seen_files: set[str] = set()
+    for item in files:
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        normalized = raw_path.replace("\\", "/")
+        if normalized.startswith("/"):
+            abs_path = normalized
+        else:
+            abs_path = str((repo_root / normalized.lstrip("./")).resolve())
+        if abs_path in seen_files:
+            continue
+        seen_files.add(abs_path)
+        failing_files.append(abs_path)
+    return {
+        "error_code": str(error_code or ""),
+        "error_kind": str(error_kind or ""),
+        "signature": str(signature or "")[:12],
+        "failing_files": failing_files,
+        "symbols": _extract_repair_symbols("\n".join([error_text, stdout_tail, stderr_tail])),
+        "first_seen": int(prev.get("first_seen") or now) if prev_sig and prev_sig == str(signature or "")[:12] else now,
+        "latest_seen": now,
+        "top_trace": _extract_repair_top_trace(error_text, stdout_tail, stderr_tail),
+    }
+
+
+def _validate_execution_plan_harness_consistency(
+    repo_root: Path,
+    *,
+    execution_plan_doc: dict[str, Any] | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    doc = _build_harness_index_doc(repo_root, execution_plan_doc=execution_plan_doc)
+    missing_targets = [str(x).strip() for x in list(doc.get("missing_targets") or []) if str(x).strip()]
+    if missing_targets:
+        extras = [str(x).strip() for x in list(doc.get("extra_harnesses") or []) if str(x).strip()]
+        msg = (
+            "execution_plan_harness_mismatch: missing harness source for targets="
+            + ",".join(missing_targets)
+            + (f"; extra_harnesses={','.join(extras[:8])}" if extras else "")
+        )
+        return False, msg, doc
+    return True, "", doc
 
 
 def _classify_build_failure(
@@ -2741,6 +2989,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     repair_mode = bool(repair_snapshot.get("repair_mode"))
     repair_origin_stage = str(repair_snapshot.get("repair_origin_stage") or "build")
     repair_recent_attempts = list(repair_snapshot.get("repair_recent_attempts") or [])
+    repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
+    repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
+    repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
     antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
     target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
     if antlr_context_summary:
@@ -2807,7 +3058,18 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             f"- repair_error_kind: {repair_kind}",
             f"- repair_error_code: {repair_code or 'n/a'}",
             f"- repair_signature: {repair_signature or 'n/a'}",
+            f"- repair_attempt_index: {repair_attempt_index}",
         ]
+        if repair_force_strategy_change:
+            repair_blocks.append(
+                "Strategy gate: repeated failure signature detected. This round must change strategy materially "
+                "(target combination, harness API path, or build/link approach)."
+            )
+        if repair_error_digest:
+            repair_blocks.append(
+                "=== repair error digest ===\n"
+                + json.dumps(repair_error_digest, ensure_ascii=False, indent=2)
+            )
         if repair_error_text:
             repair_blocks.append("=== repair error ===\n" + repair_error_text[:4096])
         if repair_stderr_tail:
@@ -3127,17 +3389,39 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         repair_stderr_tail = str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip()
         repair_stdout_tail = str(state.get("repair_stdout_tail") or state.get("build_stdout_tail") or "").strip()
         repair_recent_attempts = list(state.get("repair_recent_attempts") or [])
+        repair_attempt_index = int(state.get("repair_attempt_index") or 0)
+        repair_force_strategy_change = bool(state.get("repair_strategy_force_change") or False)
+        repair_error_digest = dict(state.get("repair_error_digest") or {})
         repair_lines: list[str] = [
             "Repair mode context (consume this before editing):",
             f"- repair_origin_stage: {repair_origin_stage}",
             f"- repair_error_kind: {repair_error_kind or 'generic_failure'}",
             f"- repair_error_code: {repair_error_code or 'n/a'}",
             f"- repair_signature: {repair_signature or 'n/a'}",
+            f"- repair_attempt_index: {repair_attempt_index}",
         ]
+        if repair_force_strategy_change:
+            repair_lines.append(
+                "Strategy gate: repeated failure signature detected. This round must produce a materially different "
+                "repair strategy (target selection, harness API path, or build/link design)."
+            )
+        if repair_error_digest:
+            repair_lines.append(
+                "=== repair error digest ===\n"
+                + json.dumps(repair_error_digest, ensure_ascii=False, indent=2)
+            )
         if repair_stderr_tail:
             repair_lines.append("=== repair stderr tail ===\n" + "\n".join(repair_stderr_tail.splitlines()[-200:]))
         if repair_stdout_tail:
             repair_lines.append("=== repair stdout tail ===\n" + "\n".join(repair_stdout_tail.splitlines()[-120:]))
+        if repair_error_code == "non_public_api_usage":
+            repair_lines.extend(
+                [
+                    "Repair priority: resolve non-public API usage in harness first.",
+                    "Replace internal/private symbols (for example `detail::`, `internal::`, `impl::`) with public/stable APIs.",
+                    "When no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.",
+                ]
+            )
         if repair_recent_attempts:
             repair_lines.append(
                 "=== repair recent attempts ===\n"
@@ -3644,6 +3928,24 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         _run_post_synthesize_build_validation()
+        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        harness_index_path = ""
+        harness_index_doc: dict[str, Any] = {}
+        try:
+            harness_ok, harness_reason, harness_index_doc = _validate_execution_plan_harness_consistency(
+                gen.repo_root,
+                execution_plan_doc=execution_plan_doc,
+            )
+            harness_index_path, harness_index_doc = _write_harness_index_doc(
+                gen.repo_root,
+                execution_plan_doc=execution_plan_doc,
+            )
+            if not harness_ok:
+                raise HarnessGeneratorError(f"synthesize incomplete: {harness_reason}")
+        except HarnessGeneratorError:
+            raise
+        except Exception as e:
+            raise HarnessGeneratorError(f"synthesize incomplete: unable to build harness index: {e}")
         target_alignment = _analyze_harness_target_alignment(gen.repo_root)
         readme_alignment = {
             "complete": True,
@@ -3708,6 +4010,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "repo_understanding_path": repo_understanding_path,
             "observed_target_path": observed_target_path,
             "build_strategy_path": build_strategy_path,
+            "harness_index_path": harness_index_path,
             "build_mode": str(build_strategy_doc.get("build_mode") or ""),
             "build_target_source": "external_scaffold",
             "synthesize_selected_target_name": str(target_alignment.get("expected_target_name") or selected_target_name),
@@ -4004,18 +4307,43 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "build_stdout_tail": _tail(final_out),
             "build_stderr_tail": _tail(final_err),
             "build_full_log_path": str(build_full_log_path),
+            "harness_index_path": str(_harness_index_path(gen.repo_root)),
             "last_step": "build",
             "build_mode": str(state.get("build_mode") or ""),
             "build_target_source": str(state.get("build_target_source") or "external_scaffold"),
         }
         def _mark_build_repair_state(*, kind: str, code: str, sig: str = "") -> None:
+            signature_short = sig[:12] if sig else str(next_state.get("build_error_signature_short") or "")
+            attempt_index = int(state.get("repair_attempt_index") or 0) + 1
+            same_signature_streak = int(next_state.get("same_build_error_repeats") or 0) + 1
+            force_change = same_signature_streak >= _repair_strategy_repeat_threshold()
             next_state["repair_mode"] = True
             next_state["repair_origin_stage"] = "build"
             next_state["repair_error_kind"] = kind or "build_failure_generic"
             next_state["repair_error_code"] = code or ""
-            next_state["repair_signature"] = sig[:12] if sig else str(next_state.get("build_error_signature_short") or "")
+            next_state["repair_signature"] = signature_short
             next_state["repair_stdout_tail"] = str(next_state.get("build_stdout_tail") or "")
             next_state["repair_stderr_tail"] = str(next_state.get("build_stderr_tail") or "")
+            next_state["repair_attempt_index"] = attempt_index
+            next_state["repair_strategy_force_change"] = force_change
+            if force_change:
+                force_msg = (
+                    " strategy_change_required: same build signature repeated; "
+                    "next repair round must materially change target selection or harness/build strategy."
+                )
+                current_error = str(next_state.get("last_error") or "")
+                if force_msg.strip() not in current_error:
+                    next_state["last_error"] = (current_error + force_msg).strip()
+            next_state["repair_error_digest"] = _build_repair_error_digest(
+                repo_root=gen.repo_root,
+                error_kind=kind or "build_failure_generic",
+                error_code=code or "",
+                signature=signature_short,
+                error_text=str(next_state.get("last_error") or ""),
+                stdout_tail=str(next_state.get("build_stdout_tail") or ""),
+                stderr_tail=str(next_state.get("build_stderr_tail") or ""),
+                prev_digest=dict(state.get("repair_error_digest") or {}),
+            )
             recent = list(state.get("repair_recent_attempts") or [])
             recent.append(
                 {
@@ -4023,7 +4351,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "origin": "build",
                     "error_kind": kind or "build_failure_generic",
                     "error_code": code or "",
-                    "signature": next_state.get("repair_signature") or "",
+                    "signature": signature_short,
+                    "attempt_index": attempt_index,
+                    "force_strategy_change": force_change,
                     "message": str(next_state.get("last_error") or "")[:512],
                 }
             )
@@ -4158,20 +4488,42 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             item for item in list(execution_plan_doc.get("execution_targets") or [])
             if isinstance(item, dict)
         ]
+        harness_index_doc = _load_harness_index_doc(gen.repo_root)
+        if not harness_index_doc:
+            try:
+                _, harness_index_doc = _write_harness_index_doc(
+                    gen.repo_root,
+                    execution_plan_doc=execution_plan_doc,
+                )
+            except Exception:
+                harness_index_doc = {}
+        mapping_by_target: dict[str, dict[str, Any]] = {}
+        for row in list(harness_index_doc.get("mappings") or []):
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("target_name") or "").strip()
+            if key and key not in mapping_by_target:
+                mapping_by_target[key] = row
         built_names = {p.name for p in final_bins}
         built_stems = {Path(name).stem for name in built_names}
         target_build_matrix: list[dict[str, Any]] = []
         built_execution_targets = 0
         for item in execution_targets:
+            target_name = str(item.get("target_name") or "").strip()
             expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
             matched = expected in built_names or Path(expected).stem in built_stems
-            if matched:
+            mapping = mapping_by_target.get(target_name)
+            source_path = str(mapping.get("source_path") or "").strip() if isinstance(mapping, dict) else ""
+            has_source = bool(source_path)
+            if matched and has_source:
                 built_execution_targets += 1
             target_build_matrix.append(
                 {
-                    "target_name": str(item.get("target_name") or ""),
+                    "target_name": target_name,
                     "expected_fuzzer_name": expected,
                     "must_run": bool(item.get("must_run") or False),
+                    "source_path": source_path,
+                    "has_source": has_source,
                     "built": bool(matched),
                 }
             )
@@ -4180,7 +4532,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             missing_targets = [
                 str(item.get("target_name") or item.get("expected_fuzzer_name") or "")
                 for item in target_build_matrix
-                if not bool(item.get("built"))
+                if not (bool(item.get("built")) and bool(item.get("has_source")))
             ]
             next_state["last_error"] = (
                 "partial_build_undercoverage: built "
@@ -4230,6 +4582,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         next_state["repair_stdout_tail"] = ""
         next_state["repair_stderr_tail"] = ""
         next_state["repair_recent_attempts"] = []
+        next_state["repair_error_digest"] = {}
+        next_state["repair_attempt_index"] = 0
+        next_state["repair_strategy_force_change"] = False
 
         enforce_declared_optional_deps = _env_bool("SHERPA_BUILD_ENFORCE_DECLARED_OPTIONAL_DEPS", True)
         if enforce_declared_optional_deps:
@@ -5672,6 +6027,12 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 codex_hint.strip()
                 + "\nThe current scaffold lacks grounded repository understanding. Repair `fuzz/repo_understanding.json` first with concrete build facts and evidence, then make `fuzz/build.py` match it."
             )
+        if build_error_code == "non_public_api_usage":
+            codex_hint = (
+                codex_hint.strip()
+                + "\nDiagnostics indicate non-public/internal API usage in harness code. Replace offending symbols with public/stable APIs first."
+                + "\nIf no public API exists, declare `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (and optional `approved_symbols`)."
+            )
         if recent_history and any("noop" in str(x.get("outcome") or "") for x in recent_history):
             codex_hint = (
                 codex_hint.strip()
@@ -6619,6 +6980,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         out["coverage_quality_flags"] = sorted({flag for flag in quality_flags if flag})
         if run_error_kind:
             last_detail = run_details[-1] if run_details else {}
+            attempt_index = int(state.get("repair_attempt_index") or 0) + 1
             out["repair_mode"] = True
             out["repair_origin_stage"] = "crash"
             out["repair_error_kind"] = run_error_kind
@@ -6626,6 +6988,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             out["repair_signature"] = str(timeout_signature or crash_signature or "")[:12]
             out["repair_stdout_tail"] = str(last_detail.get("stdout_tail") or "")
             out["repair_stderr_tail"] = str(last_detail.get("stderr_tail") or "")
+            out["repair_attempt_index"] = attempt_index
+            out["repair_strategy_force_change"] = False
+            out["repair_error_digest"] = {
+                "error_code": str(out.get("repair_error_code") or ""),
+                "error_kind": run_error_kind,
+                "signature": str(out.get("repair_signature") or ""),
+                "failing_files": [],
+                "symbols": [],
+                "first_seen": int(time.time()),
+                "latest_seen": int(time.time()),
+                "top_trace": _extract_repair_top_trace(
+                    str(out.get("last_error") or ""),
+                    str(last_detail.get("stdout_tail") or ""),
+                    str(last_detail.get("stderr_tail") or ""),
+                ),
+            }
             recent = list(state.get("repair_recent_attempts") or [])
             recent.append(
                 {
@@ -6634,6 +7012,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "error_kind": run_error_kind,
                     "error_code": run_terminal_reason or run_error_kind,
                     "signature": out["repair_signature"],
+                    "attempt_index": attempt_index,
                     "message": str(out.get("last_error") or "")[:512],
                 }
             )
@@ -6647,6 +7026,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             out["repair_stdout_tail"] = ""
             out["repair_stderr_tail"] = ""
             out["repair_recent_attempts"] = []
+            out["repair_error_digest"] = {}
+            out["repair_attempt_index"] = 0
+            out["repair_strategy_force_change"] = False
         _wf_log(
             cast(dict[str, Any], out),
             (
@@ -7559,6 +7941,26 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "repair_signature": str(state.get("crash_signature") or "")[:12] if not re_build_ok else "",
         "repair_stdout_tail": str(payload.get("stdout_tail") or "") if not re_build_ok else "",
         "repair_stderr_tail": str(payload.get("stderr_tail") or "") if not re_build_ok else "",
+        "repair_attempt_index": (int(state.get("repair_attempt_index") or 0) + 1) if not re_build_ok else 0,
+        "repair_strategy_force_change": False,
+        "repair_error_digest": (
+            {
+                "error_code": restart_reason,
+                "error_kind": "re_build_failed",
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "failing_files": [],
+                "symbols": [],
+                "first_seen": int(time.time()),
+                "latest_seen": int(time.time()),
+                "top_trace": _extract_repair_top_trace(
+                    restart_error,
+                    str(payload.get("stdout_tail") or ""),
+                    str(payload.get("stderr_tail") or ""),
+                ),
+            }
+            if not re_build_ok
+            else {}
+        ),
         "repair_recent_attempts": (
             (list(state.get("repair_recent_attempts") or []) + [{
                 "step": "re-build",
@@ -7566,6 +7968,7 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "error_kind": "re_build_failed",
                 "error_code": restart_reason,
                 "signature": str(state.get("crash_signature") or "")[:12],
+                "attempt_index": int(state.get("repair_attempt_index") or 0) + 1,
                 "message": restart_error[:512],
             }])[-5:]
             if not re_build_ok
@@ -7941,6 +8344,26 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "repair_signature": str(state.get("crash_signature") or "")[:12] if not re_run_ok else "",
         "repair_stdout_tail": str(payload.get("stdout_tail") or "") if not re_run_ok else "",
         "repair_stderr_tail": str(payload.get("stderr_tail") or "") if not re_run_ok else "",
+        "repair_attempt_index": (int(state.get("repair_attempt_index") or 0) + 1) if not re_run_ok else 0,
+        "repair_strategy_force_change": False,
+        "repair_error_digest": (
+            {
+                "error_code": restart_reason,
+                "error_kind": "re_run_failed",
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "failing_files": [],
+                "symbols": [],
+                "first_seen": int(time.time()),
+                "latest_seen": int(time.time()),
+                "top_trace": _extract_repair_top_trace(
+                    restart_error,
+                    str(payload.get("stdout_tail") or ""),
+                    str(payload.get("stderr_tail") or ""),
+                ),
+            }
+            if not re_run_ok
+            else {}
+        ),
         "repair_recent_attempts": (
             (list(state.get("repair_recent_attempts") or []) + [{
                 "step": "re-run",
@@ -7948,6 +8371,7 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "error_kind": "re_run_failed",
                 "error_code": restart_reason,
                 "signature": str(state.get("crash_signature") or "")[:12],
+                "attempt_index": int(state.get("repair_attempt_index") or 0) + 1,
                 "message": restart_error[:512],
             }])[-5:]
             if not re_run_ok

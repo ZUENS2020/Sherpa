@@ -17,6 +17,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` (target-to-harness mapping aligned with `fuzz/execution_plan.json`)
 - when execution plan has multiple targets, scaffold should preserve multi-target buildability (not single-target-only by default)
 
 ## Key File Templates
@@ -125,14 +126,22 @@ if __name__ == "__main__":
   - `build_fuzzers()` must call `find_static_lib()` directly; defining it without calling it is invalid.
   - `build_fuzzers()` must produce a concrete fuzzer executable under `fuzz/out/`.
   - if `fuzz/execution_plan.json` lists multiple execution targets, `build_fuzzers()` should compile/link multiple fuzzers accordingly.
-  - prefer public/stable APIs in generated harness code; avoid internal/private namespaces (for example `detail`, `_internal`, `impl`) unless concrete repository evidence proves no public entrypoint exists.
+- prefer public/stable APIs in generated harness code; avoid internal/private namespaces (for example `detail`, `_internal`, `impl`) unless concrete repository evidence proves no public entrypoint exists.
+- soft-block rule for internal/private APIs:
+  - default: do not use `detail::`, `internal::`, `_internal`, `impl::`, `private::` patterns in harness files.
+  - exception path (only when no public alternative exists): add `api_surface_exception` to `fuzz/repo_understanding.json` with:
+    - `reason` (non-empty string)
+    - `evidence` (non-empty string array)
+    - optional `approved_symbols` (specific symbols allowed to remain)
 
 ## Acceptance Criteria
 - harness-first contract: create harness source file before completing build/json/readme scaffold.
 - all required scaffold files exist.
 - scaffold target alignment is explicit and consistent across README/harness/strategy files.
 - harness code uses public/stable APIs by default; internal/private-only API usage requires explicit evidence in `fuzz/repo_understanding.json` `evidence`.
+- if internal/private APIs remain, `fuzz/repo_understanding.json` must include valid `api_surface_exception.reason` and non-empty `api_surface_exception.evidence`.
 - scaffold aligns with `fuzz/execution_plan.json` when present.
+- `fuzz/harness_index.json` maps each execution target to an existing harness source file.
 - build script does not hardcode a single guessed static-library path.
 - when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]` before broader edits.
 - `fuzz/README.md` field `Harness file:` points to an existing harness file under `fuzz/`.

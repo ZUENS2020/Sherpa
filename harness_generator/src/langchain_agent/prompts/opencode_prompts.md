@@ -50,11 +50,13 @@ Build-repair focus:
 - prioritize compile/link/build-system root cause
 - produce a strategy different from the previous failed attempt when signatures repeat
 - keep target/runtime decisions grounded in build diagnostics
+- prefer public/stable APIs for harness logic; use internal/private APIs only when no viable public alternative exists, and document evidence via `api_surface_exception`
 
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
+- if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 
 MANDATORY:
 - create `./done`
@@ -79,11 +81,13 @@ Crash-repair focus:
 - prioritize crash reproducibility, harness/runtime relation, and root-cause reachability
 - produce a strategy different from previous failed crash-repair attempts
 - avoid fallback-to-generic wrappers when crash evidence points to deeper parser/decoder/archive entrypoints
+- prefer public/stable APIs for harness logic; use internal/private APIs only when no viable public alternative exists, and document evidence via `api_surface_exception`
 
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
+- if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 
 MANDATORY:
 - create `./done`
@@ -108,6 +112,7 @@ Required outputs:
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
 - keep compatibility with `fuzz/execution_plan.json` (top targets must be buildable by scaffold)
+- generate `fuzz/harness_index.json` so each `execution_targets[].target_name` maps to an existing harness source file
 
 Stage requirements:
 - Do NOT run build/execute commands.
@@ -152,14 +157,18 @@ Required outputs:
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` with target-to-harness mapping aligned to `fuzz/execution_plan.json`
 
 Build-repair constraints:
 - consume `repair_*` diagnostics first
 - change strategy if previous attempt signatures repeat
 - avoid no-op doc-only edits
 - keep target/build fields consistent across README + JSONs + build script
+- update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
+- prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
+- if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 MANDATORY:
 - create `./done`
@@ -190,8 +199,11 @@ Crash-repair constraints:
 - explicitly map selected vs observed runtime target relation in README
 - preserve crash-path semantics; do not “fix” by disabling harness behavior
 - avoid no-op doc-only edits
+- prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
+- update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
+- if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 MANDATORY:
 - create `./done`
@@ -218,6 +230,7 @@ Required outputs:
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
 - outputs remain consistent with `fuzz/execution_plan.json`
+- produce/refresh `fuzz/harness_index.json` and keep it consistent with `fuzz/execution_plan.json`
 
 Constraints:
 - Do NOT run build/execute commands.
@@ -323,6 +336,7 @@ Constraints:
 - do not run build/execute commands
 - read-only exploration commands are allowed
 - when diagnostics include file paths, issue explicit `Read and fix <path>[:line]` actions
+- prefer public/stable APIs; do not keep internal/private namespaces in harness logic unless `api_surface_exception` with evidence is present
 - stale `./done` without fresh code diff is invalid
 - pure no-op is invalid
 
