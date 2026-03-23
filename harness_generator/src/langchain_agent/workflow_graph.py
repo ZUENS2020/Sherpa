@@ -8401,7 +8401,9 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     if not (state.get("last_error") or "").strip():
         return "run"
-    return "plan"
+    if str(state.get("build_error_kind") or "").strip().lower() == "infra":
+        return "plan"
+    return "fix_build"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
@@ -8409,7 +8411,7 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
     if run_error_kind:
-        return "plan"
+        return "fix_crash"
     if bool(state.get("crash_found")):
         return "crash-triage"
     return "coverage-analysis"
@@ -8517,7 +8519,7 @@ def _route_after_re_build_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "plan"
+        return "fix_crash"
     if bool(state.get("re_build_done")) and bool(state.get("re_build_ok")):
         return "re-run"
     return "stop"
@@ -8531,9 +8533,9 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
             return "stop"
-        return "plan"
+        return "fix_crash"
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
-        return "plan"
+        return "fix_crash"
     return "stop"
 
 
@@ -8549,8 +8551,12 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_synthesize_state(state)
     if last_step == "build":
         return _route_after_build_state(state)
+    if last_step == "fix_build":
+        return _route_after_fix_build_state(state)
     if last_step == "run":
         return _route_after_run_state(state)
+    if last_step == "fix_crash":
+        return _route_after_fix_crash_state(state)
     if last_step == "crash-triage":
         return _route_after_crash_triage_state(state)
     if last_step == "fix-harness":
@@ -8574,7 +8580,9 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "plan",
         "synthesize",
         "build",
+        "fix_build",
         "run",
+        "fix_crash",
         "crash-triage",
         "fix-harness",
         "coverage-analysis",
@@ -8583,8 +8591,6 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "re-run",
         "repro_crash",
     }
-    if raw in {"fix_build", "fix_crash"}:
-        raw = "plan"
     if raw == "repro_crash":
         raw = "re-build"
     if raw in allowed:
@@ -8610,12 +8616,14 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
+    graph.add_node("fix_build", _node_fix_build)
     graph.add_node("coverage-analysis", _node_coverage_analysis)
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
     graph.add_node("re-run", _node_re_run)
     graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("run", _node_run)
+    graph.add_node("fix_crash", _node_fix_crash)
     graph.add_node("crash-triage", _node_crash_triage)
     graph.add_node("fix-harness", _node_fix_harness_after_run)
 
@@ -8644,6 +8652,14 @@ def build_fuzz_workflow() -> StateGraph:
     def _route_after_run(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
+
+    def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_fix_build_state(state)
+        return _apply_stage_stop_guard(state, "fix_build", nxt)
+
+    def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_fix_crash_state(state)
+        return _apply_stage_stop_guard(state, "fix_crash", nxt)
 
     def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_crash_triage_state(state)
@@ -8676,7 +8692,9 @@ def build_fuzz_workflow() -> StateGraph:
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
+            "fix_build": "fix_build",
             "run": "run",
+            "fix_crash": "fix_crash",
             "crash-triage": "crash-triage",
             "fix-harness": "fix-harness",
             "coverage-analysis": "coverage-analysis",
@@ -8692,7 +8710,12 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "build",
         _route_after_build,
-        {"run": "run", "plan": "plan", "stop": END},
+        {"run": "run", "plan": "plan", "fix_build": "fix_build", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "fix_build",
+        _route_after_fix_build,
+        {"build": "build", "fix_build": "fix_build", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "run",
@@ -8700,9 +8723,15 @@ def build_fuzz_workflow() -> StateGraph:
         {
             "coverage-analysis": "coverage-analysis",
             "crash-triage": "crash-triage",
+            "fix_crash": "fix_crash",
             "plan": "plan",
             "stop": END,
         },
+    )
+    graph.add_conditional_edges(
+        "fix_crash",
+        _route_after_fix_crash,
+        {"build": "build", "fix_crash": "fix_crash", "stop": END},
     )
     graph.add_conditional_edges(
         "crash-triage",
@@ -8724,9 +8753,9 @@ def build_fuzz_workflow() -> StateGraph:
         _route_after_improve_harness,
         {"plan": "plan", "stop": END},
     )
-    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
-    graph.add_conditional_edges("re-run", _route_after_re_run, {"plan": "plan", "stop": END})
-    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "plan": "plan", "stop": END})
+    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("re-run", _route_after_re_run, {"fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
 
     return graph
 
@@ -8757,8 +8786,6 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     resume_step = (inp.resume_from_step or "").strip().lower()
     if resume_step == "repro_crash":
         resume_step = "re-build"
-    if resume_step in {"fix_build", "fix_crash"}:
-        resume_step = "plan"
     resume_root = str(inp.resume_repo_root or "").strip()
     stop_after_step = (inp.stop_after_step or "").strip().lower()
     _wf_log(

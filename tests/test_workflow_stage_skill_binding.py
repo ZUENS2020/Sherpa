@@ -70,12 +70,12 @@ def test_workflow_plan_and_synthesize_use_group_feedback_context() -> None:
     assert 'stage="synthesize"' in text
 
 
-def test_workflow_build_failures_route_to_plan_without_fix_nodes() -> None:
+def test_workflow_build_failures_route_to_fix_nodes() -> None:
     text = WF.read_text(encoding="utf-8")
-    assert 'return "plan"' in text
-    assert '"fix_build": "fix_build"' not in text
-    assert 'graph.add_node("fix_build", _node_fix_build)' not in text
-    assert 'graph.add_node("fix_crash", _node_fix_crash)' not in text
+    assert 'return "fix_build"' in text
+    assert '"fix_build": "fix_build"' in text
+    assert 'graph.add_node("fix_build", _node_fix_build)' in text
+    assert 'graph.add_node("fix_crash", _node_fix_crash)' in text
 
 
 def test_workflow_synthesize_uses_configurable_opencode_attempts() -> None:
