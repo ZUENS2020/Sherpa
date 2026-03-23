@@ -97,6 +97,37 @@ Additional instruction from coordinator:
 {{hint}}
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: plan_repair_coverage_with_hint -->
+You are coordinating a repair planning workflow after a coverage plateau / replan trigger.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- produce a coverage-improvement repair plan with materially different strategy
+- update `fuzz/PLAN.md` and strict-schema `fuzz/targets.json`
+- keep `fuzz/execution_plan.json` aligned with deeper runtime-viable targets
+
+Coverage-repair focus:
+- read coverage diagnostics first (`seed families`, `quality flags`, `plateau/replan reason`, depth and bias fields)
+- consume `SeedFeedback` and `HarnessFeedback` first; use them to decide seed-modeling vs harness-path changes
+- explicitly state strategy changes versus the latest failed cycle
+- prefer actions that improve reachable parser/decoder/archive behavior depth
+- keep execution targets mappable to real harness files via `fuzz/harness_index.json`
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
+- do not produce doc-only adjustments disconnected from next build/run outcomes
+
+MANDATORY:
+- create `./done`
+- write `fuzz/PLAN.md` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: synthesize_with_hint -->
 You are coordinating a fuzz harness generation workflow.
 Follow the STAGE SKILL loaded by the runner as primary instructions.
@@ -204,6 +235,70 @@ Crash-repair constraints:
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
+
+MANDATORY:
+- create `./done`
+- write `fuzz/out/` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: synthesize_repair_coverage_with_hint -->
+You are coordinating scaffold repair after a coverage plateau / replan trigger.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- update scaffold under `fuzz/` so the next build/run cycle can pursue higher coverage
+
+Required outputs:
+- harness source under `fuzz/`
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+- `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` with target-to-harness mapping aligned to `fuzz/execution_plan.json`
+
+Coverage-repair constraints:
+- consume coverage diagnostics first (`seed families`, quality gaps, plateau reason)
+- consume `SeedFeedback` and `HarnessFeedback` first; apply at least one change linked to these signals
+- include and apply at least one material strategy change from previous cycle
+- avoid no-op doc-only edits
+- keep selected/final target, execution plan, and harness index consistent
+- Do NOT run build/execute commands
+- Read-only exploration commands are allowed
+
+MANDATORY:
+- create `./done`
+- write `fuzz/out/` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: improve_harness_in_place_with_hint -->
+You are coordinating an in-place coverage improvement pass for the current target.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- apply concrete scaffold/code changes under `fuzz/` to improve coverage for the current target
+- keep target identity stable (no target switch in this stage)
+
+Required outputs:
+- update harness and/or seed-generation related files under `fuzz/`
+- keep `fuzz/execution_plan.json`, `fuzz/harness_index.json`, and harness source files consistent
+- keep scaffold buildable for the next workflow build/run
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- prioritize the current coverage diagnostic gaps first (seed families, modeling, dictionary, call path).
+- consume `SeedFeedback` and `HarnessFeedback` before editing; include one concrete change tied to these signals.
+- pure doc-only edits are invalid in this stage.
+- include at least one material strategy change vs the previous failed cycle.
 
 MANDATORY:
 - create `./done`

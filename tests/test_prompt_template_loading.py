@@ -19,9 +19,12 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     assert "plan_with_hint" in templates
     assert "plan_repair_build_with_hint" in templates
     assert "plan_repair_crash_with_hint" in templates
+    assert "plan_repair_coverage_with_hint" in templates
     assert "synthesize_with_hint" in templates
     assert "synthesize_repair_build_with_hint" in templates
     assert "synthesize_repair_crash_with_hint" in templates
+    assert "synthesize_repair_coverage_with_hint" in templates
+    assert "improve_harness_in_place_with_hint" in templates
     assert "synthesize_complete_scaffold" in templates
     assert "plan_fix_targets_schema" in templates
     assert "crash_triage_with_hint" in templates
@@ -53,6 +56,7 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     workflow_common.load_opencode_prompt_templates.cache_clear()
     build_repair = workflow_common.render_opencode_prompt("plan_repair_build_with_hint", hint="build-diag")
     crash_repair = workflow_common.render_opencode_prompt("plan_repair_crash_with_hint", hint="crash-diag")
+    coverage_repair = workflow_common.render_opencode_prompt("plan_repair_coverage_with_hint", hint="coverage-diag")
 
     assert "build-stage failure" in build_repair
     assert "crash/repro stage failure" in crash_repair
@@ -62,6 +66,9 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "non_public_api_usage" in build_repair
     assert "api_surface_exception" in crash_repair
     assert "non_public_api_usage" in crash_repair
+    assert "coverage plateau / replan trigger" in coverage_repair
+    assert "strategy changes versus the latest failed cycle" in coverage_repair
+    assert "coverage-diag" in coverage_repair
 
 
 def test_synthesize_prompts_keep_stage_contracts_but_are_short():
@@ -89,6 +96,8 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
 
     synth_build_repair = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")
     synth_crash_repair = workflow_common.render_opencode_prompt("synthesize_repair_crash_with_hint", hint="crash-fail")
+    synth_coverage_repair = workflow_common.render_opencode_prompt("synthesize_repair_coverage_with_hint", hint="coverage-fail")
+    in_place_repair = workflow_common.render_opencode_prompt("improve_harness_in_place_with_hint", hint="in-place-fail")
     assert "after a build-stage failure" in synth_build_repair
     assert "after a crash/repro-stage failure" in synth_crash_repair
     assert "build-fail" in synth_build_repair
@@ -97,6 +106,12 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "non_public_api_usage" in synth_build_repair
     assert "api_surface_exception" in synth_crash_repair
     assert "non_public_api_usage" in synth_crash_repair
+    assert "coverage plateau / replan trigger" in synth_coverage_repair
+    assert "material strategy change" in synth_coverage_repair
+    assert "coverage-fail" in synth_coverage_repair
+    assert "in-place coverage improvement pass" in in_place_repair
+    assert "pure doc-only edits are invalid" in in_place_repair
+    assert "in-place-fail" in in_place_repair
 
     triage = workflow_common.render_opencode_prompt("crash_triage_with_hint", hint="triage-this")
     assert "classify crash into exactly one label" in triage
@@ -179,8 +194,11 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     plan_fix = (skill_root / "plan_fix_targets_schema" / "SKILL.md").read_text(encoding="utf-8")
     plan_repair_build = (skill_root / "plan_repair_build" / "SKILL.md").read_text(encoding="utf-8")
     plan_repair_crash = (skill_root / "plan_repair_crash" / "SKILL.md").read_text(encoding="utf-8")
+    plan_repair_coverage = (skill_root / "plan_repair_coverage" / "SKILL.md").read_text(encoding="utf-8")
+    improve_in_place = (skill_root / "improve_harness_in_place" / "SKILL.md").read_text(encoding="utf-8")
     synth_repair_build = (skill_root / "synthesize_repair_build" / "SKILL.md").read_text(encoding="utf-8")
     synth_repair_crash = (skill_root / "synthesize_repair_crash" / "SKILL.md").read_text(encoding="utf-8")
+    synth_repair_coverage = (skill_root / "synthesize_repair_coverage" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
     assert "`api` must describe a target API identifier" in plan
@@ -188,8 +206,12 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "semantic reminder: do not rewrite `api` to harness file paths" in plan_fix
     assert "build-stage failure" in plan_repair_build
     assert "crash/repro-stage failure" in plan_repair_crash
+    assert "coverage plateau / replan trigger" in plan_repair_coverage
     assert "build-failure-driven" in synth_repair_build
     assert "crash/repro evidence" in synth_repair_crash
+    assert "coverage-improvement replan cycles" in synth_repair_coverage
+    assert "in-place coverage improvements" in improve_in_place
+    assert "no doc-only patch in this stage" in improve_in_place
     assert "api_surface_exception" in plan_repair_build
     assert "api_surface_exception" in plan_repair_crash
     assert "non_public_api_usage" in synth_repair_build
