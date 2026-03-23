@@ -18,8 +18,13 @@ def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
         'synth_stage_skill = "synthesize"',
         'plan_stage_skill = "plan_repair_build"',
         'plan_stage_skill = "plan_repair_crash"',
+        'plan_stage_skill = "plan_repair_coverage"',
         'synth_stage_skill = "synthesize_repair_build"',
         'synth_stage_skill = "synthesize_repair_crash"',
+        'synth_stage_skill = "synthesize_repair_coverage"',
+        'plan_template_name = "plan_repair_coverage_with_hint"',
+        'synth_template_name = "synthesize_repair_coverage_with_hint"',
+        'stage_skill="improve_harness_in_place"',
     ]
     for token in expected:
         assert token in text
@@ -34,8 +39,11 @@ def test_main_workflow_stage_skills_exist() -> None:
         "synthesize_complete_scaffold",
         "plan_repair_build",
         "plan_repair_crash",
+        "plan_repair_coverage",
         "synthesize_repair_build",
         "synthesize_repair_crash",
+        "synthesize_repair_coverage",
+        "improve_harness_in_place",
         "seed_generation",
         "crash_triage",
     ]
@@ -82,3 +90,10 @@ def test_workflow_synthesize_uses_configurable_opencode_attempts() -> None:
     text = WF.read_text(encoding="utf-8")
     assert "def _synthesize_opencode_attempts() -> int:" in text
     assert "max_attempts=_synthesize_opencode_attempts()" in text
+
+
+def test_workflow_marks_coverage_replan_as_coverage_repair_origin() -> None:
+    text = WF.read_text(encoding="utf-8")
+    assert '"repair_origin_stage": "coverage" if replan_required' in text
+    assert '"repair_error_kind": "coverage_plateau" if replan_required' in text
+    assert '"repair_error_code": "coverage_replan_required" if replan_required' in text
