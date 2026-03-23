@@ -35,6 +35,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: dev
+
+      - name: Resolve deploy target refs
+        id: target_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin dev
+          target_sha="$(git rev-parse origin/dev)"
+          git checkout --detach "${target_sha}"
+          checked_out_sha="$(git rev-parse HEAD)"
+          base_sha=""
+          if git rev-parse --verify "${target_sha}^" >/dev/null 2>&1; then
+            base_sha="$(git rev-parse "${target_sha}^")"
+          fi
+          echo "target_branch=dev" >> "$GITHUB_OUTPUT"
+          echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "checked_out_sha=${checked_out_sha}" >> "$GITHUB_OUTPUT"
+          echo "::notice::target_branch=dev target_sha=${target_sha} checked_out_sha=${checked_out_sha} base_sha=${base_sha}"
 
       - name: Guard no GHCR push path
         shell: bash
@@ -508,13 +528,16 @@ jobs:
         if: steps.kube_preflight.outputs.reachable == 'true'
         id: prep
         shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target_ref.outputs.target_sha }}
         run: |
           set -euo pipefail
-          sha="${GITHUB_SHA}"
+          sha="${TARGET_SHA:-${GITHUB_SHA}}"
           echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
           echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
           echo "web_tar=/tmp/sherpa-web-${sha}.tar" >> "$GITHUB_OUTPUT"
           echo "frontend_tar=/tmp/sherpa-frontend-${sha}.tar" >> "$GITHUB_OUTPUT"
+          echo "::notice::image_tag_sha=${sha}"
 
       - name: Decide image rebuild scope
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -522,6 +545,8 @@ jobs:
         shell: bash
         env:
           FORCE_REBUILD_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild_all || 'false' }}
+          TARGET_SHA: ${{ steps.target_ref.outputs.target_sha }}
+          BASE_SHA: ${{ steps.target_ref.outputs.base_sha }}
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
           FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
         run: |
@@ -535,15 +560,15 @@ jobs:
             frontend_changed=true
           else
             changed_files=""
-            if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-              if ! changed_files="$(git diff --name-only HEAD~1 HEAD)"; then
+            if [[ -n "${BASE_SHA}" && -n "${TARGET_SHA}" ]]; then
+              if ! changed_files="$(git diff --name-only "${BASE_SHA}" "${TARGET_SHA}")"; then
                 change_detection_uncertain=true
                 changed_files=""
-                echo "::warning::git diff HEAD~1..HEAD failed; falling back to safe rebuild."
+                echo "::warning::git diff ${BASE_SHA}..${TARGET_SHA} failed; falling back to safe rebuild."
               fi
             else
               change_detection_uncertain=true
-              echo "::warning::No valid git baseline for change detection; falling back to safe rebuild."
+              echo "::warning::No valid target/base commit baseline for change detection; falling back to safe rebuild."
             fi
 
             while IFS= read -r file; do
@@ -591,7 +616,7 @@ jobs:
 
           echo "web_changed=${web_changed}" >> "$GITHUB_OUTPUT"
           echo "frontend_changed=${frontend_changed}" >> "$GITHUB_OUTPUT"
-          echo "::notice::force_rebuild_all=${FORCE_REBUILD_ALL}, uncertain=${change_detection_uncertain}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
+          echo "::notice::target_sha=${TARGET_SHA}, base_sha=${BASE_SHA}, force_rebuild_all=${FORCE_REBUILD_ALL}, uncertain=${change_detection_uncertain}, web_changed=${web_changed}, frontend_changed=${frontend_changed}"
 
       - name: Resolve base images
         id: base_images
@@ -835,12 +860,19 @@ jobs:
           FRONTEND_CHANGED: ${{ steps.rebuild_scope.outputs.frontend_changed }}
         run: |
           set -euo pipefail
+          kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
+            -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
+          patched_worker_image="$(kubectl -n "${NAMESPACE}" get configmap sherpa-config -o jsonpath='{.data.SHERPA_K8S_WORKER_IMAGE}')"
+          echo "::notice::worker image patched to ${patched_worker_image}"
+          if [[ "${patched_worker_image}" != "${WEB_IMAGE}" ]]; then
+            echo "::error::worker image patch mismatch expected=${WEB_IMAGE} actual=${patched_worker_image}"
+            exit 1
+          fi
           if [[ "${WEB_CHANGED}" == "true" ]]; then
-            kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
-              -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
             kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
+            echo "::notice::sherpa-web rollout requested image=${WEB_IMAGE}"
           else
-            echo "::notice::Skip sherpa-web image pin (web_changed=false)"
+            echo "::notice::Skip sherpa-web rollout (web_changed=false)"
           fi
           if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
             kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
@@ -873,6 +905,38 @@ jobs:
           rollout_with_retry deployment sherpa-web 600s
           kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s
           kubectl -n "${NAMESPACE}" rollout status deployment/cloudflared --timeout=300s
+
+      - name: Validate deployed image consistency
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          WEB_CHANGED: ${{ steps.rebuild_scope.outputs.web_changed }}
+        run: |
+          set -euo pipefail
+          worker_cfg_image="$(kubectl -n "${NAMESPACE}" get configmap sherpa-config -o jsonpath='{.data.SHERPA_K8S_WORKER_IMAGE}')"
+          web_deploy_image="$(kubectl -n "${NAMESPACE}" get deployment sherpa-web -o jsonpath='{.spec.template.spec.containers[?(@.name==\"web\")].image}')"
+          echo "::notice::consistency worker_cfg_image=${worker_cfg_image}"
+          echo "::notice::consistency web_deploy_image=${web_deploy_image}"
+          if [[ "${worker_cfg_image}" != "${WEB_IMAGE}" ]]; then
+            echo "::error::worker configmap image mismatch expected=${WEB_IMAGE} actual=${worker_cfg_image}"
+            exit 1
+          fi
+          if [[ "${WEB_CHANGED}" == "true" && "${web_deploy_image}" != "${WEB_IMAGE}" ]]; then
+            echo "::error::web deployment image mismatch expected=${WEB_IMAGE} actual=${web_deploy_image}"
+            exit 1
+          fi
+          latest_worker_pod="$(kubectl -n "${NAMESPACE}" get pods --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name --no-headers | grep '^sherpa-fuzz-' | tail -n 1 || true)"
+          if [[ -n "${latest_worker_pod}" ]]; then
+            worker_pod_image="$(kubectl -n "${NAMESPACE}" get pod "${latest_worker_pod}" -o jsonpath='{.spec.containers[0].image}')"
+            echo "::notice::consistency worker_pod=${latest_worker_pod} image=${worker_pod_image}"
+            if [[ "${worker_pod_image}" != "${WEB_IMAGE}" ]]; then
+              echo "::error::latest worker pod image mismatch expected=${WEB_IMAGE} actual=${worker_pod_image}"
+              exit 1
+            fi
+          else
+            echo "::notice::no sherpa-fuzz worker pod found for runtime image check"
+          fi
 
       - name: Health check
         if: steps.kube_preflight.outputs.reachable == 'true'
