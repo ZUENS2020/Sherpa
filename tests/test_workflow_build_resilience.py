@@ -341,6 +341,64 @@ def test_build_file_targeted_fix_lines_extracts_actionable_paths():
     assert "/fuzz/libarchive_fuzzer.cc:22`" in joined
 
 
+def test_build_file_targeted_fix_lines_skips_generated_cmake_paths():
+    repo_root = Path("/tmp/sherpa-repo")
+    lines = workflow_graph._build_file_targeted_fix_lines(
+        repo_root,
+        "",
+        "",
+        "/tmp/repo/fuzz/build-work/CMakeFiles/3.31.6/CompilerIdCXX/CMakeCXXCompilerId.cpp:779: error: bad symbol",
+    )
+    assert lines == []
+
+
+def test_execution_plan_harness_consistency_detects_missing_targets(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {"target_name": "println", "expected_fuzzer_name": "println_fuzz"},
+                    {"target_name": "vformat", "expected_fuzzer_name": "vformat_fuzz"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "println_fuzz.cc").write_text("int x;", encoding="utf-8")
+    ok, reason, doc = workflow_graph._validate_execution_plan_harness_consistency(tmp_path)
+    assert ok is False
+    assert "execution_plan_harness_mismatch" in reason
+    assert "vformat" in reason
+    assert "missing_targets" in doc
+
+
+def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {"target_name": "println", "expected_fuzzer_name": "println_fuzz"},
+                    {"target_name": "vformat", "expected_fuzzer_name": "vformat_fuzz"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "println_fuzz.cc").write_text("int x;", encoding="utf-8")
+    (fuzz_dir / "vformat_fuzz.cc").write_text("int y;", encoding="utf-8")
+    ok, _, doc = workflow_graph._validate_execution_plan_harness_consistency(tmp_path)
+    assert ok is True
+    assert list(doc.get("missing_targets") or []) == []
+    path, written = workflow_graph._write_harness_index_doc(tmp_path)
+    assert Path(path).is_file()
+    assert written.get("schema_version") == 1
+    assert len(list(written.get("mappings") or [])) == 2
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -502,6 +560,15 @@ def test_opencode_cli_retries_default_and_bounds(monkeypatch) -> None:
 
     monkeypatch.setenv("SHERPA_WORKFLOW_OPENCODE_CLI_RETRIES", "bad")
     assert workflow_graph._opencode_cli_retries() == 2
+
+
+def test_repair_strategy_repeat_threshold_default_and_bounds(monkeypatch) -> None:
+    monkeypatch.delenv("SHERPA_REPAIR_STRATEGY_REPEAT_THRESHOLD", raising=False)
+    assert workflow_graph._repair_strategy_repeat_threshold() == 3
+    monkeypatch.setenv("SHERPA_REPAIR_STRATEGY_REPEAT_THRESHOLD", "1")
+    assert workflow_graph._repair_strategy_repeat_threshold() == 2
+    monkeypatch.setenv("SHERPA_REPAIR_STRATEGY_REPEAT_THRESHOLD", "99")
+    assert workflow_graph._repair_strategy_repeat_threshold() == 10
 
 
 def test_route_after_init_resumes_from_requested_step() -> None:

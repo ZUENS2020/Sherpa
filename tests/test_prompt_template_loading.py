@@ -73,6 +73,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "`fuzz/repo_understanding.json`" in synth
     assert "`fuzz/build_strategy.json`" in synth
     assert "`fuzz/build_runtime_facts.json`" in synth
+    assert "`fuzz/harness_index.json`" in synth
     assert "DEFAULT_CMAKE_ARGS" in synth
     assert "-DENABLE_TEST=OFF" in synth
     assert "-DENABLE_INSTALL=OFF" in synth
@@ -83,6 +84,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
     assert "fuzz/build_runtime_facts.json" in scaffold
+    assert "fuzz/harness_index.json" in scaffold
     assert "missing items" in scaffold.lower()
 
     synth_build_repair = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")

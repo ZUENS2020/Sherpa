@@ -8,11 +8,13 @@ Repair planning artifacts after a build-stage failure.
 - `fuzz/PLAN.md` (if present)
 - `fuzz/targets.json` (if present)
 - `fuzz/execution_plan.json` (if present)
+- `repair_error_digest` from coordinator context (if provided)
 
 ## Required Outputs
 - updated `fuzz/PLAN.md`
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
+- strategy note that keeps `fuzz/harness_index.json` mappable (no orphan execution targets)
 
 ## Acceptance Criteria
 - plan explicitly addresses current build failure kind/code/signature.
