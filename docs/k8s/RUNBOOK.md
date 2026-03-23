@@ -1,51 +1,85 @@
-# Runbook
+# Kubernetes Runbook
 
-## 先看哪里
+This is the current troubleshooting guide for a deployed Sherpa environment.
 
-1. 聚合日志：`/app/job-logs/jobs/<job_id>.log`
-2. 阶段文件：`/shared/output/_k8s_jobs/<job_id>/stage-*.json`
-3. 任务目录：`/shared/output/<repo>-<id>/run_summary.json`
-4. stage pod 日志
+## 1. First Places to Look
 
-## 常见排障路径
+1. backend aggregate log: `/app/job-logs/jobs/<job_id>.log`
+2. stage result files: `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
+3. stage error files: `/shared/output/_k8s_jobs/<job_id>/stage-*.error.txt`
+4. task workspace artifacts: `/shared/output/<repo>-<id>/`
+5. Kubernetes pod logs for the specific stage
 
-### `plan` 失败
-看：
-- `targets.json` schema
-- `target_analysis.json`
-- 是否 fallback 成功
+## 2. Stage-Oriented Triage
 
-### `synthesize` 失败
-看：
-- 是否 partial scaffold
-- 是否至少有 harness + build script
-- 是否触发 completion prompt
+### `plan` issues
 
-### `build` 失败
-看：
+Check:
+
+- target planning artifacts exist
+- selected/execution targets are coherent
+- error text persisted in stage result files
+
+### `synthesize` issues
+
+Check:
+
+- harness source exists
+- build scaffold exists
+- `execution_plan.json` and `harness_index.json` are aligned
+
+### `build` issues
+
+Check:
+
 - `build_error_code`
-- `error_signature_before/after`
-- `fix_action_type`
-- `fix_effect`
-- `final_build_error_code`
+- `build_error_kind`
+- `target_build_matrix`
+- `missing_targets`
+- `repair_error_digest`
 
-### `run` 很久不结束
-看：
+### `run` issues
+
+Check:
+
+- `run_summary.json`
+- `run_error_kind`
 - `terminal_reason`
-- `coverage_loop.round`
-- `coverage_loop.stop_reason`
-- `coverage_loop.target_depth_class`
-- `coverage_loop.repo_examples_*`
+- coverage and feature movement
+- seed quality and family gaps
 
-### `re-run` 失败
-看：
+### `crash-triage` issues
+
+Check:
+
+- `crash_info.md`
+- `crash_analysis.md`
+- `crash_triage.json`
+
+### `re-build` / `re-run` issues
+
+Check:
+
 - `repro_context.json`
-- `.repro_crash/`
-- `last_crash_artifact`
-- `re_workspace_root`
+- repro workspace paths
+- rebuild logs
+- artifact existence
 
-## 线上重点判断标准
+## 3. High-Value Questions
 
-- 如果 `run` 已 plateau 且预算耗尽，应正常 stop
-- 如果 `replan` 没有 material change，应 stop，不应继续空转
-- 如果 `build` 只是 env rebuild 问题，应该 fresh build 收口
+Ask these first:
+
+- did the stage persist structured output?
+- is the task failing because of planning/synthesis drift, or runtime execution?
+- is the crash path actually a harness bug?
+- are seed quality and execution-target coverage the real bottleneck?
+
+## 4. Operational Principle
+
+Do not trust stage status alone. Always cross-check:
+
+- stage JSON
+- task workspace artifacts
+- aggregate logs
+
+That combination is the closest thing to ground truth during live debugging.

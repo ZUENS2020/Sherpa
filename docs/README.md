@@ -1,33 +1,45 @@
-# Sherpa 文档入口
+# Documentation Index
 
-本目录记录 Sherpa 当前代码实现的真实口径。这里不复述历史设计，只保留当前能落地、可联调、可接手的内容。
+This directory documents Sherpa as it behaves today. It is organized for technical learning first, not for historical reconstruction.
 
-## 推荐阅读顺序
+## Read These First
 
-1. [仓库总览](/README.md)
-   - 先看项目定位、当前工作流和模块边界。
+1. [../README.md](../README.md)
+   System overview, current workflow, and artifact model.
 
-2. [代码级技术分析](/docs/CODEBASE_TECHNICAL_ANALYSIS.md)
-   - 面向开发者，解释控制面、执行面、工作流状态机和 crash triage 逻辑。
+2. [CODEBASE_TECHNICAL_ANALYSIS.md](CODEBASE_TECHNICAL_ANALYSIS.md)
+   Module boundaries, control plane vs execution plane, and state machine semantics.
 
-3. [API Reference](/docs/API_REFERENCE.md)
-   - 面向前端联调，按当前真实实现整理 `/api/task`、`/api/tasks`、`/api/system`、`/api/config` 等接口。
+3. [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
+   How to study the codebase efficiently and what each major capability is doing.
 
-4. [技术学习指南](/docs/TECHNICAL_DEEP_DIVE.md)
-   - 面向开发者系统学习 Sherpa 的工作流、状态机、API、K8s 和 crash triage 逻辑。
+4. [API_REFERENCE.md](API_REFERENCE.md)
+   Current backend API contract for frontend integration and task control.
 
-5. [标准变更流程](/docs/STANDARD_CHANGE_PROCESS.md)
-   - 描述 `codex/* -> dev -> main` 的标准验证和发布路径。
+5. [STANDARD_CHANGE_PROCESS.md](STANDARD_CHANGE_PROCESS.md)
+   Branching, validation, doc-sync, and release expectations.
 
-6. [原版 K8s 主控/Worker 集群部署](/docs/k8s/ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md)
-   - 面向 kubeadm，说明如何把多台服务器组成集群并部署 Sherpa。
+## Deployment and Operations
 
-## 当前统一口径
+- [k8s/DEPLOY.md](k8s/DEPLOY.md)
+- [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)
+- [k8s/RUNBOOK.md](k8s/RUNBOOK.md)
+- [k8s/MAPPING.md](k8s/MAPPING.md)
+- [k8s/ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md](k8s/ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md)
 
-- 线上执行环境是 Kubernetes，工作流阶段由短生命周期 Job 执行。
-- 常驻服务是 `sherpa-web`、`sherpa-frontend`、`postgres`。
-- `main.py` 负责外层 API 与调度，`workflow_graph.py` 负责状态机，`fuzz_unharnessed_repo.py` 负责底层 clone/build/run。
-- 当前主线工作流包含：
+## Historical / Legacy Context
+
+These files are preserved as context, not as the primary operating manual:
+
+- [PROJECT_HANDOFF_STATUS.md](PROJECT_HANDOFF_STATUS.md)
+- [K8S_MIGRATION_CHECKLIST.md](K8S_MIGRATION_CHECKLIST.md)
+- [DOCKER_TO_K8S_HANDOFF.md](DOCKER_TO_K8S_HANDOFF.md)
+- [k8s/DEPLOY_ISSUES_NON_NETWORK.md](k8s/DEPLOY_ISSUES_NON_NETWORK.md)
+- [k8s/E2E_ZLIB_REPORT.md](k8s/E2E_ZLIB_REPORT.md)
+
+## Current Documentation Rules
+
+- Workflow descriptions should follow the current mainline stages:
   - `plan`
   - `synthesize`
   - `build`
@@ -38,7 +50,6 @@
   - `improve-harness`
   - `re-build`
   - `re-run`
-- `fix_build` / `fix_crash` 仍保留兼容逻辑，但不是当前主线的唯一修复路径。
-- 默认不复用仓库自带 fuzz target，而是统一生成外部 harness 与 build scaffold。
-- non-root 是默认运行假设，运行时临时文件优先使用容器内 `/tmp`。
-- 前端联调用到的动态指标优先看 `/api/system` 和 `/api/tasks`，其契约以 `docs/API_REFERENCE.md` 为准。
+- API docs must match the actual FastAPI implementation in `harness_generator/src/langchain_agent/main.py`.
+- Links in docs should be relative repository paths.
+- Historical design notes must be clearly labeled as historical rather than operational truth.
