@@ -1,86 +1,86 @@
-# Standard Change Process
+# 标准变更流程
 
-This document describes the current recommended change, validation, and release flow for Sherpa.
+本文档描述 Sherpa 当前推荐的变更、验证与发布流程。
 
-## 1. Branching Model
+## 1. 分支模型
 
-- feature work: `codex/*` or explicit topic branches
-- integration branch: `dev`
-- production branch: `main`
+- 功能开发分支：`codex/*` 或明确主题分支
+- 集成验证分支：`dev`
+- 生产发布分支：`main`
 
-Expected path:
+推荐路径：
 
-1. develop on a feature branch
-2. open a PR into `dev`
-3. validate through `dev`
-4. open `dev -> main`
-5. release through `main`
+1. 在功能分支上开发
+2. 提交 PR 到 `dev`
+3. 在 `dev` 上完成验证
+4. 创建 `dev -> main` PR
+5. 通过 `main` 完成发布
 
-## 2. Required Project Process
+## 2. 必须遵守的项目流程
 
-For major project changes:
+对于较大的项目变更：
 
-1. define goal and planned scope first
-2. write that summary into a Linear issue
-3. apply type-based labels
-4. set the issue to `In Progress`
-5. only then start implementation
-6. update the same issue with progress comments as work evolves
-7. finish with a `Done` status and a final Chinese summary comment
+1. 先定义目标与计划范围
+2. 将摘要写入 Linear issue
+3. 按类型添加标签
+4. 将 issue 状态设为 `In Progress`
+5. 然后才能开始实现
+6. 随工作进展持续在同一 issue 中同步评论
+7. 完成后设为 `Done`，并附上一条中文总结评论
 
-## 3. Validation Expectations
+## 3. 验证要求
 
-Minimum local validation depends on change type.
+最低本地验证要求取决于变更类型。
 
-### Code changes
+### 代码变更
 
-- `python3 -m py_compile` for touched Python modules
-- relevant pytest subset
+- 对修改过的 Python 模块运行 `python3 -m py_compile`
+- 运行相关 pytest 子集
 
-### Frontend changes
+### 前端变更
 
-- build and/or tests for the touched frontend
-- confirm API field usage still matches backend behavior
+- 对受影响的前端执行 build 和/或测试
+- 确认 API 字段使用方式仍与后端行为一致
 
-### Workflow changes
+### 工作流变更
 
-Prefer at least one real repository validation on `dev`, commonly:
+优先在 `dev` 上至少做一次真实仓库验证，常见样例包括：
 
 - `fmt`
 - `libyaml`
 - `zlib`
 - `libarchive`
 
-## 4. Documentation Sync Rules
+## 4. 文档同步规则
 
-Any change that affects these behaviors must update docs in the same change:
+若变更影响以下行为，必须在同一提交中更新文档：
 
-- workflow stages or routing
-- target selection or execution-plan behavior
-- seed generation or seed-quality policy
-- crash triage / repro / harness-fix behavior
-- deployment model
-- API contracts consumed by frontend
+- 工作流阶段或路由
+- 目标选择或 execution-plan 行为
+- 种子生成或种子质量策略
+- 崩溃分诊 / 复现 / harness 修复行为
+- 部署模型
+- 前端依赖的 API 契约
 
-At minimum, review:
+至少应复核：
 
 - [../README.md](../README.md)
 - [API_REFERENCE.md](API_REFERENCE.md)
 - [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
-- deployment docs under `docs/k8s/`
+- `docs/k8s/` 下的部署文档
 
-## 5. Release Guardrails
+## 5. 发布保护规则
 
-- do not push directly to `dev` or `main`
-- `main` should accept changes from `dev`, not directly from feature branches
-- required PRs should include:
-  - change summary
-  - risk / rollback note
-  - reproducible validation result
+- 不要直接 push 到 `dev` 或 `main`
+- `main` 应只接受来自 `dev` 的变更，而非功能分支直提
+- 必需的 PR 内容包括：
+  - 变更摘要
+  - 风险 / 回滚说明
+  - 可复现的验证结果
 
-## 6. Things to Avoid
+## 6. 需要避免的做法
 
-- updating only README while leaving deeper docs stale
-- describing idealized APIs instead of actual API behavior
-- treating stage success alone as proof without checking artifacts
-- keeping historical migration notes unlabeled so they look current
+- 只更新 README，却让更深层文档过期
+- 描述理想化 API，而不是实际实现行为
+- 只看阶段成功状态，不检查实际产物
+- 不标注历史迁移说明，导致其看起来像当前事实

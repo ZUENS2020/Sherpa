@@ -1,18 +1,18 @@
-# Kubernetes Deployment Detailed Guide
+# Kubernetes 部署详解
 
-This document explains the current Sherpa deployment model in more detail than the short deploy guide.
+本文档比简版部署指南更详细地说明当前 Sherpa 的部署模型。
 
-## 1. Component Model
+## 1. 组件模型
 
-### Long-lived services
+### 常驻服务
 
-- backend API / control plane
-- frontend UI
+- 后端 API / 控制面
+- 前端 UI
 - Postgres
 
-### Stage jobs
+### 阶段作业
 
-The workflow dispatches short-lived Jobs for stages such as:
+工作流会为以下阶段分发短生命周期 Job：
 
 - `plan`
 - `synthesize`
@@ -25,53 +25,53 @@ The workflow dispatches short-lived Jobs for stages such as:
 - `re-build`
 - `re-run`
 
-## 2. Data and Artifact Model
+## 2. 数据与产物模型
 
-Sherpa relies on durable output paths rather than pod-local state.
+Sherpa 依赖持久化输出路径，而不是 Pod 本地状态。
 
-Important persisted locations:
+重要持久化位置：
 
 - `/shared/output/<repo>-<id>/`
 - `/shared/output/_k8s_jobs/<job_id>/`
 - `/app/job-logs/jobs/<job_id>.log`
 
-## 3. Control Flow
+## 3. 控制流
 
 ```mermaid
 sequenceDiagram
-  participant U as User
-  participant FE as Frontend
-  participant API as Backend
+  participant U as 用户
+  participant FE as 前端
+  participant API as 后端
   participant DB as Postgres
-  participant K8S as Stage Jobs
+  participant K8S as 阶段作业
 
-  U->>FE: submit repo
+  U->>FE: 提交仓库
   FE->>API: POST /api/task
-  API->>DB: create parent task + child jobs
-  API->>K8S: dispatch stage job
-  K8S->>API: persist stage result
-  API->>K8S: dispatch next stage
+  API->>DB: 创建父任务与子作业
+  API->>K8S: 分发阶段作业
+  K8S->>API: 持久化阶段结果
+  API->>K8S: 分发下一阶段
 ```
 
-## 4. Environment Expectations
+## 4. 环境要求
 
-- worker and backend versions must be aligned
-- shared output must be accessible wherever stage jobs run
-- metrics availability improves observability but is not the workflow source of truth
-- non-root runtime and temp-dir assumptions should be preserved
+- worker 与 backend 版本必须对齐
+- 共享输出路径必须对所有阶段作业可访问
+- metrics 可提升可观测性，但不是工作流事实来源
+- 应保持非 root 运行与临时目录相关假设
 
-## 5. What to Validate After Deploy
+## 5. 部署后要验证什么
 
-- backend routes respond
-- frontend loads and reads live API data
-- stage jobs can be dispatched
-- persisted output appears where expected
-- one real repository task can traverse multiple stages successfully
+- 后端路由可正常响应
+- 前端可以加载并读取实时 API 数据
+- 阶段作业能够被成功分发
+- 持久化输出出现在预期位置
+- 至少一个真实仓库任务能成功跨越多个阶段
 
-## 6. Not Covered Here
+## 6. 本文不覆盖的内容
 
-- cluster bootstrap from scratch
-- cloud-provider-specific ingress/load-balancer setup
-- historical migration notes
+- 从零开始引导集群
+- 云厂商特定的 ingress / 负载均衡配置
+- 历史迁移笔记
 
-For cluster bootstrap, see [ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md](ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md).
+如需查看集群引导，请阅读 [ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md](ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md)。

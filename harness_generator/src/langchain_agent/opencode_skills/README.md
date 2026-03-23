@@ -1,13 +1,12 @@
-# OpenCode Stage Skills
+# OpenCode 阶段技能
 
-This directory contains stage-scoped OpenCode skills used by the main
-`workflow_graph` pipeline.
+该目录包含主 `workflow_graph` 流水线使用的、按阶段划分的 OpenCode skill。
 
-Each stage skill lives in:
+每个阶段 skill 位于：
 
 - `<stage>/SKILL.md`
 
-Current stages:
+当前阶段包括：
 
 - `plan`
 - `plan_fix_targets_schema`

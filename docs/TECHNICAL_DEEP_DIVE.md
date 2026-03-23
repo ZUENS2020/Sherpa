@@ -1,41 +1,41 @@
-# Sherpa Technical Deep Dive
+# Sherpa 技术深潜
 
-This document is for learning the project efficiently. Read it when you want to understand how the system works end to end and where to look in code.
+本文档旨在帮助你高效理解项目。当你希望端到端地理解系统在做什么，以及应该先看哪些代码时，请从这里开始。
 
-## 1. What Sherpa Is Actually Solving
+## 1. Sherpa 真正要解决的问题
 
-Sherpa automates the fuzz engineering loop, not just harness generation.
+Sherpa 自动化的是 fuzz 工程闭环，而不只是 harness 生成。
 
-The hard part of practical fuzzing is chaining these steps reliably:
+实践中的难点，是要把以下步骤稳定串起来：
 
-- choose a target worth fuzzing
-- generate a scaffold that actually builds
-- create seeds with semantic value
-- run fuzzers long enough to get signal
-- classify crashes correctly
-- keep improving when there is no crash but coverage stalls
+- 选择值得 fuzz 的目标
+- 生成真正能构建的脚手架
+- 创建有语义价值的种子
+- 让 fuzzer 跑得足够久，从而产生有效信号
+- 正确分类崩溃
+- 在没有崩溃但覆盖率停滞时继续改进
 
-Sherpa exists to turn those repeated steps into an explicit workflow with artifacts and routing.
+Sherpa 的存在，就是把这些重复步骤变成一个具有明确产物与路由决策的工作流。
 
-## 2. Build the Right Mental Model
+## 2. 建立正确的心智模型
 
-Think in four layers:
+请按四层来理解系统：
 
 1. UI
-   Submit tasks, configure providers, and observe jobs.
+   提交任务、配置 provider、观察作业。
 
-2. Control plane
-   `main.py` exposes APIs and dispatches stage jobs.
+2. 控制面
+   `main.py` 暴露 API，并分发阶段作业。
 
-3. Workflow state machine
-   `workflow_graph.py` decides what stage comes next and why.
+3. 工作流状态机
+   `workflow_graph.py` 决定下一阶段是什么，以及为什么这样决策。
 
-4. Execution layer
-   `fuzz_unharnessed_repo.py` performs clone/build/run/OpenCode actions.
+4. 执行层
+   `fuzz_unharnessed_repo.py` 负责 clone / build / run / OpenCode 等具体动作。
 
-If you confuse layer 3 and layer 4, the codebase becomes much harder to read.
+如果把第 3 层和第 4 层混为一谈，代码库会非常难读。
 
-## 3. Current Mainline Workflow
+## 3. 当前主线工作流
 
 ```mermaid
 flowchart LR
@@ -53,103 +53,103 @@ flowchart LR
   RB --> RR["re-run"]
 ```
 
-How to read the key edges:
+关键边的阅读方式：
 
-- `build -> run`: scaffold is buildable and target mapping is acceptable
-- `run -> coverage-analysis`: no crash path to triage, now decide whether improvement is justified
-- `run -> crash-triage`: there is a crash candidate that needs classification
-- `crash-triage -> fix-harness`: likely harness-side bug
-- `crash-triage -> re-build`: likely upstream bug or at least needs repro validation
-- `improve-harness -> build`: keep the same target but improve its behavior
+- `build -> run`：脚手架可构建，且目标映射可接受
+- `run -> coverage-analysis`：没有需要分诊的崩溃路径，此时判断是否值得继续改进
+- `run -> crash-triage`：出现候选崩溃，需要进一步分类
+- `crash-triage -> fix-harness`：更可能是 harness 侧问题
+- `crash-triage -> re-build`：更可能是上游问题，或至少需要复现验证
+- `improve-harness -> build`：保留当前目标，只改进行为
 
-## 4. How to Study the Code
+## 4. 如何阅读代码
 
-Recommended order:
+推荐顺序：
 
 1. [../README.md](../README.md)
-   Get the system map first.
+   先获得系统地图。
 
 2. [CODEBASE_TECHNICAL_ANALYSIS.md](CODEBASE_TECHNICAL_ANALYSIS.md)
-   Understand module boundaries and current stage semantics.
+   理解模块边界与当前阶段语义。
 
 3. `harness_generator/src/langchain_agent/workflow_graph.py`
-   Read node functions and routing decisions.
+   阅读节点函数与路由决策。
 
 4. `harness_generator/src/fuzz_unharnessed_repo.py`
-   Read how each stage is actually executed.
+   阅读各阶段实际如何执行。
 
 5. `harness_generator/src/langchain_agent/main.py`
-   Read task lifecycle, API aggregation, and stage dispatch.
+   阅读任务生命周期、API 聚合与阶段分发。
 
-6. `harness_generator/src/codex_helper.py` and `harness_generator/src/langchain_agent/opencode_skills/`
-   Read how stage-specific AI behavior is constrained.
+6. `harness_generator/src/codex_helper.py` 与 `harness_generator/src/langchain_agent/opencode_skills/`
+   阅读阶段级 AI 行为是如何被约束的。
 
-## 5. Three Core Capability Loops
+## 5. 三条核心能力循环
 
-### 5.1 Target planning loop
+### 5.1 目标规划循环
 
-Artifacts:
+产物：
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
 - `fuzz/selected_targets.json`
 - `fuzz/execution_plan.json`
 
-What matters:
+关键点：
 
-- target must be runtime-viable
-- depth matters more than superficial call reachability
-- target choice implies seed profile and likely harness shape
+- 目标必须在运行时可行
+- 深度比表面的可达性更重要
+- 目标选择会直接影响种子画像与 harness 形态
 
-### 5.2 Seed quality loop
+### 5.2 种子质量循环
 
-Artifacts:
+产物：
 
 - `fuzz/corpus/<target>/`
 - `fuzz/seed_quality_<target>.json`
-- workflow `SeedFeedback`
+- 工作流内的 `SeedFeedback`
 
-What matters:
+关键点：
 
-- repo examples are preferred when meaningful
-- AI seeds should cover missing semantic families
-- mutation is supportive, not a substitute for valid examples
-- coverage improvement depends on seed quality, not just seed count
+- 有意义时优先使用仓库样例
+- AI 种子应补齐缺失的语义家族
+- 变异只是辅助，而不是有效样例的替代品
+- 覆盖率改进依赖的是种子质量，而不只是种子数量
 
-### 5.3 Crash and repro loop
+### 5.3 崩溃与复现循环
 
-Artifacts:
+产物：
 
 - `crash_info.md`
 - `crash_analysis.md`
 - `crash_triage.json`
 - `repro_context.json`
 
-What matters:
+关键点：
 
-- not every crash is an upstream bug
-- harness bugs must be filtered before repro claims
-- repro is a separate validation path, not part of exploratory fuzzing
+- 并不是所有崩溃都是上游 bug
+- 在宣称可复现之前，必须先滤掉 harness bug
+- 复现是一条独立验证链路，不属于探索式 fuzz 本身
 
-## 6. Coverage Improvement Logic
+## 6. 覆盖率改进逻辑
 
-Coverage improvement is where many systems become noisy. Sherpa uses a dedicated loop:
+覆盖率改进是很多系统噪声最重的地方。Sherpa 为此设计了专门的循环：
 
-1. `run` emits coverage, feature, plateau, seed, and target signals
-2. `coverage-analysis` decides whether there is a justified next action
-3. `improve-harness` either improves the current target in place or hands off to replan
+1. `run` 输出覆盖率、feature、平台期、种子与目标相关信号
+2. `coverage-analysis` 判断是否存在合理的下一步
+3. `improve-harness` 决定是在当前目标上原地改进，还是移交给 replan
 
-Current feedback signals worth understanding:
+当前值得重点理解的反馈信号：
 
 - `SeedFeedback`
 - `HarnessFeedback`
 - `coverage_quality_oracle`
 
-The point is to avoid blind replanning or repeated no-op changes.
+核心目标，是避免盲目 replan 或重复执行无效修改。
 
-## 7. API Learning Path
+## 7. API 学习路径
 
-If you need frontend/backend integration, focus on these routes first:
+如果你关注前后端集成，请先聚焦这些路由：
 
 - `POST /api/task`
 - `GET /api/tasks`
@@ -158,69 +158,69 @@ If you need frontend/backend integration, focus on these routes first:
 - `GET /api/system`
 - `PUT /api/config`
 
-Important distinction:
+需要注意的区别：
 
-- task-level rows are parent tasks
-- workflow stages are child fuzz jobs or stage jobs
-- `/api/system` is a system aggregate, not a raw task dump
+- 任务表中的行是父任务
+- 工作流阶段对应的是子 fuzz job 或 stage job
+- `/api/system` 是系统聚合视图，而不是原始任务转储
 
-See [API_REFERENCE.md](API_REFERENCE.md) for field-level detail.
+字段细节见 [API_REFERENCE.md](API_REFERENCE.md)。
 
-## 8. Where Failures Usually Come From
+## 8. 常见失败来源
 
-### Target too shallow
+### 目标太浅
 
-Symptoms:
+表现：
 
-- fast build/run success
-- little coverage growth
-- repeated plateau
+- build / run 很快成功
+- 覆盖率增长很少
+- 频繁进入平台期
 
-### Scaffold and execution plan drift
+### 脚手架与 execution plan 漂移
 
-Symptoms:
+表现：
 
-- `execution_plan.json` points to targets that are not backed by harnesses
-- undercoverage gate triggers even after “successful” synthesis
+- `execution_plan.json` 指向的目标没有对应 harness
+- 即使 synthesize 看起来成功，仍触发 undercoverage 门禁
 
-### Seed quality looks large but weak
+### 种子看起来很多，但质量很弱
 
-Symptoms:
+表现：
 
-- many corpus files
-- low family coverage
-- high noise rejection
-- little coverage gain
+- 语料文件很多
+- 家族覆盖不足
+- 噪声拒绝率高
+- 覆盖率收益很小
 
-### Crash path is actually harness-side
+### 崩溃路径实际上是 harness 问题
 
-Symptoms:
+表现：
 
-- invalid format string / uncaught exception / bad harness assumptions
-- repro fails in a way that does not implicate upstream code
+- 无效格式字符串 / 未捕获异常 / 错误的 harness 假设
+- 复现失败，且无法指向上游代码
 
-## 9. Operational Reading
+## 9. 运维阅读顺序
 
-When debugging a live task, check these in order:
+调试线上任务时，建议按以下顺序查看：
 
 1. `/app/job-logs/jobs/<job_id>.log`
 2. `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
 3. `/shared/output/<repo>-<id>/run_summary.json`
-4. crash and repro artifacts if present
+4. 若存在，再查看 crash 与 repro 产物
 
-Operational docs:
+运维文档：
 
 - [k8s/DEPLOY.md](k8s/DEPLOY.md)
 - [k8s/RUNBOOK.md](k8s/RUNBOOK.md)
 
-## 10. What Not to Learn from Old Material
+## 10. 不要从旧材料中学到什么
 
-If an older document implies that:
+如果旧文档暗示：
 
-- historical fix stages are the main repair path
-- inner Docker remains part of the required execution model
-- migration checklist items are the current operating manual
+- 历史修复阶段仍然是主要修复路径
+- inner Docker 仍是必需执行模型的一部分
+- 迁移清单仍是当前操作手册
 
-then treat it as legacy context rather than current truth.
+请将其视为遗留背景，而不是当前事实。
 
-The current source of truth is the code plus the rewritten main docs in this directory.
+当前事实来源始终是代码，以及本目录中重写后的主文档。

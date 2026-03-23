@@ -1,45 +1,45 @@
-# Project Handoff Status
+# 项目交接状态
 
-This file is historical context, not the primary operating manual.
+本文件仅作为历史交接背景，不是当前首选操作手册。
 
-For current documentation, start here:
+当前文档请从以下位置开始阅读：
 
 - [../README.md](../README.md)
 - [README.md](README.md)
 - [CODEBASE_TECHNICAL_ANALYSIS.md](CODEBASE_TECHNICAL_ANALYSIS.md)
 - [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
 
-## Current High-Level Status
+## 当前高层状态
 
-Sherpa currently has:
+Sherpa 当前已经具备：
 
-- a staged Kubernetes execution model
-- a workflow centered on planning, synthesis, build, run, coverage improvement, crash triage, harness repair, and repro
-- frontend/backend dynamic task and system views
-- seed-quality-aware coverage improvement
+- 分阶段的 Kubernetes 执行模型
+- 以规划、生成、构建、运行、覆盖率改进、崩溃分诊、harness 修复与复现为核心的工作流
+- 前后端动态任务与系统视图
+- 具备种子质量感知能力的覆盖率改进链路
 
-## What This File Should Be Used For
+## 本文件适合承载什么内容
 
-Use this file only to communicate high-level handoff notes, such as:
+仅用于传达高层交接说明，例如：
 
-- where the primary docs now live
-- what broad subsystems exist
-- what still requires deeper engineering work
+- 主要文档当前位于哪里
+- 系统包含哪些大模块
+- 哪些部分仍需要进一步工程化完善
 
-## Current Ongoing Engineering Risks
+## 当前仍然存在的工程风险
 
-- target depth selection can still drift toward shallow wrappers
-- scaffold consistency can still be broken by weak synthesis rounds
-- seed quality remains a major determinant of real coverage progress
-- crash classification quality depends on repro and log quality
+- 目标深度选择仍可能偏向浅层包装函数
+- 若生成轮次过弱，脚手架一致性仍可能被破坏
+- 种子质量依旧是实际覆盖率增长的关键决定因素
+- 崩溃分类质量仍依赖复现链路与日志质量
 
-## Not the Source of Truth
+## 它不是事实来源
 
-Do not use this file as the source of truth for:
+不要把本文件当作以下内容的权威来源：
 
-- stage routing
-- API field contracts
-- deployment steps
-- validation criteria
+- 阶段路由
+- API 字段契约
+- 部署步骤
+- 验证标准
 
-Those now live in the rewritten main docs.
+这些信息现在都已迁移到重写后的主文档中。

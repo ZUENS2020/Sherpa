@@ -1,6 +1,6 @@
-# Harness Generator Backend
+# Harness Generator 后端
 
-`harness_generator/` 是 Sherpa 的后端实现目录，包含 Web API、stage worker、工作流状态机、OpenCode 封装以及非 OSS-Fuzz 仓库处理逻辑。
+`harness_generator/` 是 Sherpa 的后端实现目录，包含 Web API、stage worker、工作流状态机、OpenCode 封装，以及非 OSS-Fuzz 仓库的处理逻辑。
 
 当前线上主路径是：
 
@@ -51,26 +51,26 @@ harness_generator/
 - 负责：
   - `targets.json` schema 校验
   - coverage loop
-  - env rebuild build rerun
+  - env rebuild / build / rerun
   - plateau 收口
   - replan 有效性校验
 
 ### `src/fuzz_unharnessed_repo.py`
-- 仓库 clone、build、run 的底层执行
-- seed bootstrap 三段式实现
-- repo examples 过滤
-- OpenCode scaffolding passes
-- 本地 build/run 命令执行与日志解析
+- 负责仓库 clone、build、run 的底层执行
+- 实现 seed bootstrap 三段式逻辑
+- 处理 repo examples 过滤
+- 执行 OpenCode scaffolding passes
+- 执行本地 build / run 命令并解析日志
 
 ### `src/codex_helper.py`
-- OpenCode CLI 调用封装
-- sentinel 与 idle timeout
-- 原生 `opencode` 执行
-- 对只读命令（含 `grep/rg`）的白名单控制
+- 封装 OpenCode CLI 调用
+- 管理 sentinel 与 idle timeout
+- 原生执行 `opencode`
+- 对只读命令（含 `grep/rg`）做白名单控制
 
 ## 当前数据产物
 
-任务输出目录典型内容：
+任务输出目录中的典型内容：
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
@@ -108,8 +108,8 @@ harness_generator/
 - `generic`
 
 ### 3. Coverage loop
-- plateau 后先做当前 target 的 in-place improve
-- 连续无收益且预算允许才 replan
+- plateau 后优先在当前 target 上做原地 improve
+- 连续无收益且预算允许时才 replan
 - replan 必须有实质变化，否则停止
 
 ### 4. Build resilience
@@ -121,11 +121,11 @@ harness_generator/
 
 ## 当前与历史实现的差异
 
-旧版实现里曾存在：
+旧版实现曾经存在：
 - inner Docker OpenCode
 - 固定阶段尾序列
-- 无 `seed_profile`
-- 无 `target_analysis.json`
+- 缺少 `seed_profile`
+- 缺少 `target_analysis.json`
 - plateau 后直接反复回 `plan`
 
 这些都不是当前主线行为。请以当前代码和本文档为准。
