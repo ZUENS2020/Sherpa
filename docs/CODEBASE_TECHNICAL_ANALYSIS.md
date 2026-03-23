@@ -1,91 +1,91 @@
-# Sherpa Codebase Technical Analysis
+# Sherpa 代码库技术分析
 
-This document explains the current codebase structure and how the main runtime path is assembled.
+本文档说明当前代码库结构，以及主运行路径是如何拼装起来的。
 
-## 1. System Objective
+## 1. 系统目标
 
-Sherpa automates the engineering loop around fuzzing a repository:
+Sherpa 试图把“对一个仓库做 fuzz”的工程闭环自动化：
 
-- select runtime-viable targets
-- synthesize an external scaffold
-- build the scaffold
-- generate and evaluate seeds
-- run fuzzers and collect quality signals
-- classify crashes
-- reproduce and validate crash paths
+- 选择运行时可行的目标
+- 生成外置脚手架
+- 构建脚手架
+- 生成并评估种子
+- 运行 fuzzer 并采集质量信号
+- 对崩溃进行分类
+- 复现并验证崩溃路径
 
-The design goal is not one-shot harness generation. It is a recoverable workflow with explicit artifacts and routing decisions.
+设计目标不是一次性生成 harness，而是构建一个具有明确产物与路由决策、可恢复的工作流。
 
-## 2. Top-Level Structure
+## 2. 顶层结构
 
 ```mermaid
 flowchart LR
-  FE["Frontend"] --> API["main.py"]
+  FE["前端"] --> API["main.py"]
   API --> DB[("Postgres")]
   API --> WF["workflow_graph.py"]
   WF --> GEN["fuzz_unharnessed_repo.py"]
   WF --> SUM["workflow_summary.py"]
-  API --> JOB["Kubernetes stage jobs"]
+  API --> JOB["Kubernetes 阶段作业"]
   JOB --> OUT["/shared/output"]
 ```
 
-## 3. Main Code Entrypoints
+## 3. 主要代码入口
 
 ### `harness_generator/src/langchain_agent/main.py`
 
-Primary responsibilities:
+核心职责：
 
-- FastAPI routes
-- task creation, resume, stop
-- job persistence and aggregation
-- runtime config persistence
-- stage job dispatch
-- `/api/system`, `/api/tasks`, `/api/task/*` aggregation
+- 提供 FastAPI 路由
+- 创建、恢复、停止任务
+- 持久化并聚合作业信息
+- 持久化运行时配置
+- 分发阶段作业
+- 聚合 `/api/system`、`/api/tasks`、`/api/task/*`
 
-Treat this file as the control-plane source of truth.
+可将该文件视为控制面的事实来源。
 
 ### `harness_generator/src/langchain_agent/workflow_graph.py`
 
-This is the workflow state machine. It defines:
+这是工作流状态机，定义了：
 
-- workflow state shape
-- stage node implementations
-- routing decisions between stages
-- repair mode propagation
-- coverage improvement loop
-- crash triage / repro flow
+- 工作流状态结构
+- 各阶段节点实现
+- 阶段间路由决策
+- 修复模式传递
+- 覆盖率改进循环
+- 崩溃分诊 / 复现链路
 
-If you want to know why the workflow moved from one stage to another, start here.
+如果你想知道工作流为什么从一个阶段跳到另一个阶段，应先看这里。
 
 ### `harness_generator/src/fuzz_unharnessed_repo.py`
 
-This is the execution primitive layer. It handles:
+这是执行原语层，负责：
 
-- repository clone
-- OpenCode prompt execution
-- scaffold generation
-- build execution
-- seed bootstrap
-- fuzzer execution
-- crash packaging
-- seed quality scoring and filtering
+- clone 仓库
+- 执行 OpenCode prompt
+- 生成脚手架
+- 执行构建
+- 初始化种子
+- 运行 fuzzer
+- 打包崩溃产物
+- 对种子质量打分与过滤
 
-It should be read as the “how to perform a stage” layer, not the “what stage comes next” layer.
+阅读它时，应把它当作“如何执行某一阶段”的实现层，而不是“下一阶段是什么”的决策层。
 
 ### `harness_generator/src/codex_helper.py`
 
-This file wraps OpenCode invocation and stage-session behavior. Important areas:
+该文件封装了 OpenCode 调用与阶段会话行为，重点包括：
 
-- stage-aware task preparation
-- prompt/context assembly
-- session reuse rules
-- done sentinel handling
+- 感知阶段的任务准备逻辑
+- prompt / 上下文拼装
+- 会话复用规则
+- done sentinel 处理
 
 ### `harness_generator/src/langchain_agent/opencode_skills/`
 
-This directory contains stage-specific behavior contracts used by OpenCode. These skills are the instruction boundary between workflow state and stage-local editing behavior.
+该目录包含 OpenCode 使用的阶段级行为契约。这些 skill 是工作流状态与阶段内编辑行为之间的指令边界。
 
-## 4. Current Mainline Workflow
+## 4. 当前主线路工作流
 
 ```mermaid
 flowchart TD
@@ -105,7 +105,7 @@ flowchart TD
 
 ### `plan`
 
-Produces planning artifacts, not executable harnesses:
+产生规划产物，而不是可执行 harness：
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
@@ -113,110 +113,110 @@ Produces planning artifacts, not executable harnesses:
 - `fuzz/execution_plan.json`
 - `fuzz/target_analysis.json`
 
-Key purpose:
+关键目的：
 
-- select runtime-viable targets
-- assign `target_type` and `seed_profile`
-- define execution targets rather than arbitrary target candidates
+- 选择运行时可行的目标
+- 为目标分配 `target_type` 与 `seed_profile`
+- 明确定义执行目标，而不是只保留随意的候选目标
 
 ### `synthesize`
 
-Produces the executable scaffold under `fuzz/`:
+在 `fuzz/` 下产出可执行脚手架：
 
-- harness source
-- `build.py` or `build.sh`
+- harness 源码
+- `build.py` 或 `build.sh`
 - `README.md`
 - `repo_understanding.json`
 - `build_strategy.json`
 - `build_runtime_facts.json`
 - `harness_index.json`
 
-Key purpose:
+关键目的：
 
-- convert planning intent into a buildable fuzz scaffold
-- keep `execution_plan.json` and `harness_index.json` aligned
+- 将规划意图转成可构建的 fuzz 脚手架
+- 保证 `execution_plan.json` 与 `harness_index.json` 保持一致
 
 ### `build`
 
-Responsible for:
+负责：
 
-- executing scaffold build logic
-- validating execution-target coverage
-- classifying build failures
-- emitting structured repair context
+- 执行脚手架构建逻辑
+- 校验执行目标覆盖情况
+- 分类构建失败原因
+- 产出结构化修复上下文
 
-Important build-side contracts:
+重要契约：
 
-- execution targets must map to real harnesses
-- build success is not enough; required targets must actually be built
-- undercoverage is treated as a gated failure, not silent success
+- 执行目标必须映射到真实 harness
+- 仅仅 build 成功还不够，要求目标必须真的被构建出来
+- 覆盖不足会被视为门禁失败，而不是静默成功
 
 ### `run`
 
-Responsible for:
+负责：
 
-- seed bootstrap
-- parallel or batched fuzzer execution
-- extracting `cov`, `ft`, `exec/s`, plateau, timeout, OOM, and crash signals
-- packaging crash artifacts
-- emitting `SeedFeedback` and `HarnessFeedback`
+- 初始化种子
+- 并行或分批运行 fuzzer
+- 抽取 `cov`、`ft`、`exec/s`、平台期、超时、OOM 与崩溃信号
+- 打包崩溃产物
+- 输出 `SeedFeedback` 与 `HarnessFeedback`
 
 ### `coverage-analysis`
 
-Responsible for deciding whether the current target should:
+负责判断当前目标应当：
 
-- continue with in-place improvement
-- replan to a deeper/better target
-- stop because there is no justified next action
+- 继续原地改进
+- 重新规划到更深 / 更优目标
+- 因为没有合理下一步而停止
 
-The stage consumes:
+该阶段会消费：
 
-- coverage progression
-- plateau signals
-- seed quality
-- execution target mismatches
-- target depth metadata
+- 覆盖率变化
+- 平台期信号
+- 种子质量
+- 执行目标不匹配信息
+- 目标深度元数据
 
 ### `improve-harness`
 
-Responsible for current-target improvements without arbitrary target switching:
+负责在不随意切换目标的前提下改进当前目标：
 
-- seed modeling adjustments
-- corpus/dictionary changes
-- harness call-path improvements
-- replan handoff when in-place strategy is no longer justified
+- 调整种子建模
+- 调整语料 / 字典
+- 改进 harness 调用路径
+- 当原地策略不再合理时，移交给 replan
 
 ### `crash-triage`
 
-Responsible for classifying crashes into:
+负责将崩溃分类为：
 
 - harness bug
-- upstream bug
-- inconclusive
+- 上游 bug
+- 结论不确定
 
-It uses crash logs, packaged artifacts, and repro-chain signals.
+它会使用崩溃日志、打包产物与复现链路信号。
 
 ### `fix-harness`
 
-Responsible only for harness-side correction. It is not intended to patch upstream product code.
+只负责修复 harness 侧问题，不用于修补上游产品代码。
 
 ### `re-build` / `re-run`
 
-These form the isolated repro path:
+它们构成隔离的复现链路：
 
-- rebuild the repro workspace
-- rerun the crashing input
-- preserve repro context and reports
+- 重建复现工作目录
+- 重新执行崩溃输入
+- 保留复现上下文与报告
 
-This chain exists to separate discovery from validation.
+这条链路的存在，是为了把“发现”与“验证”分开。
 
-## 5. Artifact Model
+## 5. 产物模型
 
-Typical workspace:
+典型工作目录：
 
 - `/shared/output/<repo>-<shortid>/`
 
-Important files:
+重要文件：
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
@@ -232,33 +232,33 @@ Important files:
 - `crash_triage.json`
 - `repro_context.json`
 
-Per-stage job artifacts:
+每阶段作业产物：
 
 - `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
 - `/shared/output/_k8s_jobs/<job_id>/stage-*.error.txt`
 
-## 6. Seed and Quality Pipeline
+## 6. 种子与质量流水线
 
-Seed handling is profile-driven. Important concepts:
+种子处理是画像驱动的，关键概念如下：
 
-- `seed_profile` controls expected input families
-- repo examples are reused where possible
-- AI generation fills semantic gaps
-- mutation is controlled, not the only source
-- filtering is soft-by-default to avoid over-pruning
-- seed scoring is written into `seed_quality_<target>.json`
+- `seed_profile` 决定期望的输入家族
+- 能复用仓库样例时优先复用
+- AI 生成负责补齐语义空白
+- 变异是受控辅助手段，而不是唯一来源
+- 过滤默认偏软，以避免过度裁剪
+- 种子评分会写入 `seed_quality_<target>.json`
 
-Current feedback structures propagated through the workflow:
+当前在工作流中传播的反馈结构包括：
 
 - `SeedFeedback`
 - `HarnessFeedback`
 - `coverage_quality_oracle`
 
-These are used by coverage improvement and repair planning.
+这些结构会被覆盖率改进与修复规划使用。
 
-## 7. API and Frontend Mapping
+## 7. API 与前端映射
 
-Frontend-facing APIs are implemented in `main.py`:
+前端相关 API 由 `main.py` 实现：
 
 - `POST /api/task`
 - `GET /api/task/{job_id}`
@@ -268,33 +268,33 @@ Frontend-facing APIs are implemented in `main.py`:
 - `GET /api/system`
 - `PUT /api/config`
 
-Important frontend-oriented aggregates:
+面向前端的重要聚合字段包括：
 
 - `overview`
 - `telemetry`
 - `execution.summary`
 - `tasks_tab_metrics`
 
-For exact field semantics, see [API_REFERENCE.md](API_REFERENCE.md).
+精确字段语义见 [API_REFERENCE.md](API_REFERENCE.md)。
 
-## 8. Deployment Model
+## 8. 部署模型
 
-Current runtime model:
+当前运行模型：
 
-- control-plane services are long-lived Deployments
-- stage execution happens in short-lived Kubernetes Jobs
-- output and logs are persisted outside the pod lifecycle
-- runtime assumes non-root execution
+- 控制面服务以长期存活的 Deployment 形式运行
+- 阶段执行发生在短生命周期 Kubernetes Job 中
+- 输出与日志持久化在 Pod 生命周期之外
+- 运行时默认假设非 root 执行
 
-Operational docs:
+运维文档见：
 
 - [k8s/DEPLOY.md](k8s/DEPLOY.md)
 - [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)
 - [k8s/RUNBOOK.md](k8s/RUNBOOK.md)
 
-## 9. Where to Read Next
+## 9. 后续推荐阅读
 
-Recommended order:
+推荐顺序：
 
 1. [../README.md](../README.md)
 2. [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)

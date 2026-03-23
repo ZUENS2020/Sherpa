@@ -1,44 +1,44 @@
-# Kubernetes Mapping
+# Kubernetes 映射关系
 
-This file maps Sherpa concepts to current runtime objects.
+本文档把 Sherpa 的概念映射到当前运行时对象。
 
-## 1. Runtime Object Mapping
+## 1. 运行时对象映射
 
-| Logical component | Current implementation |
+| 逻辑组件 | 当前实现 |
 |---|---|
-| API / control plane | backend Deployment / service |
+| API / 控制面 | backend Deployment / service |
 | UI | frontend Deployment / service |
-| state store | Postgres |
-| stage execution | Kubernetes Job |
-| task output root | `/shared/output` |
-| aggregated job logs | `/app/job-logs/jobs/*.log` |
+| 状态存储 | Postgres |
+| 阶段执行 | Kubernetes Job |
+| 任务输出根目录 | `/shared/output` |
+| 聚合作业日志 | `/app/job-logs/jobs/*.log` |
 
-## 2. Important Artifact Mapping
+## 2. 关键产物映射
 
-| Path or file | Meaning |
+| 路径或文件 | 含义 |
 |---|---|
-| `fuzz/PLAN.md` | planning artifact |
-| `fuzz/targets.json` | candidate targets |
-| `fuzz/selected_targets.json` | selected targets with execution metadata |
-| `fuzz/execution_plan.json` | execution-target contract |
-| `fuzz/harness_index.json` | target-to-harness mapping |
-| `run_summary.json` | task-level run summary |
-| `repro_context.json` | crash repro context |
-| `stage-*.json` | stage result record |
+| `fuzz/PLAN.md` | 规划产物 |
+| `fuzz/targets.json` | 候选目标 |
+| `fuzz/selected_targets.json` | 带执行元数据的已选目标 |
+| `fuzz/execution_plan.json` | 执行目标契约 |
+| `fuzz/harness_index.json` | 目标到 harness 的映射 |
+| `run_summary.json` | 任务级运行摘要 |
+| `repro_context.json` | 崩溃复现上下文 |
+| `stage-*.json` | 阶段结果记录 |
 
-## 3. Current Mainline Routing
+## 3. 当前主线路由
 
-| Stage | Possible next stage |
+| 阶段 | 可能的下一阶段 |
 |---|---|
 | `plan` | `synthesize` |
 | `synthesize` | `build` |
-| `build` | `run` or `plan` |
-| `run` | `coverage-analysis`, `crash-triage`, or `plan` depending on outcome |
-| `coverage-analysis` | `improve-harness` or `stop` |
-| `improve-harness` | `build`, `plan`, or `stop` |
-| `crash-triage` | `fix-harness`, `re-build`, `plan`, or `stop` |
-| `fix-harness` | `build` or `plan` |
-| `re-build` | `re-run`, `plan`, or `stop` |
-| `re-run` | `plan` or `stop` |
+| `build` | `run` 或 `plan` |
+| `run` | 根据结果进入 `coverage-analysis`、`crash-triage` 或 `plan` |
+| `coverage-analysis` | `improve-harness` 或 `stop` |
+| `improve-harness` | `build`、`plan` 或 `stop` |
+| `crash-triage` | `fix-harness`、`re-build`、`plan` 或 `stop` |
+| `fix-harness` | `build` 或 `plan` |
+| `re-build` | `re-run`、`plan` 或 `stop` |
+| `re-run` | `plan` 或 `stop` |
 
-This table describes the documented current mainline behavior, not every compatibility branch left in code.
+该表描述的是文档口径下的当前主线行为，并非代码中残留的每一条兼容分支。

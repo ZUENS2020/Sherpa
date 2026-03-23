@@ -1,21 +1,21 @@
-# Original Kubernetes Cluster Deployment Guide
+# 原始 Kubernetes 集群部署指南
 
-This document explains how to bootstrap a Sherpa-ready cluster on upstream Kubernetes with kubeadm. It is for cluster creation, not day-2 task debugging.
+本文档说明如何基于上游 Kubernetes 与 kubeadm 引导一个可运行 Sherpa 的集群。它面向“建集群”阶段，而不是日常任务排障。
 
-## 1. Intended Use
+## 1. 适用场景
 
-Use this document when:
+在以下情况使用本文：
 
-- you are building a kubeadm-based cluster from scratch
-- you want Sherpa control-plane services and stage jobs on the same cluster
+- 你要从零开始搭建一个基于 kubeadm 的集群
+- 你希望把 Sherpa 控制面服务与阶段作业部署在同一个集群中
 
-Do not use this as the primary runtime or troubleshooting manual after the cluster already exists. For that, use:
+如果集群已经存在，不要把它当作主要运行或故障排查手册。那时应查看：
 
 - [DEPLOY.md](DEPLOY.md)
 - [DEPLOYMENT_DETAILED.md](DEPLOYMENT_DETAILED.md)
 - [RUNBOOK.md](RUNBOOK.md)
 
-## 2. Target Shape
+## 2. 目标形态
 
 ```mermaid
 flowchart LR
@@ -34,33 +34,33 @@ flowchart LR
   FE --> API
 ```
 
-## 3. Bootstrap Summary
+## 3. 引导摘要
 
-1. provision Linux nodes
-2. install `containerd`, `kubelet`, `kubeadm`, `kubectl`
-3. initialize control plane with kubeadm
-4. install a CNI
-5. join worker nodes
-6. confirm nodes are ready
-7. deploy Sherpa services and stage-job-capable runtime configuration
+1. 准备 Linux 节点
+2. 安装 `containerd`、`kubelet`、`kubeadm`、`kubectl`
+3. 使用 kubeadm 初始化控制面
+4. 安装 CNI
+5. 将 worker 节点加入集群
+6. 确认节点 ready
+7. 部署 Sherpa 服务与支持 stage-job 的运行时配置
 
-## 4. Sherpa-Specific Requirements
+## 4. Sherpa 特定要求
 
-- stage jobs and backend must have access to the same output root strategy
-- image pull access must be reliable for backend and worker images
-- long-lived services and short-lived jobs must share compatible runtime configuration
-- non-root assumptions should be preserved when preparing storage and permissions
+- 阶段作业与后端必须能够访问同一种输出根目录策略
+- 后端与 worker 镜像必须具备可靠的拉取能力
+- 常驻服务与短生命周期作业必须共享兼容的运行时配置
+- 在准备存储与权限时，应保留非 root 运行假设
 
-## 5. After Bootstrap
+## 5. 集群引导完成后
 
-Once the cluster is up:
+集群准备好之后：
 
-1. deploy Sherpa using the current deployment docs
-2. run a smoke-test repository task
-3. confirm task artifacts and logs are persisted
+1. 使用当前部署文档部署 Sherpa
+2. 跑一个 smoke-test 仓库任务
+3. 确认任务产物与日志已被持久化
 
-## 6. What This File Does Not Try To Be
+## 6. 本文不尝试做什么
 
-- not the current workflow source of truth
-- not the task runbook
-- not the frontend/API contract document
+- 不是当前工作流的事实来源
+- 不是任务运行手册
+- 不是前端 / API 契约文档

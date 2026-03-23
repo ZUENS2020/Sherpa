@@ -1,50 +1,48 @@
-# Release Gate
+# 发布门禁
 
-This document defines the minimum checks required before promoting a change from
-development validation to production release.
+本文档定义了从开发验证晋级到生产发布前，至少需要满足的检查项。
 
-## Required Checks
+## 必需检查
 
-### Backend
+### 后端
 
-- `python -m py_compile` for the modules touched by the change
-- Relevant `pytest` subsets for the changed workflow, API, or quality logic
+- 对本次修改涉及的模块执行 `python -m py_compile`
+- 运行与变更的工作流、API 或质量逻辑相关的 `pytest` 子集
 
-### Frontend
+### 前端
 
-- `npm run build`
-- Any test or lint step required by the changed frontend package
+- 执行 `npm run build`
+- 运行受影响前端包要求的测试或 lint 步骤
 
-### Deployment Readiness
+### 部署就绪性
 
-- Dev deployment uses the expected image tags
-- Worker image pinning and config are aligned
-- API fields consumed by the frontend are still present and documented
-- Docs are updated when workflow or API behavior changes
+- dev 部署使用了预期的镜像标签
+- worker 镜像 pinning 与配置保持一致
+- 前端消费的 API 字段仍然存在且已写入文档
+- 如果工作流或 API 行为发生变化，文档已同步更新
 
-## Recommended Smoke Tests
+## 推荐 smoke test
 
-Before promoting `dev` to `main`, validate at least:
+在把 `dev` 提升到 `main` 之前，至少验证：
 
-- One parser-focused repository, such as `libyaml` or `fmt`
-- One build-sensitive repository, such as `zlib` or `libarchive`
+- 一个以 parser 为主的仓库，如 `libyaml` 或 `fmt`
+- 一个对构建更敏感的仓库，如 `zlib` 或 `libarchive`
 
-The goal is to cover both the planning/synthesis path and the build/run/crash
-artifact path.
+目标是同时覆盖规划 / 生成链路，以及 build / run / crash 产物链路。
 
-## Reject Release If
+## 出现以下情况时拒绝发布
 
-- Stage jobs are looping without meaningful state change
-- Coverage improvement keeps replanning without producing a strategy change
-- Seed generation regresses into source-file ingestion or excessive noise
-- The worker falls back to unsupported execution assumptions
-- The deployed image version cannot be proven from the running cluster state
+- 阶段作业在没有实质状态变化的情况下循环
+- 覆盖率改进持续 replan，却没有产生策略变化
+- 种子生成退化成源码文件吞入或产生大量噪声
+- worker 回退到了不受支持的执行假设
+- 无法从集群运行态证明部署镜像版本
 
-## Evidence To Keep
+## 需要保留的证据
 
-For each release candidate, retain:
+对每个候选发布版本，应保留：
 
-- PR link
-- Validation commands and result summary
-- One successful dev task ID
-- Any rollback note if the change touches workflow routing or deployment logic
+- PR 链接
+- 验证命令与结果摘要
+- 一个成功的 dev 任务 ID
+- 如果变更涉及工作流路由或部署逻辑，则附带回滚说明
