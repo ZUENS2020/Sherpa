@@ -21,6 +21,9 @@ Repair scaffold files under `fuzz/` for build-stage failures.
 - when signatures repeat, this round must use a different repair strategy.
 - no doc-only no-op patches; scaffold must materially change where needed.
 - keep selected/final target and build strategy fields consistent across README and JSON files.
+- public/stable APIs are mandatory by default in harness code.
+- if non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
+- when diagnostics contain `non_public_api_usage`, replace offending symbols first before any unrelated edits.
 
 ## Command Policy
 - Allowed: read-only commands only.

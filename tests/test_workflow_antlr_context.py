@@ -553,3 +553,78 @@ def test_node_plan_marks_replan_ineffective_when_outputs_do_not_materially_chang
     assert out["coverage_replan_effective"] is False
     assert out["coverage_round_budget_exhausted"] is True
     assert out["coverage_stop_reason"] == "no_material_change"
+
+
+def test_node_synthesize_rejects_non_public_api_usage_without_exception(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"fmt_parse","api":"fmt_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            (fuzz_dir / "fmt_parse_fuzz.cc").write_text(
+                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) {\n"
+                "  fmt::detail::parse_format_specs((const char*)data, (const char*)data, *(fmt::detail::dynamic_format_specs<char>*)0, *(fmt::format_parse_context*)0, fmt::detail::type::int_type);\n"
+                "  return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","chosen_target_api":"fmt_parse","chosen_target_reason":"test","fuzzer_entry_strategy":"sanitizer_fuzzer","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+    out = workflow_graph._node_synthesize({"generator": gen, "codex_hint": "repair harness"})
+    assert "non_public_api_usage" in str(out.get("last_error") or "")
+    assert "Read and fix" in str(out.get("last_error") or "")
+
+
+def test_node_synthesize_accepts_non_public_api_with_valid_exception(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"fmt_parse","api":"fmt_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            (fuzz_dir / "fmt_parse_fuzz.cc").write_text(
+                "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size) {\n"
+                "  fmt::detail::parse_format_specs((const char*)data, (const char*)data, *(fmt::detail::dynamic_format_specs<char>*)0, *(fmt::format_parse_context*)0, fmt::detail::type::int_type);\n"
+                "  return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","chosen_target_api":"fmt_parse","chosen_target_reason":"test","fuzzer_entry_strategy":"sanitizer_fuzzer","evidence":["repo"],"api_surface_exception":{"reason":"no public parser primitive is available for this narrow parser path","evidence":["include/fmt/base.h only exposes detail parser primitive for this parse branch"],"approved_symbols":["fmt::detail::parse_format_specs","fmt::detail::dynamic_format_specs<char>","fmt::detail::type::int_type"]}}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+    out = workflow_graph._node_synthesize({"generator": gen, "codex_hint": "repair harness"})
+    assert out["last_error"] == ""

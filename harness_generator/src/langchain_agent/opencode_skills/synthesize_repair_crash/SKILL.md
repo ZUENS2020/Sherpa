@@ -21,6 +21,9 @@ Repair scaffold files under `fuzz/` for crash/repro-stage failures.
 - selected vs final runtime target relation is explicit and technically justified.
 - when signatures repeat, this round must change strategy.
 - no “fix” by disabling harness behavior or deleting crash-relevant code paths.
+- public/stable APIs are mandatory by default in harness code.
+- if non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
+- when diagnostics contain `non_public_api_usage`, replace offending symbols first before any unrelated edits.
 
 ## Command Policy
 - Allowed: read-only commands only.

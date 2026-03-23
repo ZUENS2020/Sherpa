@@ -79,3 +79,19 @@ def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:
     assert "Avoid hand-crafted magic-only files" in seed
     assert "malformed/truncated seeds <= 30%" in seed
     assert "at least one semantically valid archive sample exists" in seed
+
+
+def test_repair_skills_include_api_surface_exception_contract() -> None:
+    plan_repair_build = _load("plan_repair_build")
+    plan_repair_crash = _load("plan_repair_crash")
+    synth_repair_build = _load("synthesize_repair_build")
+    synth_repair_crash = _load("synthesize_repair_crash")
+    fix_crash_h = _load("fix_crash_harness_error")
+
+    assert "api_surface_exception" in plan_repair_build
+    assert "api_surface_exception" in plan_repair_crash
+    assert "api_surface_exception" in synth_repair_build
+    assert "api_surface_exception" in synth_repair_crash
+    assert "non_public_api_usage" in synth_repair_build
+    assert "non_public_api_usage" in synth_repair_crash
+    assert "api_surface_exception" in fix_crash_h
