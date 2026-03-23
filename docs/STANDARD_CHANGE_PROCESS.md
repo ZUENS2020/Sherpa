@@ -1,59 +1,86 @@
-# 标准修改流程
+# Standard Change Process
 
-本文档描述 Sherpa 当前推荐的修改、验证、合并与部署流程。
+This document describes the current recommended change, validation, and release flow for Sherpa.
 
-## 分支策略
+## 1. Branching Model
 
-- 功能开发：`codex/*` 或人工特性分支
-- 集成验证：`dev`
-- 生产主线：`main`
+- feature work: `codex/*` or explicit topic branches
+- integration branch: `dev`
+- production branch: `main`
 
-## 推荐流程
+Expected path:
 
-1. 在功能分支开发与验证
-2. 提 PR 到 `dev`
-3. `dev` 部署后跑真实仓库任务验证
-4. 验证通过后再合并或继续补丁
-5. 生产发布走 `dev -> main`
+1. develop on a feature branch
+2. open a PR into `dev`
+3. validate through `dev`
+4. open `dev -> main`
+5. release through `main`
 
-## 变更前最低检查
+## 2. Required Project Process
 
-### 代码变更
+For major project changes:
 
-- `python -m py_compile` 覆盖改动模块
-- 对应 pytest 子集通过
+1. define goal and planned scope first
+2. write that summary into a Linear issue
+3. apply type-based labels
+4. set the issue to `In Progress`
+5. only then start implementation
+6. update the same issue with progress comments as work evolves
+7. finish with a `Done` status and a final Chinese summary comment
 
-### 前端变更
+## 3. Validation Expectations
 
-- `npm test`
-- `npm run build`
+Minimum local validation depends on change type.
 
-### 工作流变更
+### Code changes
 
-至少做一条真实仓库验证，优先：
+- `python3 -m py_compile` for touched Python modules
+- relevant pytest subset
 
-- `libyaml`
+### Frontend changes
+
+- build and/or tests for the touched frontend
+- confirm API field usage still matches backend behavior
+
+### Workflow changes
+
+Prefer at least one real repository validation on `dev`, commonly:
+
 - `fmt`
+- `libyaml`
 - `zlib`
 - `libarchive`
 
-## 文档要求
+## 4. Documentation Sync Rules
 
-任何改变下列行为的修改，都要同步文档：
+Any change that affects these behaviors must update docs in the same change:
 
-- stage 路由
-- `targets.json` schema
-- seed 生成规则
-- build / repair / crash-triage 规则
-- k8s 运行时行为
-- 部署方式
-- API 契约，尤其是前端直接消费的 `/api/system`、`/api/tasks`、`/api/task/{id}`
+- workflow stages or routing
+- target selection or execution-plan behavior
+- seed generation or seed-quality policy
+- crash triage / repro / harness-fix behavior
+- deployment model
+- API contracts consumed by frontend
 
-如果这类修改会影响技术学习材料，还需要同步 `docs/TECHNICAL_DEEP_DIVE.md`。
+At minimum, review:
 
-## 不推荐做法
+- [../README.md](../README.md)
+- [API_REFERENCE.md](API_REFERENCE.md)
+- [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
+- deployment docs under `docs/k8s/`
 
-- 只改 README，不改运维文档
-- 只看 stage 成功，不检查 `run_summary.json`
-- 让 `replan` 无实质变化仍继续空转
-- 在 `k8s_job` 路径依赖 Docker CLI
+## 5. Release Guardrails
+
+- do not push directly to `dev` or `main`
+- `main` should accept changes from `dev`, not directly from feature branches
+- required PRs should include:
+  - change summary
+  - risk / rollback note
+  - reproducible validation result
+
+## 6. Things to Avoid
+
+- updating only README while leaving deeper docs stale
+- describing idealized APIs instead of actual API behavior
+- treating stage success alone as proof without checking artifacts
+- keeping historical migration notes unlabeled so they look current

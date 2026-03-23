@@ -1,86 +1,77 @@
-# K8s 部署说明（详细版）
+# Kubernetes Deployment Detailed Guide
 
-## 组件
+This document explains the current Sherpa deployment model in more detail than the short deploy guide.
 
-### 常驻 Deployment
-- `sherpa-web`
-- `frontend-next`
-- `postgres`
+## 1. Component Model
 
-### 短生命周期 Job
+### Long-lived services
+
+- backend API / control plane
+- frontend UI
+- Postgres
+
+### Stage jobs
+
+The workflow dispatches short-lived Jobs for stages such as:
+
 - `plan`
 - `synthesize`
 - `build`
 - `run`
+- `crash-triage`
+- `fix-harness`
 - `coverage-analysis`
 - `improve-harness`
 - `re-build`
 - `re-run`
 
-## 镜像职责
+## 2. Data and Artifact Model
 
-### `sherpa-web`
-当前镜像内负责：
-- Python backend
-- `opencode`
-- seed/bootstrap 分析依赖
-- `radamsa`
+Sherpa relies on durable output paths rather than pod-local state.
 
-worker stage job 复用该镜像或同一运行时能力，不依赖 inner Docker。
+Important persisted locations:
 
-### `frontend-next`
-提供配置、日志、任务进度展示。
+- `/shared/output/<repo>-<id>/`
+- `/shared/output/_k8s_jobs/<job_id>/`
+- `/app/job-logs/jobs/<job_id>.log`
 
-## 关键环境约束
-
-- `SHERPA_EXECUTOR_MODE=k8s_job`
-- `SHERPA_OUTPUT_DIR=/shared/output`
-- `SHERPA_VERIFY_STAGE_NO_AI` 会影响 verify/seed 相关路径
-- k8s 环境中不再依赖 `SHERPA_OPENCODE_DOCKER_IMAGE` 作为 worker 运行前提
-
-## 任务执行链
+## 3. Control Flow
 
 ```mermaid
 sequenceDiagram
   participant U as User
   participant FE as Frontend
-  participant API as sherpa-web
+  participant API as Backend
   participant DB as Postgres
   participant K8S as Stage Jobs
-  U->>FE: submit repo URL
+
+  U->>FE: submit repo
   FE->>API: POST /api/task
-  API->>DB: create task
-  API->>K8S: dispatch plan
-  K8S->>API: stage result
-  API->>K8S: dispatch synthesize/build/run...
-  K8S->>DB: stage status aggregated by API
+  API->>DB: create parent task + child jobs
+  API->>K8S: dispatch stage job
+  K8S->>API: persist stage result
+  API->>K8S: dispatch next stage
 ```
 
-## 当前常见故障树
+## 4. Environment Expectations
 
-### 1. `plan` 失败
-优先看：
-- `targets.json` schema
-- `target_analysis.json`
-- OpenCode scaffold 输出是否完整
+- worker and backend versions must be aligned
+- shared output must be accessible wherever stage jobs run
+- metrics availability improves observability but is not the workflow source of truth
+- non-root runtime and temp-dir assumptions should be preserved
 
-### 2. `build` 失败
-优先看：
-- `build_error_code`
-- `fix_action_type`
-- `fix_effect`
-- `final_build_error_code`
+## 5. What to Validate After Deploy
 
-### 3. `run` 很久不结束
-优先看：
-- `run_summary.json`
-- `terminal_reason`
-- `coverage_loop.*`
-- 是否 plateau 但仍有剩余预算
+- backend routes respond
+- frontend loads and reads live API data
+- stage jobs can be dispatched
+- persisted output appears where expected
+- one real repository task can traverse multiple stages successfully
 
-### 4. `re-run` 失败
-优先看：
-- `repro_context.json`
-- `.repro_crash/`
-- `re_build_report.json`
-- `run_summary.json`
+## 6. Not Covered Here
+
+- cluster bootstrap from scratch
+- cloud-provider-specific ingress/load-balancer setup
+- historical migration notes
+
+For cluster bootstrap, see [ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md](ORIGINAL_K8S_CLUSTER_DEPLOYMENT.md).

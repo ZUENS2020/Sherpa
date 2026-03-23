@@ -1,101 +1,91 @@
-# Sherpa 代码级技术分析
+# Sherpa Codebase Technical Analysis
 
-本文基于当前仓库实现整理，目标是解释 Sherpa 的真实运行方式，而不是复述历史设计。
+This document explains the current codebase structure and how the main runtime path is assembled.
 
-## 1. 系统目标
+## 1. System Objective
 
-Sherpa 是一个面向公开代码仓库的自动化 fuzz 编排系统。它的核心目标不是“单次生成一个 harness”，而是把 fuzz 工程拆成可恢复、可解释、可观测的多阶段流水线：
+Sherpa automates the engineering loop around fuzzing a repository:
 
-- 从仓库 URL 自动规划 target
-- 生成外部 harness 与 build scaffold
-- 自动修 build 失败并把错误反馈回修复态
-- 自动做 seed bootstrap
-- 自动运行 fuzz 并提取质量信号
-- 在 plateau 后继续改进当前 target
-- crash 进入 triage / 修复 / 复现的独立闭环
+- select runtime-viable targets
+- synthesize an external scaffold
+- build the scaffold
+- generate and evaluate seeds
+- run fuzzers and collect quality signals
+- classify crashes
+- reproduce and validate crash paths
 
-## 2. 顶层结构
+The design goal is not one-shot harness generation. It is a recoverable workflow with explicit artifacts and routing decisions.
+
+## 2. Top-Level Structure
 
 ```mermaid
 flowchart LR
-  FE["frontend-next"] --> API["FastAPI: main.py"]
+  FE["Frontend"] --> API["main.py"]
   API --> DB[("Postgres")]
   API --> WF["workflow_graph.py"]
   WF --> GEN["fuzz_unharnessed_repo.py"]
   WF --> SUM["workflow_summary.py"]
-  API --> KJ["k8s worker jobs"]
-  KJ --> OUT["/shared/output"]
-  API --> LOGS["/app/job-logs"]
+  API --> JOB["Kubernetes stage jobs"]
+  JOB --> OUT["/shared/output"]
 ```
 
-## 3. 模块职责
+## 3. Main Code Entrypoints
 
 ### `harness_generator/src/langchain_agent/main.py`
 
-这是系统的 API 与调度入口，负责：
+Primary responsibilities:
 
-- FastAPI 生命周期初始化
-- 配置持久化与运行时环境注入
-- 任务创建、停止、恢复
-- Postgres job store 读写
-- 动态生成 Kubernetes worker Job manifest
-- 聚合 stage 结果并对外暴露 `/api/*`
-- 提供前端使用的动态块：
-  - `overview`
-  - `telemetry`
-  - `execution.summary`
-  - `tasks_tab_metrics`
+- FastAPI routes
+- task creation, resume, stop
+- job persistence and aggregation
+- runtime config persistence
+- stage job dispatch
+- `/api/system`, `/api/tasks`, `/api/task/*` aggregation
+
+Treat this file as the control-plane source of truth.
 
 ### `harness_generator/src/langchain_agent/workflow_graph.py`
 
-这是 Sherpa 的编排核心。它定义了：
+This is the workflow state machine. It defines:
 
-- 工作流状态结构
-- 各阶段节点实现
-- 节点间跳转条件
-- build / run / replay / triage 的错误分类
-- summary 与关键产物落盘
+- workflow state shape
+- stage node implementations
+- routing decisions between stages
+- repair mode propagation
+- coverage improvement loop
+- crash triage / repro flow
 
-系统行为的大部分“决策逻辑”都在这里。
+If you want to know why the workflow moved from one stage to another, start here.
 
 ### `harness_generator/src/fuzz_unharnessed_repo.py`
 
-这是执行面，负责：
+This is the execution primitive layer. It handles:
 
-- clone 仓库
-- 调用 OpenCode
-- 执行 build scaffold
-- bootstrap seeds
-- 运行 fuzzer
-- 解析输出
-- 收集 crash、plateau、覆盖率等信号
+- repository clone
+- OpenCode prompt execution
+- scaffold generation
+- build execution
+- seed bootstrap
+- fuzzer execution
+- crash packaging
+- seed quality scoring and filtering
 
-它不做全局路由决策，而是为工作流节点提供执行原语。
+It should be read as the “how to perform a stage” layer, not the “what stage comes next” layer.
 
-### `harness_generator/src/langchain_agent/persistent_config.py`
+### `harness_generator/src/codex_helper.py`
 
-负责 Web 配置的持久化与运行时文件生成，当前重点是：
+This file wraps OpenCode invocation and stage-session behavior. Important areas:
 
-- `web_config.json`
-- `opencode.generated.json`
-- `web_opencode.env`
+- stage-aware task preparation
+- prompt/context assembly
+- session reuse rules
+- done sentinel handling
 
-默认运行时生成文件落在 `/tmp/sherpa-runtime`。
+### `harness_generator/src/langchain_agent/opencode_skills/`
 
-### `frontend-next/`
+This directory contains stage-specific behavior contracts used by OpenCode. These skills are the instruction boundary between workflow state and stage-local editing behavior.
 
-前端控制台只做以下事情：
-
-- 展示系统状态
-- 保存配置
-- 提交任务
-- 展示父任务 / 子任务 / 日志
-
-它不参与后端工作流决策。
-
-## 4. 工作流状态机
-
-当前主线如下：
+## 4. Current Mainline Workflow
 
 ```mermaid
 flowchart TD
@@ -113,199 +103,201 @@ flowchart TD
   RB --> RR["re-run"]
 ```
 
-### `init`
-
-负责仓库 clone、工作目录准备、上下文恢复。此阶段的真实工作目录通常位于：
-
-- `/shared/output/<repo>-<shortid>`
-
 ### `plan`
 
-负责产出 target 规划上下文，而不是直接生成 harness。
-
-当前关键产物：
+Produces planning artifacts, not executable harnesses:
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
+- `fuzz/selected_targets.json`
+- `fuzz/execution_plan.json`
 - `fuzz/target_analysis.json`
+
+Key purpose:
+
+- select runtime-viable targets
+- assign `target_type` and `seed_profile`
+- define execution targets rather than arbitrary target candidates
 
 ### `synthesize`
 
-负责把计划中的 target 收敛为单个可执行 scaffold。当前阶段会写：
+Produces the executable scaffold under `fuzz/`:
 
-- harness 源文件
-- `fuzz/build.py` 或 `fuzz/build.sh`
-- `fuzz/README.md`
-- `fuzz/observed_target.json`
-- `fuzz/build_strategy.json`
+- harness source
+- `build.py` or `build.sh`
+- `README.md`
+- `repo_understanding.json`
+- `build_strategy.json`
+- `build_runtime_facts.json`
+- `harness_index.json`
 
-当前默认策略是不复用仓库自带 fuzz target，而是统一生成外部 build scaffold。
+Key purpose:
+
+- convert planning intent into a buildable fuzz scaffold
+- keep `execution_plan.json` and `harness_index.json` aligned
 
 ### `build`
 
-负责执行 scaffold，并在正式 build 前做静态预检。重点检查：
+Responsible for:
 
-- 是否偷偷调用了仓库自带 fuzz target
-- 是否缺失明确的 fuzzer entry 策略
-- build scaffold 与 `build_strategy.json` 是否一致
-- build 失败后是否需要进入 repair mode
+- executing scaffold build logic
+- validating execution-target coverage
+- classifying build failures
+- emitting structured repair context
 
-build 失败时，当前主线会把错误、签名、stderr/stdout 尾部和 `repair_mode` 信息写回状态；`fix_build`/`fix_crash` 仍保留兼容逻辑，但主线不再依赖它们作为唯一修复路由。
+Important build-side contracts:
+
+- execution targets must map to real harnesses
+- build success is not enough; required targets must actually be built
+- undercoverage is treated as a gated failure, not silent success
 
 ### `run`
 
-负责 seed bootstrap 和实际 fuzz 运行。运行阶段除了执行 fuzzer，还要收集：
+Responsible for:
 
-- `cov`
-- `ft`
-- `exec/s`
-- plateau
-- crash
-- timeout
-- OOM
+- seed bootstrap
+- parallel or batched fuzzer execution
+- extracting `cov`, `ft`, `exec/s`, plateau, timeout, OOM, and crash signals
+- packaging crash artifacts
+- emitting `SeedFeedback` and `HarnessFeedback`
 
-当前 seed bootstrap 是三段式：
+### `coverage-analysis`
 
-1. repo examples
-2. AI 补种
-3. `radamsa` 变异
+Responsible for deciding whether the current target should:
+
+- continue with in-place improvement
+- replan to a deeper/better target
+- stop because there is no justified next action
+
+The stage consumes:
+
+- coverage progression
+- plateau signals
+- seed quality
+- execution target mismatches
+- target depth metadata
+
+### `improve-harness`
+
+Responsible for current-target improvements without arbitrary target switching:
+
+- seed modeling adjustments
+- corpus/dictionary changes
+- harness call-path improvements
+- replan handoff when in-place strategy is no longer justified
 
 ### `crash-triage`
 
-对 `run` 阶段发现的 crash 做分类，输出三种结论：
+Responsible for classifying crashes into:
 
-- `harness_bug`
-- `upstream_bug`
-- `inconclusive`
+- harness bug
+- upstream bug
+- inconclusive
 
-这一步会结合 `crash_info.md`、`crash_analysis.md`、re-build / re-run 报告以及 crash 日志尾部。
+It uses crash logs, packaged artifacts, and repro-chain signals.
 
 ### `fix-harness`
 
-只修 harness 侧问题，例如：
+Responsible only for harness-side correction. It is not intended to patch upstream product code.
 
-- 未捕获异常
-- 错误的调用方式
-- 入口函数或参数模型不对
+### `re-build` / `re-run`
 
-这一步不直接改上游库源码。
+These form the isolated repro path:
 
-### `coverage-analysis` 与 `improve-harness`
+- rebuild the repro workspace
+- rerun the crashing input
+- preserve repro context and reports
 
-当 `run` 没有 crash 且覆盖率进入平台期时，Sherpa 优先做当前 target 的 in-place 改进，而不是直接回到 `plan`。
+This chain exists to separate discovery from validation.
 
-只有在以下条件成立时才会进入更激进的重规划：
+## 5. Artifact Model
 
-- 连续改进无收益
-- 当前预算允许
-- replan 能产生实质变化
+Typical workspace:
 
-### `re-build` 与 `re-run`
+- `/shared/output/<repo>-<shortid>/`
 
-crash 复现阶段单独执行，不与主探索链路混在一起。复现链路会持久化 `repro_context.json` 和相关报告，保证复现结果可追踪。
+Important files:
 
-## 5. build scaffold 设计
-
-当前系统默认假设所有仓库都需要“外部 harness + 外部 build scaffold”，而不是直接复用仓库自带 fuzz target。
-
-这意味着：
-
-- `build.py` 需要明确描述库/源码如何构建
-- harness 如何参与编译
-- `libFuzzer main` 如何提供
-- 依赖的 include dirs、link libs、extra sources 是什么
-
-对应产物：
-
+- `fuzz/PLAN.md`
+- `fuzz/targets.json`
+- `fuzz/selected_targets.json`
+- `fuzz/execution_plan.json`
+- `fuzz/harness_index.json`
+- `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
-- `fuzz/repo_understanding.json`
+- `run_summary.json`
+- `crash_info.md`
+- `crash_analysis.md`
+- `crash_triage.json`
+- `repro_context.json`
 
-当前其中的核心字段包括：
+Per-stage job artifacts:
 
-- `build_system`
-- `build_mode`
-- `library_targets`
-- `library_artifacts`
-- `include_dirs`
-- `extra_sources`
-- `fuzzer_entry_strategy`
+- `/shared/output/_k8s_jobs/<job_id>/stage-*.json`
+- `/shared/output/_k8s_jobs/<job_id>/stage-*.error.txt`
 
-## 6. seed bootstrap 与运行质量
+## 6. Seed and Quality Pipeline
 
-当前 `run` 的 seed bootstrap 会综合：
+Seed handling is profile-driven. Important concepts:
 
-- repo examples
-- AI 生成的 seeds
-- `radamsa` 变异
+- `seed_profile` controls expected input families
+- repo examples are reused where possible
+- AI generation fills semantic gaps
+- mutation is controlled, not the only source
+- filtering is soft-by-default to avoid over-pruning
+- seed scoring is written into `seed_quality_<target>.json`
 
-`seed_profile` 决定 repo examples 的过滤规则和 AI 补种风格，例如：
+Current feedback structures propagated through the workflow:
 
-- `parser-structure`
-- `parser-token`
-- `parser-format`
-- `parser-numeric`
-- `decoder-binary`
-- `archive-container`
-- `serializer-structured`
-- `document-text`
-- `network-message`
-- `generic`
+- `SeedFeedback`
+- `HarnessFeedback`
+- `coverage_quality_oracle`
 
-当前实现还会把 seed 质量信号写回工作流状态，用于后续的 coverage-analysis 和 repair-mode 决策。
+These are used by coverage improvement and repair planning.
 
-## 7. 运行时与部署模型
+## 7. API and Frontend Mapping
 
-### Kubernetes
+Frontend-facing APIs are implemented in `main.py`:
 
-当前线上模型是：
+- `POST /api/task`
+- `GET /api/task/{job_id}`
+- `POST /api/task/{job_id}/resume`
+- `POST /api/task/{job_id}/stop`
+- `GET /api/tasks`
+- `GET /api/system`
+- `PUT /api/config`
 
-- `sherpa-web`：控制面服务
-- `sherpa-frontend`：控制台 UI
-- `postgres`：任务状态持久化
-- 每个 workflow stage 对应一个短生命周期 worker Job
-
-worker Job 由 `main.py` 动态生成 manifest。当前 manifest 会显式注入：
-
-- payload
-- provider / model
-- git mirrors
-- non-root 运行参数
-
-### non-root 与共享输出
-
-运行时默认按 non-root 设计。工作流中大量阶段产物会落到：
-
-- `/shared/output`
-
-这让 stage 之间的上下文、日志、报告和 crash artifact 能被后续阶段继续读取。
-
-### 前端动态指标
-
-前端控制台不直接计算业务指标，而是消费后端聚合块：
+Important frontend-oriented aggregates:
 
 - `overview`
 - `telemetry`
 - `execution.summary`
 - `tasks_tab_metrics`
 
-这些字段从 `/api/system` 获取，`/api/tasks` 用于任务表格刷新。
+For exact field semantics, see [API_REFERENCE.md](API_REFERENCE.md).
 
-## 8. 兼容层说明
+## 8. Deployment Model
 
-当前仓库保留了一些兼容符号和旧节点名，例如：
+Current runtime model:
 
-- `fix_build`
-- `fix_crash`
-- `repro_crash`
+- control-plane services are long-lived Deployments
+- stage execution happens in short-lived Kubernetes Jobs
+- output and logs are persisted outside the pod lifecycle
+- runtime assumes non-root execution
 
-它们主要用于历史任务恢复、旧状态兼容和调试回放。当前文档在描述主线流程时，应以 `plan / synthesize / build / run / crash-triage / fix-harness / coverage-analysis / improve-harness / re-build / re-run` 为准。
+Operational docs:
 
-## 9. 阅读建议
+- [k8s/DEPLOY.md](k8s/DEPLOY.md)
+- [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)
+- [k8s/RUNBOOK.md](k8s/RUNBOOK.md)
 
-如果你要快速接手代码，推荐顺序：
+## 9. Where to Read Next
 
-1. `README.md`
-2. `docs/API_REFERENCE.md`
-3. `docs/PROJECT_HANDOFF_STATUS.md`
-4. `docs/TECHNICAL_DEEP_DIVE.md`
+Recommended order:
+
+1. [../README.md](../README.md)
+2. [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
+3. `harness_generator/src/langchain_agent/workflow_graph.py`
+4. `harness_generator/src/fuzz_unharnessed_repo.py`
+5. [API_REFERENCE.md](API_REFERENCE.md)
