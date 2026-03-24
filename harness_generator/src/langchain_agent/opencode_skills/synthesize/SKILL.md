@@ -19,6 +19,7 @@ Create a complete external fuzz scaffold aligned with the selected runtime targe
 - `fuzz/build_runtime_facts.json`
 - `fuzz/harness_index.json` (target-to-harness mapping aligned with `fuzz/execution_plan.json`)
 - when execution plan has multiple targets, scaffold should preserve multi-target buildability (not single-target-only by default)
+- optionally: `fuzz/dict/<fuzzer_name>.dict` — libFuzzer dictionary with relevant tokens (format keywords, delimiters, magic bytes) extracted from the target API or protocol specification. The system auto-generates dictionaries from seed_profile tokens and harness string literals, but hand-crafted entries targeting specific parser states improve coverage.
 
 ## Key File Templates
 - `fuzz/README.md` fields:

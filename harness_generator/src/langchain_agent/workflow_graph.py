@@ -29,6 +29,7 @@ from fuzz_unharnessed_repo import (
     NonOssFuzzHarnessGenerator,
     RepoSpec,
     _seed_families_for_target,
+    extract_crash_stack_signature,
     snapshot_repo_text,
     write_patch_from_snapshot,
 )
@@ -76,6 +77,15 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_feedback: dict[str, Any]
     coverage_harness_feedback: dict[str, Any]
     coverage_quality_oracle: str
+    coverage_source_report: dict[str, Any]
+    coverage_uncovered_functions: list[str]
+    coverage_exhausted_targets: list[str]
+    coverage_feedback_for_plan: str
+    crash_stack_signature: str
+    crash_stack_type: str
+    crash_stack_top_frames: str
+    dry_run_result: dict[str, Any]
+    seed_pre_check_result: dict[str, Any]
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
@@ -6444,6 +6454,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
             crash_info = gen.repo_root / "crash_info.md"
             crash_analysis = gen.repo_root / "crash_analysis.md"
+            combined_log = ""
             for p in (crash_info, crash_analysis):
                 if not p.is_file():
                     continue
@@ -6453,7 +6464,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     continue
                 tail = "\n".join(txt.splitlines()[-400:])
                 parts.append(f"== {p.name} ==\n{tail}")
+                combined_log += txt + "\n"
+            # Also compute stack-based signature for better dedup
+            stack_sig = extract_crash_stack_signature(combined_log)
+            nonlocal _last_stack_sig
+            _last_stack_sig = stack_sig
             return _sha256_text("\n\n".join(parts))
+
+        _last_stack_sig: dict[str, str] = {}
 
         def _calc_timeout_signature(kind: str, details: list[dict[str, Any]]) -> str:
             parts: list[str] = [f"kind={kind}"]
@@ -6998,6 +7016,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
             "coverage_repo_examples_accepted_count": repo_examples_accepted_count,
             "crash_signature": crash_signature,
+            "crash_stack_signature": _last_stack_sig.get("stack_signature", ""),
+            "crash_stack_type": _last_stack_sig.get("crash_type", ""),
+            "crash_stack_top_frames": _last_stack_sig.get("top_frames", ""),
             "same_crash_repeats": same_crash_repeats,
             "timeout_signature": timeout_signature,
             "same_timeout_repeats": same_timeout_repeats,
@@ -7364,6 +7385,43 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         }
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
+
+        # Collect source coverage report (llvm-cov) for improve feedback
+        source_report: dict[str, Any] | None = None
+        try:
+            fuzz_out = gen.repo_root / "fuzz" / "out"
+            if fuzz_out.is_dir():
+                bins = sorted(fuzz_out.glob("*"))
+                for b in bins:
+                    if b.is_file() and os.access(str(b), os.X_OK):
+                        source_report = gen.collect_source_coverage(b)
+                        if source_report:
+                            break
+        except Exception:
+            pass
+        if source_report:
+            out["coverage_source_report"] = source_report
+            out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
+
+        # Track exhausted targets for coverage-guided replan
+        exhausted = list(state.get("coverage_exhausted_targets") or [])
+        if plateau_streak >= 2 and current_target_api and current_target_api not in exhausted:
+            exhausted.append(current_target_api)
+        out["coverage_exhausted_targets"] = exhausted
+
+        # Build coverage feedback for plan stage (replan context)
+        if replan_required and history:
+            feedback_lines = [f"Previously exhausted targets (avoid re-selecting):"]
+            for t in exhausted:
+                feedback_lines.append(f"  - {t}")
+            for h_entry in history[-3:]:
+                feedback_lines.append(
+                    f"  Round {h_entry.get('round')}: target={h_entry.get('target_api')}, "
+                    f"cov={h_entry.get('max_cov')}, ft={h_entry.get('max_ft')}, "
+                    f"plateau={h_entry.get('plateau_detected')}"
+                )
+            out["coverage_feedback_for_plan"] = "\n".join(feedback_lines)
+
         _wf_log(
             cast(dict[str, Any], out),
             f"<- coverage-analysis improve={int(should_improve)} {reason} dt={_fmt_dt(time.perf_counter()-t0)}",
@@ -7433,8 +7491,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
-                "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream."
+                "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream.\n"
             )
+            # Append coverage-guided target selection context
+            coverage_feedback_for_plan = str(state.get("coverage_feedback_for_plan") or "")
+            exhausted_targets = list(state.get("coverage_exhausted_targets") or [])
+            if exhausted_targets:
+                hint += f"- AVOID re-selecting these exhausted targets: {', '.join(exhausted_targets)}\n"
+            if coverage_feedback_for_plan:
+                hint += f"- Coverage history context:\n{coverage_feedback_for_plan}\n"
         else:
             hint = (
                 "Coverage-loop improvement task (in-place target repair):\n"
@@ -7460,6 +7525,28 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Diagnostic summary: {cov_reason}"
             )
+
+        # Append fine-grained source coverage feedback if available
+        source_report = dict(state.get("coverage_source_report") or {})
+        uncovered_fns = list(state.get("coverage_uncovered_functions") or [])
+        if source_report or uncovered_fns:
+            hint += "\n--- Source Coverage Report ---\n"
+            if source_report:
+                hint += (
+                    f"- Function coverage: {source_report.get('covered_functions', '?')}"
+                    f"/{source_report.get('total_functions', '?')} "
+                    f"({source_report.get('coverage_pct', '?')}%)\n"
+                )
+            if uncovered_fns:
+                hint += f"- Top uncovered functions (focus improvement here):\n"
+                for fn in uncovered_fns[:10]:
+                    hint += f"  * {fn}\n"
+            hint += "- Consider adding API calls or input patterns that exercise uncovered functions.\n"
+            # Also point to the full report file
+            report_path = source_report.get("report_path")
+            if report_path:
+                hint += f"- Full coverage report: {report_path}\n"
+
         opencode_applied = False
         if improve_mode == "in_place":
             if not _has_codex_key():
@@ -7476,10 +7563,13 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             try:
                 exec_plan = gen.repo_root / "fuzz" / "execution_plan.json"
                 harness_index = gen.repo_root / "fuzz" / "harness_index.json"
+                coverage_report = gen.repo_root / "fuzz" / "coverage_report.txt"
                 if exec_plan.is_file():
                     ctx_parts.append("=== fuzz/execution_plan.json ===\n" + exec_plan.read_text(encoding="utf-8", errors="replace"))
                 if harness_index.is_file():
                     ctx_parts.append("=== fuzz/harness_index.json ===\n" + harness_index.read_text(encoding="utf-8", errors="replace"))
+                if coverage_report.is_file():
+                    ctx_parts.append("=== fuzz/coverage_report.txt ===\n" + coverage_report.read_text(encoding="utf-8", errors="replace")[:4000])
             except Exception:
                 pass
             gen.patcher.run_codex_command(
