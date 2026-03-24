@@ -166,6 +166,26 @@ except Exception:  # pragma: no cover
 # ────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
+# Supported sanitizer configurations for multi-sanitizer fuzzing
+SANITIZER_CONFIGS: Dict[str, Dict[str, str]] = {
+    "address": {
+        "compile_flags": "-fsanitize=address,undefined,fuzzer",
+        "asan_options": "exitcode=76:detect_leaks=0",
+        "ubsan_options": "print_stacktrace=1",
+    },
+    "memory": {
+        "compile_flags": "-fsanitize=memory,fuzzer -fno-omit-frame-pointer -fPIE",
+        "msan_options": "exitcode=77:halt_on_error=1",
+    },
+    "undefined": {
+        "compile_flags": "-fsanitize=undefined,fuzzer",
+        "ubsan_options": "print_stacktrace=1:halt_on_error=1",
+    },
+    "thread": {
+        "compile_flags": "-fsanitize=thread,fuzzer",
+        "tsan_options": "exitcode=78",
+    },
+}
 MAX_BUILD_RETRIES = int(os.environ.get("SHERPA_MAX_BUILD_RETRIES", "3"))
 CODEX_ANALYSIS_MODEL = os.environ.get("CODEX_ANALYSIS_MODEL", "sonnet")
 CODEX_APPROVAL_MODE = os.environ.get("CODEX_APPROVAL_MODE", "full-auto")
@@ -173,6 +193,7 @@ CODEX_APPROVAL_MODE = os.environ.get("CODEX_APPROVAL_MODE", "full-auto")
 FUZZ_DIR = "fuzz"
 FUZZ_OUT_DIR = "fuzz/out"
 FUZZ_CORPUS_DIR = "fuzz/corpus"
+FUZZ_DICT_DIR = "fuzz/dict"
 ARTIFACT_PREFIX = "artifacts"
 FUZZ_SYSTEM_PACKAGES_FILE = os.environ.get("SHERPA_FUZZ_SYSTEM_PACKAGES_FILE", "fuzz/system_packages.txt")
 VCPKG_REPO_DIR = (os.environ.get("SHERPA_VCPKG_REPO_DIR") or "vcpkg").strip() or "vcpkg"
@@ -236,6 +257,63 @@ FMT_SEED_FAMILIES = {
     "fill_align",
     "type_conversions",
     "malformed_replacement_fields",
+}
+
+# ── Per-profile dictionary tokens (libFuzzer -dict= format) ──────────────
+# Each entry is a raw byte-string that libFuzzer will use as a mutation hint.
+PROFILE_DICTIONARY_TOKENS: Dict[str, List[str]] = {
+    "parser-structure": [
+        '":"', '"{"', '"}"', '"["', '"]"', '","', '"true"', '"false"', '"null"',
+        '"---"', '"..."', '": "', '"- "', '"\\n"', '"\\t"',
+    ],
+    "parser-token": [
+        '"<"', '">"', '"</"', '"/>"', '"="', '"\\""', '"&amp;"', '"&lt;"', '"&gt;"',
+        '"<!--"', '"-->"', '"<![CDATA["', '"]]>"',
+    ],
+    "parser-format": [
+        '"%s"', '"%d"', '"%f"', '"%x"', '"%p"', '"%n"', '"%%"', '"%0"',
+        '"{}"', '"{0}"', '"{:"', '"}"',
+    ],
+    "parser-numeric": [
+        '"0"', '"-1"', '"2147483647"', '"-2147483648"', '"0x"', '"0b"', '"0o"',
+        '"NaN"', '"Inf"', '"-Inf"', '"1e308"', '"-1e308"',
+    ],
+    "decoder-binary": [
+        '"\\x00"', '"\\xff"', '"\\x89PNG"', '"\\xff\\xd8\\xff"', '"GIF89a"',
+        '"BM"', '"RIFF"', '"\\x00\\x00\\x01\\x00"',
+    ],
+    "archive-container": [
+        '"PK\\x03\\x04"', '"PK\\x05\\x06"', '"\\x1f\\x8b\\x08"',
+        '"BZh"', '"\\xfd7zXZ\\x00"', '"Rar!\\x1a\\x07"',
+        '"7z\\xbc\\xaf\\x27\\x1c"', '"\\x75\\x73\\x74\\x61\\x72"',
+    ],
+    "serializer-structured": [
+        '":"', '"{"', '"}"', '"["', '"]"', '","', '"\\n"',
+        '"true"', '"false"', '"null"', '"\\""',
+    ],
+    "document-text": [
+        '"<html"', '"<body"', '"<div"', '"<p>"', '"</p>"', '"<a "', '"href="',
+        '"<!DOCTYPE"', '"<head"', '"<script"', '"<style"',
+    ],
+    "network-message": [
+        '"GET "', '"POST "', '"HTTP/1."', '"\\r\\n"', '"Host: "',
+        '"Content-Length: "', '"Content-Type: "', '"\\r\\n\\r\\n"',
+    ],
+    "generic": [],
+}
+
+# ── Per-profile adaptive max_len (bytes) ─────────────────────────────────
+PROFILE_MAX_LEN: Dict[str, int] = {
+    "parser-structure": 4096,
+    "parser-token": 2048,
+    "parser-format": 2048,
+    "parser-numeric": 512,
+    "decoder-binary": 16384,
+    "archive-container": 65536,
+    "serializer-structured": 4096,
+    "document-text": 8192,
+    "network-message": 4096,
+    "generic": 1024,
 }
 
 # Recognize fuzzer executables by name pattern.
@@ -1059,6 +1137,51 @@ def _normalized_format_shape(text: str) -> str:
     lowered = re.sub(r"[a-z]+", "a", lowered)
     lowered = re.sub(r"\s+", " ", lowered)
     return lowered.strip()
+
+
+# ── Crash stack signature extraction ─────────────────────────────────
+
+_STACK_FRAME_RE = re.compile(
+    r"#\d+\s+(?:0x[0-9a-f]+\s+in\s+)?(\S+)"
+    r"|#\d+\s+(\S+)\s+\("
+)
+
+_SANITIZER_TYPE_RE = re.compile(
+    r"ERROR:\s*(Address|Undefined|Memory|Thread|Leak)Sanitizer:\s*(\S+)"
+)
+
+
+def extract_crash_stack_signature(log: str, top_n: int = 3) -> Dict[str, str]:
+    """
+    Extract a normalized crash signature from sanitizer output.
+    Returns {crash_type, stack_signature, top_frames}.
+    """
+    crash_type = "unknown"
+    m = _SANITIZER_TYPE_RE.search(log)
+    if m:
+        crash_type = f"{m.group(1)}Sanitizer:{m.group(2)}"
+
+    frames: list[str] = []
+    for fm in _STACK_FRAME_RE.finditer(log):
+        func_name = fm.group(1) or fm.group(2)
+        if func_name and func_name not in ("__asan", "__ubsan", "__interceptor", "<null>"):
+            # Strip address offsets and file locations, keep function name only
+            clean = re.sub(r"\+0x[0-9a-f]+$", "", func_name)
+            clean = re.sub(r"\(.*\)$", "", clean)
+            if clean and clean not in frames:
+                frames.append(clean)
+            if len(frames) >= top_n:
+                break
+
+    top_frames = "|".join(frames[:top_n]) if frames else "no_frames"
+    sig_input = f"{crash_type}:{top_frames}"
+    stack_signature = hashlib.sha256(sig_input.encode("utf-8")).hexdigest()[:16]
+
+    return {
+        "crash_type": crash_type,
+        "stack_signature": stack_signature,
+        "top_frames": top_frames,
+    }
 
 
 def _seed_filter_mode() -> str:
@@ -4166,6 +4289,429 @@ EOF
         print(f"[*] Codex seed creation done (truncated):\n{stdout[:600]}")
 
     # ────────────────────────────────────────────────────────────────────
+    # Step E-pre – Dictionary generation & corpus minimization
+    # ────────────────────────────────────────────────────────────────────
+
+    def _generate_dictionary(self, bin_path: Path, seed_profile: str) -> Optional[Path]:
+        """
+        Auto-generate a libFuzzer dictionary file for the given fuzzer binary.
+        Sources:
+          1. Built-in tokens from PROFILE_DICTIONARY_TOKENS keyed by seed_profile
+          2. Existing .dict files under fuzz/
+          3. String literals extracted from the harness source file
+        Returns the path to the generated .dict file, or None if no tokens found.
+        """
+        tokens: list[str] = []
+
+        # 1. Profile-based tokens
+        profile_tokens = PROFILE_DICTIONARY_TOKENS.get(seed_profile or "generic", [])
+        tokens.extend(profile_tokens)
+
+        # 2. Collect tokens from existing .dict files in fuzz/
+        dict_dir = self.repo_root / FUZZ_DICT_DIR
+        dict_dir.mkdir(parents=True, exist_ok=True)
+        for existing_dict in self.fuzz_dir.rglob("*.dict"):
+            try:
+                for line in existing_dict.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Accept lines like: keyword="value" or just "value"
+                        if "=" in line:
+                            line = line.split("=", 1)[1].strip()
+                        if line.startswith('"') and line.endswith('"'):
+                            tokens.append(line)
+            except Exception:
+                pass
+
+        # 3. Extract string literals from harness source
+        harness_extensions = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
+        for src in self.fuzz_dir.iterdir():
+            if src.is_file() and src.suffix in harness_extensions:
+                try:
+                    content = src.read_text(encoding="utf-8", errors="replace")
+                    # Extract C string literals (simple heuristic)
+                    for m in re.finditer(r'"([^"\\]{1,64}(?:\\.[^"\\]{0,64})*)"', content):
+                        literal = m.group(0)
+                        # Skip very common/useless strings
+                        if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
+                            tokens.append(literal)
+                except Exception:
+                    pass
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_tokens: list[str] = []
+        for t in tokens:
+            if t not in seen:
+                seen.add(t)
+                unique_tokens.append(t)
+
+        if not unique_tokens:
+            return None
+
+        # Write dictionary file
+        dict_path = dict_dir / f"{bin_path.stem}.dict"
+        lines = [f"# Auto-generated dictionary for {bin_path.name} (profile: {seed_profile})"]
+        for i, tok in enumerate(unique_tokens[:256]):  # Cap at 256 entries
+            lines.append(f"token_{i}={tok}")
+        write_text_safely(dict_path, "\n".join(lines) + "\n")
+        print(f"[*] Generated dictionary: {dict_path.relative_to(self.repo_root)} ({len(unique_tokens[:256])} tokens)")
+        return dict_path
+
+    def _minimize_corpus(self, bin_path: Path, corpus_dir: Path) -> Dict[str, int]:
+        """
+        Minimize the corpus using libFuzzer -merge=1 mode.
+        Replaces the corpus dir contents with the minimized set.
+        Returns a dict with before/after file counts and sizes.
+        """
+        if not corpus_dir.exists():
+            return {"before_files": 0, "after_files": 0, "before_bytes": 0, "after_bytes": 0}
+
+        before_files = 0
+        before_bytes = 0
+        for p in corpus_dir.rglob("*"):
+            if p.is_file():
+                before_files += 1
+                try:
+                    before_bytes += int(p.stat().st_size)
+                except Exception:
+                    pass
+
+        if before_files < 4:
+            return {"before_files": before_files, "after_files": before_files,
+                    "before_bytes": before_bytes, "after_bytes": before_bytes}
+
+        merged_dir = corpus_dir.parent / f"{corpus_dir.name}_merged"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env = self._compose_vcpkg_runtime_env(env)
+        env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
+        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
+
+        cmd = [str(bin_path), "-merge=1", str(merged_dir), str(corpus_dir)]
+        try:
+            rc, out, err = self._run_cmd(
+                cmd, cwd=self.repo_root, env=env, timeout=120,
+            )
+            if rc == 0 and any(merged_dir.iterdir()):
+                # Replace old corpus with merged
+                for p in corpus_dir.iterdir():
+                    if p.is_file():
+                        p.unlink()
+                for p in merged_dir.iterdir():
+                    if p.is_file():
+                        shutil.move(str(p), str(corpus_dir / p.name))
+        except Exception as exc:
+            print(f"[warn] corpus minimization failed: {exc}")
+        finally:
+            shutil.rmtree(merged_dir, ignore_errors=True)
+
+        after_files = 0
+        after_bytes = 0
+        for p in corpus_dir.rglob("*"):
+            if p.is_file():
+                after_files += 1
+                try:
+                    after_bytes += int(p.stat().st_size)
+                except Exception:
+                    pass
+
+        if before_files != after_files:
+            print(f"[*] Corpus minimized: {before_files} -> {after_files} files, "
+                  f"{before_bytes} -> {after_bytes} bytes")
+        return {"before_files": before_files, "after_files": after_files,
+                "before_bytes": before_bytes, "after_bytes": after_bytes}
+
+    def collect_source_coverage(self, bin_path: Path) -> Optional[Dict[str, object]]:
+        """
+        Collect source-level coverage using llvm-cov after a fuzzer run.
+        Requires the binary to have been compiled with
+        -fprofile-instr-generate -fcoverage-mapping.
+
+        Returns a dict with function-level coverage summary, or None if unavailable.
+        """
+        corpus_dir = self.fuzz_corpus_dir / bin_path.name
+        if not corpus_dir.exists():
+            return None
+
+        llvm_profdata = which("llvm-profdata") or which("llvm-profdata-18")
+        llvm_cov = which("llvm-cov") or which("llvm-cov-18")
+        if not llvm_profdata or not llvm_cov:
+            print("[warn] llvm-profdata/llvm-cov not found, skipping source coverage")
+            return None
+
+        # Check if binary has coverage instrumentation
+        profraw_dir = self.repo_root / "fuzz" / "out"
+        profraw_files = list(profraw_dir.glob("*.profraw")) if profraw_dir.exists() else []
+        # Also check default location
+        default_profraw = self.repo_root / "default.profraw"
+        if default_profraw.exists():
+            profraw_files.append(default_profraw)
+
+        if not profraw_files:
+            # Try running the binary against the corpus to generate profraw
+            env = os.environ.copy()
+            env["LLVM_PROFILE_FILE"] = str(self.fuzz_dir / "coverage.profraw")
+            env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
+            env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+            env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
+
+            corpus_files = sorted(corpus_dir.rglob("*"))[:50]  # sample up to 50
+            if not corpus_files:
+                return None
+
+            for cf in corpus_files:
+                if cf.is_file():
+                    try:
+                        self._run_cmd(
+                            [str(bin_path), str(cf)],
+                            cwd=self.repo_root, env=env, timeout=5,
+                        )
+                    except Exception:
+                        pass  # Crashes are expected
+
+            profraw_path = Path(env["LLVM_PROFILE_FILE"])
+            if not profraw_path.exists():
+                return None
+            profraw_files = [profraw_path]
+
+        # Merge profraw files
+        profdata_path = self.fuzz_dir / "coverage.profdata"
+        merge_cmd = [llvm_profdata, "merge", "-sparse"] + [str(p) for p in profraw_files] + ["-o", str(profdata_path)]
+        try:
+            rc, _, err = self._run_cmd(merge_cmd, cwd=self.repo_root, timeout=60)
+            if rc != 0:
+                print(f"[warn] llvm-profdata merge failed: {err[:200]}")
+                return None
+        except Exception as exc:
+            print(f"[warn] llvm-profdata merge error: {exc}")
+            return None
+
+        # Generate function-level report
+        report_cmd = [llvm_cov, "report", str(bin_path), f"-instr-profile={profdata_path}"]
+        try:
+            rc, report_out, report_err = self._run_cmd(report_cmd, cwd=self.repo_root, timeout=60)
+            if rc != 0:
+                print(f"[warn] llvm-cov report failed: {report_err[:200]}")
+                return None
+        except Exception as exc:
+            print(f"[warn] llvm-cov report error: {exc}")
+            return None
+
+        # Parse function coverage from report
+        uncovered_functions: list[str] = []
+        total_functions = 0
+        covered_functions = 0
+        for line in report_out.splitlines():
+            parts = line.split()
+            if len(parts) >= 6:
+                try:
+                    funcs_total = int(parts[-4])
+                    funcs_missed = int(parts[-3])
+                    total_functions += funcs_total
+                    covered_functions += funcs_total - funcs_missed
+                except (ValueError, IndexError):
+                    pass
+
+        # Generate uncovered function list using llvm-cov export
+        export_cmd = [
+            llvm_cov, "export", str(bin_path),
+            f"-instr-profile={profdata_path}",
+            "-format=text", "-summary-only",
+        ]
+        try:
+            rc, export_out, _ = self._run_cmd(export_cmd, cwd=self.repo_root, timeout=60)
+            if rc == 0:
+                try:
+                    export_data = json.loads(export_out)
+                    for file_data in export_data.get("data", []):
+                        for fn in file_data.get("functions", []):
+                            if fn.get("count", 0) == 0:
+                                uncovered_functions.append(fn.get("name", ""))
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        except Exception:
+            pass
+
+        # Write coverage report file
+        report_path = self.fuzz_dir / "coverage_report.txt"
+        write_text_safely(report_path, report_out)
+
+        coverage_pct = (float(covered_functions) / float(max(1, total_functions))) * 100.0
+
+        result: Dict[str, object] = {
+            "total_functions": total_functions,
+            "covered_functions": covered_functions,
+            "coverage_pct": round(coverage_pct, 1),
+            "uncovered_functions": uncovered_functions[:20],  # top 20
+            "report_path": str(report_path),
+        }
+        print(f"[*] Source coverage: {covered_functions}/{total_functions} functions "
+              f"({coverage_pct:.1f}%), {len(uncovered_functions)} uncovered")
+        return result
+
+    @staticmethod
+    def _adaptive_max_len(seed_profile: str, configured_max_len: int) -> int:
+        """Return adaptive max_len based on seed_profile. If user explicitly
+        configured a non-default value, respect it."""
+        if configured_max_len > 0:
+            return configured_max_len
+        return PROFILE_MAX_LEN.get(seed_profile or "generic", 1024)
+
+    @staticmethod
+    def _adaptive_plateau_idle_sec(
+        depth_class: str,
+        execs_per_sec: int,
+        initial_cov_growth_rate: float,
+        configured: int,
+    ) -> int:
+        """Return adaptive plateau idle threshold based on target characteristics.
+        If user explicitly configured a value via env var, respect it."""
+        if configured > 0:
+            return configured
+        base = 180
+        if depth_class == "shallow":
+            base = 90
+        elif depth_class == "deep":
+            base = 360
+        if execs_per_sec > 0 and execs_per_sec < 100:
+            base = int(base * 1.5)
+        if initial_cov_growth_rate > 2.0:
+            base = int(base * 0.7)
+        return max(60, min(600, base))
+
+    def seed_completeness_pre_check(self, bin_path: Path) -> Dict[str, object]:
+        """
+        Pre-check seed corpus completeness before a full run.
+        Returns a dict with check results and any issues found.
+        """
+        corpus_dir = self.fuzz_corpus_dir / bin_path.name
+        issues: list[str] = []
+        seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
+        bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
+        family_coverage = dict(bootstrap.get("seed_family_coverage") or {})
+        required_families = list(bootstrap.get("seed_families_required") or [])
+        covered_families = list(family_coverage.get("covered") or [])
+
+        # Check corpus file count
+        file_count = 0
+        total_bytes = 0
+        if corpus_dir.exists():
+            for p in corpus_dir.rglob("*"):
+                if p.is_file():
+                    file_count += 1
+                    try:
+                        total_bytes += int(p.stat().st_size)
+                    except Exception:
+                        pass
+        if file_count < 8:
+            issues.append(f"corpus_too_small (only {file_count} files, need >= 8)")
+
+        # Check family coverage
+        missing_families = [f for f in required_families if f and f not in set(covered_families)]
+        if missing_families:
+            issues.append(f"missing_families: {', '.join(missing_families)}")
+
+        # Check archive validity
+        if seed_profile == "archive-container" and file_count > 0:
+            valid = 0
+            for p in corpus_dir.rglob("*"):
+                if p.is_file():
+                    try:
+                        data = p.read_bytes()[:4]
+                        if data[:2] == b'PK' or data[:3] == b'\x1f\x8b\x08' or data[:3] == b'BZh':
+                            valid += 1
+                    except Exception:
+                        pass
+            if valid < 1:
+                issues.append("archive_no_valid_samples")
+
+        result: Dict[str, object] = {
+            "seed_profile": seed_profile,
+            "corpus_files": file_count,
+            "corpus_bytes": total_bytes,
+            "required_families": required_families,
+            "covered_families": covered_families,
+            "missing_families": missing_families,
+            "issues": issues,
+            "passed": len(issues) == 0,
+        }
+        if issues:
+            print(f"[warn] Seed pre-check issues for {bin_path.name}: {'; '.join(issues)}")
+        else:
+            print(f"[*] Seed pre-check passed for {bin_path.name}: {file_count} files, "
+                  f"profile={seed_profile}")
+        return result
+
+    def dry_run_fuzzer(self, bin_path: Path, duration_sec: int = 10) -> Dict[str, object]:
+        """
+        Run the fuzzer for a short duration to validate basic functionality.
+        Returns diagnostics: cov, ft, execs_per_sec, and any issues.
+        """
+        corpus_dir = self.fuzz_corpus_dir / bin_path.name
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env = self._compose_vcpkg_runtime_env(env)
+        env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
+        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
+
+        cmd = [
+            str(bin_path),
+            "-print_final_stats=1",
+            f"-max_total_time={duration_sec}",
+            f"-max_len={self._adaptive_max_len(str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or 'generic'), self.max_len)}",
+            f"-rss_limit_mb={self.rss_limit_mb}",
+            str(corpus_dir),
+        ]
+
+        issues: list[str] = []
+        print(f"[*] Dry-run: {' '.join(cmd)}")
+        try:
+            rc, out, err = self._run_cmd(
+                cmd, cwd=self.repo_root, env=env,
+                timeout=max(30, duration_sec + 20),
+            )
+            log = (out + "\n" + err).replace("\r", "\n")
+            stats = parse_libfuzzer_final_stats(log)
+            cov = int(stats.get("cov", 0))
+            ft = int(stats.get("ft", 0))
+            execs = int(stats.get("execs_per_sec", 0))
+
+            if cov == 0:
+                issues.append("zero_coverage")
+            if cov > 0 and ft == 0:
+                issues.append("zero_features")
+            if execs > 0 and execs < 10:
+                issues.append(f"very_slow ({execs} exec/s)")
+            if rc != 0 and "ERROR" in log:
+                issues.append("runtime_error")
+
+            result: Dict[str, object] = {
+                "rc": rc,
+                "cov": cov,
+                "ft": ft,
+                "execs_per_sec": execs,
+                "issues": issues,
+                "passed": len(issues) == 0 or (cov > 0 and "runtime_error" not in issues),
+            }
+        except Exception as exc:
+            result = {
+                "rc": -1, "cov": 0, "ft": 0, "execs_per_sec": 0,
+                "issues": [f"dry_run_failed: {exc}"], "passed": False,
+            }
+
+        if issues:
+            print(f"[warn] Dry-run issues for {bin_path.name}: {'; '.join(issues)}")
+        else:
+            print(f"[*] Dry-run passed for {bin_path.name}: cov={result['cov']}, ft={result['ft']}, "
+                  f"exec/s={result['execs_per_sec']}")
+        return result
+
+    # ────────────────────────────────────────────────────────────────────
     # Step E – Run fuzzer
     # ────────────────────────────────────────────────────────────────────
 
@@ -4180,6 +4726,12 @@ EOF
 
         env = os.environ.copy()
         env = self._compose_vcpkg_runtime_env(env)
+        # Apply sanitizer-specific runtime options
+        sanitizer_config = SANITIZER_CONFIGS.get(self.sanitizer, SANITIZER_CONFIGS["address"])
+        for key, val in sanitizer_config.items():
+            if key.endswith("_options"):
+                env_key = key.upper()  # e.g. asan_options -> ASAN_OPTIONS
+                env.setdefault(env_key, val)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
         env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
@@ -4252,9 +4804,32 @@ EOF
             str(bin_path),
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
-            f"-max_len={self.max_len}",
             f"-rss_limit_mb={self.rss_limit_mb}",
         ]
+
+        # Adaptive max_len based on seed_profile
+        seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
+        effective_max_len = self._adaptive_max_len(seed_profile, self.max_len)
+        cmd.append(f"-max_len={effective_max_len}")
+        if effective_max_len != 1024:
+            print(f"[*] Adaptive max_len={effective_max_len} for profile={seed_profile}")
+
+        # Auto-generate and attach dictionary
+        dict_path = self._generate_dictionary(bin_path, seed_profile)
+        if dict_path and dict_path.is_file():
+            cmd.append(f"-dict={dict_path}")
+
+        # Fork mode for parallel exploration
+        fork_count_raw = os.environ.get("SHERPA_FUZZ_FORK", "0")
+        try:
+            fork_count = max(0, min(int(fork_count_raw), os.cpu_count() or 1))
+        except (ValueError, TypeError):
+            fork_count = 0
+        if fork_count > 1:
+            cmd.append(f"-fork={fork_count}")
+            cmd.append("-ignore_crashes=1")
+            print(f"[*] Fork mode enabled: {fork_count} workers")
+
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")
 
@@ -4408,6 +4983,14 @@ EOF
 
         plateau_detected = "[callback-stop] coverage_plateau" in log.lower()
         plateau_idle_seconds = plateau_idle_growth_sec if plateau_detected else 0
+
+        # Corpus minimization after run (non-fatal)
+        corpus_min_stats: Dict[str, int] = {}
+        if not crash_found and corpus_files >= 4:
+            try:
+                corpus_min_stats = self._minimize_corpus(bin_path, corpus_dir)
+            except Exception as exc:
+                print(f"[warn] corpus minimization skipped: {exc}")
 
         return FuzzerRunResult(
             rc=int(rc),

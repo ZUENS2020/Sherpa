@@ -26,3 +26,17 @@ This policy applies to every OpenCode stage unless explicitly overridden by stag
 - For `archive-container`, use real repository samples first (for example `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, `tests/**`).
 - Avoid hand-crafted magic-only archive seeds.
 - Keep malformed/truncated archive seeds as a minority of the corpus (<=30%).
+
+## 6) Dictionary Policy
+- The system auto-generates libFuzzer dictionaries (`fuzz/dict/*.dict`) from seed_profile tokens, existing .dict files, and harness string literals.
+- When improving coverage, consider adding domain-specific tokens to the dictionary: format keywords, protocol delimiters, magic bytes, reserved words from the target API.
+- Dictionary entries use libFuzzer format: `token_name="value"` (one per line).
+
+## 7) Source Coverage Feedback Policy
+- When `fuzz/coverage_report.txt` is available, it contains function-level coverage data from llvm-cov.
+- Prioritize exercising uncovered functions listed in the coordinator hint's "Top uncovered functions" section.
+- Consider adding new API call sequences, input patterns, or seed variants that target uncovered code paths.
+
+## 8) Adaptive Input Length Policy
+- The system automatically adapts `-max_len` based on seed_profile (e.g. archive-container=65536, parser-structure=4096, generic=1024).
+- Harness code should handle variable-length inputs gracefully; do not assume a fixed input size.
