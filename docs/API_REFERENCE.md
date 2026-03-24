@@ -1,21 +1,23 @@
 # Sherpa API 参考
 
-最后更新：2026-03-23
-后端事实来源：`harness_generator/src/langchain_agent/main.py`
+最后更新：2026-03-24
+事实来源：[`harness_generator/src/langchain_agent/main.py`](../harness_generator/src/langchain_agent/main.py)
+
+本文档只描述当前真实实现，不描述理想化契约。
 
 ## 1. 基础信息
 
 - dev 基础地址：`https://dev.zuens2020.work`
 - API 前缀：`/api`
-- 请求 / 响应内容类型：除非特别说明，否则为 JSON
-- 鉴权：当前代码中尚未记录独立的 API 鉴权层
-- CORS：全开放
+- 返回格式：默认 JSON
+- 鉴权：当前实现未暴露独立 API 鉴权层
+- CORS：当前部署口径为全开放
 
-## 2. 通用语义
+## 2. 通用规则
 
 ### 状态归一化
 
-面向任务的 API 会把内部状态归一成大写值：
+任务相关接口会把内部状态归一成大写值：
 
 - `QUEUED`
 - `RUNNING`
@@ -26,35 +28,32 @@
 
 ### 时间字段
 
-大多数任务载荷同时暴露原始时间戳与 ISO 字符串：
+不少返回同时提供：
 
-- `*_at`
-- `*_at_iso`
+- 原始时间戳
+- ISO 字符串
 
-### 无限预算
+### 无限预算语义
 
-当前约定：
-
-- 请求层接受 `-1` 表示“无限”意图
-- 对时间预算类字段，内部使用 `0` 表示无限
+当前实现里，时间预算类字段的无限意图通常会被桥接为 `0`。
 
 ## 3. 配置 API
 
 ### GET `/api/config`
 
-返回当前持久化的运行时配置视图。
+返回当前运行时配置的持久化视图。
 
 说明：
 
 - secret 字段会被隐藏或清空
 - `*_set` 风格字段表示对应 secret 是否已存在
-- 部分 Docker 相关字段仍保留用于兼容，但当前分阶段 K8s 运行时以原生执行为主
+- 部分 Docker 相关字段仍保留用于兼容
 
 ### PUT `/api/config`
 
-支持以下形式。
+支持轻量前端配置更新和完整配置更新。
 
-#### 轻量前端更新
+#### 轻量更新
 
 ```json
 {
@@ -62,7 +61,7 @@
 }
 ```
 
-或者：
+或：
 
 ```json
 {
@@ -70,16 +69,16 @@
 }
 ```
 
-#### 完整配置更新
+#### 完整更新
 
-后端会将请求与现有配置合并，完成校验、保留 provider secret 所有权后再持久化。
+后端会把请求与现有配置合并后保存。
 
-代码中可见的校验规则：
+当前代码中能直接看到的校验示例包括：
 
 - `fuzz_time_budget >= 0`
 - `sherpa_run_unlimited_round_budget_sec >= 0`
 
-成功响应：
+成功返回：
 
 ```json
 { "ok": true }
@@ -89,7 +88,7 @@
 
 ### GET `/api/system`
 
-返回系统级运行时与仪表盘聚合信息。
+返回系统级运行态与仪表盘聚合数据。
 
 顶层字段块：
 
@@ -111,7 +110,7 @@
 
 #### `overview`
 
-代码中的当前字段：
+当前字段：
 
 - `avg_fuzz_time`
 - `active_agents`
@@ -130,7 +129,7 @@
 
 #### `telemetry`
 
-代码中的当前字段：
+当前字段：
 
 - `llm_token_usage`
 - `llm_token_status`
@@ -143,7 +142,7 @@
 
 重要说明：
 
-- `llm_token_usage` 仅使用真实 token 衍生的作业数据；如果没有可用 token 字段，则可能为 `null`
+- `llm_token_usage` 只应基于真实 token 数据；如果没有可用 token 字段，应显示为空或占位，不要用 `max_tokens` 估算。
 
 #### `execution.summary`
 
@@ -169,11 +168,11 @@
 - `success_rate`
 - `failed_tasks`
 
-`execs_per_sec` 来源于近期 run 阶段执行速率聚合，而不是静态配置值。
+`execs_per_sec` 来源于近期任务的真实执行速率聚合，而不是静态配置值。
 
 ### GET `/api/metrics`
 
-Prometheus 纯文本指标端点。
+Prometheus 文本指标端点。
 
 媒体类型：
 
@@ -191,9 +190,9 @@ Prometheus 纯文本指标端点。
 
 ### POST `/api/task`
 
-为每个提交的 job 条目创建一个父任务（`kind=task`）以及一个子 fuzz job。
+创建一个或多个父任务，并为每个 job 派生子 fuzz job。
 
-请求格式：
+请求体示例：
 
 ```json
 {
@@ -224,14 +223,14 @@ Prometheus 纯文本指标端点。
 }
 ```
 
-行为说明：
+字段说明：
 
-- `code_url` 是每个 job 中最关键的字段
-- `total_duration` 与 `single_duration` 是前端仍在使用的兼容别名
-- `unlimited_round_limit` 会被接受并桥接到运行时预算语义
+- `code_url` 是最关键字段
+- `total_duration` / `single_duration` 是前端兼容别名
+- `unlimited_round_limit` 会被桥接到运行时预算语义
 - `max_tokens=0` 表示没有显式 token 上限
 
-成功响应：
+成功返回：
 
 ```json
 {
@@ -242,9 +241,9 @@ Prometheus 纯文本指标端点。
 
 ### GET `/api/task/{job_id}`
 
-若 `job_id` 对应任务，则返回父任务视图。
+返回父任务视图。
 
-可能的错误响应：
+常见错误：
 
 ```json
 { "error": "job_not_found" }
@@ -254,123 +253,60 @@ Prometheus 纯文本指标端点。
 { "error": "job_not_task" }
 ```
 
-当前响应中会包含聚合后的子任务状态，例如：
+父任务视图会包含任务级状态以及子任务聚合信息，例如：
 
 - `status`
 - `children_status`
-- `children`
-- `phase`
-- `runtime_mode`
+- `active_child_status`
 - `error_code`
-- `error_kind`
-- `error_signature`
+- `repo`
+- `created_at`
+- `updated_at`
 
 ### POST `/api/task/{job_id}/resume`
 
-根据持久化的 `kind` 恢复任务或 fuzz job。
-
-当前响应包含：
-
-- `job_id`
-- `kind`
-- `accepted`
-- `reason`
-- `resume_attempts`
-- `status`
+恢复一个暂停或失败后可继续的任务。
 
 ### POST `/api/task/{job_id}/stop`
 
-请求取消一个任务或 fuzz job。
-
-当前响应包含：
-
-- `job_id`
-- `kind`
-- `accepted`
-- `reason`
-- `status`
-- `details`
-
-## 6. 任务列表 API
+停止任务。
 
 ### GET `/api/tasks`
 
-返回任务表使用的父任务行。
+返回任务列表，供 Tasks 面板轮询。
 
-查询参数：
-
-- `limit` 默认 `50`，会被约束在 `[1, 200]`
-
-当前条目字段：
+列表项会做前端友好归一化，常见字段包括：
 
 - `job_id`
 - `id`
-- `status`
-- `status_raw`
-- `stage`
 - `repo`
-- `repo_raw`
-- `created_at`
-- `created_at_iso`
-- `updated_at`
-- `updated_at_iso`
-- `started_at`
-- `started_at_iso`
-- `finished_at`
-- `finished_at_iso`
-- `error`
-- `error_code`
-- `error_kind`
-- `error_signature`
-- `phase`
-- `runtime_mode`
-- `result`
-- `children_status`
-- `child_count`
-- `progress`
-- `active_child_id`
+- `status`
+- `stage`
 - `active_child_status`
-- `active_child_phase`
-
-响应格式：
-
-```json
-{
-  "items": [
-    {
-      "job_id": "parent-task-id",
-      "id": "parent-task-id",
-      "status": "RUNNING",
-      "stage": "BUILD",
-      "repo": "batch",
-      "progress": 66
-    }
-  ]
-}
-```
+- `progress`
 
 说明：
 
-- 该端点列出的是父任务，而不是每个子 fuzz job
-- `repo` 是展示标签；前端可能会进一步从中推导仓库名
-- `progress` 是聚合任务信号，并非严格的工作流百分比
+- `status` 已归一成前端可直接消费的大写枚举
+- `stage` 优先显示当前 active child stage
+- `progress` 是任务进度百分比，通常只在运行中有意义
 
-## 7. 与前端相关的语义
+## 6. 前端消费建议
 
-本地 / Next 前端主要依赖以下接口：
+前端应优先使用：
 
-- `POST /api/task`
-- `POST /api/task/{job_id}/stop`
-- `GET /api/tasks`
-- `GET /api/system`
-- `PUT /api/config`
+- `GET /api/system` 做 Overview / Tasks 顶部总览
+- `GET /api/tasks` 做任务表格
+- `GET /api/task/{job_id}` 做任务详情页
 
-推荐轮询模型：
+不要用静态文案模拟动态指标。
 
-1. 轮询 `/api/tasks`
-2. 轮询 `/api/system`
-3. 在需要查看详情时，再请求 `/api/task/{job_id}`
+## 7. 额外路由
 
-## 8. 事实来源提醒
+当前后端还暴露：
 
-本文档描述的是当前代码行为。如果这里的字段与实现不一致，应以 `harness_generator/src/langchain_agent/main.py` 为准。
+- `GET /`
+- `GET /api/opencode/providers/{provider}/models`
+- `POST /api/opencode/providers/{provider}/models`
+
+这些路由是实现的一部分，但前端联调通常优先关注前述核心 API。

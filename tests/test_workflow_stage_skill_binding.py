@@ -14,6 +14,7 @@ def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
         'stage_skill="plan_fix_targets_schema"',
         'stage_skill="synthesize_complete_scaffold"',
         'stage_skill="crash_triage"',
+        'stage_skill="crash_analysis"',
         'plan_stage_skill = "plan"',
         'synth_stage_skill = "synthesize"',
         'plan_stage_skill = "plan_repair_build"',
@@ -46,6 +47,7 @@ def test_main_workflow_stage_skills_exist() -> None:
         "improve_harness_in_place",
         "seed_generation",
         "crash_triage",
+        "crash_analysis",
     ]
     for stage in required:
         skill = root / stage / "SKILL.md"

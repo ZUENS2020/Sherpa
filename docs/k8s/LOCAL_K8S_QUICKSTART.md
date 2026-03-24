@@ -56,6 +56,7 @@ kubectl get ingress
 - 阶段日志可查看
 - 仓库工作目录已创建在共享输出根目录下
 - 作业产生了 `run_summary.json` 或阶段结果文件
+- 如果触发崩溃，还应能看到 `crash_info.md`、`crash_triage.json`，以及复现成功后的 `crash_analysis.md`
 
 ## 本地排障顺序
 
@@ -88,7 +89,7 @@ cat /shared/output/<repo>-<id>/run_summary.json
 
 ## 相关文档
 
-- [Deploy](DEPLOY.md)
-- [Deployment Detailed](DEPLOYMENT_DETAILED.md)
-- [Runbook](RUNBOOK.md)
-- [API Reference](../API_REFERENCE.md)
+- [`DEPLOY.md`](DEPLOY.md)
+- [`DEPLOYMENT_DETAILED.md`](DEPLOYMENT_DETAILED.md)
+- [`RUNBOOK.md`](RUNBOOK.md)
+- [`../API_REFERENCE.md`](../API_REFERENCE.md)

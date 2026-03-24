@@ -1,6 +1,6 @@
 # Docker 到 K8s 的交接说明
 
-本文件是历史背景，用于解释系统为何脱离旧的执行假设，不是当前运行手册。
+本文件是历史背景，用于解释系统为何脱离旧执行假设，不是当前运行手册。
 
 ## 当前运行现实
 
@@ -19,10 +19,10 @@ Sherpa 现在默认假设：
 - 迁移检查点
 - Kubernetes 之前的执行模式
 
-保留此文件只是为了说明，这些旧假设已不再是参考模型。
+保留此文件只是为了说明这些旧假设已不再是参考模型。
 
 ## 请改看这些文档
 
-- [README.md](README.md)
-- [k8s/DEPLOY.md](k8s/DEPLOY.md)
-- [k8s/DEPLOYMENT_DETAILED.md](k8s/DEPLOYMENT_DETAILED.md)
+- [`README.md`](README.md)
+- [`k8s/DEPLOY.md`](k8s/DEPLOY.md)
+- [`k8s/DEPLOYMENT_DETAILED.md`](k8s/DEPLOYMENT_DETAILED.md)

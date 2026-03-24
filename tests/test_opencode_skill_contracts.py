@@ -47,6 +47,7 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     fix_crash_h = _load("fix_crash_harness_error")
     fix_crash_u = _load("fix_crash_upstream_bug")
     crash_triage = _load("crash_triage")
+    crash_analysis = _load("crash_analysis")
 
     assert "forbidden: `name = LLVMFuzzerTestOneInput`" in plan
     assert "`api` must describe a target API identifier" in plan
@@ -72,6 +73,9 @@ def test_schema_and_fix_stage_contracts_cover_known_failure_modes() -> None:
     assert "upstream_bug" in crash_triage
     assert "inconclusive" in crash_triage
     assert "crash_triage.json" in crash_triage
+    assert "false_positive|real_bug|unknown" in crash_analysis
+    assert "crash_analysis.json" in crash_analysis
+    assert "analysis-only" in crash_analysis
 
 
 def test_seed_generation_skill_enforces_real_archive_first_policy() -> None:

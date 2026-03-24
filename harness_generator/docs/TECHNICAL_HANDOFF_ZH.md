@@ -2,7 +2,7 @@
 
 这是 `harness_generator/` 的中文交接摘要。完整解析见：
 
-- `docs/CODEBASE_TECHNICAL_ANALYSIS.md`
+- [`docs/CODEBASE_TECHNICAL_ANALYSIS.md`](../../docs/CODEBASE_TECHNICAL_ANALYSIS.md)
 
 ## 当前主线概况
 
@@ -16,13 +16,14 @@
 - `plan`
 - `synthesize`
 - `build`
-- `fix_build`
 - `run`
 - `coverage-analysis`
 - `improve-harness`
+- `crash-triage`
+- `fix-harness`
 - `re-build`
 - `re-run`
-- `fix_crash`
+- `crash-analysis`
 
 ## 当前重要实现点
 
@@ -32,7 +33,8 @@
 4. plateau 后优先 `in_place` 改进，连续无收益才 `replan`
 5. `replan` 没有 material change 会直接 stop
 6. crash 复现依赖 `repro_context.json`
-7. k8s worker 原生执行 `opencode`
+7. `crash-analysis` 用于区分误报 harness 和真实 bug
+8. k8s worker 原生执行 `opencode`
 
 ## 当前接手时优先看哪里
 

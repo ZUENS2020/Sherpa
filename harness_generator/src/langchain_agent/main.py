@@ -1708,6 +1708,7 @@ _RESUMABLE_WORKFLOW_STEPS = {
     "improve-harness",
     "re-build",
     "re-run",
+    "crash-analysis",
     "repro_crash",
     "fix_crash",
 }
@@ -1722,17 +1723,22 @@ _STAGED_WORKFLOW_STEPS = (
     "improve-harness",
     "re-build",
     "re-run",
+    "crash-analysis",
 )
 
 
 def _normalize_resume_step(raw: str | None) -> str:
     s = str(raw or "").strip().lower()
+    if s == "stop":
+        return "stop"
     if s == "repro_crash":
         return "re-build"
     if s in {"crash_triage", "crash-triage"}:
         return "crash-triage"
     if s in {"fix_harness", "fix-harness"}:
         return "fix-harness"
+    if s in {"crash_analysis", "crash-analysis"}:
+        return "crash-analysis"
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
     return "plan"

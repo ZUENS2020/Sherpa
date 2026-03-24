@@ -1,39 +1,23 @@
 # 项目交接状态
 
-本文件仅作为历史交接背景，不是当前首选操作手册。
+本文件仅保留历史交接背景，不是当前主手册。
 
-当前文档请从以下位置开始阅读：
+当前阅读入口请直接从：
 
-- [../README.md](../README.md)
-- [README.md](README.md)
-- [CODEBASE_TECHNICAL_ANALYSIS.md](CODEBASE_TECHNICAL_ANALYSIS.md)
-- [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md)
+- [`../README.md`](../README.md)
+- [`README.md`](README.md)
+- [`CODEBASE_TECHNICAL_ANALYSIS.md`](CODEBASE_TECHNICAL_ANALYSIS.md)
+- [`TECHNICAL_DEEP_DIVE.md`](TECHNICAL_DEEP_DIVE.md)
 
-## 当前高层状态
+## 它还适合说明什么
 
-Sherpa 当前已经具备：
+仅适合描述高层历史背景，例如：
 
-- 分阶段的 Kubernetes 执行模型
-- 以规划、生成、构建、运行、覆盖率改进、崩溃分诊、harness 修复与复现为核心的工作流
-- 前后端动态任务与系统视图
-- 具备种子质量感知能力的覆盖率改进链路
-
-## 本文件适合承载什么内容
-
-仅用于传达高层交接说明，例如：
-
-- 主要文档当前位于哪里
+- 主要文档现在在哪里
 - 系统包含哪些大模块
-- 哪些部分仍需要进一步工程化完善
+- 哪些工作仍需要进一步工程化
 
-## 当前仍然存在的工程风险
-
-- 目标深度选择仍可能偏向浅层包装函数
-- 若生成轮次过弱，脚手架一致性仍可能被破坏
-- 种子质量依旧是实际覆盖率增长的关键决定因素
-- 崩溃分类质量仍依赖复现链路与日志质量
-
-## 它不是事实来源
+## 它不应该再承担什么
 
 不要把本文件当作以下内容的权威来源：
 
@@ -42,4 +26,4 @@ Sherpa 当前已经具备：
 - 部署步骤
 - 验证标准
 
-这些信息现在都已迁移到重写后的主文档中。
+这些内容现在都应以主文档为准。

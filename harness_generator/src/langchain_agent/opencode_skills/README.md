@@ -18,6 +18,7 @@
 - `synthesize_repair_crash`
 - `seed_generation`
 - `crash_triage`
+- `crash_analysis`
 - `fix_build`
 - `fix_crash_harness_error`
 - `fix_crash_upstream_bug`
