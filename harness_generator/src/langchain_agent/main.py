@@ -1275,12 +1275,12 @@ def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
     raw = str(
         (stage_ctx or {}).get("run_parallel_fuzzers_override")
         or os.environ.get("SHERPA_PARALLEL_FUZZERS")
-        or "5"
+        or "2"
     ).strip()
     try:
         return max(1, min(int(raw), 64))
     except Exception:
-        return 5
+        return 2
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
@@ -3370,7 +3370,9 @@ def _run_fuzz_job(
                         "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
                         "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
                         "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
-                        "run_unlimited_round_budget_sec": int(unlimited_round_limit_value),
+                        "run_unlimited_round_budget_sec": int(
+                            stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                        ),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -3380,11 +3382,14 @@ def _run_fuzz_job(
                     if stage == "run":
                         run_fuzzer_count = _estimate_run_fuzzer_count(current_repo_root or "")
                         run_parallelism = _estimate_run_parallelism(stage_ctx)
+                    effective_round_budget = int(
+                        stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                    )
                     wait_timeout = _k8s_stage_wait_timeout_sec(
                         stage=stage,
                         total_time_budget_sec=total_time_budget_value,
                         run_time_budget_sec=run_time_budget_value,
-                        run_unlimited_round_budget_sec=unlimited_round_limit_value,
+                        run_unlimited_round_budget_sec=effective_round_budget,
                         run_fuzzer_count=run_fuzzer_count,
                         run_parallelism=run_parallelism,
                     )
@@ -3445,21 +3450,53 @@ def _run_fuzz_job(
                                 "error": stage_fail_error,
                             }
                     except Exception as e:
-                        stage_failed = True
-                        stage_fail_error = _redact_sensitive_text(str(e))
-                        stage_fail_reason = "stage_dispatch_exception"
-                        stage_result = {
-                            "message": f"stage {stage} dispatch failed; restarting from plan",
-                            "repo_root": current_repo_root,
-                            "workflow_last_step": stage,
-                            "workflow_recommended_next": "plan",
-                            "restart_to_plan": True,
-                            "restart_to_plan_reason": stage_fail_reason,
-                            "restart_to_plan_stage": stage,
-                            "restart_to_plan_error_text": stage_fail_error,
-                            "restart_to_plan_report_path": "",
-                            "error": stage_fail_error,
-                        }
+                        is_k8s_timeout = "k8s_job_timeout" in str(e)
+                        run_timeout_retry_count = int(stage_ctx.get("run_timeout_retry_count") or 0)
+                        if stage == "run" and is_k8s_timeout:
+                            current_budget = int(
+                                stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200
+                            )
+                            extended_budget = int(current_budget * 1.5)
+                            stage_ctx["run_timeout_retry_count"] = str(run_timeout_retry_count + 1)
+                            stage_ctx["run_timeout_budget_sec_override"] = str(extended_budget)
+                            print(
+                                f"[job {job_id}] run stage k8s_job_timeout; "
+                                f"retrying with extended timeout "
+                                f"(retry {run_timeout_retry_count + 1}, "
+                                f"budget {current_budget}s -> {extended_budget}s)"
+                            )
+                            stage_result = {
+                                "message": (
+                                    f"run stage k8s_job_timeout; retrying with extended timeout "
+                                    f"(retry {run_timeout_retry_count + 1}, "
+                                    f"budget {current_budget}s -> {extended_budget}s)"
+                                ),
+                                "repo_root": current_repo_root,
+                                "workflow_last_step": stage,
+                                "workflow_recommended_next": "run",
+                                "restart_to_plan": False,
+                                "run_timeout_retry_count": stage_ctx["run_timeout_retry_count"],
+                                "run_timeout_budget_sec_override": stage_ctx["run_timeout_budget_sec_override"],
+                            }
+                            stage_failed = False
+                            stage_fail_reason = ""
+                            stage_fail_error = ""
+                        else:
+                            stage_failed = True
+                            stage_fail_error = _redact_sensitive_text(str(e))
+                            stage_fail_reason = "stage_dispatch_exception"
+                            stage_result = {
+                                "message": f"stage {stage} dispatch failed; restarting from plan",
+                                "repo_root": current_repo_root,
+                                "workflow_last_step": stage,
+                                "workflow_recommended_next": "plan",
+                                "restart_to_plan": True,
+                                "restart_to_plan_reason": stage_fail_reason,
+                                "restart_to_plan_stage": stage,
+                                "restart_to_plan_error_text": stage_fail_error,
+                                "restart_to_plan_report_path": "",
+                                "error": stage_fail_error,
+                            }
                     if stage_node_name:
                         if current_node_name and stage_node_name != current_node_name:
                             print(
@@ -3484,6 +3521,8 @@ def _run_fuzz_job(
                             "run_oom_retry_count",
                             "run_rss_limit_mb_override",
                             "run_parallel_fuzzers_override",
+                            "run_timeout_retry_count",
+                            "run_timeout_budget_sec_override",
                         ):
                             v = str(stage_result.get(key) or "").strip()
                             if v:
