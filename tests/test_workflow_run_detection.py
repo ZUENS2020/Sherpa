@@ -688,7 +688,7 @@ def test_route_after_re_build_routes_to_plan_on_failure():
     assert route == "plan"
 
 
-def test_route_after_re_run_routes_to_stop_on_success():
+def test_route_after_re_run_routes_to_crash_analysis_on_success():
     route = workflow_graph._route_after_re_run_state(
         {
             "failed": False,
@@ -698,7 +698,7 @@ def test_route_after_re_run_routes_to_stop_on_success():
             "restart_to_plan": False,
         }
     )
-    assert route == "stop"
+    assert route == "crash-analysis"
 
 
 def test_route_after_re_run_routes_to_plan_on_failure():
@@ -713,6 +713,29 @@ def test_route_after_re_run_routes_to_plan_on_failure():
         }
     )
     assert route == "plan"
+
+
+def test_route_after_crash_analysis_routes_to_plan_on_false_positive():
+    route = workflow_graph._route_after_crash_analysis_state(
+        {
+            "failed": False,
+            "restart_to_plan": True,
+            "restart_to_plan_count": 1,
+            "crash_analysis_verdict": "false_positive",
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_crash_analysis_routes_to_stop_on_real_bug():
+    route = workflow_graph._route_after_crash_analysis_state(
+        {
+            "failed": False,
+            "restart_to_plan": False,
+            "crash_analysis_verdict": "real_bug",
+        }
+    )
+    assert route == "stop"
 
 
 def test_apply_stage_stop_guard_always_stops_when_targeted():

@@ -133,6 +133,12 @@ def test_k8s_stage_wait_timeout_run_finite_budget_not_multiplied(monkeypatch: py
     assert timeout == 2400
 
 
+def test_normalize_resume_step_preserves_stop_signal():
+    assert web_main._normalize_resume_step("stop") == "stop"
+    assert web_main._normalize_resume_step("STOP") == "stop"
+    assert web_main._normalize_resume_step(None) == "plan"
+
+
 def test_estimate_run_fuzzer_count_prefers_fuzz_out_executables(tmp_path: Path):
     repo_root = tmp_path / "repo"
     out_dir = repo_root / "fuzz" / "out"

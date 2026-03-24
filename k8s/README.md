@@ -12,7 +12,7 @@
 ## 目录
 
 - `base/`
-  - 基础资源：`sherpa-web`、`frontend-next`、`postgres`、ConfigMap、Secret、PVC 等
+  - 基础资源：`sherpa-web`、前端、`postgres`、ConfigMap、Secret、PVC 等
 - `overlays/dev`
   - 开发环境覆盖层
 - `overlays/prod`
@@ -35,12 +35,13 @@ flowchart LR
   J6["Job: improve-harness"]
   J7["Job: re-build"]
   J8["Job: re-run"]
+  J9["Job: crash-analysis"]
 ```
 
 ## 参考文档
 
-- `docs/k8s/DEPLOY.md`
-- `docs/k8s/DEPLOYMENT_DETAILED.md`
-- `docs/k8s/MAPPING.md`
-- `docs/k8s/RUNBOOK.md`
-- `docs/API_REFERENCE.md`
+- [`docs/k8s/DEPLOY.md`](../docs/k8s/DEPLOY.md)
+- [`docs/k8s/DEPLOYMENT_DETAILED.md`](../docs/k8s/DEPLOYMENT_DETAILED.md)
+- [`docs/k8s/MAPPING.md`](../docs/k8s/MAPPING.md)
+- [`docs/k8s/RUNBOOK.md`](../docs/k8s/RUNBOOK.md)
+- [`docs/API_REFERENCE.md`](../docs/API_REFERENCE.md)

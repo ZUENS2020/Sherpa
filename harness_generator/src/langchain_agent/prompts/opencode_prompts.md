@@ -417,6 +417,31 @@ MANDATORY:
 - write `crash_triage.json` into `./done`
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: crash_analysis_with_hint -->
+You are OpenCode. Analyze reproduced crash and decide whether it is a false positive harness issue.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Task:
+- produce `crash_analysis.json` and `crash_analysis.md`
+- output exactly one verdict: `false_positive` | `real_bug` | `unknown`
+- use crash logs/reports as primary evidence
+- if verdict is `false_positive`, clearly explain why it is harness/input-contract misuse
+
+Constraints:
+- read-only exploration commands are allowed
+- do not run build/execute commands
+- do not modify source code in this stage
+- keep all instructions and outputs in English
+
+Hint:
+{{hint}}
+
+MANDATORY:
+- create `./done`
+- write `crash_analysis.json` into `./done`
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: fix_harness_after_run -->
 You are OpenCode. The crash was triaged as a harness bug.
 Follow the STAGE SKILL loaded by the runner as primary instructions.

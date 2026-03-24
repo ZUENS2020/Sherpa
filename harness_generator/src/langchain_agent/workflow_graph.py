@@ -29,6 +29,7 @@ from fuzz_unharnessed_repo import (
     NonOssFuzzHarnessGenerator,
     RepoSpec,
     _seed_families_for_target,
+    extract_crash_stack_signature,
     snapshot_repo_text,
     write_patch_from_snapshot,
 )
@@ -76,6 +77,15 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_feedback: dict[str, Any]
     coverage_harness_feedback: dict[str, Any]
     coverage_quality_oracle: str
+    coverage_source_report: dict[str, Any]
+    coverage_uncovered_functions: list[str]
+    coverage_exhausted_targets: list[str]
+    coverage_feedback_for_plan: str
+    crash_stack_signature: str
+    crash_stack_type: str
+    crash_stack_top_frames: str
+    dry_run_result: dict[str, Any]
+    seed_pre_check_result: dict[str, Any]
     antlr_context_path: str
     antlr_context_summary: str
     target_analysis_path: str
@@ -166,6 +176,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_triage_signal_lines: list[str]
     crash_triage_report_path: str
     crash_triage_json_path: str
+    crash_analysis_done: bool
+    crash_analysis_verdict: str
+    crash_analysis_reason: str
+    crash_analysis_report_path: str
+    crash_analysis_json_path: str
     re_build_done: bool
     re_build_ok: bool
     re_build_rc: int
@@ -979,6 +994,19 @@ def _normalize_exec_target_token(value: str) -> str:
     return s
 
 
+def _token_overlap_ratio(a: str, b: str) -> float:
+    """Return the ratio of overlapping character trigrams between two strings.
+    Used as a lightweight fuzzy match for target-to-harness name mapping."""
+    if not a or not b:
+        return 0.0
+    trigrams_a = {a[i:i+3] for i in range(max(1, len(a) - 2))}
+    trigrams_b = {b[i:i+3] for i in range(max(1, len(b) - 2))}
+    if not trigrams_a or not trigrams_b:
+        return 0.0
+    overlap = len(trigrams_a & trigrams_b)
+    return float(overlap) / float(max(len(trigrams_a), len(trigrams_b)))
+
+
 def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any] | None = None) -> dict[str, Any]:
     execution_plan = dict(execution_plan_doc or _load_execution_plan_doc(repo_root))
     execution_targets = [
@@ -1009,6 +1037,7 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         ]
         source_path = ""
         matched_by = ""
+        # Phase 1: exact normalized match
         for normalized, origin in candidates:
             if not normalized:
                 continue
@@ -1017,6 +1046,44 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
                 source_path = found
                 matched_by = origin
                 break
+        # Phase 2: substring/contains/prefix/fuzzy fallback match
+        # Handles cases where harness name is related but not identical
+        # (e.g., target="inflateBack9" but harness="infback9_fuzz.c",
+        #  or target="decode" when harness is "blast_fuzz.c" from blast API)
+        if not source_path:
+            best_score = 0.0
+            best_src = ""
+            best_origin = ""
+            for normalized, origin in candidates:
+                if not normalized or len(normalized) < 3:
+                    continue
+                for norm_key, src_rel in by_norm.items():
+                    if src_rel in used_sources:
+                        continue
+                    score = 0.0
+                    # Exact substring match
+                    if normalized in norm_key or norm_key in normalized:
+                        score = 0.8
+                    else:
+                        # Shared prefix (at least 3 chars)
+                        prefix_len = 0
+                        for i in range(min(len(normalized), len(norm_key))):
+                            if normalized[i] == norm_key[i]:
+                                prefix_len += 1
+                            else:
+                                break
+                        if prefix_len >= 3:
+                            score = max(score, 0.3 + 0.4 * (prefix_len / max(len(normalized), len(norm_key))))
+                        # Trigram overlap
+                        overlap = _token_overlap_ratio(normalized, norm_key)
+                        score = max(score, overlap)
+                    if score > best_score and score >= 0.35:
+                        best_score = score
+                        best_src = src_rel
+                        best_origin = f"{origin}(fuzzy:{score:.2f})"
+            if best_src:
+                source_path = best_src
+                matched_by = best_origin
         if source_path:
             used_sources.add(source_path)
         else:
@@ -1035,6 +1102,30 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         )
 
     extra_harnesses = [rel for rel in all_harness_rel if rel not in used_sources]
+
+    # Phase 3: positional fallback — when we have exactly as many unmatched
+    # targets as extra harnesses, pair them by order (best-effort).
+    # This handles cases where the AI chose completely different names but
+    # the target count matches the harness count.
+    if missing_targets and extra_harnesses and len(missing_targets) == len(extra_harnesses):
+        for i, label in enumerate(list(missing_targets)):
+            fallback_src = extra_harnesses[i]
+            for m in mappings:
+                tname = m.get("target_name") or m.get("expected_fuzzer_name") or ""
+                if tname == label and not m.get("source_path"):
+                    m["source_path"] = fallback_src
+                    m["matched_by"] = "positional_fallback"
+                    used_sources.add(fallback_src)
+                    break
+        missing_targets = [
+            label for label in missing_targets
+            if not any(
+                m.get("source_path") and (m.get("target_name") == label or m.get("expected_fuzzer_name") == label)
+                for m in mappings
+            )
+        ]
+        extra_harnesses = [rel for rel in all_harness_rel if rel not in used_sources]
+
     return {
         "schema_version": 1,
         "execution_plan_path": _execution_plan_path(repo_root).relative_to(repo_root).as_posix(),
@@ -6444,6 +6535,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
             crash_info = gen.repo_root / "crash_info.md"
             crash_analysis = gen.repo_root / "crash_analysis.md"
+            combined_log = ""
             for p in (crash_info, crash_analysis):
                 if not p.is_file():
                     continue
@@ -6453,7 +6545,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     continue
                 tail = "\n".join(txt.splitlines()[-400:])
                 parts.append(f"== {p.name} ==\n{tail}")
+                combined_log += txt + "\n"
+            # Also compute stack-based signature for better dedup
+            stack_sig = extract_crash_stack_signature(combined_log)
+            nonlocal _last_stack_sig
+            _last_stack_sig = stack_sig
             return _sha256_text("\n\n".join(parts))
+
+        _last_stack_sig: dict[str, str] = {}
 
         def _calc_timeout_signature(kind: str, details: list[dict[str, Any]]) -> str:
             parts: list[str] = [f"kind={kind}"]
@@ -6998,6 +7097,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_repo_examples_rejected_count": repo_examples_rejected_count,
             "coverage_repo_examples_accepted_count": repo_examples_accepted_count,
             "crash_signature": crash_signature,
+            "crash_stack_signature": _last_stack_sig.get("stack_signature", ""),
+            "crash_stack_type": _last_stack_sig.get("crash_type", ""),
+            "crash_stack_top_frames": _last_stack_sig.get("top_frames", ""),
             "same_crash_repeats": same_crash_repeats,
             "timeout_signature": timeout_signature,
             "same_timeout_repeats": same_timeout_repeats,
@@ -7364,6 +7466,43 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         }
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
+
+        # Collect source coverage report (llvm-cov) for improve feedback
+        source_report: dict[str, Any] | None = None
+        try:
+            fuzz_out = gen.repo_root / "fuzz" / "out"
+            if fuzz_out.is_dir():
+                bins = sorted(fuzz_out.glob("*"))
+                for b in bins:
+                    if b.is_file() and os.access(str(b), os.X_OK):
+                        source_report = gen.collect_source_coverage(b)
+                        if source_report:
+                            break
+        except Exception:
+            pass
+        if source_report:
+            out["coverage_source_report"] = source_report
+            out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
+
+        # Track exhausted targets for coverage-guided replan
+        exhausted = list(state.get("coverage_exhausted_targets") or [])
+        if plateau_streak >= 2 and current_target_api and current_target_api not in exhausted:
+            exhausted.append(current_target_api)
+        out["coverage_exhausted_targets"] = exhausted
+
+        # Build coverage feedback for plan stage (replan context)
+        if replan_required and history:
+            feedback_lines = [f"Previously exhausted targets (avoid re-selecting):"]
+            for t in exhausted:
+                feedback_lines.append(f"  - {t}")
+            for h_entry in history[-3:]:
+                feedback_lines.append(
+                    f"  Round {h_entry.get('round')}: target={h_entry.get('target_api')}, "
+                    f"cov={h_entry.get('max_cov')}, ft={h_entry.get('max_ft')}, "
+                    f"plateau={h_entry.get('plateau_detected')}"
+                )
+            out["coverage_feedback_for_plan"] = "\n".join(feedback_lines)
+
         _wf_log(
             cast(dict[str, Any], out),
             f"<- coverage-analysis improve={int(should_improve)} {reason} dt={_fmt_dt(time.perf_counter()-t0)}",
@@ -7433,8 +7572,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
-                "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream."
+                "- Prefer deeper entrypoints such as decode/inflate/deflate/parse/read/load/scan/archive/stream.\n"
             )
+            # Append coverage-guided target selection context
+            coverage_feedback_for_plan = str(state.get("coverage_feedback_for_plan") or "")
+            exhausted_targets = list(state.get("coverage_exhausted_targets") or [])
+            if exhausted_targets:
+                hint += f"- AVOID re-selecting these exhausted targets: {', '.join(exhausted_targets)}\n"
+            if coverage_feedback_for_plan:
+                hint += f"- Coverage history context:\n{coverage_feedback_for_plan}\n"
         else:
             hint = (
                 "Coverage-loop improvement task (in-place target repair):\n"
@@ -7460,6 +7606,28 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Diagnostic summary: {cov_reason}"
             )
+
+        # Append fine-grained source coverage feedback if available
+        source_report = dict(state.get("coverage_source_report") or {})
+        uncovered_fns = list(state.get("coverage_uncovered_functions") or [])
+        if source_report or uncovered_fns:
+            hint += "\n--- Source Coverage Report ---\n"
+            if source_report:
+                hint += (
+                    f"- Function coverage: {source_report.get('covered_functions', '?')}"
+                    f"/{source_report.get('total_functions', '?')} "
+                    f"({source_report.get('coverage_pct', '?')}%)\n"
+                )
+            if uncovered_fns:
+                hint += f"- Top uncovered functions (focus improvement here):\n"
+                for fn in uncovered_fns[:10]:
+                    hint += f"  * {fn}\n"
+            hint += "- Consider adding API calls or input patterns that exercise uncovered functions.\n"
+            # Also point to the full report file
+            report_path = source_report.get("report_path")
+            if report_path:
+                hint += f"- Full coverage report: {report_path}\n"
+
         opencode_applied = False
         if improve_mode == "in_place":
             if not _has_codex_key():
@@ -7476,10 +7644,13 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             try:
                 exec_plan = gen.repo_root / "fuzz" / "execution_plan.json"
                 harness_index = gen.repo_root / "fuzz" / "harness_index.json"
+                coverage_report = gen.repo_root / "fuzz" / "coverage_report.txt"
                 if exec_plan.is_file():
                     ctx_parts.append("=== fuzz/execution_plan.json ===\n" + exec_plan.read_text(encoding="utf-8", errors="replace"))
                 if harness_index.is_file():
                     ctx_parts.append("=== fuzz/harness_index.json ===\n" + harness_index.read_text(encoding="utf-8", errors="replace"))
+                if coverage_report.is_file():
+                    ctx_parts.append("=== fuzz/coverage_report.txt ===\n" + coverage_report.read_text(encoding="utf-8", errors="replace")[:4000])
             except Exception:
                 pass
             gen.patcher.run_codex_command(
@@ -7672,6 +7843,17 @@ def _normalize_crash_triage_label(raw: str) -> str:
     return "inconclusive"
 
 
+def _normalize_crash_analysis_verdict(raw: str) -> str:
+    val = str(raw or "").strip().lower()
+    if val in {"false_positive", "real_bug", "unknown"}:
+        return val
+    if val in {"false-positive", "harness_false_positive", "falsepositive"}:
+        return "false_positive"
+    if val in {"upstream_bug", "realbug", "true_positive", "upstream"}:
+        return "real_bug"
+    return "unknown"
+
+
 def _heuristic_crash_triage(*, info_text: str, analysis_text: str, stderr_tail: str) -> tuple[str, float, str, list[str]]:
     blob = "\n".join([info_text or "", analysis_text or "", stderr_tail or ""]).lower()
     signals: list[str] = []
@@ -7686,6 +7868,31 @@ def _heuristic_crash_triage(*, info_text: str, analysis_text: str, stderr_tail: 
     if signals and any("harness" in s.lower() or "uncaught" in s.lower() for s in signals):
         return "harness_bug", 0.78, "uncaught exception / harness misuse signal found", signals
     return "inconclusive", 0.35, "no high-confidence harness/upstream signal", signals
+
+
+def _heuristic_crash_analysis_verdict(*, info_text: str, re_run_text: str, triage_doc: dict[str, Any]) -> tuple[str, str, list[str]]:
+    signals: list[str] = []
+    label = _normalize_crash_triage_label(str(triage_doc.get("label") or ""))
+    reason = str(triage_doc.get("reason") or "").strip()
+    confidence = float(triage_doc.get("confidence") or 0.0)
+    if label == "harness_bug":
+        signals.append("crash_triage label is harness_bug")
+        if reason:
+            signals.append(f"crash_triage reason: {reason}")
+        return "false_positive", "triage indicates harness-side root cause", signals
+    if label == "upstream_bug":
+        signals.append("crash_triage label is upstream_bug")
+        if reason:
+            signals.append(f"crash_triage reason: {reason}")
+        return "real_bug", "triage indicates upstream bug with memory-safety signal", signals
+    if confidence >= 0.8 and label == "inconclusive":
+        signals.append("triage confidence is high but label remains inconclusive")
+    blob = "\n".join([info_text or "", re_run_text or ""]).lower()
+    if "addresssanitizer" in blob and "segv on unknown address 0x000000000000" in blob:
+        signals.append("asan null dereference signal observed in reproducible crash")
+    if "terminate called after throwing" in blob or "format_error" in blob:
+        signals.append("uncaught exception signal observed")
+    return "unknown", "insufficient confidence to classify false positive vs real bug", signals
 
 
 def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
@@ -7808,6 +8015,186 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "message": f"crash triage classified as {label}",
     }
     _wf_log(cast(dict[str, Any], out), f"<- crash-triage label={label} conf={confidence:.2f} dt={_fmt_dt(time.perf_counter()-t0)}")
+    return out
+
+
+def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "crash-analysis")
+    if stop_now:
+        return state
+
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> crash-analysis")
+
+    repo_root = gen.repo_root
+    crash_info = repo_root / "crash_info.md"
+    re_run_report = repo_root / "re_run_report.md"
+    triage_json_path = repo_root / "crash_triage.json"
+    analysis_json_path = repo_root / "crash_analysis.json"
+    analysis_md_path = repo_root / "crash_analysis.md"
+
+    info_text = crash_info.read_text(encoding="utf-8", errors="replace") if crash_info.is_file() else ""
+    re_run_text = re_run_report.read_text(encoding="utf-8", errors="replace") if re_run_report.is_file() else ""
+    triage_doc: dict[str, Any] = {}
+    if triage_json_path.is_file():
+        try:
+            parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(parsed, dict):
+                triage_doc = parsed
+        except Exception:
+            triage_doc = {}
+
+    prompt = _render_opencode_prompt("crash_analysis_with_hint", hint=str(state.get("codex_hint") or ""))
+    context_parts = [
+        f"last_fuzzer: {str(state.get('last_fuzzer') or '').strip()}",
+        f"last_crash_artifact: {str(state.get('last_crash_artifact') or '').strip()}",
+        f"crash_signature: {str(state.get('crash_signature') or '').strip()}",
+    ]
+    if info_text:
+        context_parts.append("=== crash_info.md ===\n" + info_text)
+    if re_run_text:
+        context_parts.append("=== re_run_report.md ===\n" + _trim_feedback_text(re_run_text))
+    if triage_doc:
+        context_parts.append("=== crash_triage.json ===\n" + json.dumps(triage_doc, ensure_ascii=False, indent=2))
+    context = "\n\n".join(context_parts)
+
+    verdict = "unknown"
+    reason = "analysis output missing; fallback heuristic applied"
+    evidence: list[str] = []
+    recommended_action = "stop_report"
+    try:
+        gen.patcher.run_codex_command(
+            prompt,
+            additional_context=context or None,
+            stage_skill="crash_analysis",
+            timeout=_remaining_time_budget_sec(state),
+            max_attempts=1,
+            max_cli_retries=_opencode_cli_retries(),
+        )
+        parsed_doc: dict[str, Any] = {}
+        if analysis_json_path.is_file():
+            try:
+                loaded = json.loads(analysis_json_path.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(loaded, dict):
+                    parsed_doc = loaded
+            except Exception:
+                parsed_doc = {}
+        verdict = _normalize_crash_analysis_verdict(str(parsed_doc.get("verdict") or ""))
+        reason = str(parsed_doc.get("reason") or "").strip() or reason
+        evidence = [str(x).strip() for x in list(parsed_doc.get("evidence") or []) if str(x).strip()]
+        recommended_action = str(parsed_doc.get("recommended_action") or "").strip().lower() or (
+            "repair_harness" if verdict == "false_positive" else "stop_report"
+        )
+    except Exception as e:
+        reason = f"crash-analysis agent error: {e}"
+
+    if verdict == "unknown" or not evidence:
+        h_verdict, h_reason, h_signals = _heuristic_crash_analysis_verdict(
+            info_text=info_text,
+            re_run_text=re_run_text,
+            triage_doc=triage_doc,
+        )
+        if verdict == "unknown":
+            verdict = h_verdict
+        if not reason.strip() or "fallback heuristic" in reason.lower() or "agent error" in reason.lower():
+            reason = h_reason
+        if not evidence:
+            evidence = h_signals
+
+    if not evidence:
+        evidence = ["no concrete crash-analysis evidence captured"]
+    if verdict == "false_positive":
+        recommended_action = "repair_harness"
+    elif recommended_action not in {"repair_harness", "stop_report"}:
+        recommended_action = "stop_report"
+
+    analysis_doc = {
+        "verdict": verdict,
+        "reason": reason,
+        "evidence": evidence,
+        "recommended_action": recommended_action,
+        "last_fuzzer": str(state.get("last_fuzzer") or ""),
+        "last_crash_artifact": str(state.get("last_crash_artifact") or ""),
+        "crash_signature": str(state.get("crash_signature") or ""),
+    }
+    analysis_json_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_lines = [
+        "# Crash Analysis",
+        "",
+        f"- verdict: {verdict}",
+        f"- recommended_action: {recommended_action}",
+        f"- reason: {reason}",
+        "",
+        "## Evidence",
+        "",
+    ]
+    for line in evidence:
+        md_lines.append(f"- {line}")
+    analysis_md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    false_positive = verdict == "false_positive"
+    restart_reason = "crash_false_positive" if false_positive else ""
+    restart_error = reason[:4096] if false_positive else ""
+    now_ts = int(time.time())
+    out = {
+        **state,
+        "last_step": "crash-analysis",
+        "last_error": "",
+        "crash_analysis_done": True,
+        "crash_analysis_verdict": verdict,
+        "crash_analysis_reason": reason,
+        "crash_analysis_report_path": str(analysis_md_path),
+        "crash_analysis_json_path": str(analysis_json_path),
+        "restart_to_plan": false_positive,
+        "restart_to_plan_reason": restart_reason,
+        "restart_to_plan_stage": "crash-analysis" if false_positive else "",
+        "restart_to_plan_error_text": restart_error,
+        "restart_to_plan_report_path": str(analysis_md_path) if false_positive else "",
+        "repair_mode": false_positive,
+        "repair_origin_stage": "crash" if false_positive else "",
+        "repair_error_kind": "false_positive_crash" if false_positive else "",
+        "repair_error_code": restart_reason if false_positive else "",
+        "repair_signature": str(state.get("crash_signature") or "")[:12] if false_positive else "",
+        "repair_stdout_tail": "",
+        "repair_stderr_tail": "",
+        "repair_attempt_index": (int(state.get("repair_attempt_index") or 0) + 1) if false_positive else 0,
+        "repair_strategy_force_change": bool(false_positive),
+        "repair_error_digest": (
+            {
+                "error_code": restart_reason,
+                "error_kind": "false_positive_crash",
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "failing_files": [],
+                "symbols": [],
+                "first_seen": now_ts,
+                "latest_seen": now_ts,
+                "top_trace": evidence[0] if evidence else reason[:256],
+            }
+            if false_positive
+            else {}
+        ),
+        "repair_recent_attempts": (
+            (list(state.get("repair_recent_attempts") or []) + [{
+                "step": "crash-analysis",
+                "origin": "crash",
+                "error_kind": "false_positive_crash",
+                "error_code": restart_reason,
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "attempt_index": int(state.get("repair_attempt_index") or 0) + 1,
+                "message": reason[:512],
+            }])[-5:]
+            if false_positive
+            else []
+        ),
+        "message": "crash-analysis false_positive" if false_positive else "crash-analysis stop",
+    }
+    _wf_log(
+        cast(dict[str, Any], out),
+        f"<- crash-analysis verdict={verdict} action={recommended_action} dt={_fmt_dt(time.perf_counter()-t0)}",
+    )
     return out
 
 
@@ -8704,6 +9091,21 @@ def _route_after_re_run_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     if bool(state.get("crash_repro_done")) and not bool(state.get("crash_repro_ok")):
         return "plan"
+    if bool(state.get("crash_repro_done")) and bool(state.get("crash_repro_ok")):
+        return "crash-analysis"
+    return "stop"
+
+
+def _route_after_crash_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if bool(state.get("restart_to_plan")):
+        if int(state.get("restart_to_plan_count") or 0) > _re_restart_limit():
+            return "stop"
+        return "plan"
+    verdict = _normalize_crash_analysis_verdict(str(state.get("crash_analysis_verdict") or ""))
+    if verdict == "false_positive":
+        return "plan"
     return "stop"
 
 
@@ -8737,6 +9139,8 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_re_build_state(state)
     if last_step == "re-run":
         return _route_after_re_run_state(state)
+    if last_step == "crash-analysis":
+        return _route_after_crash_analysis_state(state)
     return "stop"
 
 
@@ -8758,6 +9162,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "re-build",
         "re-run",
         "repro_crash",
+        "crash-analysis",
     }
     if raw == "repro_crash":
         raw = "re-build"
@@ -8789,6 +9194,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
     graph.add_node("re-run", _node_re_run)
+    graph.add_node("crash-analysis", _node_crash_analysis)
     graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("run", _node_run)
     graph.add_node("fix_crash", _node_fix_crash)
@@ -8853,6 +9259,10 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_re_run_state(state)
         return _apply_stage_stop_guard(state, "re-run", nxt)
 
+    def _route_after_crash_analysis(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_crash_analysis_state(state)
+        return _apply_stage_stop_guard(state, "crash-analysis", nxt)
+
     graph.add_conditional_edges(
         "init",
         _route_after_init_state,
@@ -8869,6 +9279,7 @@ def build_fuzz_workflow() -> StateGraph:
             "improve-harness": "improve-harness",
             "re-build": "re-build",
             "re-run": "re-run",
+            "crash-analysis": "crash-analysis",
             "repro_crash": "re-build",
             "stop": END,
         },
@@ -8921,9 +9332,26 @@ def build_fuzz_workflow() -> StateGraph:
         _route_after_improve_harness,
         {"plan": "plan", "stop": END},
     )
-    graph.add_conditional_edges("re-build", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
-    graph.add_conditional_edges("re-run", _route_after_re_run, {"fix_crash": "fix_crash", "stop": END})
-    graph.add_conditional_edges("repro_crash", _route_after_re_build, {"re-run": "re-run", "fix_crash": "fix_crash", "stop": END})
+    graph.add_conditional_edges(
+        "re-build",
+        _route_after_re_build,
+        {"re-run": "re-run", "fix_crash": "fix_crash", "plan": "plan", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "re-run",
+        _route_after_re_run,
+        {"crash-analysis": "crash-analysis", "plan": "plan", "fix_crash": "fix_crash", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "crash-analysis",
+        _route_after_crash_analysis,
+        {"plan": "plan", "stop": END},
+    )
+    graph.add_conditional_edges(
+        "repro_crash",
+        _route_after_re_build,
+        {"re-run": "re-run", "fix_crash": "fix_crash", "plan": "plan", "stop": END},
+    )
 
     return graph
 
@@ -9103,6 +9531,11 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "re_run_rc": int(out.get("re_run_rc") or 0),
         "re_run_report_path": str(out.get("re_run_report_path") or ""),
         "re_run_json_path": str(out.get("re_run_json_path") or ""),
+        "crash_analysis_done": bool(out.get("crash_analysis_done") or False),
+        "crash_analysis_verdict": str(out.get("crash_analysis_verdict") or ""),
+        "crash_analysis_reason": str(out.get("crash_analysis_reason") or ""),
+        "crash_analysis_report_path": str(out.get("crash_analysis_report_path") or ""),
+        "crash_analysis_json_path": str(out.get("crash_analysis_json_path") or ""),
         "re_workspace_root": str(out.get("re_workspace_root") or ""),
         "last_fuzzer": str(out.get("last_fuzzer") or ""),
         "last_crash_artifact": str(out.get("last_crash_artifact") or ""),
