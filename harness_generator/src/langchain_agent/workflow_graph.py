@@ -989,6 +989,19 @@ def _normalize_exec_target_token(value: str) -> str:
     return s
 
 
+def _token_overlap_ratio(a: str, b: str) -> float:
+    """Return the ratio of overlapping character trigrams between two strings.
+    Used as a lightweight fuzzy match for target-to-harness name mapping."""
+    if not a or not b:
+        return 0.0
+    trigrams_a = {a[i:i+3] for i in range(max(1, len(a) - 2))}
+    trigrams_b = {b[i:i+3] for i in range(max(1, len(b) - 2))}
+    if not trigrams_a or not trigrams_b:
+        return 0.0
+    overlap = len(trigrams_a & trigrams_b)
+    return float(overlap) / float(max(len(trigrams_a), len(trigrams_b)))
+
+
 def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any] | None = None) -> dict[str, Any]:
     execution_plan = dict(execution_plan_doc or _load_execution_plan_doc(repo_root))
     execution_targets = [
@@ -1019,6 +1032,7 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         ]
         source_path = ""
         matched_by = ""
+        # Phase 1: exact normalized match
         for normalized, origin in candidates:
             if not normalized:
                 continue
@@ -1027,6 +1041,44 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
                 source_path = found
                 matched_by = origin
                 break
+        # Phase 2: substring/contains/prefix/fuzzy fallback match
+        # Handles cases where harness name is related but not identical
+        # (e.g., target="inflateBack9" but harness="infback9_fuzz.c",
+        #  or target="decode" when harness is "blast_fuzz.c" from blast API)
+        if not source_path:
+            best_score = 0.0
+            best_src = ""
+            best_origin = ""
+            for normalized, origin in candidates:
+                if not normalized or len(normalized) < 3:
+                    continue
+                for norm_key, src_rel in by_norm.items():
+                    if src_rel in used_sources:
+                        continue
+                    score = 0.0
+                    # Exact substring match
+                    if normalized in norm_key or norm_key in normalized:
+                        score = 0.8
+                    else:
+                        # Shared prefix (at least 3 chars)
+                        prefix_len = 0
+                        for i in range(min(len(normalized), len(norm_key))):
+                            if normalized[i] == norm_key[i]:
+                                prefix_len += 1
+                            else:
+                                break
+                        if prefix_len >= 3:
+                            score = max(score, 0.3 + 0.4 * (prefix_len / max(len(normalized), len(norm_key))))
+                        # Trigram overlap
+                        overlap = _token_overlap_ratio(normalized, norm_key)
+                        score = max(score, overlap)
+                    if score > best_score and score >= 0.35:
+                        best_score = score
+                        best_src = src_rel
+                        best_origin = f"{origin}(fuzzy:{score:.2f})"
+            if best_src:
+                source_path = best_src
+                matched_by = best_origin
         if source_path:
             used_sources.add(source_path)
         else:
@@ -1045,6 +1097,30 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         )
 
     extra_harnesses = [rel for rel in all_harness_rel if rel not in used_sources]
+
+    # Phase 3: positional fallback — when we have exactly as many unmatched
+    # targets as extra harnesses, pair them by order (best-effort).
+    # This handles cases where the AI chose completely different names but
+    # the target count matches the harness count.
+    if missing_targets and extra_harnesses and len(missing_targets) == len(extra_harnesses):
+        for i, label in enumerate(list(missing_targets)):
+            fallback_src = extra_harnesses[i]
+            for m in mappings:
+                tname = m.get("target_name") or m.get("expected_fuzzer_name") or ""
+                if tname == label and not m.get("source_path"):
+                    m["source_path"] = fallback_src
+                    m["matched_by"] = "positional_fallback"
+                    used_sources.add(fallback_src)
+                    break
+        missing_targets = [
+            label for label in missing_targets
+            if not any(
+                m.get("source_path") and (m.get("target_name") == label or m.get("expected_fuzzer_name") == label)
+                for m in mappings
+            )
+        ]
+        extra_harnesses = [rel for rel in all_harness_rel if rel not in used_sources]
+
     return {
         "schema_version": 1,
         "execution_plan_path": _execution_plan_path(repo_root).relative_to(repo_root).as_posix(),
