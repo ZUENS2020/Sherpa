@@ -3452,7 +3452,11 @@ def _run_fuzz_job(
                     except Exception as e:
                         is_k8s_timeout = "k8s_job_timeout" in str(e)
                         run_timeout_retry_count = int(stage_ctx.get("run_timeout_retry_count") or 0)
-                        if stage == "run" and is_k8s_timeout:
+                        try:
+                            max_timeout_retries = int(os.environ.get("SHERPA_RUN_TIMEOUT_MAX_RETRIES", "3"))
+                        except Exception:
+                            max_timeout_retries = 3
+                        if stage == "run" and is_k8s_timeout and run_timeout_retry_count < max_timeout_retries:
                             current_budget = int(
                                 stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200
                             )
@@ -3484,7 +3488,15 @@ def _run_fuzz_job(
                         else:
                             stage_failed = True
                             stage_fail_error = _redact_sensitive_text(str(e))
-                            stage_fail_reason = "stage_dispatch_exception"
+                            if is_k8s_timeout:
+                                stage_fail_reason = "k8s_job_timeout"
+                                print(
+                                    f"[job {job_id}] run stage k8s_job_timeout; "
+                                    f"max retries exhausted ({run_timeout_retry_count}/{max_timeout_retries}) "
+                                    f"-> fallback to plan"
+                                )
+                            else:
+                                stage_fail_reason = "stage_dispatch_exception"
                             stage_result = {
                                 "message": f"stage {stage} dispatch failed; restarting from plan",
                                 "repo_root": current_repo_root,
