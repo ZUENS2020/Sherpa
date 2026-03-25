@@ -21,19 +21,25 @@ class _FakeProc:
     def __init__(self, *, stdout_text: str = "") -> None:
         self.stdout = io.StringIO(stdout_text)
         self.returncode: int | None = None
+        self.wait_calls = 0
+        self.terminate_calls = 0
+        self.kill_calls = 0
 
     def poll(self) -> int | None:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
+        self.wait_calls += 1
         if self.returncode is None:
             self.returncode = 0
         return self.returncode
 
     def terminate(self) -> None:
+        self.terminate_calls += 1
         self.returncode = 0
 
     def kill(self) -> None:
+        self.kill_calls += 1
         self.returncode = -9
 
 
@@ -810,3 +816,27 @@ def test_run_codex_command_injects_session_memory_into_additional_context(
     assert "SESSION MEMORY (recent attempts in this session group)" in ctx
     assert "status=retry_no_diff" in ctx
     assert "changed_paths=fuzz/build.py" in ctx
+
+
+def test_run_codex_command_reaps_process_on_eof_without_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    proc = _FakeProc(stdout_text="")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(helper, "_git_diff_head", lambda: "")
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "repair build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=5,
+        initial_backoff=0,
+    )
+
+    assert out is None
+    assert proc.wait_calls >= 1

@@ -189,3 +189,27 @@ def test_worker_applies_run_oom_retry_overrides_to_env(tmp_path: Path, monkeypat
     rc = k8s_job_worker.main()
     assert rc == 0
     assert captured["docker_image"] is None
+
+
+def test_worker_fails_fast_when_opencode_defunct_exceeds_threshold(tmp_path: Path, monkeypatch):
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    payload = {
+        "job_id": "job-defunct-guard",
+        "repo_url": "https://github.com/fmtlib/fmt.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.setenv("SHERPA_OPENCODE_DEFUNCT_THRESHOLD", "3")
+    monkeypatch.setattr(k8s_job_worker, "_count_opencode_defunct_processes", lambda: 5)
+
+    rc = k8s_job_worker.main()
+    assert rc == 1
+    assert result_path.is_file()
+    assert error_path.is_file()
+    txt = error_path.read_text(encoding="utf-8", errors="replace")
+    assert "opencode defunct process count exceeded threshold" in txt
