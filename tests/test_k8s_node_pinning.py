@@ -106,6 +106,7 @@ def test_k8s_stage_wait_timeout_run_unlimited_is_round_aware(monkeypatch: pytest
     monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "600")
     monkeypatch.setenv("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
     monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC", "120")
+    monkeypatch.setenv("SHERPA_SEED_GEN_RETRY_MULTIPLIER", "1")
 
     timeout = web_main._k8s_stage_wait_timeout_sec(
         stage="run",
@@ -121,6 +122,7 @@ def test_k8s_stage_wait_timeout_run_unlimited_is_round_aware(monkeypatch: pytest
 
 def test_k8s_stage_wait_timeout_run_finite_budget_not_multiplied(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "600")
+    monkeypatch.setenv("SHERPA_SEED_GEN_RETRY_MULTIPLIER", "1")
 
     timeout = web_main._k8s_stage_wait_timeout_sec(
         stage="run",
@@ -131,6 +133,21 @@ def test_k8s_stage_wait_timeout_run_finite_budget_not_multiplied(monkeypatch: py
     )
 
     assert timeout == 2400
+
+
+def test_k8s_stage_wait_timeout_run_applies_seed_retry_multiplier(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "600")
+    monkeypatch.setenv("SHERPA_SEED_GEN_RETRY_MULTIPLIER", "3")
+
+    timeout = web_main._k8s_stage_wait_timeout_sec(
+        stage="run",
+        total_time_budget_sec=0,
+        run_time_budget_sec=1800,
+        run_fuzzer_count=1,
+        run_parallelism=1,
+    )
+
+    assert timeout == 6000
 
 
 def test_normalize_resume_step_preserves_stop_signal():
