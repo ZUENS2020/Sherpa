@@ -1462,6 +1462,7 @@ def _classify_log_category(line: str) -> str:
 _WF_STEP_ENTRY_RE = re.compile(r"\[wf[^\]]*\]\s*->\s*([a-z_]+)")
 _WF_STEP_EXIT_RE = re.compile(r"\[wf[^\]]*\]\s*<-\s*([a-z_]+)")
 _WF_REPO_ROOT_RE = re.compile(r"\brepo_root=(.+?)(?:\s+dt=|$)")
+_WF_METRICS_RE = re.compile(r"\[wf-metrics\]\s*(\{.+)")
 
 
 def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
@@ -1493,6 +1494,31 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
         repo_root = repo_m.group(1).strip()
         if repo_root:
             _job_update(job_id, workflow_repo_root=repo_root)
+
+    # Parse structured per-fuzzer metrics emitted by workflow_graph.py
+    metrics_m = _WF_METRICS_RE.search(line)
+    if metrics_m:
+        try:
+            payload = json.loads(metrics_m.group(1))
+            _job_update(
+                job_id,
+                fuzz_metrics=payload,
+                fuzz_metrics_ts=payload.get("ts") or time.time(),
+                fuzz_fuzzers=payload.get("fuzzers") or {},
+                fuzz_max_cov=int(payload.get("max_cov") or 0),
+                fuzz_max_ft=int(payload.get("max_ft") or 0),
+                fuzz_total_execs_per_sec=int(payload.get("total_execs_per_sec") or 0),
+                fuzz_crash_found=bool(payload.get("crash_found")),
+                fuzz_coverage_history=payload.get("coverage_history") or [],
+                fuzz_coverage_source_report=payload.get("coverage_source_report") or {},
+                fuzz_coverage_loop_round=int(payload.get("coverage_loop_round") or 0),
+                fuzz_coverage_loop_max_rounds=int(payload.get("coverage_loop_max_rounds") or 0),
+                fuzz_coverage_plateau_streak=int(payload.get("coverage_plateau_streak") or 0),
+                fuzz_coverage_seed_profile=str(payload.get("coverage_seed_profile") or ""),
+                fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
+            )
+        except Exception:
+            pass
 
 
 def _infer_checkpoint_from_log_text(text: str) -> tuple[str, str]:
@@ -3021,6 +3047,43 @@ def _job_snapshot(job_id: str) -> dict | None:
     return view
 
 
+def _enrich_job_view(view: dict) -> None:
+    """Add workflow/resume/cancel tracking fields and fuzz metrics to a job API view."""
+    # -- workflow & resume tracking --
+    view.setdefault("k8s_phase", None)
+    view.setdefault("cancel_requested", False)
+    view.setdefault("last_cancel_requested_at", None)
+    view.setdefault("workflow_active_step", None)
+    view.setdefault("workflow_last_step", None)
+    view.setdefault("workflow_last_step_ts", None)
+    view.setdefault("parent_id", None)
+    view.setdefault("recoverable", None)
+    view.setdefault("resume_attempts", 0)
+    view.setdefault("resume_error_code", None)
+    view.setdefault("resume_from_step", None)
+    view.setdefault("last_resume_reason", None)
+    view.setdefault("last_resume_requested_at", None)
+    view.setdefault("last_resume_started_at", None)
+    view.setdefault("last_resume_finished_at", None)
+    view.setdefault("last_interrupted_at", None)
+    view.setdefault("request", None)
+    # -- per-fuzzer performance metrics --
+    view.setdefault("fuzz_metrics", None)
+    view.setdefault("fuzz_metrics_ts", None)
+    view.setdefault("fuzz_fuzzers", {})
+    view.setdefault("fuzz_max_cov", 0)
+    view.setdefault("fuzz_max_ft", 0)
+    view.setdefault("fuzz_total_execs_per_sec", 0)
+    view.setdefault("fuzz_crash_found", False)
+    view.setdefault("fuzz_coverage_history", [])
+    view.setdefault("fuzz_coverage_source_report", {})
+    view.setdefault("fuzz_coverage_loop_round", 0)
+    view.setdefault("fuzz_coverage_loop_max_rounds", 0)
+    view.setdefault("fuzz_coverage_plateau_streak", 0)
+    view.setdefault("fuzz_coverage_seed_profile", "")
+    view.setdefault("fuzz_coverage_quality_flags", [])
+
+
 def _derive_task_status(job: dict) -> dict:
     children = list(job.get("children") or [])
     if not children:
@@ -3030,6 +3093,7 @@ def _derive_task_status(job: dict) -> dict:
         view["error_signature"] = _error_signature_for_job(view)
         view["phase"] = _phase_for_job(view)
         view["runtime_mode"] = _runtime_mode_for_job(view)
+        _enrich_job_view(view)
         return view
     child_jobs = []
     with _JOBS_LOCK:
@@ -3068,12 +3132,14 @@ def _derive_task_status(job: dict) -> dict:
         c["error_signature"] = _error_signature_for_job(c)
         c["phase"] = _phase_for_job(c)
         c["runtime_mode"] = _runtime_mode_for_job(c)
+        _enrich_job_view(c)
     view["children"] = child_jobs
     view["error_code"] = _error_code_for_job(view)
     view["error_kind"] = _error_kind_for_job(view)
     view["error_signature"] = _error_signature_for_job(view)
     view["phase"] = _phase_for_job(view)
     view["runtime_mode"] = _runtime_mode_for_job(view)
+    _enrich_job_view(view)
     if derived in {"success", "error"} and not job.get("finished_at"):
         done_ts = time.time()
         _job_update(job.get("job_id"), finished_at=done_ts, status=derived)
@@ -3159,6 +3225,28 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "active_child_id": active_child.get("job_id") if active_child else None,
                 "active_child_status": _status_upper(str(active_child.get("status") or "")) if active_child else None,
                 "active_child_phase": _phase_for_job(active_child) if active_child else None,
+                "cancel_requested": job.get("cancel_requested", False),
+                "last_cancel_requested_at": job.get("last_cancel_requested_at"),
+                "workflow_active_step": job.get("workflow_active_step"),
+                "workflow_last_step": job.get("workflow_last_step"),
+                "workflow_last_step_ts": job.get("workflow_last_step_ts"),
+                "recoverable": job.get("recoverable"),
+                "resume_attempts": job.get("resume_attempts", 0),
+                "resume_error_code": job.get("resume_error_code"),
+                "last_resume_reason": job.get("last_resume_reason"),
+                "last_interrupted_at": job.get("last_interrupted_at"),
+                "request": job.get("request"),
+                # Per-fuzzer metrics from active child (or self for fuzz jobs)
+                "fuzz_fuzzers": (active_child or job).get("fuzz_fuzzers", {}),
+                "fuzz_max_cov": (active_child or job).get("fuzz_max_cov", 0),
+                "fuzz_max_ft": (active_child or job).get("fuzz_max_ft", 0),
+                "fuzz_total_execs_per_sec": (active_child or job).get("fuzz_total_execs_per_sec", 0),
+                "fuzz_crash_found": (active_child or job).get("fuzz_crash_found", False),
+                "fuzz_coverage_loop_round": (active_child or job).get("fuzz_coverage_loop_round", 0),
+                "fuzz_coverage_loop_max_rounds": (active_child or job).get("fuzz_coverage_loop_max_rounds", 0),
+                "fuzz_coverage_plateau_streak": (active_child or job).get("fuzz_coverage_plateau_streak", 0),
+                "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
+                "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)

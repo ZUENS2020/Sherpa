@@ -46,7 +46,7 @@ export default function App() {
 
   const normalizedTasks = (tasksData || []).map((task: any) => {
     const status = String(task?.status || 'UNKNOWN').toUpperCase();
-    const stage = String(task?.active_child_status || task?.stage || 'UNKNOWN').toUpperCase();
+    const stage = String(task?.active_child_phase || task?.stage || 'UNKNOWN').toUpperCase();
     return {
       ...task,
       status,
@@ -71,7 +71,7 @@ export default function App() {
   const totalTasks = normalizedTasks.length;
   const filteredTasks = normalizedTasks.filter((task: any) => {
     const status = String(task?.status || '').toUpperCase();
-    const stage = String(task?.stage || task?.active_child_status || '').toUpperCase();
+    const stage = String(task?.stage || task?.active_child_phase || '').toUpperCase();
     const id = String(task?.id || task?.job_id || '').toUpperCase();
     const repo = String(task?.repo || '').toUpperCase();
     const query = taskSearch.trim().toUpperCase();
@@ -1088,7 +1088,7 @@ export default function App() {
                     type="text"
                     value={apiBaseUrl}
                     onChange={(e) => setApiBaseUrl(e.target.value)}
-                    placeholder="https://dev.zuens2020.work"
+                    placeholder="https://sherpa.zuens2020.work"
                     className="w-full bg-zinc-100 py-3 px-4 font-mono text-sm tracking-tight outline-none focus:ring-2 focus:ring-emerald-700"
                   />
                   <p className="mt-2 font-mono text-[10px] text-zinc-400">
@@ -1355,7 +1355,7 @@ export default function App() {
                 </div>
                 <div>
                   <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-1">Stage</p>
-                  <p className="font-mono text-sm text-zinc-900">{selectedTask.active_child_status || selectedTask.stage || 'UNKNOWN'}</p>
+                  <p className="font-mono text-sm text-zinc-900">{selectedTask.active_child_phase || selectedTask.stage || 'UNKNOWN'}</p>
                 </div>
                 <div>
                   <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-1">Progress</p>
