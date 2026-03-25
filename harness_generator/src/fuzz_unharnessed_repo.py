@@ -4093,7 +4093,8 @@ EOF
             seed_idle_timeout = int(os.environ.get("SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC", "300"))
         except Exception:
             seed_idle_timeout = 300
-        patcher_kwargs["idle_timeout_override"] = max(60, seed_idle_timeout)
+        effective_idle = seed_timeout if isinstance(seed_timeout, int) and seed_timeout > 0 else seed_idle_timeout
+        patcher_kwargs["idle_timeout_override"] = max(60, effective_idle)
         selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
         observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")

@@ -2,13 +2,14 @@
 
 ## 问题总览
 
-| # | 问题 | 严重程度 | 优先级 |
-|---|------|----------|--------|
-| 1 | Seed Generation 未为所有 Fuzzer 生成 AI Seeds | 中等 | P1 |
-| 2 | K8s Job Timeout 导致 build/run 阶段失败 | 高 | P0 |
-| 3 | OpenCodeHelper 僵尸进程 | 中等 | P2 |
-| 4 | Coverage Plateau 检测后无法有效改善 | 中等 | P2 |
-| 5 | Re-build 失败：CMakeCache.txt 路径冲突 | 高 | P0 |
+| # | 问题 | 严重程度 | 优先级 | 状态 |
+|---|------|----------|--------|------|
+| 1 | Seed Generation 未为所有 Fuzzer 生成 AI Seeds | 中等 | P1 | 未修复 |
+| 2 | K8s Job Timeout 导致 build/run 阶段失败 | 高 | P0 | 未修复 |
+| 3 | OpenCodeHelper 僵尸进程 | 中等 | P2 | ✅ 已修复 |
+| 4 | Coverage Plateau 检测后无法有效改善 | 中等 | P2 | 未修复 |
+| 5 | Re-build 失败：CMakeCache.txt 路径冲突 | 高 | P0 | ✅ 已修复 |
+| 6 | Seed Gen Idle Timeout 未使用动态时间预算 | 中等 | P1 | ✅ 已修复 |
 
 ---
 
@@ -65,7 +66,7 @@ run_base = run_base * seed_gen_retry_multiplier
 
 ---
 
-## P0-2：Re-build 失败 — CMakeCache.txt 路径冲突
+## P0-2：Re-build 失败 — CMakeCache.txt 路径冲突 ✅ 已修复
 
 ### 现象
 
@@ -81,77 +82,26 @@ where CMakeCache.txt was created.
 
 | 根因 | 位置 | 说明 |
 |------|------|------|
-| `shutil.copytree` 复制了 `build-work` 目录 | `workflow_graph.py:8374` | 包含 `CMakeCache.txt`，内部硬编码了原始路径 `CMAKE_HOME_DIRECTORY:INTERNAL=/shared/output/zlib-7161af14` |
+| `shutil.copytree` 复制了 `build-work` 目录 | `workflow_graph.py:8374` | 包含 `CMakeCache.txt`，内部硬编码了原始路径 |
 | clone 到新路径但沿用旧缓存 | `workflow_graph.py:8347` | `clone_root = repro_workspace / "workdir"`，路径变了但 CMake cache 还指向老路径 |
 
-### 代码上下文
+### 修复内容
+
+**文件**: `workflow_graph.py:8374` 和 `workflow_graph.py:8626`（两处 copytree）
 
 ```python
-# workflow_graph.py:8368-8374
-source_fuzz = repo_root / "fuzz"                  # /shared/output/zlib-7161af14/fuzz
-dest_fuzz = clone_root / "fuzz"                    # /shared/output/zlib-7161af14/.repro_crash/workdir/fuzz
-if dest_fuzz.exists():
-    shutil.rmtree(dest_fuzz, ignore_errors=True)
-shutil.copytree(source_fuzz, dest_fuzz)            # ← 连 build-work/CMakeCache.txt 一起复制了
-```
-
-复制过来的 `CMakeCache.txt` 包含:
-```
-CMAKE_HOME_DIRECTORY:INTERNAL=/shared/output/zlib-7161af14
-```
-但 re-build 实际在 `/shared/output/zlib-7161af14/.repro_crash/workdir/` 下执行，路径不匹配。
-
-### 修复方案
-
-**推荐方案 B — copytree 时排除构建产物**（更干净，避免遗漏其他构建系统的缓存）
-
-**文件**: `workflow_graph.py:8374`
-
-```python
-# 现在:
-shutil.copytree(source_fuzz, dest_fuzz)
-
-# 改为:
 shutil.copytree(
     source_fuzz,
     dest_fuzz,
     ignore=shutil.ignore_patterns(
-        "build-work",     # CMake 构建目录（含 CMakeCache.txt）
-        "CMakeFiles",     # CMake 中间文件
-        "out",            # fuzzer 输出目录（corpus / crashes），re-run 会重新生成
-        "__pycache__",    # Python 缓存
-        "*.o",            # 编译中间产物
-        "*.a",            # 静态库
+        "build-work", "CMakeFiles", "out", "__pycache__", "*.o", "*.a",
     ),
 )
 ```
 
-**理由**:
-- 方案 A（复制后删除）有 TOCTOU 风险——删除前如果 re-build 已经启动会出问题
-- 方案 B 从源头排除，更安全且性能更好（少复制大量二进制产物）
-- 排除 `out/` 也是必要的——re-run 需要干净的输出目录，不应继承旧 corpus
-
-**不排除的关键文件**:
-- `build.py` / `build.sh` — 构建脚本
-- `*.c` / `*.cc` / `*.h` — harness 源码
-- `README.md` / `*.json` — 元数据
-- `corpus/` — 种子目录（如果存在，与 `out/` 不同）
-
-### 验证方法
-
-```bash
-# 确认 clone 后没有构建缓存
-ls -la /shared/output/<repo>/.repro_crash/workdir/fuzz/build-work/
-# 应该不存在
-
-# 确认 re-build 从干净状态构建
-grep "CMAKE_HOME_DIRECTORY" /shared/output/<repo>/.repro_crash/workdir/fuzz/build-work/CMakeCache.txt
-# 应该指向 .repro_crash/workdir 路径
-```
-
 ---
 
-## P1：Seed Generation 未为所有 Fuzzer 生成 AI Seeds
+## P1-1：Seed Generation 未为所有 Fuzzer 生成 AI Seeds
 
 ### 现象
 
@@ -164,20 +114,15 @@ grep "CMAKE_HOME_DIRECTORY" /shared/output/<repo>/.repro_crash/workdir/fuzz/buil
 | 根因 | 位置 | 说明 |
 |------|------|------|
 | Seed gen 串行执行 | `fuzz_unharnessed_repo.py:2342-2348` | `for bin_path in bins` 逐个调 `_pass_generate_seeds`，第一个耗时过长则后续无时间 |
-| idle timeout 不受 `seed_generation_timeout_sec` 控制 | `fuzz_unharnessed_repo.py:4071-4074` | 只传了 `timeout`，**没传 `idle_timeout_override`** |
+| idle timeout 不受 `seed_generation_timeout_sec` 控制 | `fuzz_unharnessed_repo.py:4096` | 固定 300s 或环境变量，不跟随动态预算 |
 | 默认 idle timeout = 900s | `codex_helper.py:1021` | AI 卡住 900s 才被杀，但 `seed_generation_timeout_sec` 无法覆盖 |
 | 异常被静默捕获 | `fuzz_unharnessed_repo.py:2346-2348` | `except HarnessGeneratorError` 只 warning，不中断不报告 |
 
 ### 修复方案
 
-#### Fix 1-A: 传递 idle_timeout_override
+#### Fix 1-A: 传递 idle_timeout_override ✅ 已修复（Fix 6 一并解决）
 
-**文件**: `fuzz_unharnessed_repo.py:4071-4074`
-
-```python
-seed_idle_timeout = int(os.environ.get("SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC", "300"))
-patcher_kwargs["idle_timeout_override"] = seed_idle_timeout
-```
+见下方 P1-2。
 
 #### Fix 1-B: 按 fuzzer 数量分配时间预算
 
@@ -202,7 +147,36 @@ for bin_path in bins:
 
 ---
 
-## P2-A：OpenCodeHelper 僵尸进程
+## P1-2：Seed Gen Idle Timeout 未使用动态时间预算 ✅ 已修复
+
+### 现象
+
+`idle_timeout_override` 固定 300s（或环境变量），不受 `seed_generation_timeout_sec` 动态控制。后续 fuzzer 的 AI seed generation 可能被提前中断。
+
+### 根因
+
+| 根因 | 位置 | 说明 |
+|------|------|------|
+| idle timeout 与动态预算脱节 | `fuzz_unharnessed_repo.py:4096` | `seed_generation_timeout_sec` 在 `workflow_graph.py:6613` 被动态设置为 `remaining_for_seed`，但 `idle_timeout_override` 固定不变 |
+
+### 修复内容
+
+**文件**: `fuzz_unharnessed_repo.py:4096`
+
+```python
+# 修改前:
+patcher_kwargs["idle_timeout_override"] = max(60, seed_idle_timeout)
+
+# 修改后:
+effective_idle = seed_timeout if isinstance(seed_timeout, int) and seed_timeout > 0 else seed_idle_timeout
+patcher_kwargs["idle_timeout_override"] = max(60, effective_idle)
+```
+
+**效果**: 当 `seed_generation_timeout_sec` 被动态设置（如剩余时间 600s），idle timeout 跟随使用 600s 而非固定 300s。环境变量 `SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC` 仍作为 fallback。
+
+---
+
+## P2-A：OpenCodeHelper 僵尸进程 ✅ 已修复
 
 ### 现象
 
@@ -212,19 +186,11 @@ for bin_path in bins:
 
 `codex_helper.py:1489-1493` 中 `proc.kill()` 后没有调用 `proc.wait()`。
 
-### 修复方案
+### 修复内容
 
-**文件**: `codex_helper.py:1489-1493`
+**文件**: `codex_helper.py:1494-1497`
 
 ```python
-# 现在:
-if proc.poll() is None:
-    try:
-        proc.kill()
-    except Exception:
-        pass
-
-# 改为:
 if proc.poll() is None:
     try:
         proc.kill()
@@ -235,8 +201,6 @@ if proc.poll() is None:
     except Exception:
         pass
 ```
-
-一行修复，影响范围极小。
 
 ---
 
@@ -290,19 +254,20 @@ required family cap: 3 → 5
 
 ```
 P0-1 (k8s timeout 重试/安全系数)  ← 独立，可直接做
-P0-2 (re-build CMakeCache 冲突)   ← 独立，可直接做
+P0-2 (re-build CMakeCache 冲突)   ← ✅ 已修复
          ↓
-P1   (seed gen 时间分配 + idle)   ← 依赖 P0-1 生效后验证
+P1-1 (seed gen 时间分配)          ← 依赖 P0-1 生效后验证
+P1-2 (seed gen idle timeout)      ← ✅ 已修复
          ↓
-P2-A (僵尸进程)                   ← 独立，一行修复
+P2-A (僵尸进程)                   ← ✅ 已修复
 P2-B (plateau 改善)               ← 长期，依赖 P1 生效后有更好的种子数据
 ```
 
 ## 涉及文件清单
 
-| 文件 | 涉及 Fix |
-|------|----------|
-| `harness_generator/src/langchain_agent/main.py` | P0-1 (Fix 2-A, 2-B, 2-C) |
-| `harness_generator/src/langchain_agent/workflow_graph.py` | P0-2 (Fix 5), P2-B (Fix 4-A) |
-| `harness_generator/src/fuzz_unharnessed_repo.py` | P1 (Fix 1-A, 1-B, 1-C), P2-B (Fix 4-C) |
-| `harness_generator/src/codex_helper.py` | P2-A |
+| 文件 | 涉及 Fix | 状态 |
+|------|----------|------|
+| `harness_generator/src/langchain_agent/main.py` | P0-1 (Fix 2-A, 2-B, 2-C) | 未修复 |
+| `harness_generator/src/langchain_agent/workflow_graph.py` | P0-2 (copytree), P2-B (Fix 4-A) | P0-2 ✅ |
+| `harness_generator/src/fuzz_unharnessed_repo.py` | P1-1 (Fix 1-B, 1-C), P1-2 (idle timeout) | P1-2 ✅ |
+| `harness_generator/src/codex_helper.py` | P2-A (zombie process) | ✅ |
