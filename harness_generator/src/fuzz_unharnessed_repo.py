@@ -2339,35 +2339,51 @@ EOF
         run_rc = 0
         crash_evidence = "none"
         run_error_kind = ""
-        for bin_path in bins:
-            fuzzer_name = bin_path.name
-            try:
-                print(f"[*] Pass D: Generating initial seeds for {fuzzer_name} …")
-                self._pass_generate_seeds(fuzzer_name)
-            except HarnessGeneratorError as e:
-                print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
+        seed_gen_failed_fuzzers: List[str] = []
+        previous_seed_timeout = self.seed_generation_timeout_sec
+        total_seed_budget = (
+            int(previous_seed_timeout)
+            if isinstance(previous_seed_timeout, int) and previous_seed_timeout > 0
+            else 1800
+        )
+        per_fuzzer_seed_budget = max(300, total_seed_budget // max(1, len(bins)))
+        try:
+            for bin_path in bins:
+                fuzzer_name = bin_path.name
+                self.seed_generation_timeout_sec = per_fuzzer_seed_budget
+                try:
+                    print(
+                        f"[*] Pass D: Generating initial seeds for {fuzzer_name} "
+                        f"(budget={per_fuzzer_seed_budget}s) …"
+                    )
+                    self._pass_generate_seeds(fuzzer_name)
+                except HarnessGeneratorError as e:
+                    print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
+                    seed_gen_failed_fuzzers.append(fuzzer_name)
 
-            print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
-            run = self._run_fuzzer(bin_path)
-            run_rc = run.rc
-            crash_evidence = run.crash_evidence
-            run_error_kind = run.run_error_kind
+                print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
+                run = self._run_fuzzer(bin_path)
+                run_rc = run.rc
+                crash_evidence = run.crash_evidence
+                run_error_kind = run.run_error_kind
 
-            if run.error:
-                raise HarnessGeneratorError(run.error)
+                if run.error:
+                    raise HarnessGeneratorError(run.error)
 
-            if run.crash_found and run.first_artifact:
-                print(f"[!] Found {len(run.new_artifacts)} bug artifact(s), evidence={run.crash_evidence}.")
-                first = Path(run.first_artifact)
-                print(f"    → analyzing first: {first}")
-                self._analyze_and_package(fuzzer_name, first)
-                crash_found = True
-                last_fuzzer = fuzzer_name
-                last_artifact = str(first)
-                # Stop after first validated crash to keep the demo tight.
-                break
-            else:
-                print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
+                if run.crash_found and run.first_artifact:
+                    print(f"[!] Found {len(run.new_artifacts)} bug artifact(s), evidence={run.crash_evidence}.")
+                    first = Path(run.first_artifact)
+                    print(f"    → analyzing first: {first}")
+                    self._analyze_and_package(fuzzer_name, first)
+                    crash_found = True
+                    last_fuzzer = fuzzer_name
+                    last_artifact = str(first)
+                    # Stop after first validated crash to keep the demo tight.
+                    break
+                else:
+                    print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
+        finally:
+            self.seed_generation_timeout_sec = previous_seed_timeout
 
         print("[*] Workflow complete.")
         self._write_run_summary(
@@ -2377,6 +2393,7 @@ EOF
             run_rc=run_rc,
             crash_evidence=crash_evidence,
             run_error_kind=run_error_kind,
+            seed_gen_failed_fuzzers=seed_gen_failed_fuzzers,
         )
 
     # ────────────────────────────────────────────────────────────────────
@@ -4072,6 +4089,11 @@ EOF
         patcher_kwargs: Dict[str, object] = {}
         if isinstance(seed_timeout, int) and seed_timeout > 0:
             patcher_kwargs["timeout"] = seed_timeout
+        try:
+            seed_idle_timeout = int(os.environ.get("SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC", "300"))
+        except Exception:
+            seed_idle_timeout = 300
+        patcher_kwargs["idle_timeout_override"] = max(60, seed_idle_timeout)
         selected_targets_text = read_text_safely(self.fuzz_dir / "selected_targets.json")
         observed_target_text = read_text_safely(self.fuzz_dir / "observed_target.json")
         target_analysis_text = read_text_safely(self.fuzz_dir / "target_analysis.json")
@@ -5296,6 +5318,7 @@ EOF
         run_rc: int | None = None,
         crash_evidence: str = "none",
         run_error_kind: str = "",
+        seed_gen_failed_fuzzers: Optional[List[str]] = None,
     ) -> None:
         summary_json = self.repo_root / "run_summary.json"
         summary_md = self.repo_root / "run_summary.md"
@@ -5326,6 +5349,7 @@ EOF
             "crash_found": crash_found,
             "last_fuzzer": last_fuzzer,
             "last_crash_artifact": last_artifact,
+            "seed_gen_failed_fuzzers": list(seed_gen_failed_fuzzers or []),
             "harness_error": harness_error,
             "error": error or "",
             "crash_info_path": str(self.repo_root / "crash_info.md"),
@@ -5350,6 +5374,10 @@ EOF
             f"- Crash evidence: {payload['crash_evidence']}",
             f"- Crash found: {payload['crash_found']}",
             f"- Harness error: {payload['harness_error']}",
+            (
+                "- Seed generation failed fuzzers: "
+                + (", ".join(payload["seed_gen_failed_fuzzers"]) if payload["seed_gen_failed_fuzzers"] else "none")
+            ),
         ]
         if error:
             md_lines.extend(["", "## Error", "```text", error, "```"])

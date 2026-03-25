@@ -17,6 +17,10 @@ def _fake_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     gen = NonOssFuzzHarnessGenerator.__new__(NonOssFuzzHarnessGenerator)
     gen.repo_root = repo_root
     gen.docker_image = None
+    gen.sanitizer = "address"
+    gen.fuzz_dir = repo_root / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_out_dir = gen.fuzz_dir / "out"
     gen.last_seed_profile_by_fuzzer = {}
     gen.last_seed_bootstrap_by_fuzzer = {}
     gen.last_selected_target_by_fuzzer = {}
@@ -432,6 +436,55 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
+
+
+def test_pass_generate_seeds_passes_idle_timeout_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "targets.json").write_text(
+        '[{"name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC", "180")
+    gen.seed_generation_timeout_sec = 900
+
+    captured_kwargs: dict[str, object] = {}
+
+    class _Patcher:
+        def run_codex_command(self, _instructions: str, additional_context: str = "", **kwargs):
+            captured_kwargs.update(kwargs)
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+    gen._pass_generate_seeds("yaml_parser_parse_fuzz")
+
+    assert captured_kwargs["timeout"] == 900
+    assert captured_kwargs["idle_timeout_override"] == 180
+
+
+def test_write_run_summary_includes_seed_generation_failures(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.time_budget = 120
+    gen.max_len = 4096
+    gen.docker_image = None
+
+    gen._write_run_summary(
+        crash_found=False,
+        run_rc=0,
+        crash_evidence="none",
+        run_error_kind="",
+        seed_gen_failed_fuzzers=["fread_file_func_fuzz", "fseek64_file_func_fuzz"],
+    )
+
+    summary = (tmp_path / "run_summary.json").read_text(encoding="utf-8")
+    assert "seed_gen_failed_fuzzers" in summary
+    assert "fread_file_func_fuzz" in summary
+    assert "fseek64_file_func_fuzz" in summary
 
 
 def test_pass_generate_seeds_adds_argument_id_boundary_guidance(tmp_path: Path):
