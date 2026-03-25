@@ -106,6 +106,50 @@ def collect_fuzz_inventory(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _build_fuzz_performance(run_details: list[dict[str, Any]], out: dict[str, Any]) -> dict[str, Any]:
+    """Build per-fuzzer performance metrics for the run summary JSON."""
+    fuzzers: dict[str, dict[str, Any]] = {}
+    for detail in (run_details or []):
+        name = str(detail.get("fuzzer") or "unknown")
+        fuzzers[name] = {
+            "final_cov": int(detail.get("final_cov") or 0),
+            "final_ft": int(detail.get("final_ft") or 0),
+            "final_execs_per_sec": int(detail.get("final_execs_per_sec") or 0),
+            "final_iteration": int(detail.get("final_iteration") or 0),
+            "final_rss_mb": int(detail.get("final_rss_mb") or 0),
+            "final_corpus_files": int(detail.get("final_corpus_files") or 0),
+            "final_corpus_size_bytes": int(detail.get("final_corpus_size_bytes") or 0),
+            "corpus_files": int(detail.get("corpus_files") or 0),
+            "corpus_size_bytes": int(detail.get("corpus_size_bytes") or 0),
+            "crash_found": bool(detail.get("crash_found")),
+            "rc": int(detail.get("rc") or 0),
+            "run_error_kind": str(detail.get("run_error_kind") or ""),
+            "terminal_reason": str(detail.get("terminal_reason") or ""),
+            "plateau_detected": bool(detail.get("plateau_detected")),
+            "plateau_idle_seconds": int(detail.get("plateau_idle_seconds") or 0),
+            "seed_quality": dict(detail.get("seed_quality") or {}),
+        }
+    max_cov = max((f["final_cov"] for f in fuzzers.values()), default=0)
+    max_ft = max((f["final_ft"] for f in fuzzers.values()), default=0)
+    total_execs = sum(f["final_execs_per_sec"] for f in fuzzers.values())
+    return {
+        "fuzzers": fuzzers,
+        "aggregate": {
+            "max_cov": max_cov,
+            "max_ft": max_ft,
+            "total_execs_per_sec": total_execs,
+            "crash_found": any(f["crash_found"] for f in fuzzers.values()),
+            "fuzzer_count": len(fuzzers),
+        },
+        "coverage_loop_round": int(out.get("coverage_loop_round") or 0),
+        "coverage_loop_max_rounds": int(out.get("coverage_loop_max_rounds") or 0),
+        "coverage_plateau_streak": int(out.get("coverage_plateau_streak") or 0),
+        "coverage_seed_profile": str(out.get("coverage_seed_profile") or ""),
+        "coverage_quality_flags": list(out.get("coverage_quality_flags") or []),
+        "coverage_source_report": dict(out.get("coverage_source_report") or {}),
+    }
+
+
 def write_run_summary(out: dict[str, Any]) -> None:
     repo_root_raw = out.get("repo_root")
     if not repo_root_raw:
@@ -282,6 +326,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "noise_rejected_count": int(out.get("coverage_seed_noise_rejected_count") or 0),
             "family_coverage": dict(out.get("coverage_seed_family_coverage") or {}),
         },
+        "fuzz_performance": _build_fuzz_performance(run_details, out),
         "timestamp": time.time(),
     }
 
@@ -346,18 +391,39 @@ def write_run_summary(out: dict[str, Any]) -> None:
         md_lines.extend(["", "## Key Artifact Hashes"])
         for path, digest in sorted(key_artifact_hashes.items()):
             md_lines.append(f"- {path}: `{digest}`")
+    perf = data.get("fuzz_performance") or {}
+    agg = perf.get("aggregate") or {}
+    if agg:
+        md_lines.extend([
+            "",
+            "## Fuzz Performance (Aggregate)",
+            f"- Max coverage (edges): {agg.get('max_cov', 0)}",
+            f"- Max features: {agg.get('max_ft', 0)}",
+            f"- Total execs/sec: {agg.get('total_execs_per_sec', 0)}",
+            f"- Crash found: {agg.get('crash_found', False)}",
+            f"- Fuzzer count: {agg.get('fuzzer_count', 0)}",
+            f"- Coverage loop round: {perf.get('coverage_loop_round', 0)}/{perf.get('coverage_loop_max_rounds', 0)}",
+            f"- Plateau streak: {perf.get('coverage_plateau_streak', 0)}",
+            f"- Quality flags: {perf.get('coverage_quality_flags') or 'none'}",
+        ])
     if run_details:
-        md_lines.extend(["", "## Fuzzer Effectiveness"])
+        md_lines.extend(["", "## Fuzzer Effectiveness (Per-Fuzzer)"])
         for item in run_details:
             md_lines.append(
-                "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, corpus={corp_files}/{corp_size}, rss={rss}MB".format(
+                "- {fuzzer}: rc={rc}, cov={cov}, ft={ft}, exec/s={eps}, "
+                "corpus={corp_files}/{corp_size}, rss={rss}MB, "
+                "plateau={plateau}({plateau_sec}s), terminal={terminal}".format(
                     fuzzer=item.get("fuzzer"),
                     rc=item.get("rc"),
                     cov=item.get("final_cov"),
                     ft=item.get("final_ft"),
+                    eps=item.get("final_execs_per_sec", 0),
                     corp_files=item.get("final_corpus_files"),
                     corp_size=bytes_human(int(item.get("final_corpus_size_bytes") or 0)),
                     rss=item.get("final_rss_mb"),
+                    plateau=item.get("plateau_detected", False),
+                    plateau_sec=item.get("plateau_idle_seconds", 0),
+                    terminal=item.get("terminal_reason") or "none",
                 )
             )
     if last_error:
