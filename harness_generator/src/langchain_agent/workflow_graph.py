@@ -8371,7 +8371,18 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         dest_fuzz = clone_root / "fuzz"
         if dest_fuzz.exists():
             shutil.rmtree(dest_fuzz, ignore_errors=True)
-        shutil.copytree(source_fuzz, dest_fuzz)
+        shutil.copytree(
+            source_fuzz,
+            dest_fuzz,
+            ignore=shutil.ignore_patterns(
+                "build-work",   # CMake build dir (contains CMakeCache.txt with hardcoded paths)
+                "CMakeFiles",   # CMake intermediate files
+                "out",          # fuzzer output (corpus/crashes); re-run regenerates
+                "__pycache__",
+                "*.o",
+                "*.a",
+            ),
+        )
 
         python_runner = "python3"
         try:
@@ -8623,7 +8634,18 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         dest_fuzz = clone_root / "fuzz"
         if dest_fuzz.exists():
             shutil.rmtree(dest_fuzz, ignore_errors=True)
-        shutil.copytree(source_fuzz, dest_fuzz)
+        shutil.copytree(
+            source_fuzz,
+            dest_fuzz,
+            ignore=shutil.ignore_patterns(
+                "build-work",   # CMake build dir (contains CMakeCache.txt with hardcoded paths)
+                "CMakeFiles",   # CMake intermediate files
+                "out",          # fuzzer output (corpus/crashes); re-run regenerates
+                "__pycache__",
+                "*.o",
+                "*.a",
+            ),
+        )
 
         python_runner = "python3"
         try:
