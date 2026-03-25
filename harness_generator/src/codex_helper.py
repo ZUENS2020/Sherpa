@@ -1489,13 +1489,52 @@ class CodexHelper:
                         return proc.poll() is not None
                     return True
 
+                def _reap_process_group_children(pgid: int, budget_sec: float) -> tuple[int, str]:
+                    if os.name == "nt" or pgid <= 0:
+                        return 0, "ok"
+                    deadline = time.monotonic() + max(0.0, float(budget_sec))
+                    reaped = 0
+                    status = "ok"
+                    while time.monotonic() < deadline:
+                        try:
+                            pid, _ = os.waitpid(-pgid, os.WNOHANG)
+                        except ChildProcessError:
+                            break
+                        except Exception:
+                            status = "failed"
+                            break
+                        if pid == 0:
+                            status = "partial"
+                            time.sleep(0.05)
+                            continue
+                        reaped += 1
+                    return reaped, status
+
+                def _reap_any_dead_children(max_rounds: int = 8) -> tuple[int, str]:
+                    if os.name == "nt":
+                        return 0, "ok"
+                    reaped = 0
+                    status = "ok"
+                    rounds = max(1, min(int(max_rounds), 128))
+                    for _ in range(rounds):
+                        try:
+                            pid, _ = os.waitpid(-1, os.WNOHANG)
+                        except ChildProcessError:
+                            break
+                        except Exception:
+                            status = "failed"
+                            break
+                        if pid == 0:
+                            break
+                        reaped += 1
+                    return reaped, status
+
                 def _terminate_or_kill_proc(force: bool) -> None:
                     if proc.poll() is not None:
                         return
                     if os.name != "nt":
                         try:
                             os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
-                            return
                         except Exception:
                             pass
                     try:
@@ -1513,6 +1552,9 @@ class CodexHelper:
                     cleanup_finalized = True
                     cleanup_status = "ok"
                     cleanup_error = ""
+                    cleanup_reaped_count = 0
+                    cleanup_reap_status = "ok"
+                    proc_pgid = int(getattr(proc, "pid", 0) or 0)
                     try:
                         if proc.stdout is not None:
                             try:
@@ -1526,6 +1568,18 @@ class CodexHelper:
                                 if not _wait_proc_with_timeout(4.0):
                                     cleanup_status = "failed"
                                     cleanup_error = "process did not exit after terminate/kill sequence"
+                        reaped_pg, reap_status_pg = _reap_process_group_children(proc_pgid, 1.0)
+                        cleanup_reaped_count += int(reaped_pg)
+                        if reap_status_pg == "failed":
+                            cleanup_reap_status = "failed"
+                        elif reap_status_pg == "partial" and cleanup_reap_status == "ok":
+                            cleanup_reap_status = "partial"
+                        reaped_any, reap_status_any = _reap_any_dead_children(16)
+                        cleanup_reaped_count += int(reaped_any)
+                        if reap_status_any == "failed":
+                            cleanup_reap_status = "failed"
+                        elif reap_status_any == "partial" and cleanup_reap_status == "ok":
+                            cleanup_reap_status = "partial"
                     except Exception as e:
                         cleanup_status = "failed"
                         cleanup_error = str(e)
@@ -1533,8 +1587,12 @@ class CodexHelper:
                         _cleanup_docker_run()
                     run_meta["cleanup_status"] = cleanup_status
                     run_meta["cleanup_reason"] = reason
+                    run_meta["cleanup_reaped_count"] = int(cleanup_reaped_count)
+                    run_meta["cleanup_reap_status"] = cleanup_reap_status
                     if cleanup_error:
                         run_meta["cleanup_error"] = cleanup_error[:400]
+                    if cleanup_reap_status == "failed":
+                        run_meta["cleanup_reap_error"] = "failed to reap one or more child processes"
                     if cleanup_status != "ok":
                         LOGGER.warning(
                             "[OpenCodeHelper] process cleanup failed (reason=%s): %s",
@@ -1688,7 +1746,7 @@ class CodexHelper:
                         pass
                     _finalize_proc_lifecycle("loop_exit", force_kill=False)
 
-                if str(run_meta.get("cleanup_status") or "") != "ok":
+                if str(run_meta.get("cleanup_status") or "") != "ok" or str(run_meta.get("cleanup_reap_status") or "") == "failed":
                     saw_retry_error = True
 
                 if saw_retry_error:

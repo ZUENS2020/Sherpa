@@ -21,6 +21,7 @@ class _FakeProc:
     def __init__(self, *, stdout_text: str = "") -> None:
         self.stdout = io.StringIO(stdout_text)
         self.returncode: int | None = None
+        self.pid = 4242
         self.wait_calls = 0
         self.terminate_calls = 0
         self.kill_calls = 0
@@ -840,3 +841,54 @@ def test_run_codex_command_reaps_process_on_eof_without_done(monkeypatch: pytest
 
     assert out is None
     assert proc.wait_calls >= 1
+
+
+def test_run_codex_command_retries_when_cleanup_reap_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls = {"n": 0}
+    waitpid_calls = {"n": 0}
+
+    def _fake_waitpid(pid: int, options: int):
+        waitpid_calls["n"] += 1
+        # Force reap failure on first finalize, then behave as no-children.
+        if waitpid_calls["n"] <= 1:
+            raise OSError("waitpid failed")
+        raise ChildProcessError()
+
+    def _fake_popen(*args, **kwargs):
+        calls["n"] += 1
+        done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        proc = _FakeProc(stdout_text="")
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.os, "waitpid", _fake_waitpid)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/build.py"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz build script",
+        max_attempts=1,
+        max_cli_retries=2,
+        timeout=10,
+        initial_backoff=0,
+    )
+
+    assert out is not None
+    assert calls["n"] == 2
