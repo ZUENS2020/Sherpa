@@ -1,312 +1,357 @@
-# Sherpa API 参考
+# Sherpa API Reference
 
-最后更新：2026-03-24
-事实来源：[`harness_generator/src/langchain_agent/main.py`](../harness_generator/src/langchain_agent/main.py)
+本文档以当前分支代码实现为准，覆盖前端联调所需的主要 API。  
+后端入口实现位于 `harness_generator/src/langchain_agent/main.py`。
 
-本文档只描述当前真实实现，不描述理想化契约。
+## 1. 通用说明
 
-## 1. 基础信息
+- 基础前缀：`/api`
+- 数据格式：`application/json`
+- CORS：当前服务端允许所有来源（`*`）
+- 时间字段：主用 Unix 时间戳（秒，`float`），部分接口附带 `*_iso` 字段（ISO8601）
 
-- dev 基础地址：`https://dev.zuens2020.work`
-- API 前缀：`/api`
-- 返回格式：默认 JSON
-- 鉴权：当前实现未暴露独立 API 鉴权层
-- CORS：当前部署口径为全开放
+任务模型说明：
+- 主任务（`kind=task`）：批量提交入口，聚合多个子任务状态
+- 子任务（`kind=fuzz`）：实际执行工作流的阶段任务
 
-## 2. 通用规则
-
-### 状态归一化
-
-任务相关接口会把内部状态归一成大写值：
-
-- `QUEUED`
-- `RUNNING`
-- `SUCCESS`
-- `COMPLETED`
-- `FAILED`
-- `ERROR`
-
-### 时间字段
-
-不少返回同时提供：
-
-- 原始时间戳
-- ISO 字符串
-
-### 无限预算语义
-
-当前实现里，时间预算类字段的无限意图通常会被桥接为 `0`。
-
-## 3. 配置 API
+## 2. 配置接口
 
 ### GET `/api/config`
 
-返回当前运行时配置的持久化视图。
+用途：读取当前 Web 配置（去敏后的公开配置）。
+
+响应：`200 OK`
+
+```json
+{
+  "fuzz_time_budget": 0,
+  "fuzz_use_docker": false,
+  "fuzz_docker_image": "",
+  "openrouter_model": "MiniMax-M2.7-highspeed",
+  "api_base_url": "https://dev.example.com"
+}
+```
 
 说明：
-
-- secret 字段会被隐藏或清空
-- `*_set` 风格字段表示对应 secret 是否已存在
-- 部分 Docker 相关字段仍保留用于兼容
+- 实际返回字段以 `as_public_dict(cfg)` 为准。
+- 敏感字段（API Key）不会以明文形式返回。
 
 ### PUT `/api/config`
 
-支持轻量前端配置更新和完整配置更新。
+用途：更新配置，支持轻量模式与完整模式。
 
-#### 轻量更新
-
-```json
-{
-  "apiBaseUrl": "https://dev.zuens2020.work"
-}
-```
-
-或：
+请求体（轻量模式）：
 
 ```json
 {
-  "api_base_url": "https://dev.zuens2020.work"
+  "apiBaseUrl": "https://dev.zuens2020.work/"
 }
 ```
 
-#### 完整更新
+请求体（完整模式）：可传递配置对象。后端会做校验并保留受控字段。
 
-后端会把请求与现有配置合并后保存。
-
-当前代码中能直接看到的校验示例包括：
-
-- `fuzz_time_budget >= 0`
-- `sherpa_run_unlimited_round_budget_sec >= 0`
-
-成功返回：
+响应：`200 OK`
 
 ```json
-{ "ok": true }
+{
+  "ok": true
+}
 ```
 
-## 4. 系统 API
+约束：
+- `fuzz_time_budget >= 0`（`0` 表示 unlimited）
+- `sherpa_run_unlimited_round_budget_sec >= 0`（`0` 表示 fully unlimited）
+- `apiBaseUrl` 与 `api_base_url` 均可用，最终统一存为 `api_base_url`
+- 若 payload 非法返回 `400`
 
-### GET `/api/system`
-
-返回系统级运行态与仪表盘聚合数据。
-
-顶层字段块：
-
-- `ok`
-- `server_time`
-- `server_time_iso`
-- `uptime_sec`
-- `jobs`
-- `jobs_by_kind`
-- `workers`
-- `active_jobs`
-- `logs`
-- `memory`
-- `config`
-- `overview`
-- `telemetry`
-- `execution`
-- `tasks_tab_metrics`
-
-#### `overview`
-
-当前字段：
-
-- `avg_fuzz_time`
-- `active_agents`
-- `cluster_health`
-- `cluster_health_trend`
-- `crash_triage_rate`
-- `crash_triage_rate_trend`
-- `harnesses_synthesized`
-- `harnesses_synthesized_trend`
-- `avg_coverage`
-- `avg_coverage_trend`
-- `main_tasks_running`
-- `main_tasks_queued`
-- `child_jobs_running`
-- `child_jobs_queued`
-
-#### `telemetry`
-
-当前字段：
-
-- `llm_token_usage`
-- `llm_token_status`
-- `k8s_pod_capacity`
-- `k8s_pod_status`
-- `fastapi_gateway`
-- `fastapi_status`
-- `agent_health_matrix`
-- `performance_series`
-
-重要说明：
-
-- `llm_token_usage` 只应基于真实 token 数据；如果没有可用 token 字段，应显示为空或占位，不要用 `max_tokens` 估算。
-
-#### `execution.summary`
-
-当前字段：
-
-- `failure_rate`
-- `fuzzing_jobs_24h`
-- `cluster_load_peak`
-- `repos_queued`
-- `avg_triage_time_ms`
-- `success_ratio`
-- `main_tasks_running`
-- `main_tasks_queued`
-- `child_jobs_running`
-- `child_jobs_queued`
-
-#### `tasks_tab_metrics`
-
-当前字段：
-
-- `total_jobs`
-- `execs_per_sec`
-- `success_rate`
-- `failed_tasks`
-
-`execs_per_sec` 来源于近期任务的真实执行速率聚合，而不是静态配置值。
-
-### GET `/api/metrics`
-
-Prometheus 文本指标端点。
-
-媒体类型：
-
-- `text/plain; version=0.0.4; charset=utf-8`
-
-### GET `/api/health`
-
-简单存活探针：
-
-```json
-{ "ok": true }
-```
-
-## 5. 任务 API
+## 3. 任务提交与控制
 
 ### POST `/api/task`
 
-创建一个或多个父任务，并为每个 job 派生子 fuzz job。
+用途：提交一批 fuzz 子任务，创建一个主任务。
 
-请求体示例：
+请求体：
 
 ```json
 {
   "jobs": [
     {
-      "code_url": "https://github.com/owner/repo",
-      "email": "optional",
-      "model": "optional",
-      "temperature": 0.5,
-      "timeout": 10,
+      "code_url": "https://github.com/fmtlib/fmt.git",
+      "model": "MiniMax-M2.7-highspeed",
       "max_tokens": 0,
-      "time_budget": 900,
-      "total_time_budget": 900,
-      "run_time_budget": 900,
-      "total_duration": 900,
-      "single_duration": 900,
-      "unlimited_round_limit": 7200,
-      "docker": false,
-      "docker_image": ""
+      "total_time_budget": 0,
+      "run_time_budget": 0,
+      "total_duration": -1,
+      "single_duration": -1,
+      "unlimited_round_limit": 7200
     }
   ],
   "auto_init": true,
   "build_images": true,
-  "images": ["cpp"],
+  "images": [],
   "force_build": false,
-  "oss_fuzz_repo_url": "optional",
   "force_clone": false
 }
 ```
 
-字段说明：
+关键兼容字段：
+- `total_duration` -> `total_time_budget`
+- `single_duration` -> `run_time_budget`
+- `-1` 会被转换为 `0`（unlimited）
 
-- `code_url` 是最关键字段
-- `total_duration` / `single_duration` 是前端兼容别名
-- `unlimited_round_limit` 会被桥接到运行时预算语义
-- `max_tokens=0` 表示没有显式 token 上限
-
-成功返回：
+响应：`200 OK`
 
 ```json
 {
-  "job_id": "parent-task-id",
+  "job_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "status": "queued"
 }
 ```
 
 ### GET `/api/task/{job_id}`
 
-返回父任务视图。
+用途：查询主任务详情（聚合状态 + 子任务列表 +增强字段）。
 
-常见错误：
-
-```json
-{ "error": "job_not_found" }
-```
+响应：`200 OK`
 
 ```json
-{ "error": "job_not_task" }
+{
+  "job_id": "xxxxxxxx",
+  "kind": "task",
+  "status": "running",
+  "children_status": {
+    "total": 3,
+    "queued": 0,
+    "running": 1,
+    "success": 1,
+    "error": 1
+  },
+  "children": [
+    {
+      "job_id": "child_xxx",
+      "kind": "fuzz",
+      "status": "running",
+      "phase": "build",
+      "runtime_mode": "native",
+      "fuzz_total_execs_per_sec": 8123.5
+    }
+  ],
+  "phase": "task",
+  "runtime_mode": "native",
+  "error_code": null,
+  "error_kind": null,
+  "error_signature": null
+}
 ```
 
-父任务视图会包含任务级状态以及子任务聚合信息，例如：
-
-- `status`
-- `children_status`
-- `active_child_status`
-- `error_code`
-- `repo`
-- `created_at`
-- `updated_at`
+增强字段（父子任务都可能出现）：
+- 工作流与恢复：`k8s_phase`、`cancel_requested`、`workflow_active_step`、`workflow_last_step`、`recoverable`、`resume_attempts`、`resume_error_code`、`last_resume_reason` 等
+- fuzz 指标：`fuzz_fuzzers`、`fuzz_max_cov`、`fuzz_max_ft`、`fuzz_total_execs_per_sec`、`fuzz_crash_found`、`fuzz_coverage_*`
 
 ### POST `/api/task/{job_id}/resume`
 
-恢复一个暂停或失败后可继续的任务。
+用途：手动恢复任务（task/fuzz 都支持）。
+
+响应：`200 OK`
+
+```json
+{
+  "job_id": "xxxxxxxx",
+  "kind": "task",
+  "accepted": true,
+  "reason": "resume_started",
+  "resume_attempts": 2,
+  "status": "running"
+}
+```
 
 ### POST `/api/task/{job_id}/stop`
 
-停止任务。
+用途：手动停止任务（task/fuzz 都支持）。
 
-### GET `/api/tasks`
+响应：`200 OK`
 
-返回任务列表，供 Tasks 面板轮询。
+```json
+{
+  "job_id": "xxxxxxxx",
+  "kind": "task",
+  "accepted": true,
+  "reason": "stopped",
+  "status": "error",
+  "details": {
+    "accepted": true,
+    "reason": "stopped"
+  }
+}
+```
 
-列表项会做前端友好归一化，常见字段包括：
+## 4. 任务列表（前端 Tasks 面板）
 
-- `job_id`
-- `id`
-- `repo`
-- `status`
-- `stage`
-- `active_child_status`
-- `progress`
+### GET `/api/tasks?limit=50`
 
-说明：
+用途：分页/轮询任务列表，返回主任务视图（每项已聚合子任务状态）。
 
-- `status` 已归一成前端可直接消费的大写枚举
-- `stage` 优先显示当前 active child stage
-- `progress` 是任务进度百分比，通常只在运行中有意义
+响应：`200 OK`
 
-## 6. 前端消费建议
+```json
+{
+  "items": [
+    {
+      "job_id": "xxxxxxxx",
+      "id": "xxxxxxxx",
+      "status": "RUNNING",
+      "status_raw": "running",
+      "stage": "BUILD",
+      "repo": "fmt",
+      "repo_raw": "https://github.com/fmtlib/fmt.git",
+      "progress": 66,
+      "active_child_id": "child_xxx",
+      "active_child_status": "RUNNING",
+      "active_child_phase": "build",
+      "children_status": {
+        "total": 3,
+        "queued": 0,
+        "running": 1,
+        "success": 1,
+        "error": 1
+      },
+      "fuzz_fuzzers": {},
+      "fuzz_max_cov": 0,
+      "fuzz_max_ft": 0,
+      "fuzz_total_execs_per_sec": 8123.5,
+      "fuzz_crash_found": false,
+      "fuzz_coverage_loop_round": 1,
+      "fuzz_coverage_loop_max_rounds": 3,
+      "fuzz_coverage_plateau_streak": 0,
+      "fuzz_coverage_seed_profile": "parser-format",
+      "fuzz_coverage_quality_flags": []
+    }
+  ]
+}
+```
 
-前端应优先使用：
+字段口径：
+- `status`：大写标准状态（`RUNNING/SUCCESS/COMPLETED/FAILED/ERROR/QUEUED` 兼容前端）
+- `stage`：优先 active child 的阶段；无 active child 时回退主任务阶段
+- `progress`：由子任务完成度估算（0-100）
+- `repo`：用于 UI 展示的仓库名/短名；`repo_raw` 保留原始 URL
+- `fuzz_*`：来自 active child（若存在），否则来自主任务自身
 
-- `GET /api/system` 做 Overview / Tasks 顶部总览
-- `GET /api/tasks` 做任务表格
-- `GET /api/task/{job_id}` 做任务详情页
+## 5. 系统总览（前端 Overview/Tasks 顶部）
 
-不要用静态文案模拟动态指标。
+### GET `/api/system`
 
-## 7. 额外路由
+用途：系统级统计与前端总览聚合。
 
-当前后端还暴露：
+响应：`200 OK`
 
-- `GET /`
-- `GET /api/opencode/providers/{provider}/models`
-- `POST /api/opencode/providers/{provider}/models`
+```json
+{
+  "ok": true,
+  "server_time": 1770000000.123,
+  "server_time_iso": "2026-03-25T20:00:00+08:00",
+  "uptime_sec": 12345.6,
+  "jobs": {
+    "total": 42,
+    "queued": 2,
+    "running": 5,
+    "success": 31,
+    "error": 4
+  },
+  "jobs_by_kind": {
+    "task": 12,
+    "fuzz": 30
+  },
+  "overview": {
+    "avg_fuzz_time": "12m 34s",
+    "active_agents": "3",
+    "cluster_health": "97.2",
+    "cluster_health_trend": "+0.8% ▲",
+    "crash_triage_rate": "1",
+    "harnesses_synthesized": "9",
+    "avg_coverage": "61.23"
+  },
+  "telemetry": {
+    "llm_token_usage": "2.4M / hr",
+    "llm_token_status": "Active",
+    "k8s_pod_capacity": "68% CAP",
+    "k8s_pod_status": "Normal",
+    "fastapi_gateway": "99.95% SLI",
+    "fastapi_status": "UP",
+    "agent_health_matrix": [1, 1, 0, 1],
+    "performance_series": []
+  },
+  "execution": {
+    "summary": {
+      "failure_rate": "2.56%",
+      "fuzzing_jobs_24h": "128",
+      "cluster_load_peak": "68%",
+      "repos_queued": "2",
+      "success_ratio": "97.44"
+    }
+  },
+  "tasks_tab_metrics": {
+    "total_jobs": "12",
+    "execs_per_sec": "84.2",
+    "success_rate": "91.7",
+    "failed_tasks": "1"
+  }
+}
+```
 
-这些路由是实现的一部分，但前端联调通常优先关注前述核心 API。
+字段口径说明：
+- `llm_token_usage`：仅基于任务结果里的真实 token 字段聚合；无数据时为 `null`/`--` 状态
+- `tasks_tab_metrics.execs_per_sec`：来自近期 fuzz job 的执行速率聚合（非配置常量）
+- `overview.avg_coverage`：从 fuzz 结果中提取覆盖率相关字段并归一到 0-100 后求均值
+
+## 6. 监控与健康
+
+### GET `/api/metrics`
+
+用途：Prometheus 文本指标。
+
+响应类型：`text/plain; version=0.0.4; charset=utf-8`
+
+包含指标示例：
+- `sherpa_jobs_total`
+- `sherpa_jobs_status{status="running"}`
+- `sherpa_jobs_failure_rate_window`
+- `sherpa_process_resident_memory_bytes`
+- `sherpa_cgroup_memory_*`
+
+### GET `/api/health`
+
+用途：基础健康探针。
+
+响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+## 7. OpenCode Provider 模型接口（配置页可选）
+
+### GET `/api/opencode/providers/{provider}/models`
+### POST `/api/opencode/providers/{provider}/models`
+
+用途：获取 provider 可用模型列表（支持带临时 `api_key/base_url` 查询）。
+
+响应示例：
+
+```json
+{
+  "provider": "openai",
+  "models": ["gpt-5.4", "gpt-5.4-mini"],
+  "source": "provider-config",
+  "warning": null
+}
+```
+
+## 8. 前端联调建议
+
+- Tasks 列表优先使用 `/api/tasks`，避免前端自行拼装主子任务状态。
+- 任务详情页面使用 `/api/task/{job_id}`，可直接读取 `children` 和 `fuzz_*`。
+- Overview 与 Tasks 顶部统计都由 `/api/system` 提供，建议 5s 轮询一次。
+- 如果只改前端 API Base URL，优先调用 `PUT /api/config` 轻量模式（`apiBaseUrl`）。

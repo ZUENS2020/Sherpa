@@ -25,6 +25,27 @@ import {
   Area,
 } from 'recharts';
 
+function asNumber(value: unknown, fallback = 0): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function asText(value: unknown, fallback = '--'): string {
+  if (value === null || value === undefined) return fallback;
+  const s = String(value).trim();
+  return s.length > 0 ? s : fallback;
+}
+
+function repoDisplayName(task: any): string {
+  const raw = String(task?.repo || task?.repo_raw || '').trim();
+  if (!raw) return 'Unknown Repo';
+  if (raw.includes('/')) {
+    const tail = raw.replace(/\/+$/, '').split('/').pop();
+    return tail || raw;
+  }
+  return raw;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [apiBaseUrl, setApiBaseUrl] = useState(() => {
@@ -33,6 +54,7 @@ export default function App() {
   const [tasksData, setTasksData] = useState<any[]>([]);
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [selectedTask, setSelectedTask] = useState<any>(null);
+  const [selectedTaskLoading, setSelectedTaskLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
   const [fetchError, setFetchError] = useState('');
@@ -51,9 +73,13 @@ export default function App() {
       ...task,
       status,
       stage,
-      progress: Number(task?.progress || 0),
+      progress: asNumber(task?.progress || 0),
       id: task?.job_id || task?.id || 'UNKNOWN',
-      repo: task?.repo || 'Unknown Repo',
+      repo: repoDisplayName(task),
+      repo_raw: task?.repo_raw || task?.repo || '',
+      fuzz_total_execs_per_sec: asNumber(task?.fuzz_total_execs_per_sec, 0),
+      fuzz_max_cov: asNumber(task?.fuzz_max_cov, 0),
+      fuzz_max_ft: asNumber(task?.fuzz_max_ft, 0),
     };
   });
 
@@ -98,6 +124,14 @@ export default function App() {
     .sort((a, b) => b.count - a.count)
     .slice(0, 4);
   const maxCrashCount = crashDistribution.length ? crashDistribution[0].count : 1;
+  const taskMetrics = systemStatus?.tasks_tab_metrics || {};
+  const taskTotalDisplay = asText(taskMetrics?.total_jobs, String(totalTasks));
+  const taskExecsPerSecDisplay = asText(taskMetrics?.execs_per_sec, '--');
+  const taskSuccessRateDisplay = asText(taskMetrics?.success_rate, '--');
+  const taskFailedDisplay = asText(taskMetrics?.failed_tasks, String(failedTasks.length));
+  const overview = systemStatus?.overview || {};
+  const telemetry = systemStatus?.telemetry || {};
+  const executionSummary = systemStatus?.execution?.summary || {};
 
   // Task Configuration State
   const [totalDuration, setTotalDuration] = useState(() => localStorage.getItem('sherpaTotalDuration') || '900');
@@ -176,6 +210,34 @@ export default function App() {
     }
   };
 
+  const openTaskDetails = async (task: any) => {
+    const id = task?.job_id || task?.id;
+    if (!id) {
+      setSelectedTask(task);
+      return;
+    }
+    setSelectedTask(task);
+    setSelectedTaskLoading(true);
+    try {
+      const resp = await fetch(`${apiBaseUrl}/api/task/${id}`);
+      if (resp.ok) {
+        const full = await resp.json();
+        if (!full?.error) {
+          setSelectedTask({
+            ...task,
+            ...full,
+            repo: repoDisplayName(full),
+            repo_raw: full?.repo || task?.repo_raw || task?.repo || '',
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load task detail:', err);
+    } finally {
+      setSelectedTaskLoading(false);
+    }
+  };
+
   const handleConfirmCancelTask = async () => {
     if (!taskToCancel) {
       return;
@@ -193,9 +255,9 @@ export default function App() {
         body: JSON.stringify({
           jobs: [
             {
-              code_url: task.repo,
+              code_url: task.repo_raw || task.repo,
               model: 'MiniMax-M2.7-highspeed',
-              max_tokens: Number(maxTokens) || 1000,
+              max_tokens: Number(maxTokens) || 0,
               time_budget: isTotalUnlimited ? -1 : Number(totalDuration),
               total_time_budget: isTotalUnlimited ? -1 : Number(totalDuration),
               run_time_budget: isSingleUnlimited ? -1 : Number(singleDuration),
@@ -389,7 +451,7 @@ export default function App() {
                     Avg Fuzz Time
                   </p>
                   <p className="font-headline text-2xl font-black italic leading-none text-orange-600 uppercase">
-                    {systemStatus?.overview?.avg_fuzz_time || '--'}
+                    {asText(overview?.avg_fuzz_time, '--')}
                   </p>
                 </div>
                 <div className="h-10 w-[1px] bg-zinc-300"></div>
@@ -398,7 +460,7 @@ export default function App() {
                     Active Agents
                   </p>
                   <p className="font-headline text-2xl font-black italic leading-none text-emerald-700 uppercase">
-                    {systemStatus?.overview?.active_agents || '--'}
+                    {asText(overview?.active_agents, '--')}
                   </p>
                 </div>
               </div>
@@ -412,10 +474,10 @@ export default function App() {
                   </p>
                   <div className="flex items-end justify-between">
                     <h3 className="font-headline text-4xl font-black italic uppercase">
-                      {systemStatus?.overview?.cluster_health || '--'}<span className="text-lg">%</span>
+                      {asText(overview?.cluster_health, '--')}
                     </h3>
                     <span className="font-headline text-sm font-bold italic text-emerald-700">
-                      {systemStatus?.overview?.cluster_health_trend || '--'}
+                      {asText(overview?.cluster_health_trend, '--')}
                     </span>
                   </div>
                 </div>
@@ -425,10 +487,10 @@ export default function App() {
                   </p>
                   <div className="flex items-end justify-between">
                     <h3 className="font-headline text-4xl font-black italic uppercase">
-                      {systemStatus?.overview?.crash_triage_rate || '--'}<span className="text-lg">/hr</span>
+                      {asText(overview?.crash_triage_rate, '--')}
                     </h3>
                     <span className="font-headline text-sm font-bold italic text-emerald-700">
-                      {systemStatus?.overview?.crash_triage_rate_trend || '--'}
+                      {asText(overview?.crash_triage_rate_trend, '--')}
                     </span>
                   </div>
                 </div>
@@ -438,10 +500,10 @@ export default function App() {
                   </p>
                   <div className="flex items-end justify-between">
                     <h3 className="font-headline text-4xl font-black italic uppercase">
-                      {systemStatus?.overview?.harnesses_synthesized || '--'}<span className="text-lg">k</span>
+                      {asText(overview?.harnesses_synthesized, '--')}
                     </h3>
                     <span className="font-headline text-sm font-bold italic text-emerald-700">
-                      {systemStatus?.overview?.harnesses_synthesized_trend || '--'}
+                      {asText(overview?.harnesses_synthesized_trend, '--')}
                     </span>
                   </div>
                 </div>
@@ -451,10 +513,10 @@ export default function App() {
                   </p>
                   <div className="flex items-end justify-between">
                     <h3 className="font-headline text-4xl font-black italic uppercase">
-                      {systemStatus?.overview?.avg_coverage || '--'}<span className="text-lg">%</span>
+                      {asText(overview?.avg_coverage, '--')}
                     </h3>
                     <span className="font-headline text-sm font-bold italic text-emerald-700">
-                      {systemStatus?.overview?.avg_coverage_trend || '--'}
+                      {asText(overview?.avg_coverage_trend, '--')}
                     </span>
                   </div>
                 </div>
@@ -486,10 +548,10 @@ export default function App() {
                         </p>
                         <div className="flex items-baseline justify-between">
                           <span className="font-mono text-xl font-bold italic uppercase">
-                            {systemStatus?.telemetry?.llm_token_usage || '--'}
+                            {asText(telemetry?.llm_token_usage, '--')}
                           </span>
                           <span className="font-mono text-xs font-bold text-emerald-500 uppercase">
-                            {systemStatus?.telemetry?.llm_token_status || '--'}
+                            {asText(telemetry?.llm_token_status, '--')}
                           </span>
                         </div>
                       </div>
@@ -499,10 +561,10 @@ export default function App() {
                         </p>
                         <div className="flex items-baseline justify-between">
                           <span className="font-mono text-xl font-bold italic uppercase">
-                            {systemStatus?.telemetry?.k8s_pod_capacity || '--'}
+                            {asText(telemetry?.k8s_pod_capacity, '--')}
                           </span>
                           <span className="font-mono text-[10px] font-bold text-orange-500 uppercase">
-                            {systemStatus?.telemetry?.k8s_pod_status || '--'}
+                            {asText(telemetry?.k8s_pod_status, '--')}
                           </span>
                         </div>
                       </div>
@@ -515,7 +577,7 @@ export default function App() {
                             {fastapiGatewayDisplay}
                           </span>
                           <span className="block font-mono text-[10px] font-bold text-emerald-500 uppercase">
-                            {systemStatus?.telemetry?.fastapi_status || '--'}
+                            {asText(telemetry?.fastapi_status, '--')}
                           </span>
                         </div>
                       </div>
@@ -697,7 +759,7 @@ export default function App() {
                         </p>
                         <div className="flex items-center gap-2">
                           <span className="font-mono text-xl font-black italic text-emerald-500">
-                            {systemStatus?.execution?.summary?.failure_rate || '--'}
+                            {asText(executionSummary?.failure_rate, '--')}
                           </span>
                           <span className="bg-emerald-100 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-600 uppercase">
                             Stable
@@ -714,7 +776,7 @@ export default function App() {
                         </p>
                         <div className="flex items-baseline gap-2">
                           <span className="font-headline text-4xl font-black italic uppercase">
-                            {systemStatus?.execution?.summary?.fuzzing_jobs_24h || '--'}
+                            {asText(executionSummary?.fuzzing_jobs_24h, '--')}
                           </span>
                           <span className="font-mono text-[10px] tracking-widest text-zinc-500 uppercase">
                             Jobs / 24h
@@ -736,7 +798,7 @@ export default function App() {
                         </p>
                         <div className="flex items-baseline gap-2">
                           <span className="font-headline text-4xl font-black italic uppercase">
-                            {systemStatus?.execution?.summary?.cluster_load_peak || '--'}
+                            {asText(executionSummary?.cluster_load_peak, '--')}
                           </span>
                           <span className="font-mono text-[10px] tracking-widest text-orange-500 uppercase">
                             PEAK
@@ -764,13 +826,13 @@ export default function App() {
                       <div className="flex items-center gap-2">
                         <div className="h-1.5 w-1.5 bg-emerald-500"></div>
                         <span className="font-mono text-[9px] tracking-tighter uppercase">
-                          {`FastAPI: ${systemStatus?.telemetry?.fastapi_status || '--'}`}
+                          {`FastAPI: ${asText(telemetry?.fastapi_status, '--')}`}
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
                         <div className="h-1.5 w-1.5 bg-emerald-500"></div>
                         <span className="font-mono text-[9px] tracking-tighter uppercase">
-                          {`Running Jobs: ${systemStatus?.overview?.main_tasks_running || runningTasks.length}`}
+                          {`Running Jobs: ${asText(overview?.main_tasks_running, String(runningTasks.length))}`}
                         </span>
                       </div>
                     </div>
@@ -781,7 +843,7 @@ export default function App() {
                         Repos Queued
                       </p>
                       <p className="font-mono text-lg font-bold uppercase">
-                        {systemStatus?.execution?.summary?.repos_queued || '--'} <span className="text-xs">REPOS</span>
+                        {asText(executionSummary?.repos_queued, '--')} <span className="text-xs">REPOS</span>
                       </p>
                     </div>
                     <div>
@@ -789,7 +851,7 @@ export default function App() {
                         Avg Triage Time
                       </p>
                       <p className="font-mono text-lg font-bold uppercase">
-                        {systemStatus?.execution?.summary?.avg_triage_time_ms || '--'} <span className="text-xs">ms</span>
+                        {asText(executionSummary?.avg_triage_time_ms, '--')} <span className="text-xs">ms</span>
                       </p>
                     </div>
                     <div>
@@ -797,7 +859,7 @@ export default function App() {
                         Success Ratio
                       </p>
                       <p className="font-mono text-lg font-bold uppercase">
-                        {systemStatus?.execution?.summary?.success_ratio || '--'} <span className="text-xs">%</span>
+                        {asText(executionSummary?.success_ratio, '--')} <span className="text-xs">%</span>
                       </p>
                     </div>
                   </div>
@@ -822,7 +884,7 @@ export default function App() {
                     Total Jobs
                   </p>
                   <p className="font-headline text-2xl font-black italic leading-none text-orange-600 uppercase">
-                    {systemStatus?.tasks_tab_metrics?.total_jobs || String(totalTasks)}
+                    {taskTotalDisplay}
                   </p>
                 </div>
                 <div className="flex items-center gap-6">
@@ -862,7 +924,7 @@ export default function App() {
                   Total Jobs
                 </p>
                 <p className="font-mono text-3xl font-black text-zinc-900">
-                  {systemStatus?.tasks_tab_metrics?.total_jobs || String(totalTasks)}
+                  {taskTotalDisplay}
                 </p>
               </div>
               <div className="border-l-4 border-orange-600 bg-white p-6 shadow-sm">
@@ -870,7 +932,7 @@ export default function App() {
                   Execs / Sec
                 </p>
                 <p className="font-mono text-3xl font-black text-zinc-900">
-                  {systemStatus?.tasks_tab_metrics?.execs_per_sec || '--'}<span className="text-xs">K/S</span>
+                  {taskExecsPerSecDisplay}<span className="text-xs">/S</span>
                 </p>
               </div>
               <div className="border-l-4 border-emerald-500 bg-white p-6 shadow-sm">
@@ -878,14 +940,14 @@ export default function App() {
                   Success Rate
                 </p>
                 <p className="font-mono text-3xl font-black text-zinc-900">
-                  {systemStatus?.tasks_tab_metrics?.success_rate || '--'}<span className="text-xs">%</span>
+                  {taskSuccessRateDisplay}<span className="text-xs">%</span>
                 </p>
               </div>
               <div className="border-l-4 border-rose-600 bg-white p-6 shadow-sm">
                 <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400">
                   Failed Tasks
                 </p>
-                <p className="font-mono text-3xl font-black text-zinc-900">{systemStatus?.tasks_tab_metrics?.failed_tasks || String(failedTasks.length)}</p>
+                <p className="font-mono text-3xl font-black text-zinc-900">{taskFailedDisplay}</p>
               </div>
             </div>
 
@@ -920,7 +982,7 @@ export default function App() {
                     return (
                     <tr
                       key={index}
-                      onClick={() => setSelectedTask(task)}
+                      onClick={() => openTaskDetails(task)}
                       className={`group transition-colors hover:bg-zinc-50 cursor-pointer ${
                         status === 'FAILED' || status === 'ERROR'
                           ? 'border-l-4 border-rose-600'
@@ -1021,7 +1083,7 @@ export default function App() {
                           <div className="flex justify-center">
                             <button
                               className="text-zinc-400 transition-colors hover:text-emerald-700"
-                              onClick={() => setSelectedTask(task)}
+                              onClick={() => openTaskDetails(task)}
                               title="View Details"
                             >
                               <Download className="h-5 w-5" />
@@ -1049,7 +1111,7 @@ export default function App() {
 
           {/* Pagination */}
           <footer className="flex items-center justify-between border-t border-zinc-200 px-6 pt-8 font-mono text-[10px] tracking-widest uppercase text-zinc-400">
-            <div>{`SHOWING 1-${filteredTasks.length} OF ${systemStatus?.tasks_tab_metrics?.total_jobs || totalTasks} JOBS`}</div>
+            <div>{`SHOWING 1-${filteredTasks.length} OF ${taskTotalDisplay} JOBS`}</div>
             <div className="flex space-x-4">
               <button className="flex items-center transition-colors hover:text-emerald-700">
                 <ChevronLeft className="h-4 w-4" /> PREV
@@ -1361,7 +1423,22 @@ export default function App() {
                   <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-1">Progress</p>
                   <p className="font-mono text-sm text-zinc-900">{selectedTask.progress || 0}%</p>
                 </div>
+                <div>
+                  <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-1">Execs / Sec</p>
+                  <p className="font-mono text-sm text-zinc-900">{asText(selectedTask.fuzz_total_execs_per_sec, '--')}</p>
+                </div>
+                <div>
+                  <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-1">Max Coverage</p>
+                  <p className="font-mono text-sm text-zinc-900">{asText(selectedTask.fuzz_max_cov, '--')}</p>
+                </div>
               </div>
+              {selectedTaskLoading && (
+                <div className="border-l-4 border-orange-600 bg-orange-50 p-3">
+                  <p className="font-mono text-xs font-bold text-orange-700 uppercase">
+                    Loading latest task details...
+                  </p>
+                </div>
+              )}
               
               <div>
                 <p className="font-label text-[10px] font-bold tracking-widest uppercase text-zinc-400 mb-2">Raw Data</p>
