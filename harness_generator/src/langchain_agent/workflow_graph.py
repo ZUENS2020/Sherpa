@@ -6606,11 +6606,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if not seed_fuzzers:
             seed_fuzzers = list(bins)
         try:
-            for bin_path in seed_fuzzers:
+            for idx, bin_path in enumerate(seed_fuzzers):
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
                 if remaining_for_seed <= 0:
                     return _time_budget_exceeded_state(state, step_name="run")
-                setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
+                fuzzers_left = len(seed_fuzzers) - idx
+                per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
+                setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
                 fuzzer_name = bin_path.name
                 try:
                     gen._pass_generate_seeds(fuzzer_name)
