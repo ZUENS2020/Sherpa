@@ -1229,6 +1229,12 @@ def _k8s_stage_wait_timeout_sec(
         run_base = (round_count * run_unlimited_round_budget) + (
             max(0, round_count - 1) * inter_round_buffer_sec
         )
+    try:
+        seed_gen_retry_multiplier = int(os.environ.get("SHERPA_SEED_GEN_RETRY_MULTIPLIER", "3"))
+    except Exception:
+        seed_gen_retry_multiplier = 3
+    seed_gen_retry_multiplier = max(1, seed_gen_retry_multiplier)
+    run_base *= seed_gen_retry_multiplier
     wait_timeout = max(300, run_base + grace_run)
     if run_timeout_cap_sec > 0:
         wait_timeout = min(wait_timeout, run_timeout_cap_sec)
@@ -3393,6 +3399,13 @@ def _run_fuzz_job(
                         run_fuzzer_count=run_fuzzer_count,
                         run_parallelism=run_parallelism,
                     )
+                    wait_override_key = f"{stage}_timeout_wait_sec_override"
+                    try:
+                        wait_override_sec = int(stage_ctx.get(wait_override_key) or 0)
+                    except Exception:
+                        wait_override_sec = 0
+                    if wait_override_sec > 0:
+                        wait_timeout = max(wait_timeout, wait_override_sec)
                     stage_result: object
                     stage_node_name: str = ""
                     stage_failed = False
@@ -3451,37 +3464,55 @@ def _run_fuzz_job(
                             }
                     except Exception as e:
                         is_k8s_timeout = "k8s_job_timeout" in str(e)
-                        run_timeout_retry_count = int(stage_ctx.get("run_timeout_retry_count") or 0)
+                        timeout_retry_key = f"{stage}_timeout_retry_count"
+                        timeout_retry_count = int(stage_ctx.get(timeout_retry_key) or 0)
                         try:
-                            max_timeout_retries = int(os.environ.get("SHERPA_RUN_TIMEOUT_MAX_RETRIES", "3"))
+                            max_timeout_retries = int(os.environ.get("SHERPA_K8S_TIMEOUT_MAX_RETRIES", "0"))
+                            if max_timeout_retries <= 0:
+                                max_timeout_retries = int(os.environ.get("SHERPA_RUN_TIMEOUT_MAX_RETRIES", "3"))
                         except Exception:
                             max_timeout_retries = 3
-                        if stage == "run" and is_k8s_timeout and run_timeout_retry_count < max_timeout_retries:
-                            current_budget = int(
-                                stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200
-                            )
-                            extended_budget = int(current_budget * 1.5)
-                            stage_ctx["run_timeout_retry_count"] = str(run_timeout_retry_count + 1)
-                            stage_ctx["run_timeout_budget_sec_override"] = str(extended_budget)
+                        if stage in ("run", "build") and is_k8s_timeout and timeout_retry_count < max_timeout_retries:
+                            current_wait = max(300, wait_timeout)
+                            try:
+                                current_wait = max(
+                                    current_wait, int(stage_ctx.get(wait_override_key) or current_wait)
+                                )
+                            except Exception:
+                                pass
+                            extended_wait = int(current_wait * 1.5)
+                            stage_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
+                            stage_ctx[wait_override_key] = str(extended_wait)
+                            if stage == "run":
+                                stage_ctx["run_timeout_budget_sec_override"] = str(
+                                    int(
+                                        int(stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
+                                        * 1.5
+                                    )
+                                )
                             print(
-                                f"[job {job_id}] run stage k8s_job_timeout; "
+                                f"[job {job_id}] {stage} stage k8s_job_timeout; "
                                 f"retrying with extended timeout "
-                                f"(retry {run_timeout_retry_count + 1}, "
-                                f"budget {current_budget}s -> {extended_budget}s)"
+                                f"(retry {timeout_retry_count + 1}, "
+                                f"wait {current_wait}s -> {extended_wait}s)"
                             )
                             stage_result = {
                                 "message": (
-                                    f"run stage k8s_job_timeout; retrying with extended timeout "
-                                    f"(retry {run_timeout_retry_count + 1}, "
-                                    f"budget {current_budget}s -> {extended_budget}s)"
+                                    f"{stage} stage k8s_job_timeout; retrying with extended timeout "
+                                    f"(retry {timeout_retry_count + 1}, "
+                                    f"wait {current_wait}s -> {extended_wait}s)"
                                 ),
                                 "repo_root": current_repo_root,
                                 "workflow_last_step": stage,
-                                "workflow_recommended_next": "run",
+                                "workflow_recommended_next": stage,
                                 "restart_to_plan": False,
-                                "run_timeout_retry_count": stage_ctx["run_timeout_retry_count"],
-                                "run_timeout_budget_sec_override": stage_ctx["run_timeout_budget_sec_override"],
+                                timeout_retry_key: stage_ctx[timeout_retry_key],
+                                wait_override_key: stage_ctx[wait_override_key],
                             }
+                            if stage == "run":
+                                stage_result["run_timeout_budget_sec_override"] = stage_ctx.get(
+                                    "run_timeout_budget_sec_override", ""
+                                )
                             stage_failed = False
                             stage_fail_reason = ""
                             stage_fail_error = ""
@@ -3491,8 +3522,8 @@ def _run_fuzz_job(
                             if is_k8s_timeout:
                                 stage_fail_reason = "k8s_job_timeout"
                                 print(
-                                    f"[job {job_id}] run stage k8s_job_timeout; "
-                                    f"max retries exhausted ({run_timeout_retry_count}/{max_timeout_retries}) "
+                                    f"[job {job_id}] {stage} stage k8s_job_timeout; "
+                                    f"max retries exhausted ({timeout_retry_count}/{max_timeout_retries}) "
                                     f"-> fallback to plan"
                                 )
                             else:
