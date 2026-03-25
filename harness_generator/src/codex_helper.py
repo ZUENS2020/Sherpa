@@ -1491,6 +1491,10 @@ class CodexHelper:
                                 proc.kill()
                             except Exception:
                                 pass
+                            try:
+                                proc.wait(timeout=4)
+                            except Exception:
+                                pass
                     _cleanup_docker_run()
 
                 # Stream output while also watching for done sentinel.
