@@ -49,6 +49,7 @@ import json
 import hashlib
 import os
 import re
+import signal
 import shlex
 import queue
 import shutil
@@ -1447,6 +1448,7 @@ class CodexHelper:
                         env=None if _opencode_container_mode_enabled() else env,
                         text=True,
                         errors="replace",
+                        start_new_session=(os.name != "nt"),
                     )
                 except FileNotFoundError as e:
                     raise FileNotFoundError(
@@ -1463,6 +1465,7 @@ class CodexHelper:
                 last_progress_probe_ts = start_time
                 last_seen_diff = baseline_diff
                 last_seen_activity_sig = baseline_activity_sig
+                cleanup_finalized = False
 
                 def _cleanup_docker_run() -> None:
                     if not run_name:
@@ -1479,23 +1482,72 @@ class CodexHelper:
                     except Exception:
                         pass
 
-                def _kill_proc() -> None:
-                    if proc.poll() is None:
+                def _wait_proc_with_timeout(timeout_sec: float) -> bool:
+                    try:
+                        proc.wait(timeout=timeout_sec)
+                    except Exception:
+                        return proc.poll() is not None
+                    return True
+
+                def _terminate_or_kill_proc(force: bool) -> None:
+                    if proc.poll() is not None:
+                        return
+                    if os.name != "nt":
                         try:
-                            proc.terminate()
-                            proc.wait(timeout=4)
+                            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+                            return
                         except Exception:
                             pass
+                    try:
+                        if force:
+                            proc.kill()
+                        else:
+                            proc.terminate()
+                    except Exception:
+                        pass
+
+                def _finalize_proc_lifecycle(reason: str, *, force_kill: bool) -> None:
+                    nonlocal cleanup_finalized
+                    if cleanup_finalized:
+                        return
+                    cleanup_finalized = True
+                    cleanup_status = "ok"
+                    cleanup_error = ""
+                    try:
+                        if proc.stdout is not None:
+                            try:
+                                proc.stdout.close()
+                            except Exception:
+                                pass
                         if proc.poll() is None:
-                            try:
-                                proc.kill()
-                            except Exception:
-                                pass
-                            try:
-                                proc.wait(timeout=4)
-                            except Exception:
-                                pass
-                    _cleanup_docker_run()
+                            _terminate_or_kill_proc(force=False)
+                            if not _wait_proc_with_timeout(4.0):
+                                _terminate_or_kill_proc(force=True if force_kill else False)
+                                if not _wait_proc_with_timeout(4.0):
+                                    cleanup_status = "failed"
+                                    cleanup_error = "process did not exit after terminate/kill sequence"
+                    except Exception as e:
+                        cleanup_status = "failed"
+                        cleanup_error = str(e)
+                    finally:
+                        _cleanup_docker_run()
+                    run_meta["cleanup_status"] = cleanup_status
+                    run_meta["cleanup_reason"] = reason
+                    if cleanup_error:
+                        run_meta["cleanup_error"] = cleanup_error[:400]
+                    if cleanup_status != "ok":
+                        LOGGER.warning(
+                            "[OpenCodeHelper] process cleanup failed (reason=%s): %s",
+                            reason,
+                            cleanup_error or "unknown",
+                        )
+                        print(
+                            "[OpenCodeHelper] process cleanup failed "
+                            f"(reason={reason}): {cleanup_error or 'unknown'}"
+                        )
+
+                def _kill_proc(reason: str = "forced_stop") -> None:
+                    _finalize_proc_lifecycle(reason, force_kill=True)
 
                 # Stream output while also watching for done sentinel.
                 # NOTE: On Windows, `proc.stdout.readline()` can block forever when the child
@@ -1526,7 +1578,7 @@ class CodexHelper:
                             LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
                             saw_retry_error = True
                             print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
-                            _kill_proc()
+                            _kill_proc("hard_timeout")
                             break
 
                         if idle_timeout_sec > 0 and (now - last_progress_probe_ts) >= activity_probe_sec:
@@ -1562,7 +1614,7 @@ class CodexHelper:
                                     "[OpenCodeHelper] idle timeout after "
                                     f"{idle_for:.0f}s without activity; terminating agent"
                                 )
-                                _kill_proc()
+                                _kill_proc("idle_timeout")
                                 break
 
                         # Heartbeat so job logs keep moving even if the agent is quiet.
@@ -1594,7 +1646,7 @@ class CodexHelper:
                             else:
                                 LOGGER.info("[OpenCodeHelper] done flag detected")
                                 print("[OpenCodeHelper] done flag detected; terminating")
-                                _kill_proc()
+                                _kill_proc("done_flag")
                                 break
 
                         # Try to get output without blocking.
@@ -1612,7 +1664,7 @@ class CodexHelper:
                             if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
                                 LOGGER.warning("[OpenCodeHelper] retryable error detected → abort")
                                 saw_retry_error = True
-                                _kill_proc()
+                                _kill_proc("retryable_error")
                                 break
 
                         # If process exited and queue is drained, we can stop.
@@ -1634,7 +1686,10 @@ class CodexHelper:
                         t.join(timeout=1.0)
                     except Exception:
                         pass
-                    _cleanup_docker_run()
+                    _finalize_proc_lifecycle("loop_exit", force_kill=False)
+
+                if str(run_meta.get("cleanup_status") or "") != "ok":
+                    saw_retry_error = True
 
                 if saw_retry_error:
                     _record_session_attempt("retryable_error")

@@ -167,7 +167,7 @@ def test_build_retries_with_clean_when_supported(tmp_path: Path, monkeypatch, _n
     assert gen.commands[1][-1] == "--clean"
 
 
-def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_gate_missing_optional_ports_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -197,7 +197,7 @@ def test_build_gate_missing_optional_ports_routes_to_fix_build(tmp_path: Path, m
     assert "system_packages.txt" in out["last_error"]
     assert out["build_error_kind"] == "source"
     assert out["build_error_code"] == "missing_system_packages_declared"
-    assert workflow_graph._route_after_build_state(out) == "fix_build"
+    assert workflow_graph._route_after_build_state(out) == "plan"
 
 
 def test_build_gate_allows_declared_optional_ports(tmp_path: Path, monkeypatch, _no_sleep):
@@ -264,7 +264,7 @@ def test_build_gate_allows_declared_optional_ports_with_alias(tmp_path: Path, mo
     assert out["build_error_code"] == ""
 
 
-def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
+def test_build_source_failure_routes_to_plan_without_restart(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
@@ -282,7 +282,7 @@ def test_build_source_failure_routes_to_fix_build_without_restart(tmp_path: Path
     assert out["build_rc"] == 1
     assert bool(out["last_error"])
     assert out["restart_to_plan"] is False
-    assert workflow_graph._route_after_build_state(out) == "fix_build"
+    assert workflow_graph._route_after_build_state(out) == "plan"
 
 
 def test_build_infra_failure_routes_to_plan(tmp_path: Path, monkeypatch, _no_sleep):
@@ -397,6 +397,55 @@ def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
     assert Path(path).is_file()
     assert written.get("schema_version") == 1
     assert len(list(written.get("mappings") or [])) == 2
+
+
+def test_build_repair_contract_requires_entrypoint_when_missing_llvmfuzzer(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.cc"
+    src.write_text("int demo(){return 0;}\n", encoding="utf-8")
+    state = {
+        "repair_mode": True,
+        "repair_origin_stage": "build",
+        "repair_error_code": "missing_llvmfuzzer_entrypoint",
+    }
+    harness_index_doc = {
+        "mappings": [
+            {
+                "target_name": "demo",
+                "source_path": "fuzz/demo_fuzz.cc",
+            }
+        ]
+    }
+    ok, reason = workflow_graph._validate_build_repair_contract(tmp_path, state, harness_index_doc)
+    assert ok is False
+    assert "missing LLVMFuzzerTestOneInput" in reason
+
+
+def test_build_repair_contract_allows_entrypoint_when_present(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.cc"
+    src.write_text(
+        'extern "C" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n',
+        encoding="utf-8",
+    )
+    state = {
+        "repair_mode": True,
+        "repair_origin_stage": "build",
+        "repair_error_code": "missing_llvmfuzzer_entrypoint",
+    }
+    harness_index_doc = {
+        "mappings": [
+            {
+                "target_name": "demo",
+                "source_path": "fuzz/demo_fuzz.cc",
+            }
+        ]
+    }
+    ok, reason = workflow_graph._validate_build_repair_contract(tmp_path, state, harness_index_doc)
+    assert ok is True
+    assert reason == ""
 
 
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
@@ -525,7 +574,7 @@ def test_route_after_build_routes_infra_error_to_plan() -> None:
     assert route == "plan"
 
 
-def test_route_after_build_sends_source_error_to_fix_build() -> None:
+def test_route_after_build_sends_source_error_to_plan() -> None:
     route = workflow_graph._route_after_build_state(
         {
             "failed": False,
@@ -533,7 +582,7 @@ def test_route_after_build_sends_source_error_to_fix_build() -> None:
             "build_error_kind": "source",
         }
     )
-    assert route == "fix_build"
+    assert route == "plan"
 
 
 def test_route_after_fix_build_sends_repeated_same_signature_back_to_plan(monkeypatch) -> None:
