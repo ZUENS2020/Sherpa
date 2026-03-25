@@ -4,12 +4,13 @@
 
 | # | 问题 | 严重程度 | 优先级 | 状态 |
 |---|------|----------|--------|------|
-| 1 | Seed Generation 未为所有 Fuzzer 生成 AI Seeds | 中等 | P1 | 未修复 |
-| 2 | K8s Job Timeout 导致 build/run 阶段失败 | 高 | P0 | 未修复 |
+| 1 | Seed Generation 未为所有 Fuzzer 生成 AI Seeds | 中等 | P1 | ✅ 已修复 |
+| 2 | K8s Job Timeout 导致 build/run 阶段失败 | 高 | P0 | ✅ 已修复 |
 | 3 | OpenCodeHelper 僵尸进程 | 中等 | P2 | ✅ 已修复 |
 | 4 | Coverage Plateau 检测后无法有效改善 | 中等 | P2 | 未修复 |
 | 5 | Re-build 失败：CMakeCache.txt 路径冲突 | 高 | P0 | ✅ 已修复 |
-| 6 | Seed Gen Idle Timeout 未使用动态时间预算 | 中等 | P1 | ✅ 已修复 |
+| 6 | Seed Gen Idle Timeout: activity_watch_paths 缺失 | 高 | P0 | ✅ 已修复 |
+| 7 | FastAPI 数据暴露不完整 | 中等 | P1 | ✅ 已修复 |
 
 ---
 
@@ -147,32 +148,40 @@ for bin_path in bins:
 
 ---
 
-## P1-2：Seed Gen Idle Timeout 未使用动态时间预算 ✅ 已修复
+## P0-3：Seed Gen Idle Detection 缺少 activity_watch_paths ✅ 已修复
 
 ### 现象
 
-`idle_timeout_override` 固定 300s（或环境变量），不受 `seed_generation_timeout_sec` 动态控制。后续 fuzzer 的 AI seed generation 可能被提前中断。
+Seed generation 阶段 AI 被 idle timeout 误杀。AI 实际在思考并写入 corpus 文件，但 idle 检测只看 stdout 输出，300s 无 stdout 即判定 idle 并 kill。
 
 ### 根因
 
 | 根因 | 位置 | 说明 |
 |------|------|------|
-| idle timeout 与动态预算脱节 | `fuzz_unharnessed_repo.py:4096` | `seed_generation_timeout_sec` 在 `workflow_graph.py:6613` 被动态设置为 `remaining_for_seed`，但 `idle_timeout_override` 固定不变 |
+| seed gen 的 `run_codex_command` 调用缺少 `activity_watch_paths` | `fuzz_unharnessed_repo.py:4088-4122` | 普通 stage 会传 `activity_watch_paths` 让 idle 检测监控文件系统变化，但 seed gen 阶段遗漏了 |
+| idle 检测逻辑依赖三种信号 | `codex_helper.py:1532-1566` | `git diff` + `activity_watch_paths` + stdout。缺 `activity_watch_paths` 时只靠 stdout，AI 思考期间无 stdout 即被判定 idle |
 
 ### 修复内容
 
-**文件**: `fuzz_unharnessed_repo.py:4096`
+**文件**: `fuzz_unharnessed_repo.py` seed gen 的 `run_codex_command` 调用
 
 ```python
-# 修改前:
-patcher_kwargs["idle_timeout_override"] = max(60, seed_idle_timeout)
-
-# 修改后:
-effective_idle = seed_timeout if isinstance(seed_timeout, int) and seed_timeout > 0 else seed_idle_timeout
-patcher_kwargs["idle_timeout_override"] = max(60, effective_idle)
+# 添加 activity_watch_paths 监控 corpus 目录变化
+stdout = self.patcher.run_codex_command(
+    instructions,
+    additional_context="\n\n".join(additional_context_parts),
+    stage_skill="seed_generation",
+    activity_watch_paths=[str(corpus_dir), f"fuzz/corpus/{fuzzer_name}"],
+    **patcher_kwargs,
+)
 ```
 
-**效果**: 当 `seed_generation_timeout_sec` 被动态设置（如剩余时间 600s），idle timeout 跟随使用 600s 而非固定 300s。环境变量 `SHERPA_SEED_GEN_IDLE_TIMEOUT_SEC` 仍作为 fallback。
+同时将 idle timeout 恢复为简单的环境变量默认值:
+```python
+patcher_kwargs["idle_timeout_override"] = max(60, seed_idle_timeout)
+```
+
+**效果**: AI 写入 corpus 文件时文件系统活动会被检测到，不再被误杀。idle timeout 仅在 AI 真正停止所有活动时触发。
 
 ---
 
@@ -250,14 +259,106 @@ required family cap: 3 → 5
 
 ---
 
+## P1-3：FastAPI API 数据暴露不完整 ✅ 已修复
+
+### 现象
+
+后端存储了丰富的 workflow 状态、恢复状态、per-fuzzer 性能指标，但 API 只暴露了基础字段（status, error, timestamps），前端/监控无法看到运行时细节。
+
+### 修复内容
+
+#### Fix 7-A: 暴露 workflow/resume/cancel 追踪字段
+
+**文件**: `main.py` — 新增 `_enrich_job_view()` 函数
+
+在 `/api/task/{id}` 和 `/api/tasks` 的响应中添加:
+
+| 字段 | 说明 |
+|------|------|
+| `k8s_phase` | K8s Pod 阶段 |
+| `cancel_requested` / `last_cancel_requested_at` | 取消状态 |
+| `workflow_active_step` / `workflow_last_step` / `workflow_last_step_ts` | 流水线可见性 |
+| `parent_id` | 子任务→父任务导航 |
+| `recoverable` / `resume_attempts` / `resume_error_code` / `resume_from_step` | 恢复状态 |
+| `last_resume_reason` / `last_resume_requested_at` / `last_resume_started_at` / `last_resume_finished_at` | 恢复历史 |
+| `last_interrupted_at` | 中断时间戳 |
+| `request` | 原始请求 payload |
+
+#### Fix 7-B: 暴露 per-fuzzer 实时性能指标
+
+**架构**: workflow_graph.py → `[wf-metrics]` JSON log line → main.py 解析 → `_JOBS` → API
+
+**新增 `[wf-metrics]` 结构化日志**（`workflow_graph.py`）:
+
+在 `_node_run` 和 `_node_coverage_analysis` 完成时 emit:
+
+```json
+{
+  "ts": 1711234567,
+  "stage": "run",
+  "fuzzers": {
+    "decode_fuzzer": {
+      "final_cov": 342, "final_ft": 1205,
+      "final_execs_per_sec": 8923, "final_corpus_files": 156,
+      "plateau_detected": false, "crash_found": false,
+      "seed_quality": {...}
+    },
+    "parse_fuzzer": {
+      "final_cov": 187, "final_ft": 623,
+      "final_execs_per_sec": 12340, ...
+    }
+  },
+  "max_cov": 342, "max_ft": 1205,
+  "total_execs_per_sec": 21263,
+  "coverage_history": [...],
+  "coverage_source_report": {...}
+}
+```
+
+**API 新增字段** (在 `/api/task/{id}` 和 `/api/tasks` 中):
+
+| 字段 | 说明 |
+|------|------|
+| `fuzz_fuzzers` | `{fuzzer_name: {cov, ft, execs/s, corpus, plateau, crash, seed_quality}}` |
+| `fuzz_max_cov` / `fuzz_max_ft` | 全部 fuzzer 的最大覆盖率/特征数 |
+| `fuzz_total_execs_per_sec` | 所有 fuzzer 的总执行速度 |
+| `fuzz_crash_found` | 是否发现 crash |
+| `fuzz_coverage_history` | 覆盖率历史（每轮数据） |
+| `fuzz_coverage_source_report` | llvm-cov 源码级覆盖报告 |
+| `fuzz_coverage_loop_round` / `fuzz_coverage_loop_max_rounds` | 覆盖率循环进度 |
+| `fuzz_coverage_plateau_streak` | 平台期连续轮次 |
+| `fuzz_coverage_seed_profile` / `fuzz_coverage_quality_flags` | 种子质量信息 |
+
+#### Fix 7-C: 增强 run_summary.json 日志文件
+
+**文件**: `workflow_summary.py`
+
+新增 `fuzz_performance` 块写入 `run_summary.json`:
+
+```json
+{
+  "fuzz_performance": {
+    "fuzzers": {"decode_fuzzer": {...}, "parse_fuzzer": {...}},
+    "aggregate": {"max_cov": 342, "max_ft": 1205, "total_execs_per_sec": 21263, "fuzzer_count": 2},
+    "coverage_loop_round": 3, "coverage_loop_max_rounds": 5,
+    "coverage_plateau_streak": 1, "coverage_quality_flags": ["seed_family_undercovered"]
+  }
+}
+```
+
+Markdown 摘要 (`run_summary.md`) 新增 "Fuzz Performance (Aggregate)" 和增强的 per-fuzzer 表。
+
+---
+
 ## 修复优先级与依赖
 
 ```
-P0-1 (k8s timeout 重试/安全系数)  ← 独立，可直接做
+P0-1 (k8s timeout 重试/安全系数)  ← ✅ 已修复
 P0-2 (re-build CMakeCache 冲突)   ← ✅ 已修复
+P0-3 (seed gen activity_watch)    ← ✅ 已修复
          ↓
-P1-1 (seed gen 时间分配)          ← 依赖 P0-1 生效后验证
-P1-2 (seed gen idle timeout)      ← ✅ 已修复
+P1-1 (seed gen 时间分配)          ← ✅ 已修复
+P1-3 (API 数据暴露)              ← ✅ 已修复
          ↓
 P2-A (僵尸进程)                   ← ✅ 已修复
 P2-B (plateau 改善)               ← 长期，依赖 P1 生效后有更好的种子数据
@@ -267,7 +368,7 @@ P2-B (plateau 改善)               ← 长期，依赖 P1 生效后有更好的
 
 | 文件 | 涉及 Fix | 状态 |
 |------|----------|------|
-| `harness_generator/src/langchain_agent/main.py` | P0-1 (Fix 2-A, 2-B, 2-C) | 未修复 |
+| `harness_generator/src/langchain_agent/main.py` | P0-1, P1-3 (API enrichment + metrics parsing) | ✅ |
 | `harness_generator/src/langchain_agent/workflow_graph.py` | P0-2 (copytree), P2-B (Fix 4-A) | P0-2 ✅ |
 | `harness_generator/src/fuzz_unharnessed_repo.py` | P1-1 (Fix 1-B, 1-C), P1-2 (idle timeout) | P1-2 ✅ |
 | `harness_generator/src/codex_helper.py` | P2-A (zombie process) | ✅ |

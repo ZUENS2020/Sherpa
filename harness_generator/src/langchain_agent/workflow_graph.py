@@ -230,6 +230,66 @@ def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
     _wf_common.wf_log(state, msg)
 
 
+def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
+    """Emit a structured ``[wf-metrics]`` JSON line so that the control-plane
+    (main.py) can capture per-fuzzer performance data and expose it via the API.
+    """
+    run_details = list(state.get("run_details") or [])
+    coverage_history = list(state.get("coverage_history") or [])
+
+    # Build per-fuzzer metrics keyed by fuzzer name
+    fuzzers: dict[str, dict[str, Any]] = {}
+    for detail in run_details:
+        name = str(detail.get("fuzzer") or "unknown")
+        fuzzers[name] = {
+            "fuzzer": name,
+            "final_cov": int(detail.get("final_cov") or 0),
+            "final_ft": int(detail.get("final_ft") or 0),
+            "final_execs_per_sec": int(detail.get("final_execs_per_sec") or 0),
+            "final_iteration": int(detail.get("final_iteration") or 0),
+            "final_rss_mb": int(detail.get("final_rss_mb") or 0),
+            "final_corpus_files": int(detail.get("final_corpus_files") or 0),
+            "final_corpus_size_bytes": int(detail.get("final_corpus_size_bytes") or 0),
+            "corpus_files": int(detail.get("corpus_files") or 0),
+            "corpus_size_bytes": int(detail.get("corpus_size_bytes") or 0),
+            "crash_found": bool(detail.get("crash_found")),
+            "rc": int(detail.get("rc") or 0),
+            "run_error_kind": str(detail.get("run_error_kind") or ""),
+            "terminal_reason": str(detail.get("terminal_reason") or ""),
+            "plateau_detected": bool(detail.get("plateau_detected")),
+            "plateau_idle_seconds": int(detail.get("plateau_idle_seconds") or 0),
+            "seed_quality": dict(detail.get("seed_quality") or {}),
+        }
+
+    # Aggregate summary
+    max_cov = max((f["final_cov"] for f in fuzzers.values()), default=0)
+    max_ft = max((f["final_ft"] for f in fuzzers.values()), default=0)
+    total_execs = sum(f["final_execs_per_sec"] for f in fuzzers.values())
+    any_crash = any(f["crash_found"] for f in fuzzers.values())
+
+    payload = {
+        "ts": int(time.time()),
+        "stage": str(state.get("last_step") or ""),
+        "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
+        "coverage_loop_max_rounds": int(state.get("coverage_loop_max_rounds") or 0),
+        "max_cov": max_cov,
+        "max_ft": max_ft,
+        "total_execs_per_sec": total_execs,
+        "crash_found": any_crash,
+        "fuzzers": fuzzers,
+        "coverage_history": coverage_history,
+        "coverage_source_report": dict(state.get("coverage_source_report") or {}),
+        "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
+        "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
+        "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
+    }
+    try:
+        line = json.dumps(payload, separators=(",", ":"), default=str)
+    except Exception:
+        return
+    print(f"[wf-metrics] {line}", flush=True)
+
+
 def _fmt_dt(seconds: float) -> str:
     return _wf_common.fmt_dt(seconds)
 
@@ -6606,11 +6666,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if not seed_fuzzers:
             seed_fuzzers = list(bins)
         try:
-            for bin_path in seed_fuzzers:
+            for idx, bin_path in enumerate(seed_fuzzers):
                 remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
                 if remaining_for_seed <= 0:
                     return _time_budget_exceeded_state(state, step_name="run")
-                setattr(gen, "seed_generation_timeout_sec", max(1, remaining_for_seed))
+                fuzzers_left = len(seed_fuzzers) - idx
+                per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
+                setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
                 fuzzer_name = bin_path.name
                 try:
                     gen._pass_generate_seeds(fuzzer_name)
@@ -7217,6 +7279,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 f"dt={_fmt_dt(time.perf_counter()-t0)}"
             ),
         )
+        _emit_fuzz_metrics(cast(dict[str, Any], out))
         return out
     except Exception as e:
         out = {
@@ -7507,6 +7570,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             cast(dict[str, Any], out),
             f"<- coverage-analysis improve={int(should_improve)} {reason} dt={_fmt_dt(time.perf_counter()-t0)}",
         )
+        _emit_fuzz_metrics(cast(dict[str, Any], out))
         return out
     except Exception as e:
         out = {**state, "last_step": "coverage-analysis", "last_error": str(e), "message": "coverage analysis failed"}

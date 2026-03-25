@@ -1,26 +1,20 @@
-# Sherpa 本地联调前端
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
 
-这是给 Sherpa 后端做本地联调用的前端应用。它的目标是读取后端动态 API，而不是依赖写死数据。
+# Run and deploy your AI Studio app
 
-## 依赖的核心 API
+This contains everything you need to run your app locally.
 
-- `GET /api/system`
-- `GET /api/tasks`
-- `GET /api/task/{job_id}`
-- `POST /api/task`
-- `PUT /api/config`
+View your app in AI Studio: https://ai.studio/apps/88a896fa-b9cf-4302-b5d3-652a70cbcc54
 
-## 本地运行
+## Run Locally
 
-1. 安装依赖
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
    `npm install`
-2. 启动开发服务
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
    `npm run dev`
-3. 在设置里把 API Base URL 指向你的 Sherpa 后端，例如：
-   `https://dev.zuens2020.work`
-
-## 联调约定
-
-- 所有任务列表、系统指标和详情页都应来自后端 API
-- 不要把任务状态、仪表盘数字或仓库名写死在前端
-- 如果后端缺字段，优先补后端契约和文档，而不是继续前端硬编码
