@@ -80,6 +80,24 @@ def _count_opencode_defunct_processes() -> int:
     return count
 
 
+def _reap_any_dead_children(max_rounds: int = 16) -> int:
+    if os.name == "nt":
+        return 0
+    reaped = 0
+    rounds = max(1, min(int(max_rounds), 256))
+    for _ in range(rounds):
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        except Exception:
+            break
+        if pid == 0:
+            break
+        reaped += 1
+    return reaped
+
+
 def main() -> int:
     payload = _decode_payload()
     job_id = str(payload.get("job_id") or "")
@@ -90,17 +108,21 @@ def main() -> int:
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
-        opencode_defunct_count = _count_opencode_defunct_processes()
+        opencode_defunct_count_before = _count_opencode_defunct_processes()
         opencode_defunct_threshold = _opencode_defunct_threshold()
+        opencode_defunct_reaped = _reap_any_dead_children()
+        opencode_defunct_count_after = _count_opencode_defunct_processes()
         print(
             "[k8s-worker] diagnostics "
-            f"opencode_defunct_count={opencode_defunct_count} "
+            f"opencode_defunct_count_before={opencode_defunct_count_before} "
+            f"opencode_defunct_reaped={opencode_defunct_reaped} "
+            f"opencode_defunct_count_after={opencode_defunct_count_after} "
             f"threshold={opencode_defunct_threshold}"
         )
-        if opencode_defunct_threshold > 0 and opencode_defunct_count > opencode_defunct_threshold:
+        if opencode_defunct_threshold > 0 and opencode_defunct_count_after > opencode_defunct_threshold:
             raise RuntimeError(
                 "opencode defunct process count exceeded threshold: "
-                f"{opencode_defunct_count}>{opencode_defunct_threshold}"
+                f"{opencode_defunct_count_after}>{opencode_defunct_threshold}"
             )
 
         # Rebuild runtime OpenCode config inside the worker container.

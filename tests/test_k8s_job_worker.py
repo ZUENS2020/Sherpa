@@ -205,7 +205,9 @@ def test_worker_fails_fast_when_opencode_defunct_exceeds_threshold(tmp_path: Pat
     }
     monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
     monkeypatch.setenv("SHERPA_OPENCODE_DEFUNCT_THRESHOLD", "3")
-    monkeypatch.setattr(k8s_job_worker, "_count_opencode_defunct_processes", lambda: 5)
+    counts = iter([5, 5])
+    monkeypatch.setattr(k8s_job_worker, "_count_opencode_defunct_processes", lambda: next(counts))
+    monkeypatch.setattr(k8s_job_worker, "_reap_any_dead_children", lambda: 0)
 
     rc = k8s_job_worker.main()
     assert rc == 1
@@ -213,3 +215,28 @@ def test_worker_fails_fast_when_opencode_defunct_exceeds_threshold(tmp_path: Pat
     assert error_path.is_file()
     txt = error_path.read_text(encoding="utf-8", errors="replace")
     assert "opencode defunct process count exceeded threshold" in txt
+
+
+def test_worker_reap_allows_continue_when_after_count_is_below_threshold(tmp_path: Path, monkeypatch):
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    payload = {
+        "job_id": "job-defunct-reap-ok",
+        "repo_url": "https://github.com/fmtlib/fmt.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.setenv("SHERPA_OPENCODE_DEFUNCT_THRESHOLD", "3")
+    counts = iter([5, 2])
+    monkeypatch.setattr(k8s_job_worker, "_count_opencode_defunct_processes", lambda: next(counts))
+    monkeypatch.setattr(k8s_job_worker, "_reap_any_dead_children", lambda: 3)
+    monkeypatch.setattr(k8s_job_worker, "fuzz_logic", lambda **kwargs: {"ok": True})
+
+    rc = k8s_job_worker.main()
+    assert rc == 0
+    assert result_path.is_file()
