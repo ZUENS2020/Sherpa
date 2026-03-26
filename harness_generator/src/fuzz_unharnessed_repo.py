@@ -403,6 +403,14 @@ def _run_plateau_idle_growth_sec() -> int:
     return 30
 
 
+def _run_ft_growth_threshold() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FT_GROWTH_THRESHOLD") or "8").strip()
+    try:
+        return max(1, min(int(raw), 1_000_000))
+    except Exception:
+        return 8
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
@@ -4790,6 +4798,7 @@ EOF
         plateau_idle_growth_sec = _run_plateau_idle_growth_sec()
         best_cov = 0
         best_ft = 0
+        ft_growth_threshold = _run_ft_growth_threshold()
         now0 = time.monotonic()
         last_cov_growth_at = now0
         last_ft_growth_at = now0
@@ -4806,7 +4815,7 @@ EOF
             kind = str(m.group("kind") or "").upper()
             now = time.monotonic()
             cov_grew = cov > best_cov
-            ft_grew = ft > best_ft
+            ft_grew = (ft - best_ft) >= ft_growth_threshold
             if cov_grew:
                 best_cov = cov
                 if ft_grew:
