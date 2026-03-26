@@ -1281,12 +1281,12 @@ def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
     raw = str(
         (stage_ctx or {}).get("run_parallel_fuzzers_override")
         or os.environ.get("SHERPA_PARALLEL_FUZZERS")
-        or "2"
+        or "3"
     ).strip()
     try:
         return max(1, min(int(raw), 64))
     except Exception:
-        return 2
+        return 3
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:

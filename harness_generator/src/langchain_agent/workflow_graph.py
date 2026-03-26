@@ -6687,11 +6687,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         except Exception:
             max_same_crash_repeats = 1
         max_same_timeout_repeats = _max_same_timeout_repeats()
-        max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "2")
+        max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "3")
         try:
             max_parallel = max(1, min(int(max_parallel_raw), 16))
         except Exception:
-            max_parallel = 2
+            max_parallel = 3
         stop_on_first_crash = _run_stop_on_first_crash()
         parallel_early_stop = _run_parallel_early_stop_enabled()
         if stop_on_first_crash and len(bins) > 1 and not parallel_early_stop:
@@ -9170,6 +9170,11 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         return "plan"
+    terminal_reason = (state.get("run_terminal_reason") or "").strip().lower()
+    # Coverage plateau is a coverage signal, not a hard run failure.
+    # Let coverage-analysis decide in_place vs replan.
+    if terminal_reason == "coverage_plateau":
+        return "coverage-analysis"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
     if run_error_kind:
         return "plan"

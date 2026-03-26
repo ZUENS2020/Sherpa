@@ -418,6 +418,18 @@ def test_route_after_run_routes_recoverable_run_errors_to_plan():
     assert route == "plan"
 
 
+def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+    route = workflow_graph._route_after_run_state(
+        {
+            "run_terminal_reason": "coverage_plateau",
+            "run_error_kind": "run_no_progress",
+            "failed": False,
+            "crash_found": False,
+        }
+    )
+    assert route == "coverage-analysis"
+
+
 def test_route_after_run_routes_crash_to_repro_stage():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": True}
