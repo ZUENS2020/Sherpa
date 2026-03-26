@@ -615,6 +615,59 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
     assert "-rss_limit_mb=32768" in seen_cmd["cmd"]
 
 
+def test_run_fuzzer_feature_growth_only_delays_plateau(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.time_budget = 900
+    gen.max_len = 1024
+    gen.rss_limit_mb = 32768
+    gen.fuzz_out_dir = tmp_path / "fuzz" / "out"
+    gen.fuzz_corpus_dir = tmp_path / "fuzz" / "corpus"
+    gen.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    bin_path = gen.fuzz_out_dir / "demo_fuzz"
+    bin_path.write_text("", encoding="utf-8")
+    os.chmod(bin_path, 0o755)
+
+    timeline = iter([0.0, 1.0, 4.0, 5.0, 8.0, 11.0, 14.0, 16.0])
+    monkeypatch.setattr(fur.time, "monotonic", lambda: next(timeline))
+
+    def _fake_run_cmd(_cmd, **kwargs):
+        cb = kwargs.get("line_callback")
+        lines = [
+            "#1 NEW cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#262144 pulse  cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#262145 NEW cov: 6 ft: 11 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#524288 pulse  cov: 6 ft: 11 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#786432 pulse  cov: 6 ft: 11 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#1048576 pulse  cov: 6 ft: 11 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+        ]
+        for line in lines:
+            if cb is not None:
+                cb("stdout", line)
+        return 143, "".join(lines), "\n[callback-stop] coverage_plateau (idle_no_growth=2s pulse_hits=3)"
+
+    gen._run_cmd = _fake_run_cmd  # type: ignore[method-assign]
+    old_idle = os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC")
+    old_pulses = os.environ.get("SHERPA_RUN_PLATEAU_PULSES")
+    os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = "2"
+    os.environ["SHERPA_RUN_PLATEAU_PULSES"] = "3"
+    try:
+        result = gen._run_fuzzer(bin_path)
+    finally:
+        if old_idle is None:
+            os.environ.pop("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC", None)
+        else:
+            os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = old_idle
+        if old_pulses is None:
+            os.environ.pop("SHERPA_RUN_PLATEAU_PULSES", None)
+        else:
+            os.environ["SHERPA_RUN_PLATEAU_PULSES"] = old_pulses
+
+    assert result.rc == 0
+    assert result.plateau_detected is True
+    assert result.terminal_reason == "coverage_plateau"
+
+
 def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_path: Path, monkeypatch):
     gen = _fake_generator(tmp_path)
     gen.fuzz_dir = tmp_path / "fuzz"

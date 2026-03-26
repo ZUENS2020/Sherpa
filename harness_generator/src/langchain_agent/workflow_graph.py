@@ -6687,11 +6687,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         except Exception:
             max_same_crash_repeats = 1
         max_same_timeout_repeats = _max_same_timeout_repeats()
-        max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "2")
+        max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "3")
         try:
             max_parallel = max(1, min(int(max_parallel_raw), 16))
         except Exception:
-            max_parallel = 2
+            max_parallel = 3
         stop_on_first_crash = _run_stop_on_first_crash()
         parallel_early_stop = _run_parallel_early_stop_enabled()
         if stop_on_first_crash and len(bins) > 1 and not parallel_early_stop:

@@ -4793,27 +4793,44 @@ EOF
         plateau_idle_growth_sec = _run_plateau_idle_growth_sec()
         best_cov = 0
         best_ft = 0
-        last_growth_at = time.monotonic()
+        now0 = time.monotonic()
+        last_cov_growth_at = now0
+        last_ft_growth_at = now0
         plateau_pulse_hits = 0
         callback_stop_reason = ""
 
         def _line_callback(_kind: str, text: str) -> Optional[str]:
-            nonlocal best_cov, best_ft, last_growth_at, plateau_pulse_hits, callback_stop_reason
+            nonlocal best_cov, best_ft, last_cov_growth_at, last_ft_growth_at, plateau_pulse_hits, callback_stop_reason
             m = _LIBFUZZER_PROGRESS_RE.search(text or "")
             if not m:
                 return None
             cov = int(m.group("cov") or 0)
             ft = int(m.group("ft") or 0)
             kind = str(m.group("kind") or "").upper()
-            grew = cov > best_cov or ft > best_ft
-            if grew:
-                best_cov = max(best_cov, cov)
-                best_ft = max(best_ft, ft)
-                last_growth_at = time.monotonic()
+            now = time.monotonic()
+            cov_grew = cov > best_cov
+            ft_grew = ft > best_ft
+            if cov_grew:
+                best_cov = cov
+                if ft_grew:
+                    best_ft = ft
+                last_cov_growth_at = now
+                last_ft_growth_at = now
                 plateau_pulse_hits = 0
                 return None
+            if ft_grew:
+                # Feature growth is auxiliary: keep tracking it, but do not fully
+                # reset plateau unless coverage also advances.
+                best_ft = ft
+                last_ft_growth_at = now
+                if plateau_pulse_hits > 0:
+                    plateau_pulse_hits -= 1
+                return None
             if kind == "PULSE":
-                if (time.monotonic() - last_growth_at) >= plateau_idle_growth_sec:
+                # Coverage is the primary plateau signal. Recent feature-only growth
+                # can delay one pulse, but cannot suppress plateau indefinitely.
+                recent_ft_growth = (now - last_ft_growth_at) < max(1, plateau_idle_growth_sec // 3)
+                if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
                     plateau_pulse_hits += 1
                     if plateau_pulse_hits >= plateau_pulses:
                         callback_stop_reason = (
