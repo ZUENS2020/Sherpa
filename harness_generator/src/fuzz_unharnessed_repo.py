@@ -399,11 +399,8 @@ def _run_plateau_pulses() -> int:
 
 
 def _run_plateau_idle_growth_sec() -> int:
-    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "180").strip()
-    try:
-        return max(30, min(int(raw), 86_400))
-    except Exception:
-        return 180
+    # Keep plateau detection cadence deterministic across environments.
+    return 30
 
 
 def _default_diff_excludes() -> set[str]:

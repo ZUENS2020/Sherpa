@@ -236,6 +236,7 @@
 - `progress`：由子任务完成度估算（0-100）
 - `repo`：用于 UI 展示的仓库名/短名；`repo_raw` 保留原始 URL
 - `fuzz_*`：来自 active child（若存在），否则来自主任务自身
+- `fuzz_coverage_plateau_streak`：按固定 30 秒无增长窗口统计的连续平台期轮次（`idle_no_growth=30s`）
 
 ## 5. 系统总览（前端 Overview/Tasks 顶部）
 

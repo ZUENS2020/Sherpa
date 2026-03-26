@@ -58,6 +58,7 @@ flowchart LR
 - `build` 失败不应该被当成“任务结束”，而应该回到修复规划语境
 - `run` 后如果没有崩溃，先看覆盖率改进，而不是盲目换目标
 - `re-run` 后如果复现成功，还要做 `crash-analysis`，否则很容易把 harness 误报当成真 bug
+- plateau 检测窗口固定为 30 秒；`run_no_progress`、`run_timeout` 等可恢复 run 信号会进入 `coverage-analysis` 继续改进
 
 ## 4. 三个核心循环
 
