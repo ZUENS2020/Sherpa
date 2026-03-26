@@ -2717,13 +2717,19 @@ def put_config(request: dict = Body(...)):
 
     current = _cfg_get()
     payload = current.model_dump()
-    lightweight_only_keys = {"apiBaseUrl", "api_base_url"}
+    lightweight_only_keys = {
+        "apiBaseUrl",
+        "api_base_url",
+        "sherpa_run_plateau_idle_growth_sec",
+    }
     request_keys = set(request.keys())
     is_lightweight_update = bool(request_keys) and request_keys.issubset(lightweight_only_keys)
 
     if is_lightweight_update:
         api_base_url = str(request.get("apiBaseUrl") or request.get("api_base_url") or "").strip()
         payload["api_base_url"] = api_base_url
+        if "sherpa_run_plateau_idle_growth_sec" in request:
+            payload["sherpa_run_plateau_idle_growth_sec"] = request.get("sherpa_run_plateau_idle_growth_sec")
     else:
         merged = dict(payload)
         for key, value in request.items():
@@ -2747,6 +2753,12 @@ def put_config(request: dict = Body(...)):
         raise HTTPException(
             status_code=400,
             detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
+        )
+    plateau_idle = int(candidate.sherpa_run_plateau_idle_growth_sec)
+    if plateau_idle < 30 or plateau_idle > 86_400:
+        raise HTTPException(
+            status_code=400,
+            detail="sherpa_run_plateau_idle_growth_sec must be in [30, 86400].",
         )
 
     # Frontend no longer controls provider/API fields.

@@ -44,7 +44,8 @@
 
 ```json
 {
-  "apiBaseUrl": "https://dev.zuens2020.work/"
+  "apiBaseUrl": "https://dev.zuens2020.work/",
+  "sherpa_run_plateau_idle_growth_sec": 600
 }
 ```
 
@@ -61,6 +62,7 @@
 约束：
 - `fuzz_time_budget >= 0`（`0` 表示 unlimited）
 - `sherpa_run_unlimited_round_budget_sec >= 0`（`0` 表示 fully unlimited）
+- `sherpa_run_plateau_idle_growth_sec` 范围 `[30, 86400]`（秒）
 - `apiBaseUrl` 与 `api_base_url` 均可用，最终统一存为 `api_base_url`
 - 若 payload 非法返回 `400`
 

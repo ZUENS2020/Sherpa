@@ -399,8 +399,11 @@ def _run_plateau_pulses() -> int:
 
 
 def _run_plateau_idle_growth_sec() -> int:
-    # Keep plateau detection cadence deterministic across environments.
-    return 600
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "600").strip()
+    try:
+        return max(30, min(int(raw), 86_400))
+    except Exception:
+        return 600
 
 
 def _run_ft_growth_threshold() -> int:
@@ -412,8 +415,13 @@ def _run_ft_growth_threshold() -> int:
 
 
 def _run_ft_recent_growth_window_sec() -> int:
-    # Keep recent-ft growth window deterministic across environments.
-    return 600
+    raw = (os.environ.get("SHERPA_RUN_FT_RECENT_GROWTH_WINDOW_SEC") or "").strip()
+    if raw:
+        try:
+            return max(30, min(int(raw), 86_400))
+        except Exception:
+            pass
+    return _run_plateau_idle_growth_sec()
 
 
 def _run_ft_growth_threshold() -> int:
