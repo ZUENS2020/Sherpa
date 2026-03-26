@@ -24,6 +24,7 @@ export const configSchema = z.object({
   openrouter_model: z.string().optional().default(''),
   fuzz_time_budget: z.number().int().nonnegative().default(900),
   sherpa_run_unlimited_round_budget_sec: z.number().int().nonnegative().default(7200),
+  sherpa_run_plateau_idle_growth_sec: z.number().int().min(30).max(86400).default(600),
   fuzz_use_docker: z.boolean().default(true),
   fuzz_docker_image: z.string().default('auto'),
   sherpa_git_mirrors: z.string().default(''),
