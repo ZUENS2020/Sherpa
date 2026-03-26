@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
 import traceback
 from pathlib import Path
 
@@ -42,6 +43,61 @@ def _parse_int_keep_zero(value: object, default: int) -> int:
     return int(value)
 
 
+def _opencode_defunct_threshold() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_DEFUNCT_THRESHOLD") or "3").strip()
+    try:
+        return max(0, min(int(raw), 200))
+    except Exception:
+        return 3
+
+
+def _count_opencode_defunct_processes() -> int:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "stat=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return 0
+    if int(proc.returncode or 0) != 0:
+        return 0
+    count = 0
+    for raw_line in str(proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        stat = parts[0] if parts else ""
+        cmd = parts[1] if len(parts) > 1 else ""
+        cmd_l = cmd.lower()
+        if "opencode" not in cmd_l:
+            continue
+        if "<defunct>" in cmd_l or stat.startswith("Z"):
+            count += 1
+    return count
+
+
+def _reap_any_dead_children(max_rounds: int = 16) -> int:
+    if os.name == "nt":
+        return 0
+    reaped = 0
+    rounds = max(1, min(int(max_rounds), 256))
+    for _ in range(rounds):
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        except Exception:
+            break
+        if pid == 0:
+            break
+        reaped += 1
+    return reaped
+
+
 def main() -> int:
     payload = _decode_payload()
     job_id = str(payload.get("job_id") or "")
@@ -52,6 +108,23 @@ def main() -> int:
 
     print(f"[k8s-worker] start job_id={job_id} repo={payload.get('repo_url')}")
     try:
+        opencode_defunct_count_before = _count_opencode_defunct_processes()
+        opencode_defunct_threshold = _opencode_defunct_threshold()
+        opencode_defunct_reaped = _reap_any_dead_children()
+        opencode_defunct_count_after = _count_opencode_defunct_processes()
+        print(
+            "[k8s-worker] diagnostics "
+            f"opencode_defunct_count_before={opencode_defunct_count_before} "
+            f"opencode_defunct_reaped={opencode_defunct_reaped} "
+            f"opencode_defunct_count_after={opencode_defunct_count_after} "
+            f"threshold={opencode_defunct_threshold}"
+        )
+        if opencode_defunct_threshold > 0 and opencode_defunct_count_after > opencode_defunct_threshold:
+            raise RuntimeError(
+                "opencode defunct process count exceeded threshold: "
+                f"{opencode_defunct_count_after}>{opencode_defunct_threshold}"
+            )
+
         # Rebuild runtime OpenCode config inside the worker container.
         # The path is injected via OPENCODE_CONFIG, but the file itself is
         # container-local and must be generated after secrets/env are loaded.

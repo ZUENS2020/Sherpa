@@ -1124,6 +1124,10 @@ class HarnessGenerator:
             stdout, stderr = proc.communicate(input=input, timeout=7200)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except Exception:
+                stdout, stderr = ("", "")
             raise HarnessGeneratorError("Command timed out: " + " ".join(cmd))
 
         if proc.returncode != 0:

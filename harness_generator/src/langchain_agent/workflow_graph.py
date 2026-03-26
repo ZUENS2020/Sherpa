@@ -1731,6 +1731,57 @@ def _validate_execution_plan_harness_consistency(
     return True, "", doc
 
 
+def _validate_build_repair_contract(
+    repo_root: Path,
+    state: FuzzWorkflowRuntimeState,
+    harness_index_doc: dict[str, Any],
+) -> tuple[bool, str]:
+    if not bool(state.get("repair_mode")):
+        return True, ""
+    if str(state.get("repair_origin_stage") or "").strip() != "build":
+        return True, ""
+    error_code = str(state.get("repair_error_code") or "").strip()
+    if not error_code:
+        return True, ""
+
+    mappings = [m for m in list(harness_index_doc.get("mappings") or []) if isinstance(m, dict)]
+    source_paths = [str(m.get("source_path") or "").strip() for m in mappings]
+    source_paths = [p for p in source_paths if p]
+    if not source_paths:
+        return False, "repair contract failed: no harness source mapped in fuzz/harness_index.json"
+
+    if error_code == "missing_llvmfuzzer_entrypoint":
+        missing_entrypoints: list[str] = []
+        for rel in source_paths:
+            p = (repo_root / rel).resolve()
+            if not p.is_file():
+                missing_entrypoints.append(rel)
+                continue
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            if "LLVMFuzzerTestOneInput" not in txt:
+                missing_entrypoints.append(rel)
+        if missing_entrypoints:
+            return (
+                False,
+                "repair contract failed: missing LLVMFuzzerTestOneInput in harness source(s): "
+                + ",".join(missing_entrypoints),
+            )
+
+    if error_code in {"cxx_for_c_source_mismatch", "c_compiler_for_cpp_source_mismatch"}:
+        build_py = (repo_root / "fuzz" / "build.py")
+        if not build_py.is_file():
+            return False, "repair contract failed: fuzz/build.py missing for compiler mismatch repair"
+        build_txt = build_py.read_text(encoding="utf-8", errors="replace")
+        needs_c = any(Path(rel).suffix.lower() == ".c" for rel in source_paths)
+        needs_cxx = any(Path(rel).suffix.lower() in {".cc", ".cpp", ".cxx"} for rel in source_paths)
+        if needs_c and "clang" not in build_txt:
+            return False, "repair contract failed: build.py lacks C compiler invocation hints for .c harnesses"
+        if needs_cxx and "clang++" not in build_txt:
+            return False, "repair contract failed: build.py lacks C++ compiler invocation hints for C++ harnesses"
+
+    return True, ""
+
+
 def _classify_build_failure(
     last_error: str,
     stdout_tail: str,
@@ -1798,9 +1849,71 @@ def _alloc_output_workdir(repo_url: str) -> Path | None:
     return _wf_common.alloc_output_workdir(repo_url)
 
 
+def _opencode_defunct_threshold() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_DEFUNCT_THRESHOLD") or "3").strip()
+    try:
+        return max(0, min(int(raw), 200))
+    except Exception:
+        return 3
+
+
+def _count_opencode_defunct_processes() -> int:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "stat=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return 0
+    if int(proc.returncode or 0) != 0:
+        return 0
+    count = 0
+    for raw_line in str(proc.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        stat = parts[0] if parts else ""
+        cmd = parts[1] if len(parts) > 1 else ""
+        cmd_l = cmd.lower()
+        if "opencode" not in cmd_l:
+            continue
+        if "<defunct>" in cmd_l or stat.startswith("Z"):
+            count += 1
+    return count
+
+
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
     out, stop = _wf_common.enter_step(cast(dict[str, Any], state), step_name)
-    return cast(FuzzWorkflowRuntimeState, out), stop
+    next_state = cast(FuzzWorkflowRuntimeState, out)
+    if stop:
+        return next_state, stop
+    defunct_count = _count_opencode_defunct_processes()
+    next_state = cast(FuzzWorkflowRuntimeState, {**next_state, "opencode_defunct_count": defunct_count})
+    threshold = _opencode_defunct_threshold()
+    if threshold > 0 and defunct_count > threshold:
+        msg = (
+            f"opencode defunct process count exceeded threshold: "
+            f"{defunct_count}>{threshold}; fail-fast to avoid stage hang"
+        )
+        guarded = cast(
+            FuzzWorkflowRuntimeState,
+            {
+                **next_state,
+                "last_step": step_name,
+                "failed": True,
+                "last_error": msg,
+                "message": "workflow stopped (opencode defunct safeguard)",
+            },
+        )
+        _wf_log(cast(dict[str, Any], guarded), f"<- {step_name} stop=opencode-defunct count={defunct_count} threshold={threshold}")
+        return guarded, True
+    if defunct_count > 0:
+        _wf_log(cast(dict[str, Any], next_state), f"{step_name}: opencode_defunct_count={defunct_count}")
+    return next_state, False
 
 
 def _remaining_time_budget_sec(state: FuzzWorkflowRuntimeState, *, min_timeout: int = 5) -> int:
@@ -4165,6 +4278,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             )
             if not harness_ok:
                 raise HarnessGeneratorError(f"synthesize incomplete: {harness_reason}")
+            repair_ok, repair_reason = _validate_build_repair_contract(
+                gen.repo_root,
+                state,
+                harness_index_doc,
+            )
+            if not repair_ok:
+                raise HarnessGeneratorError(f"synthesize incomplete: {repair_reason}")
         except HarnessGeneratorError:
             raise
         except Exception as e:
