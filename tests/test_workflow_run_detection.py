@@ -411,11 +411,23 @@ def test_node_run_marks_no_progress_for_execs_zero_with_warning(tmp_path: Path):
     assert "no measurable progress" in out["last_error"]
 
 
-def test_route_after_run_routes_recoverable_run_errors_to_plan():
+def test_route_after_run_routes_recoverable_run_errors_to_coverage_analysis():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
     )
-    assert route == "plan"
+    assert route == "coverage-analysis"
+
+
+def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+    route = workflow_graph._route_after_run_state(
+        {
+            "run_terminal_reason": "coverage_plateau",
+            "run_error_kind": "run_no_progress",
+            "failed": False,
+            "crash_found": False,
+        }
+    )
+    assert route == "coverage-analysis"
 
 
 def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
@@ -444,16 +456,23 @@ def test_route_after_run_routes_clean_result_to_coverage_analysis():
     assert route == "coverage-analysis"
 
 
-def test_route_after_run_routes_idle_timeout_to_plan():
+def test_route_after_run_routes_idle_timeout_to_coverage_analysis():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
-    assert route == "plan"
+    assert route == "coverage-analysis"
 
 
-def test_route_after_run_routes_resource_exhaustion_to_plan():
+def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
+def test_route_after_run_routes_fatal_error_to_plan():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_exception", "failed": False, "crash_found": False}
     )
     assert route == "plan"
 
@@ -630,6 +649,60 @@ def test_node_coverage_analysis_allows_resource_exhaustion_to_improve():
 
     assert out["coverage_should_improve"] is True
     assert out["coverage_improve_mode"] == "in_place"
+
+
+def test_node_coverage_analysis_allows_no_progress_to_improve():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "run_no_progress",
+        }
+    )
+
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+
+
+def test_node_coverage_analysis_blocks_fatal_run_error():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "run_exception",
+        }
+    )
+
+    assert out["coverage_should_improve"] is False
+    assert out["coverage_improve_mode"] == ""
 
 
 def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
@@ -853,7 +926,7 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert out["run_error_kind"] == "run_timeout"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "plan"
+    assert route == "coverage-analysis"
 
 
 def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
@@ -883,7 +956,7 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "plan"
+    assert route == "coverage-analysis"
 
 
 def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
@@ -926,7 +999,7 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
     )
 
     assert result["workflow_last_step"] == "run"
-    assert result["workflow_recommended_next"] == "plan"
+    assert result["workflow_recommended_next"] == "coverage-analysis"
 
 
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
