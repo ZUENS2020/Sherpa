@@ -34,6 +34,20 @@ from fuzz_unharnessed_repo import (
     write_patch_from_snapshot,
 )
 
+_RECOVERABLE_RUN_ERROR_KINDS = {
+    "run_no_progress",
+    "run_idle_timeout",
+    "run_timeout",
+    "run_finalize_timeout",
+    "run_resource_exhaustion",
+}
+
+_FATAL_RUN_ERROR_KINDS = {
+    "run_exception",
+    "nonzero_exit_without_crash",
+    "workflow_time_budget_exceeded",
+}
+
 
 class FuzzWorkflowState(TypedDict, total=False):
     repo_url: str
@@ -7517,7 +7531,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
-            and (not run_error_kind or run_error_kind in {"run_resource_exhaustion"})
+            and (
+                (not run_error_kind)
+                or (run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS)
+            )
         )
         should_improve = False
         replan_required = False
@@ -9170,16 +9187,20 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         return "plan"
+    if bool(state.get("crash_found")):
+        return "crash-triage"
     terminal_reason = (state.get("run_terminal_reason") or "").strip().lower()
     # Coverage plateau is a coverage signal, not a hard run failure.
     # Let coverage-analysis decide in_place vs replan.
     if terminal_reason == "coverage_plateau":
         return "coverage-analysis"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
+    if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
+        return "coverage-analysis"
+    if run_error_kind in _FATAL_RUN_ERROR_KINDS:
+        return "plan"
     if run_error_kind:
         return "plan"
-    if bool(state.get("crash_found")):
-        return "crash-triage"
     return "coverage-analysis"
 
 
