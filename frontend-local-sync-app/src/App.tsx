@@ -140,6 +140,7 @@ export default function App() {
   const [isSingleUnlimited, setIsSingleUnlimited] = useState(() => localStorage.getItem('sherpaIsSingleUnlimited') === 'true');
   const [maxTokens, setMaxTokens] = useState(() => localStorage.getItem('sherpaMaxTokens') || '0');
   const [unlimitedRoundLimit, setUnlimitedRoundLimit] = useState(() => localStorage.getItem('sherpaUnlimitedRoundLimit') || '7200');
+  const [plateauIdleGrowthSec, setPlateauIdleGrowthSec] = useState(() => localStorage.getItem('sherpaPlateauIdleGrowthSec') || '600');
 
   const handleSaveTaskConfig = () => {
     localStorage.setItem('sherpaTotalDuration', totalDuration);
@@ -148,6 +149,7 @@ export default function App() {
     localStorage.setItem('sherpaIsSingleUnlimited', isSingleUnlimited.toString());
     localStorage.setItem('sherpaMaxTokens', maxTokens);
     localStorage.setItem('sherpaUnlimitedRoundLimit', unlimitedRoundLimit);
+    localStorage.setItem('sherpaPlateauIdleGrowthSec', plateauIdleGrowthSec);
   };
 
   const handleStartFuzzing = async () => {
@@ -289,7 +291,10 @@ export default function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ apiBaseUrl }),
+        body: JSON.stringify({
+          apiBaseUrl,
+          sherpa_run_plateau_idle_growth_sec: Number(plateauIdleGrowthSec) || 600,
+        }),
       });
       if (resp.ok) {
         setSaveMessage('Configuration saved successfully.');
@@ -306,6 +311,34 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('sherpaApiBaseUrl', apiBaseUrl);
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('sherpaPlateauIdleGrowthSec', plateauIdleGrowthSec);
+  }, [plateauIdleGrowthSec]);
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const resp = await fetch(`${apiBaseUrl}/api/config`);
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        const serverApiBase = String(cfg?.api_base_url || cfg?.apiBaseUrl || '').trim();
+        if (serverApiBase) {
+          setApiBaseUrl(serverApiBase);
+        }
+        const plateauRaw = cfg?.sherpa_run_plateau_idle_growth_sec;
+        if (plateauRaw !== undefined && plateauRaw !== null) {
+          const v = Number(plateauRaw);
+          if (Number.isFinite(v) && v >= 30 && v <= 86400) {
+            setPlateauIdleGrowthSec(String(Math.trunc(v)));
+          }
+        }
+      } catch {
+        // Ignore config fetch errors; runtime polling handles connectivity status.
+      }
+    };
+    fetchConfig();
   }, [apiBaseUrl]);
 
   useEffect(() => {
@@ -1155,6 +1188,22 @@ export default function App() {
                   />
                   <p className="mt-2 font-mono text-[10px] text-zinc-400">
                     The base URL for the Sherpa backend API.
+                  </p>
+                </div>
+                <div>
+                  <label className="block font-label text-xs font-bold tracking-widest uppercase text-zinc-500 mb-2">
+                    Plateau Idle Window (sec)
+                  </label>
+                  <input
+                    type="number"
+                    min={30}
+                    max={86400}
+                    value={plateauIdleGrowthSec}
+                    onChange={(e) => setPlateauIdleGrowthSec(e.target.value)}
+                    className="w-full bg-zinc-100 py-3 px-4 font-mono text-sm tracking-tight outline-none focus:ring-2 focus:ring-emerald-700"
+                  />
+                  <p className="mt-2 font-mono text-[10px] text-zinc-400">
+                    Run plateau idle-no-growth interval. Range: 30-86400 seconds.
                   </p>
                 </div>
                 <div className="pt-4">

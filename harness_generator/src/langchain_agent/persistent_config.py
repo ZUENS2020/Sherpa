@@ -78,6 +78,7 @@ class WebPersistentConfig(BaseModel):
     # Per-round cap (seconds) when both total/run budgets are unlimited (0).
     # 0 means fully unlimited.
     sherpa_run_unlimited_round_budget_sec: int = 7200
+    sherpa_run_plateau_idle_growth_sec: int = 600
     fuzz_use_docker: bool = False
     fuzz_docker_image: str = ""
 
@@ -623,6 +624,10 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     _set_env_if_value(
         "SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC",
         str(int(cfg.sherpa_run_unlimited_round_budget_sec)),
+    )
+    _set_env_if_value(
+        "SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC",
+        str(int(cfg.sherpa_run_plateau_idle_growth_sec)),
     )
 
     # Keep the OpenCode key file in sync for fuzz pipeline.
