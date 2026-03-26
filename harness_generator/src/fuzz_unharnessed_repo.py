@@ -416,6 +416,14 @@ def _run_ft_recent_growth_window_sec() -> int:
     return 600
 
 
+def _run_ft_growth_threshold() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FT_GROWTH_THRESHOLD") or "8").strip()
+    try:
+        return max(1, min(int(raw), 1_000_000))
+    except Exception:
+        return 8
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
