@@ -400,7 +400,20 @@ def _run_plateau_pulses() -> int:
 
 def _run_plateau_idle_growth_sec() -> int:
     # Keep plateau detection cadence deterministic across environments.
-    return 30
+    return 600
+
+
+def _run_ft_growth_threshold() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FT_GROWTH_THRESHOLD") or "8").strip()
+    try:
+        return max(1, min(int(raw), 1_000_000))
+    except Exception:
+        return 8
+
+
+def _run_ft_recent_growth_window_sec() -> int:
+    # Keep recent-ft growth window deterministic across environments.
+    return 600
 
 
 def _run_ft_growth_threshold() -> int:
@@ -4835,7 +4848,7 @@ EOF
             if kind == "PULSE":
                 # Coverage is the primary plateau signal. Recent feature-only growth
                 # can delay one pulse, but cannot suppress plateau indefinitely.
-                recent_ft_growth = (now - last_ft_growth_at) < max(1, plateau_idle_growth_sec // 3)
+                recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
                 if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
                     plateau_pulse_hits += 1
                     if plateau_pulse_hits >= plateau_pulses:
