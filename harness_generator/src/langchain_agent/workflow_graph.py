@@ -9170,6 +9170,11 @@ def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("restart_to_plan")):
         return "plan"
+    terminal_reason = (state.get("run_terminal_reason") or "").strip().lower()
+    # Coverage plateau is a coverage signal, not a hard run failure.
+    # Let coverage-analysis decide in_place vs replan.
+    if terminal_reason == "coverage_plateau":
+        return "coverage-analysis"
     run_error_kind = (state.get("run_error_kind") or "").strip().lower()
     if run_error_kind:
         return "plan"
