@@ -135,6 +135,7 @@ flowchart TD
 - 运行 fuzzer
 - 产出 coverage、exec/s、plateau、OOM、crash 等信号
 - 输出 `SeedFeedback` / `HarnessFeedback`
+- plateau 检测间隔固定 30 秒；`run_no_progress`/`run_timeout` 等可恢复错误会继续进入 `coverage-analysis`，不直接提前结束
 
 ### `coverage-analysis`
 

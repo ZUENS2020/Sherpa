@@ -74,6 +74,11 @@ flowchart TD
 - `re-build` / `re-run`：在隔离复现链路中重建并回放崩溃。
 - `crash-analysis`：对已复现 crash 做误报/真实 bug 分流，误报回 `plan`，否则停止并保留分析结果。
 
+补充（当前实现口径）：
+
+- plateau 检测窗口固定为 30 秒（`idle_no_growth=30s`）。
+- `run_no_progress`、`run_timeout`、`run_idle_timeout`、`run_finalize_timeout`、`run_resource_exhaustion` 属于可恢复 run 信号，会进入 `coverage-analysis` 持续改进闭环。
+
 说明：
 
 - `fix_build`、`fix_crash` 仍有兼容节点，但不是当前主线推荐路径。

@@ -591,17 +591,11 @@ def test_run_fuzzer_stops_on_coverage_plateau(tmp_path: Path, monkeypatch):
         return 143, "".join(lines), "\n[callback-stop] coverage_plateau (idle_no_growth=30s pulse_hits=3)"
 
     gen._run_cmd = _fake_run_cmd  # type: ignore[method-assign]
-    old_idle = os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC")
     old_pulses = os.environ.get("SHERPA_RUN_PLATEAU_PULSES")
-    os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = "2"
     os.environ["SHERPA_RUN_PLATEAU_PULSES"] = "3"
     try:
         result = gen._run_fuzzer(bin_path)
     finally:
-        if old_idle is None:
-            os.environ.pop("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC", None)
-        else:
-            os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = old_idle
         if old_pulses is None:
             os.environ.pop("SHERPA_RUN_PLATEAU_PULSES", None)
         else:
@@ -644,20 +638,14 @@ def test_run_fuzzer_feature_growth_only_delays_plateau(tmp_path: Path, monkeypat
         for line in lines:
             if cb is not None:
                 cb("stdout", line)
-        return 143, "".join(lines), "\n[callback-stop] coverage_plateau (idle_no_growth=2s pulse_hits=3)"
+        return 143, "".join(lines), "\n[callback-stop] coverage_plateau (idle_no_growth=30s pulse_hits=3)"
 
     gen._run_cmd = _fake_run_cmd  # type: ignore[method-assign]
-    old_idle = os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC")
     old_pulses = os.environ.get("SHERPA_RUN_PLATEAU_PULSES")
-    os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = "2"
     os.environ["SHERPA_RUN_PLATEAU_PULSES"] = "3"
     try:
         result = gen._run_fuzzer(bin_path)
     finally:
-        if old_idle is None:
-            os.environ.pop("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC", None)
-        else:
-            os.environ["SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC"] = old_idle
         if old_pulses is None:
             os.environ.pop("SHERPA_RUN_PLATEAU_PULSES", None)
         else:
