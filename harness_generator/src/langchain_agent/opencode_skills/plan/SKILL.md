@@ -1,45 +1,52 @@
-# Stage Skill: plan
+---
+name: plan
+description: Produce runtime-viable fuzz targets and execution plan artifacts for synthesize/build stages.
+compatibility: opencode
+metadata:
+  stage: plan
+  owner: sherpa
+---
 
-## Stage Goal
-Produce a realistic, runtime-viable target plan for harness generation.
+## What this skill does
+Generate planning artifacts that choose practical targets and define execution priorities.
 
-## Required Inputs
+## When to use this skill
+Use this skill in the `plan` stage for initial planning or re-planning.
+
+## Required inputs
 - `fuzz/target_analysis.json` (if present)
 - `fuzz/antlr_plan_context.json` (if present)
 - repository source/build metadata
 
-## Required Outputs
+## Required outputs
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
 - `fuzz/execution_plan.json`
 
-## Key File Templates
-- `fuzz/PLAN.md`
-  - selected best target (first)
-  - short rationale
-  - implementation hints for synthesize/build
-- `fuzz/targets.json`
-  - non-empty JSON array
-  - each item has non-empty: `name`, `api`, `lang`, `target_type`, `seed_profile`
-  - `api` must describe a target API identifier, not a generated harness source path
-  - forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`
-  - forbidden: `name = LLVMFuzzerTestOneInput`
-  - rank runtime-executable/public targets first
-- `fuzz/execution_plan.json`
-  - include top execution targets (default top 3)
-  - each target keeps `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`
-  - include `min_required_built_targets` (default >=2 when multiple execution targets exist)
+## Workflow
+1. Read target analysis and identify runtime-viable public entrypoints.
+2. Produce `fuzz/targets.json` as a strict non-empty array.
+3. Produce `fuzz/execution_plan.json` with prioritized execution targets.
+4. Write concise implementation guidance into `fuzz/PLAN.md`.
 
-## Acceptance Criteria
-- `fuzz/PLAN.md` exists and references a concrete primary target.
-- `fuzz/targets.json` is strict-schema valid and non-empty.
-- top-ranked target is runtime-viable and not a helper-only target.
-- `fuzz/execution_plan.json` exists and is consistent with selected top runtime targets.
-- when diagnostics/context include concrete file paths, surface explicit actions as `Read and fix <path>[:line]`.
+## Constraints
+- In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
+- `api` must describe an API identifier, not a harness path.
+- Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
+- Forbidden: `name = LLVMFuzzerTestOneInput`.
+- Rank runtime-executable/public targets first.
+- `fuzz/execution_plan.json` must include `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`.
+- Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
+- When diagnostics include concrete file paths, use `Read and fix <path>[:line]`.
 
-## Command Policy
+## Command policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `head`, `tail`, read-only `sed`).
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/PLAN.md` into `./done`.
+## Acceptance checklist
+- `fuzz/PLAN.md` exists and references a concrete primary target.
+- `fuzz/targets.json` is strict-schema valid and non-empty.
+- `fuzz/execution_plan.json` is consistent with selected runtime targets.
+
+## Done contract
+- Write `fuzz/PLAN.md` into `./done`.

@@ -38,6 +38,6 @@ def test_prompts_and_skills_reference_execution_plan_contract() -> None:
     assert "fuzz/execution_plan.json" in plan
     assert "min_required_built_targets" in plan
     assert "fuzz/execution_plan.json" in synth
-    assert "multiple execution targets" in synth
+    assert "multiple targets" in synth
     assert "fuzz/harness_index.json" in synth
     assert "fuzz/execution_plan.json" in fix_build

@@ -1,20 +1,31 @@
-# Stage Skill: fix_build
+---
+name: fix_build
+description: Apply minimal evidence-driven build fixes in fuzz scaffold files for next build attempt.
+compatibility: opencode
+metadata:
+  stage: fix-build
+  owner: sherpa
+---
 
-## Stage Goal
-Fix `fuzz/` build glue so the next workflow build attempt can pass.
+## What this skill does
+Repairs `fuzz/` build glue and related scaffold metadata after build failures.
 
-## Required Inputs
+## When to use this skill
+Use this skill when build diagnostics exist and coordinator requests targeted build recovery.
+
+## Required inputs
 - build diagnostics (`fuzz/build_full.log` or coordinator context)
 - current `fuzz/build.py` and harness files
-- current strategy/understanding files under `fuzz/`
+- strategy/understanding files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
+- `previous_failed_attempts` from context (if provided)
 
-## Required Outputs
+## Required outputs
 - minimal build fix under `fuzz/`
-- consistent updates to strategy/understanding/runtime-facts files when needed
+- consistent updates to strategy/understanding/runtime-facts when required
 
-## Key File Templates
-- `fuzz/build.py` must preserve:
+## Key template contract (`fuzz/build.py`)
+- Keep:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
   - exact static-lib discovery block:
 ```python
@@ -32,29 +43,40 @@ def find_static_lib(repo_root):
             return p
     return None
 ```
-- if dependency evidence exists, update `fuzz/system_packages.txt` with canonical vcpkg names only.
-- canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
-- if editing `fuzz/repo_understanding.json`, keep `chosen_target_api` as API identifier (not `fuzz/*.cc`-style path), keep `build_system != unknown`, and keep `evidence` as non-empty string array.
-- when execution plan requires multiple targets, do not "fix" build by dropping to single-target-only output.
-- when build diagnostics indicate internal/private API usage errors, replace those usages with public/stable APIs first; do not patch by switching to other private symbols.
-- if no public alternative exists, record `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
+- Compiler-by-suffix is mandatory:
+  - compile `.c` with `clang`
+  - compile `.cc/.cpp/.cxx` with `clang++`
+  - never compile C files with `clang++` by default
 
-## Acceptance Criteria
-- fix is evidence-driven and minimal.
-- must produce textual code changes when current diagnostics are still failing; pure no-op is invalid.
-- stale `./done` without fresh diff is invalid and must not be treated as successful completion.
-- read and use `previous_failed_attempts` from context to avoid repeating already-failed approaches.
-- no edits outside `fuzz/` (except `./done`).
-- strategy/understanding files remain aligned with build behavior.
-- build result remains aligned with execution-plan target coverage constraints.
-- do not bypass workflow acceptance by weakening or corrupting `repo_understanding` semantics.
-- when the same error repeats, change strategy instead of repeating the same patch.
-- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
-- when diagnostics include concrete symbol/file/line errors, tie each edit to those locations before broader refactors.
+## Workflow
+1. Read diagnostics first; identify smallest root-cause edit.
+2. Apply minimal patch tied to concrete symbol/file/line errors.
+3. If dependencies are missing, update `fuzz/system_packages.txt` using canonical vcpkg names.
+4. Keep execution-plan coverage intent (do not silently collapse multi-target plans).
 
-## Command Policy
+## Constraints
+- Canonical vcpkg examples: `zlib`, `bzip2`, `liblzma`, `lz4`, `zstd`, `openssl`, `expat`, `libxml2` (never `z`, `bz2`, `lzma`).
+- If editing `fuzz/repo_understanding.json`, keep:
+  - `chosen_target_api` as API identifier (not `fuzz/*.cc` path)
+  - `build_system != unknown`
+  - `evidence` as non-empty string array
+- Prefer public/stable APIs in harness code.
+- For `non_public_api_usage`, replace offending symbols first.
+- If no public alternative exists, record `api_surface_exception` with non-empty `reason` and `evidence`.
+- Must produce textual code changes; pure no-op is invalid.
+- Stale `./done` without fresh diff is invalid.
+- No edits outside `fuzz/` except `./done`.
+- Do not bypass workflow acceptance by weakening `repo_understanding` semantics.
+- Use explicit path actions: `Read and fix <path>[:line]`.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write one key modified path under `fuzz/` into `./done`.
+## Acceptance checklist
+- Fix is evidence-driven and minimal.
+- Repeated signatures trigger a changed strategy.
+- Build/scaffold behavior remains aligned with execution-plan expectations.
+
+## Done contract
+- Write one key modified path under `fuzz/` into `./done`.

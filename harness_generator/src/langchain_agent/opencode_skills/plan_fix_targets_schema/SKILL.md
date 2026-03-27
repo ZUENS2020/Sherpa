@@ -1,37 +1,48 @@
-# Stage Skill: plan_fix_targets_schema
+---
+name: plan_fix_targets_schema
+description: Repair targets.json into strict schema-valid shape without losing planning semantics.
+compatibility: opencode
+metadata:
+  stage: plan-fix-targets-schema
+  owner: sherpa
+---
 
-## Stage Goal
-Repair `fuzz/targets.json` so it passes strict schema validation.
+## What this skill does
+Fixes `fuzz/targets.json` schema violations while preserving target intent.
 
-## Required Inputs
+## When to use this skill
+Use this skill when coordinator reports `targets.json` schema errors.
+
+## Required inputs
 - current `fuzz/targets.json`
 - schema error text from coordinator
 
-## Required Outputs
+## Required outputs
 - fixed `fuzz/targets.json`
 
-## Key File Templates
-- `fuzz/targets.json`
-  - JSON array (not wrapped object)
-  - non-empty array
-  - each object contains:
-    - `name` (string)
-    - `api` (string)
-    - `lang` in `c-cpp|cpp|c|c++|java`
-    - `target_type` in `parser|decoder|archive|image|document|network|database|serializer|interpreter|generic`
-  - `seed_profile` in `parser-structure|parser-token|parser-format|parser-numeric|decoder-binary|archive-container|serializer-structured|document-text|network-message|generic`
-  - forbidden: `name = LLVMFuzzerTestOneInput`
-  - semantic reminder: do not rewrite `api` to harness file paths like `fuzz/*.cc` even when schema only requires string type
+## Workflow
+1. Parse schema diagnostics and locate invalid fields.
+2. Repair only the invalid fields while preserving valid planning data.
+3. Re-check array shape and required enums.
 
-## Acceptance Criteria
-- JSON parses successfully.
-- schema fields and enum values are valid for all entries.
-- array remains non-empty.
-- when schema diagnostics include concrete file/line references, surface explicit actions as `Read and fix <path>[:line]`.
+## Constraints
+- `fuzz/targets.json` must be a non-empty JSON array.
+- Each item must include `name`, `api`, `lang`, `target_type`, `seed_profile`.
+- `lang` must be in `c-cpp|cpp|c|c++|java`.
+- `target_type` must be in `parser|decoder|archive|image|document|network|database|serializer|interpreter|generic`.
+- `seed_profile` must be in `parser-structure|parser-token|parser-format|parser-numeric|decoder-binary|archive-container|serializer-structured|document-text|network-message|generic`.
+- Forbidden: `name = LLVMFuzzerTestOneInput`.
+- Semantic reminder: do not rewrite `api` to harness paths like `fuzz/*.cc`.
+- When diagnostics include concrete file paths, use `Read and fix <path>[:line]`.
 
-## Command Policy
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/targets.json` into `./done`.
+## Acceptance checklist
+- JSON parses successfully.
+- Schema fields and enum values are valid for all entries.
+- Array remains non-empty.
+
+## Done contract
+- Write `fuzz/targets.json` into `./done`.

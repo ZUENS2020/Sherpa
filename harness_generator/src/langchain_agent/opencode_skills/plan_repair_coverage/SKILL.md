@@ -1,33 +1,49 @@
-# Stage Skill: plan_repair_coverage
+---
+name: plan_repair_coverage
+description: Re-plan target and strategy after coverage plateau using seed/harness feedback first.
+compatibility: opencode
+metadata:
+  stage: plan-repair-coverage
+  owner: sherpa
+---
 
-## Stage Goal
-Repair planning artifacts after a coverage plateau / replan trigger.
+## What this skill does
+Repairs planning artifacts when coverage has plateaued and a replan decision is needed.
 
-## Required Inputs
-- coverage diagnostics from coordinator context (`coverage_*`, `repair_*`)
-- `SeedFeedback` and `HarnessFeedback` blocks from coordinator context (when provided)
-- `fuzz/PLAN.md` (if present)
-- `fuzz/targets.json` (if present)
-- `fuzz/execution_plan.json` (if present)
-- `fuzz/harness_index.json` (if present)
+## When to use this skill
+Use this skill when `coverage-analysis` selects replan mode.
 
-## Required Outputs
+## Required inputs
+- coverage diagnostics (`coverage_*`, `repair_*`)
+- `SeedFeedback` and `HarnessFeedback` blocks (if provided)
+- `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json`, `fuzz/harness_index.json` (if present)
+
+## Required outputs
 - updated `fuzz/PLAN.md`
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
 - explicit strategy-diff note from previous failed coverage cycle
 
-## Acceptance Criteria
-- plan consumes coverage diagnostics first (plateau reason, seed family gaps, quality flags).
-- plan consumes `SeedFeedback` and `HarnessFeedback` first and maps each chosen action to one of these signals.
-- plan describes at least one material strategy change, not a cosmetic rewrite.
-- target choices remain runtime-viable and increase depth potential.
-- plan keeps `fuzz/execution_plan.json` mappable to `fuzz/harness_index.json`.
-- no doc-only update disconnected from next build/run outcomes.
+## Workflow
+1. Read coverage diagnostics first.
+2. Map seed/harness quality gaps to concrete actions.
+3. Produce at least one material strategy change.
+4. Keep execution plan mappable to harness index.
 
-## Command Policy
+## Constraints
+- Consume `SeedFeedback` and `HarnessFeedback` before proposing changes.
+- Avoid cosmetic rewrites.
+- Keep target choices runtime-viable and depth-oriented.
+- No doc-only update disconnected from next build/run outcomes.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/PLAN.md` into `./done`.
+## Acceptance checklist
+- Plan includes strategy-diff with concrete changed actions.
+- `fuzz/execution_plan.json` remains mappable to `fuzz/harness_index.json`.
+- Coverage diagnostics are explicitly addressed.
+
+## Done contract
+- Write `fuzz/PLAN.md` into `./done`.

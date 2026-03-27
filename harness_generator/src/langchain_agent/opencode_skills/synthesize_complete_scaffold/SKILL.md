@@ -1,66 +1,55 @@
-# Stage Skill: synthesize_complete_scaffold
+---
+name: synthesize_complete_scaffold
+description: Complete missing scaffold artifacts with minimal changes while preserving target/build consistency.
+compatibility: opencode
+metadata:
+  stage: synthesize-complete-scaffold
+  owner: sherpa
+---
 
-## Stage Goal
-Complete only missing required scaffold items without rewriting unrelated files.
+## What this skill does
+Repairs only missing or semantically invalid scaffold items without rewriting unrelated files.
 
-## Required Inputs
+## When to use this skill
+Use this skill when coordinator reports missing scaffold files after synthesize.
+
+## Required inputs
 - current `fuzz/` scaffold
 - missing items list from coordinator
 - `fuzz/execution_plan.json` (if present)
 - `fuzz/harness_index.json` (if present)
 
-## Required Outputs
+## Required outputs
 - missing required files completed under `fuzz/`
-- if harness source is missing, create at least one harness source file under `fuzz/` before only-doc/json fixes
-- refresh `fuzz/harness_index.json` so execution targets map to real harness files
+- if harness source is missing, create at least one harness source file before doc/json-only fixes
+- refreshed `fuzz/harness_index.json` mapping execution targets to real harness files
 
-## Key File Templates
-- `fuzz/README.md` required fields:
-  - `Selected target: ...`
-  - `Final target: ...`
-  - `Technical reason: ...`
-  - `Relation: ...`
-  - `Harness file: ...`
-- `fuzz/repo_understanding.json` repair contract:
-  - if file exists but keys are incomplete, repair it in place
-  - if fields are present but semantically invalid, repair them before any cosmetic/doc-only edits
-  - ensure non-empty `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`
-  - ensure `evidence` is a non-empty array
-  - ensure `chosen_target_api` is an API identifier, not a harness file path/value ending in `.c|.cc|.cpp|.cxx|.java`
-  - ensure `build_system.lower() != "unknown"`
-  - minimal valid shape example:
-```json
-{
-  "build_system": "cmake",
-  "chosen_target_api": "archive_read_open1",
-  "chosen_target_reason": "runtime-reachable entrypoint",
-  "fuzzer_entry_strategy": "sanitizer_fuzzer",
-  "evidence": ["concrete repo build facts"]
-}
-```
-- `fuzz/build_strategy.json`
-  - explicit `fuzzer_entry_strategy`
-  - consistent with existing harness/build path
-- `fuzz/repo_understanding.json` and `fuzz/build_runtime_facts.json`
-  - concise, evidence-backed, scaffold-consistent
-- if `fuzz/execution_plan.json` has multiple execution targets, repair scaffold to keep multi-target buildability.
-- if `fuzz/build.py` exists and uses invalid parallel style (for example `$(nproc)`), repair it to Python-native args such as `["-j", str(os.cpu_count() or 1)]`.
+## Workflow
+1. Repair missing harness source first if absent.
+2. Repair/complete required scaffold files only.
+3. Repair semantic invalid states in `repo_understanding.json`.
+4. Reconcile execution plan and harness index mappings.
 
-## Acceptance Criteria
-- all required scaffold files exist after this step.
-- if harness was missing before this step, harness exists after this step.
-- if `fuzz/repo_understanding.json` existed but was incomplete or semantically invalid, required keys are repaired and non-empty.
-- `chosen_target_api` is not a harness file path pattern and not a filename-only suffix value.
-- `build_system` is concrete (not `unknown`) and `evidence` is a non-empty string array.
-- when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]` before broader edits.
-- existing harness/build assets are preserved unless minimal changes are required.
-- no guessed paths/targets are introduced.
-- repaired scaffold remains consistent with `fuzz/execution_plan.json` when that file exists.
-- `fuzz/harness_index.json` is updated and contains no missing execution-target mappings.
+## Constraints
+- Preserve existing harness/build assets unless minimal change is required.
+- `fuzz/repo_understanding.json` must contain non-empty:
+  - `build_system`, `chosen_target_api`, `chosen_target_reason`, `fuzzer_entry_strategy`, `evidence`
+- `chosen_target_api` must not be harness file path-like.
+- `build_system.lower() != "unknown"`.
+- `evidence` must be non-empty string array.
+- If `fuzz/build.py` uses invalid parallel style (`$(nproc)`), repair to `["-j", str(os.cpu_count() or 1)]`.
+- Keep multi-target buildability when `fuzz/execution_plan.json` contains multiple targets.
+- Use explicit path actions: `Read and fix <path>[:line]`.
 
-## Command Policy
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/out/` into `./done`.
+## Acceptance checklist
+- All required scaffold files exist after this step.
+- If harness was missing before this step, harness exists after this step.
+- `fuzz/harness_index.json` contains no missing execution-target mappings.
+- `repo_understanding.json` is semantically valid.
+
+## Done contract
+- Write `fuzz/out/` into `./done`.

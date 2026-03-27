@@ -50,6 +50,7 @@ Build-repair focus:
 - prioritize compile/link/build-system root cause
 - produce a strategy different from the previous failed attempt when signatures repeat
 - keep target/runtime decisions grounded in build diagnostics
+- enforce compiler-by-suffix in build scripts: `.c` files must compile with `clang`; `.cc/.cpp/.cxx` files must compile with `clang++` (never force all sources through `clang++`)
 - prefer public/stable APIs for harness logic; use internal/private APIs only when no viable public alternative exists, and document evidence via `api_surface_exception`
 
 Constraints:
@@ -164,6 +165,7 @@ Stage requirements:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
   - runtime artifact discovery (do not hardcode a single static library path)
   - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
+  - compiler-by-suffix rule: compile `.c` harnesses with `clang`; compile `.cc/.cpp/.cxx` harnesses with `clang++`
 
 MANDATORY:
 - create `./done`
@@ -196,6 +198,7 @@ Build-repair constraints:
 - avoid no-op doc-only edits
 - keep target/build fields consistent across README + JSONs + build script
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
+- enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed

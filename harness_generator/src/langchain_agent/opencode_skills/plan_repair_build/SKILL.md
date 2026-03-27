@@ -1,33 +1,51 @@
-# Stage Skill: plan_repair_build
+---
+name: plan_repair_build
+description: Re-plan targets and scaffold strategy after build-stage failures using diagnostic-first reasoning.
+compatibility: opencode
+metadata:
+  stage: plan-repair-build
+  owner: sherpa
+---
 
-## Stage Goal
-Repair planning artifacts after a build-stage failure.
+## What this skill does
+Repairs planning artifacts for build recovery while keeping execution targets mappable and runtime-viable.
 
-## Required Inputs
+## When to use this skill
+Use this skill when the workflow is in repair mode with `repair_origin_stage=build`.
+
+## Required inputs
 - `repair_*` diagnostics from coordinator context
-- `fuzz/PLAN.md` (if present)
-- `fuzz/targets.json` (if present)
-- `fuzz/execution_plan.json` (if present)
-- `repair_error_digest` from coordinator context (if provided)
+- `repair_error_digest` (if provided)
+- `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json` (if present)
 
-## Required Outputs
+## Required outputs
 - updated `fuzz/PLAN.md`
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
-- strategy note that keeps `fuzz/harness_index.json` mappable (no orphan execution targets)
+- strategy note that keeps `fuzz/harness_index.json` mappable
 
-## Acceptance Criteria
-- plan explicitly addresses current build failure kind/code/signature.
-- plan includes at least one strategy change from the latest failed attempt.
-- targets remain runtime-viable and executable-first.
-- do not produce doc-only updates disconnected from build recovery.
-- default to public/stable APIs for harness logic.
-- if non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
-- when diagnostics contain `non_public_api_usage`, plan must prioritize replacing offending symbols first.
+## Workflow
+1. Read repair diagnostics first.
+2. Identify root build failure pattern (compile/link/toolchain/path).
+3. Produce planning changes with at least one strategy change.
+4. Keep execution targets runtime-viable and mappable.
 
-## Command Policy
+## Constraints
+- Do not produce doc-only updates disconnected from build recovery.
+- Include compiler-selection strategy in plan notes: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`.
+- Explicitly reject universal `clang++` for mixed C/C++ harness builds unless evidence proves it is required.
+- Default to public/stable APIs for harness logic.
+- If non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
+- If diagnostics contain `non_public_api_usage`, prioritize replacing offending symbols first.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/PLAN.md` into `./done`.
+## Acceptance checklist
+- Plan explicitly addresses current build failure kind/code/signature.
+- Plan includes at least one strategy change from latest failed attempt.
+- Targets remain runtime-viable and executable-first.
+
+## Done contract
+- Write `fuzz/PLAN.md` into `./done`.
