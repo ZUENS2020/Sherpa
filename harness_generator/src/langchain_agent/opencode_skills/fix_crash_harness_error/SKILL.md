@@ -1,33 +1,49 @@
-# Stage Skill: fix_crash_harness_error
+---
+name: fix_crash_harness_error
+description: Repair harness-side crash causes while preserving target behavior and repro semantics.
+compatibility: opencode
+metadata:
+  stage: fix-crash-harness-error
+  owner: sherpa
+---
 
-## Stage Goal
-Fix harness/build glue errors so the same crashing input no longer fails due to harness misuse.
+## What this skill does
+Apply targeted harness/build-glue fixes for crashes classified as harness bugs.
 
-## Required Inputs
+## When to use this skill
+Use this skill only when crash triage/analysis indicates `harness_bug`.
+
+## Required inputs
 - `crash_info.md`
-- `crash_analysis.md` indicating harness error
-- crashing artifact metadata from coordinator
+- `crash_analysis.md` indicating harness-side fault
+- crash artifact metadata from coordinator context
 
-## Required Outputs
-- targeted harness/build glue fix
+## Required outputs
+- minimal harness/build-glue patch under `fuzz/`
 
-## Key File Templates
-- focus on `fuzz/` harness/build glue files only
-- keep changes minimal and directly tied to misuse/precondition violations
+## Workflow
+1. Read crash diagnostics and identify harness misuse/precondition violations.
+2. Apply a minimal patch in `fuzz/` files.
+3. Keep crash-path semantics and target behavior intact.
 
-## Acceptance Criteria
-- patch addresses harness-side root cause.
-- no unrelated refactor.
-- no upstream/project source modifications unless strictly required.
-- must produce textual code changes; pure no-op is invalid.
-- do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
-- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
-- prefer public/stable APIs in harness code; replace internal/private symbols first.
-- if no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
+## Constraints
+- Focus on `fuzz/` harness/build glue files.
+- No unrelated refactor.
+- Avoid upstream project source edits unless strictly required.
+- Must produce textual code changes; pure no-op is invalid.
+- Do not bypass acceptance by tampering with `fuzz/repo_understanding.json`.
+- Use explicit actions when diagnostics include concrete paths: `Read and fix <path>[:line]`.
+- Prefer public/stable APIs; replace internal/private symbols first.
+- If no public alternative exists, add `api_surface_exception` with non-empty `reason` and `evidence`.
 
-## Command Policy
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write the key modified path into `./done`.
+## Acceptance checklist
+- Patch addresses harness-side root cause directly.
+- Changes are minimal and evidence-driven.
+- No semantic bypass and no doc-only/no-op patch.
+
+## Done contract
+- Write one key modified path into `./done`.
