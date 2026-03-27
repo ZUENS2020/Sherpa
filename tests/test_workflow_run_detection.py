@@ -349,6 +349,23 @@ def test_solve_parallelism_keeps_outer_inner_within_budget():
     assert out["outer_parallelism"] * out["inner_workers"] <= 4
 
 
+def test_solve_parallelism_warning_reports_pre_and_post_clamp():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=4,
+        n_targets=3,
+        requested_outer=3,
+        outer_parallelism_max=16,
+        inner_workers_min=2,
+        requested_inner=8,
+        engine="fork",
+        sanitizer="undefined",
+    )
+    warning = str(out.get("warning") or "")
+    assert "parallel_budget_clamped" in warning
+    assert "pre_outer=" in warning and "pre_inner=" in warning
+    assert "resolved_outer=" in warning and "resolved_inner=" in warning
+
+
 def test_node_run_exposes_parallel_metadata_in_details(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
     monkeypatch.setenv("SHERPA_RUN_PARALLEL_ENGINE", "jobs_workers")

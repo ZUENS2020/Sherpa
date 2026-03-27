@@ -2539,11 +2539,8 @@ def _solve_parallelism(
             inner = max(inner_min, min(inner_req, inner_cap, cpu))
 
     warning = ""
-    if outer * inner > cpu:
-        warning = (
-            f"parallel_budget_clamped requested_outer={requested_outer} requested_inner={requested_inner} "
-            f"cpu_budget={cpu} resolved_outer={outer} resolved_inner={inner}"
-        )
+    pre_clamp_outer = int(outer)
+    pre_clamp_inner = int(inner)
     while outer * inner > cpu and inner > inner_min:
         inner -= 1
     while outer * inner > cpu and outer > 1:
@@ -2551,6 +2548,12 @@ def _solve_parallelism(
     if outer * inner > cpu:
         inner = 1
         outer = min(outer, cpu)
+    if pre_clamp_outer != int(outer) or pre_clamp_inner != int(inner):
+        warning = (
+            f"parallel_budget_clamped requested_outer={requested_outer} requested_inner={requested_inner} "
+            f"cpu_budget={cpu} pre_outer={pre_clamp_outer} pre_inner={pre_clamp_inner} "
+            f"resolved_outer={outer} resolved_inner={inner}"
+        )
 
     if inner <= 1 and resolved_engine != "single":
         resolved_engine = "single"
