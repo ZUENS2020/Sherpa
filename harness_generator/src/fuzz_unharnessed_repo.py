@@ -422,6 +422,8 @@ def _run_ft_recent_growth_window_sec() -> int:
         except Exception:
             pass
     return _run_plateau_idle_growth_sec()
+
+
 def _run_plateau_pulse_min_interval_sec() -> int:
     # libFuzzer pulse lines are execution-count based and can be very frequent.
     # We intentionally sample pulse-based plateau checks every 10 minutes.
