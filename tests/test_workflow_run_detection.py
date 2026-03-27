@@ -411,9 +411,50 @@ def test_node_run_marks_no_progress_for_execs_zero_with_warning(tmp_path: Path):
     assert "no measurable progress" in out["last_error"]
 
 
+def test_node_run_marks_seed_rejected_for_no_interesting_with_zero_cov_and_tiny_corpus(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail=(
+                    "INFO: seed corpus: files: 1 min: 1b max: 1b total: 1b rss: 27Mb\n"
+                    "#134217728\tpulse  corp: 1/1b lim: 16384 exec/s: 762600 rss: 615Mb\n"
+                    "WARNING: no interesting inputs were found so far."
+                ),
+                error="",
+                run_error_kind="",
+                final_cov=0,
+                final_ft=0,
+                final_corpus_files=1,
+                final_corpus_size_bytes=1,
+                final_execs_per_sec=762600,
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["last_step"] == "run"
+    assert out["crash_found"] is False
+    assert out["run_error_kind"] == "run_seed_rejected"
+    assert "inputs were likely rejected" in out["last_error"]
+
+
 def test_route_after_run_routes_recoverable_run_errors_to_coverage_analysis():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
+def test_route_after_run_routes_seed_rejected_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_seed_rejected", "failed": False, "crash_found": False}
     )
     assert route == "coverage-analysis"
 
@@ -870,7 +911,13 @@ def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
         assert out["run_terminal_reason"] == "run_finalize_timeout"
     else:
         assert out["last_step"] == "run"
-        assert out["run_error_kind"] in {"", "run_no_progress", "nonzero_exit_without_crash", "run_finalize_timeout"}
+        assert out["run_error_kind"] in {
+            "",
+            "run_no_progress",
+            "run_seed_rejected",
+            "nonzero_exit_without_crash",
+            "run_finalize_timeout",
+        }
 
 
 def test_calc_parallel_batch_budget_caps_unlimited_round_by_default(monkeypatch):

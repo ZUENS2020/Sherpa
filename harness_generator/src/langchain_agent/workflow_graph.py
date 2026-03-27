@@ -36,6 +36,7 @@ from fuzz_unharnessed_repo import (
 
 _RECOVERABLE_RUN_ERROR_KINDS = {
     "run_no_progress",
+    "run_seed_rejected",
     "run_idle_timeout",
     "run_timeout",
     "run_finalize_timeout",
@@ -7134,27 +7135,44 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         # ending in a false-success/false-running state.
         if not crash_candidates and not run_last_error:
             no_progress_fuzzers: list[str] = []
+            seed_rejected_fuzzers: list[str] = []
             for detail in run_details:
                 if bool(detail.get("crash_found")):
                     continue
                 if int(detail.get("rc") or 0) != 0:
                     continue
                 final_execs = int(detail.get("final_execs_per_sec") or 0)
+                final_cov = int(detail.get("final_cov") or 0)
+                final_ft = int(detail.get("final_ft") or 0)
+                final_corpus_files = int(detail.get("final_corpus_files") or 0)
+                final_corpus_size_bytes = int(detail.get("final_corpus_size_bytes") or 0)
                 log_or_err = f"{detail.get('error') or ''}\n{detail.get('log_tail') or ''}".lower()
                 warned_no_progress = (
                     "no interesting inputs were found so far" in log_or_err
                     or "inited exec/s: 0" in log_or_err
                     or "exec/s: 0" in log_or_err
                 )
+                if warned_no_progress and final_execs > 0 and final_cov <= 0 and final_ft <= 0 and (
+                    final_corpus_files <= 1 or final_corpus_size_bytes <= 1
+                ):
+                    seed_rejected_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
                 if final_execs <= 0 and warned_no_progress:
                     no_progress_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
-            if no_progress_fuzzers:
-                run_error_kind = "run_no_progress"
-                joined = ", ".join(no_progress_fuzzers[:5])
+            if seed_rejected_fuzzers:
+                run_error_kind = "run_seed_rejected"
+                joined = ", ".join(seed_rejected_fuzzers[:5])
                 run_last_error = (
-                    "fuzzer run made no measurable progress "
-                    f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    "fuzzer inputs were likely rejected by target parser "
+                    f"(no interesting inputs, zero cov/ft, tiny corpus): {joined}"
                 )
+            if no_progress_fuzzers:
+                if not run_error_kind:
+                    run_error_kind = "run_no_progress"
+                    joined = ", ".join(no_progress_fuzzers[:5])
+                    run_last_error = (
+                        "fuzzer run made no measurable progress "
+                        f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    )
 
         if crash_candidates:
             if _finalize_timed_out("packaging crash artifacts"):
