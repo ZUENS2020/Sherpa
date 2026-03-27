@@ -429,12 +429,13 @@ def _run_plateau_pulse_min_interval_sec() -> int:
 
 
 def _run_libfuzzer_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "0").strip()
+    raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "1200").strip()
     try:
-        # 0 disables libFuzzer's per-input timeout.
+        # Keep libFuzzer per-input timeout enabled by default to avoid
+        # single-unit hangs blocking long-running jobs indefinitely.
         return max(0, min(int(raw), 86_400))
     except Exception:
-        return 0
+        return 1200
 
 
 def _default_diff_excludes() -> set[str]:
