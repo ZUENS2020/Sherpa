@@ -909,6 +909,37 @@ def test_node_coverage_analysis_marks_parallel_resource_underutilized():
     assert "increase outer or inner workers" in out["coverage_parallel_diagnosis"]
 
 
+def test_node_coverage_analysis_marks_parallel_resource_underutilized_with_low_nonzero_execs():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_parallel_engine": "single",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 1,
+            "run_parallel_cpu_budget": 8,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "final_execs_per_sec": 42,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "resource_underutilized"
+    assert int(out["coverage_underutilized_execs_threshold"]) == 100
+
+
 def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
     out = workflow_graph._node_coverage_analysis(
         {

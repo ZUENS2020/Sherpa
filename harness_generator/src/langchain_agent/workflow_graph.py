@@ -2475,6 +2475,14 @@ def _run_ignore_non_fatal_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _coverage_underutilized_execs_threshold() -> int:
+    raw = (os.environ.get("SHERPA_COVERAGE_UNDERUTILIZED_EXECS_THRESHOLD") or "100").strip()
+    try:
+        return max(0, min(int(raw), 10_000_000))
+    except Exception:
+        return 100
+
+
 def _solve_parallelism(
     *,
     cpu_budget: int,
@@ -7764,8 +7772,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             parallel_utilization_ratio = 0.0
         if parallel_utilization_ratio > 1.0:
             parallel_utilization_ratio = 1.0
+        underutilized_execs_threshold = _coverage_underutilized_execs_threshold()
         resource_underutilized = bool(
-            total_execs_per_sec <= 0 and configured_parallel_units < int(parallel_cpu_budget * 0.7)
+            configured_parallel_units < int(parallel_cpu_budget * 0.7)
+            and total_execs_per_sec < underutilized_execs_threshold
         )
         strategy_mismatch = bool(
             plateau_detected and total_execs_per_sec > 0 and current_cov <= prev_cov and current_ft <= prev_ft
@@ -7923,6 +7933,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "parallel_cpu_budget": parallel_cpu_budget,
                 "parallel_utilization_ratio": parallel_utilization_ratio,
                 "total_execs_per_sec": total_execs_per_sec,
+                "underutilized_execs_threshold": underutilized_execs_threshold,
                 "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
                 "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
@@ -7958,6 +7969,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_parallel_cpu_budget": parallel_cpu_budget,
             "coverage_parallel_utilization_ratio": parallel_utilization_ratio,
             "coverage_total_execs_per_sec": total_execs_per_sec,
+            "coverage_underutilized_execs_threshold": underutilized_execs_threshold,
             "coverage_target_depth_score": current_depth_score,
             "coverage_target_depth_class": current_depth_class,
             "coverage_selection_bias_reason": current_selection_bias_reason,
