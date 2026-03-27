@@ -422,6 +422,19 @@ def _run_ft_recent_growth_window_sec() -> int:
         except Exception:
             pass
     return _run_plateau_idle_growth_sec()
+def _run_plateau_pulse_min_interval_sec() -> int:
+    # libFuzzer pulse lines are execution-count based and can be very frequent.
+    # We intentionally sample pulse-based plateau checks every 10 minutes.
+    return 600
+
+
+def _run_libfuzzer_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "0").strip()
+    try:
+        # 0 disables libFuzzer's per-input timeout.
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 0
 
 
 def _default_diff_excludes() -> set[str]:
@@ -4816,10 +4829,13 @@ EOF
         last_cov_growth_at = now0
         last_ft_growth_at = now0
         plateau_pulse_hits = 0
+        last_plateau_pulse_at = 0.0
+        plateau_pulse_min_interval_sec = _run_plateau_pulse_min_interval_sec()
         callback_stop_reason = ""
 
         def _line_callback(_kind: str, text: str) -> Optional[str]:
             nonlocal best_cov, best_ft, last_cov_growth_at, last_ft_growth_at, plateau_pulse_hits, callback_stop_reason
+            nonlocal last_plateau_pulse_at
             m = _LIBFUZZER_PROGRESS_RE.search(text or "")
             if not m:
                 return None
@@ -4846,6 +4862,12 @@ EOF
                     plateau_pulse_hits -= 1
                 return None
             if kind == "PULSE":
+                if (
+                    last_plateau_pulse_at > 0
+                    and (now - last_plateau_pulse_at) < plateau_pulse_min_interval_sec
+                ):
+                    return None
+                last_plateau_pulse_at = now
                 # Coverage is the primary plateau signal. Recent feature-only growth
                 # can delay one pulse, but cannot suppress plateau indefinitely.
                 recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
@@ -4864,6 +4886,7 @@ EOF
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
             f"-rss_limit_mb={self.rss_limit_mb}",
+            f"-timeout={_run_libfuzzer_timeout_sec()}",
         ]
 
         # Adaptive max_len based on seed_profile
