@@ -433,6 +433,22 @@ def _run_plateau_pulse_min_interval_sec() -> int:
         return 60
 
 
+def _run_plateau_hit_interval_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC") or "").strip()
+    if raw:
+        try:
+            return max(0, min(int(raw), 86_400))
+        except Exception:
+            return 60
+    # Backward-compatible fallback
+    return _run_plateau_pulse_min_interval_sec()
+
+
+def _run_progress_samples_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_PROGRESS_SAMPLES_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _run_libfuzzer_timeout_sec() -> int:
     raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "1200").strip()
     try:
@@ -909,12 +925,15 @@ class FuzzerRunResult:
     terminal_reason: str = ""
     plateau_detected: bool = False
     plateau_idle_seconds: int = 0
+    plateau_hit_count: int = 0
+    plateau_last_hit_at: float = 0.0
+    progress_sample_file: str = ""
     seed_quality: Dict[str, object] | None = None
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
     r"#(?P<iter>\d+)\s+"
-    r"(?P<kind>NEW|REDUCE|pulse)\s+"
+    r"(?P<kind>INITED|NEW|REDUCE|pulse)\s+"
     r"cov:\s*(?P<cov>\d+)\s+"
     r"ft:\s*(?P<ft>\d+)\s+"
     r"corp:\s*(?P<corp_files>\d+)/(?P<corp_size>\S+)"
@@ -4871,8 +4890,14 @@ EOF
         last_ft_growth_at = now0
         plateau_pulse_hits = 0
         last_plateau_pulse_at = 0.0
-        plateau_pulse_min_interval_sec = _run_plateau_pulse_min_interval_sec()
+        plateau_hit_interval_sec = _run_plateau_hit_interval_sec()
         callback_stop_reason = ""
+        progress_sample_file = ""
+        progress_samples_enabled = _run_progress_samples_enabled()
+        progress_sample_path = self.fuzz_out_dir / "progress_samples" / f"{bin_path.name}.jsonl"
+        if progress_samples_enabled:
+            progress_sample_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_sample_file = str(progress_sample_path)
 
         def _line_callback(_kind: str, text: str) -> Optional[str]:
             nonlocal best_cov, best_ft, last_cov_growth_at, last_ft_growth_at, plateau_pulse_hits, callback_stop_reason
@@ -4882,8 +4907,30 @@ EOF
                 return None
             cov = int(m.group("cov") or 0)
             ft = int(m.group("ft") or 0)
-            kind = str(m.group("kind") or "").upper()
+            progress_kind = str(m.group("kind") or "").upper()
             now = time.monotonic()
+            if progress_samples_enabled:
+                try:
+                    with progress_sample_path.open("a", encoding="utf-8") as fp:
+                        fp.write(
+                            json.dumps(
+                                {
+                                    "ts": time.time(),
+                                    "iter": int(m.group("iter") or 0),
+                                    "kind": progress_kind,
+                                    "cov": cov,
+                                    "ft": ft,
+                                    "corpus_files": int(m.group("corp_files") or 0),
+                                    "corpus_size": str(m.group("corp_size") or ""),
+                                    "execs_per_sec": int(m.group("execs") or 0),
+                                    "rss_mb": int(m.group("rss") or 0),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
             cov_grew = cov > best_cov
             ft_grew = (ft - best_ft) >= ft_growth_threshold
             if cov_grew:
@@ -4902,25 +4949,26 @@ EOF
                 if plateau_pulse_hits > 0:
                     plateau_pulse_hits -= 1
                 return None
-            if kind == "PULSE":
-                # Coverage is the primary plateau signal. Recent feature-only growth
-                # can delay one pulse, but cannot suppress plateau indefinitely.
-                recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
-                if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
-                    idle_elapsed = now - last_cov_growth_at
-                    if plateau_pulse_min_interval_sec > 0:
-                        expected_hits = 1 + int(
-                            max(0.0, idle_elapsed - plateau_idle_growth_sec)
-                            // plateau_pulse_min_interval_sec
-                        )
-                        plateau_pulse_hits = max(plateau_pulse_hits + 1, expected_hits)
-                    else:
-                        plateau_pulse_hits += 1
+            # Coverage is the primary plateau signal. Recent feature-only growth
+            # can delay one hit, but cannot suppress plateau indefinitely.
+            recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
+            if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
+                eligible = (
+                    plateau_hit_interval_sec <= 0
+                    or last_plateau_pulse_at <= 0.0
+                    or (now - last_plateau_pulse_at) >= plateau_hit_interval_sec
+                )
+                if eligible:
+                    plateau_pulse_hits += 1
                     last_plateau_pulse_at = now
                     if plateau_pulse_hits >= plateau_pulses:
                         callback_stop_reason = (
                             "coverage_plateau "
-                            f"(idle_no_growth={plateau_idle_growth_sec}s pulse_hits={plateau_pulse_hits})"
+                            f"(idle_no_growth={plateau_idle_growth_sec}s "
+                            f"hit_interval={plateau_hit_interval_sec}s "
+                            f"pulse_hits={plateau_pulse_hits} "
+                            f"last_cov_growth_age={int(now - last_cov_growth_at)}s "
+                            f"last_ft_growth_age={int(now - last_ft_growth_at)}s)"
                         )
                         return callback_stop_reason
             return None
@@ -5127,6 +5175,9 @@ EOF
             terminal_reason="coverage_plateau" if plateau_detected else "",
             plateau_detected=plateau_detected,
             plateau_idle_seconds=plateau_idle_seconds,
+            plateau_hit_count=int(plateau_pulse_hits),
+            plateau_last_hit_at=float(last_plateau_pulse_at),
+            progress_sample_file=progress_sample_file,
             seed_quality=_seed_quality_from_run(
                 log=log,
                 initial_corpus_files=initial_corpus_files,

@@ -7151,6 +7151,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "terminal_reason": str(run.terminal_reason or ""),
                     "plateau_detected": bool(run.plateau_detected),
                     "plateau_idle_seconds": int(run.plateau_idle_seconds or 0),
+                    "plateau_hit_count": int(run.plateau_hit_count or 0),
+                    "plateau_last_hit_at": float(run.plateau_last_hit_at or 0.0),
+                    "progress_sample_file": str(run.progress_sample_file or ""),
                     "seed_quality": dict(run.seed_quality or {}),
                 }
             )
