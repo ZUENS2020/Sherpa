@@ -399,6 +399,61 @@ def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
     assert len(list(written.get("mappings") or [])) == 2
 
 
+def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build ok')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    out_dir = fuzz_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    decode_bin = out_dir / "decode_fuzz"
+    inflate_bin = out_dir / "inflateBack9_fuzz"
+    fread_bin = out_dir / "fread_file_func_fuzz"
+    for p in (decode_bin, inflate_bin, fread_bin):
+        p.write_text("", encoding="utf-8")
+
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "min_required_built_targets": 2,
+                "execution_targets": [
+                    {"target_name": "decode", "expected_fuzzer_name": "decode"},
+                    {"target_name": "inflateBack9", "expected_fuzzer_name": "inflateBack9"},
+                    {"target_name": "fread_file_func", "expected_fuzzer_name": "fread_file_func"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "harness_index.json").write_text(
+        json.dumps(
+            {
+                "mappings": [
+                    {"target_name": "decode", "source_path": "fuzz/decode_fuzz.c"},
+                    {"target_name": "inflateBack9", "source_path": "fuzz/inflateBack9_fuzz.c"},
+                    {"target_name": "fread_file_func", "source_path": "fuzz/fread_file_func_fuzz.c"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[decode_bin, inflate_bin, fread_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_error_code"] == ""
+    assert out["build_gate_reason"] == "ok"
+    assert out["last_error"] == ""
+    assert set(out.get("built_targets") or []) >= {"decode_fuzz", "inflateBack9_fuzz", "fread_file_func_fuzz"}
+
+
 def test_build_repair_contract_requires_entrypoint_when_missing_llvmfuzzer(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

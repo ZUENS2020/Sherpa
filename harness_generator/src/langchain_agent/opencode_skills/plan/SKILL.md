@@ -36,6 +36,10 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
 - Rank runtime-executable/public targets first.
 - `fuzz/execution_plan.json` must include `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`.
+- Naming contract to reduce target/binary mismatch:
+  - `target_name` should be API-centric and suffix-free (for example: `decode`).
+  - `expected_fuzzer_name` must map predictably to the harness/binary name (prefer `<target_name>_fuzz` or `<target_name>_fuzzer`).
+  - Keep `expected_fuzzer_name` consistent with `fuzz/harness_index.json` and harness filename stem.
 - Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]`.
 
