@@ -62,6 +62,7 @@ def test_plan_and_schema_fix_contracts_keep_target_semantics() -> None:
     assert "`api` must describe an API identifier" in plan
     assert "fuzz/execution_plan.json" in plan
     assert "min_required_built_targets" in plan
+    assert "target_name" in plan and "expected_fuzzer_name" in plan
     assert "semantic reminder: do not rewrite `api` to harness paths" in plan_fix.lower()
 
 
@@ -111,6 +112,10 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "strategy change" in plan_repair_build.lower()
     assert "strategy change" in plan_repair_crash.lower()
     assert "strategy-diff" in plan_repair_coverage.lower()
+    assert "Known Issues" in plan_repair_build
+    assert "Known Issues" in plan_repair_crash
+    assert "Known Issues" in plan_repair_coverage
+    assert "target_name" in plan_repair_build and "expected_fuzzer_name" in plan_repair_build
     assert "api_surface_exception" in plan_repair_build
     assert "api_surface_exception" in plan_repair_crash
     assert "api_surface_exception" in synth_repair_build

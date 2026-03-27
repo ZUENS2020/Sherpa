@@ -24,6 +24,7 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
 - strategy note ensuring `fuzz/harness_index.json` remains mappable
+- `Known Issues` section in `fuzz/PLAN.md`
 
 ## Workflow
 1. Read crash/repro diagnostics first.
@@ -33,7 +34,12 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 
 ## Constraints
 - Avoid “repair” plans that only disable behavior.
+- `fuzz/PLAN.md` must include `Known Issues` with unresolved crash/repro blockers and concrete next-step checks.
 - Preserve crash-path reachability.
+- Naming contract to reduce crash-target mismatch:
+  - `target_name` uses API-centric suffix-free naming.
+  - `expected_fuzzer_name` maps to real harness/binary stem (prefer `<target_name>_fuzz` / `<target_name>_fuzzer`).
+  - Keep consistency with `fuzz/harness_index.json`.
 - Default to public/stable APIs for harness logic.
 - If internal APIs are unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, prioritize replacing offending symbols first.
@@ -46,6 +52,7 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - Plan addresses crash-path diagnostics explicitly.
 - Strategy change is present on repeated signatures.
 - Target relation is explicit and technically justified.
+- `Known Issues` exists and lists concrete unresolved crash risks for this cycle.
 
 ## Done contract
 - Write `fuzz/PLAN.md` into `./done`.

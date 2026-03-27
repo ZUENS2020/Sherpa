@@ -4864,14 +4864,42 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 mapping_by_target[key] = row
         built_names = {p.name for p in final_bins}
         built_stems = {Path(name).stem for name in built_names}
+        built_norm_tokens = {
+            token
+            for token in (
+                _normalize_exec_target_token(name)
+                for name in (list(built_names) + list(built_stems))
+            )
+            if token
+        }
         target_build_matrix: list[dict[str, Any]] = []
         built_execution_targets = 0
         for item in execution_targets:
             target_name = str(item.get("target_name") or "").strip()
             expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
-            matched = expected in built_names or Path(expected).stem in built_stems
             mapping = mapping_by_target.get(target_name)
             source_path = str(mapping.get("source_path") or "").strip() if isinstance(mapping, dict) else ""
+            source_stem = Path(source_path).stem if source_path else ""
+            raw_candidates = {
+                expected,
+                f"{expected}_fuzz" if expected else "",
+                f"{expected}_fuzzer" if expected else "",
+                target_name,
+                f"{target_name}_fuzz" if target_name else "",
+                f"{target_name}_fuzzer" if target_name else "",
+                source_stem,
+            }
+            raw_candidates = {c for c in raw_candidates if c}
+            norm_candidates = {
+                _normalize_exec_target_token(c)
+                for c in (list(raw_candidates) + [Path(c).stem for c in raw_candidates])
+            }
+            norm_candidates = {c for c in norm_candidates if c}
+            matched = bool(
+                (raw_candidates & built_names)
+                or ({Path(c).stem for c in raw_candidates} & built_stems)
+                or (norm_candidates & built_norm_tokens)
+            )
             has_source = bool(source_path)
             if matched and has_source:
                 built_execution_targets += 1

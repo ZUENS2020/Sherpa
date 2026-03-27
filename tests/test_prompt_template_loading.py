@@ -211,12 +211,17 @@ def test_other_stage_skills_include_runtime_contract_clauses():
 
     assert "LLVMFuzzerTestOneInput" in plan
     assert "`api` must describe an API identifier" in plan
+    assert "expected_fuzzer_name" in plan
     assert "LLVMFuzzerTestOneInput" in plan_fix
     assert "semantic reminder: do not rewrite `api` to harness paths" in plan_fix.lower()
     assert "build-stage failure" in plan_repair_build
     assert "`.c -> clang`, `.cc/.cpp/.cxx -> clang++`" in plan_repair_build
+    assert "Known Issues" in plan_repair_build
+    assert "expected_fuzzer_name" in plan_repair_build
     assert "crash/repro" in plan_repair_crash.lower()
+    assert "Known Issues" in plan_repair_crash
     assert "coverage" in plan_repair_coverage.lower()
+    assert "Known Issues" in plan_repair_coverage
     assert "build failure" in synth_repair_build.lower() or "build-stage failures" in synth_repair_build.lower()
     assert "`.c` sources must use `clang`" in synth_repair_build
     assert "`.cc/.cpp/.cxx` sources must use `clang++`" in synth_repair_build

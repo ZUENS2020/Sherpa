@@ -23,6 +23,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - schema-valid `fuzz/targets.json`
 - updated `fuzz/execution_plan.json`
 - strategy note that keeps `fuzz/harness_index.json` mappable
+- `Known Issues` section in `fuzz/PLAN.md`
 
 ## Workflow
 1. Read repair diagnostics first.
@@ -32,8 +33,13 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 
 ## Constraints
 - Do not produce doc-only updates disconnected from build recovery.
+- `fuzz/PLAN.md` must include `Known Issues` with current build blockers, suspected root cause, and next corrective action.
 - Include compiler-selection strategy in plan notes: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`.
 - Explicitly reject universal `clang++` for mixed C/C++ harness builds unless evidence proves it is required.
+- Naming contract to reduce undercoverage false negatives:
+  - `target_name` remains suffix-free API name.
+  - `expected_fuzzer_name` should map to real binary stem (prefer `<target_name>_fuzz` or `<target_name>_fuzzer`).
+  - Ensure naming remains consistent with `fuzz/harness_index.json` mappings.
 - Default to public/stable APIs for harness logic.
 - If non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, prioritize replacing offending symbols first.
@@ -46,6 +52,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - Plan explicitly addresses current build failure kind/code/signature.
 - Plan includes at least one strategy change from latest failed attempt.
 - Targets remain runtime-viable and executable-first.
+- `Known Issues` exists and names concrete unresolved blockers for this build-repair cycle.
 
 ## Done contract
 - Write `fuzz/PLAN.md` into `./done`.
