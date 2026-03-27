@@ -380,7 +380,8 @@ def test_node_run_exposes_parallel_metadata_in_details(tmp_path: Path, monkeypat
     assert isinstance(detail["reload_enabled"], bool)
 
 
-def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
+def test_node_run_stops_after_first_crash_serial_mode_has_single_detail(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "0")
     artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("asan", encoding="utf-8")
@@ -406,11 +407,38 @@ def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
     assert out["crash_found"] is True
     assert out["last_crash_artifact"] == str(artifact)
     assert out["last_fuzzer"] == "demo_fuzz_1"
-    details = out.get("run_details") or []
-    assert len(details) >= 1
-    assert details[0]["fuzzer"] == "demo_fuzz_1"
+    assert len(out.get("run_details") or []) == 1
     assert gen.analysis_calls == [("demo_fuzz_1", artifact)]
     assert len(gen._run_results) == 0
+
+
+def test_node_run_parallel_early_stop_records_metadata(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "3")
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["crash_found"] is True
+    assert str(out.get("first_crash_fuzzer") or "").startswith("demo_fuzz_")
+    assert str(out.get("early_stop_reason") or "") in {"first_crash_parallel_early_stop", "first_crash_stop"}
 
 
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
@@ -848,6 +876,71 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert out["coverage_quality_oracle"] == "quality_degraded"
     assert isinstance(out.get("coverage_seed_feedback"), dict)
     assert isinstance(out.get("coverage_harness_feedback"), dict)
+
+
+def test_node_coverage_analysis_marks_parallel_resource_underutilized():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_parallel_engine": "single",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 1,
+            "run_parallel_cpu_budget": 8,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "final_execs_per_sec": 0,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "resource_underutilized"
+    assert "increase outer or inner workers" in out["coverage_parallel_diagnosis"]
+
+
+def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "run_parallel_engine": "fork",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 2,
+            "run_parallel_cpu_budget": 2,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "final_execs_per_sec": 500000,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "strategy_mismatch"
+    assert "reduce parallelism" in out["coverage_parallel_diagnosis"]
 
 
 def test_route_after_re_build_routes_to_re_run_on_success():

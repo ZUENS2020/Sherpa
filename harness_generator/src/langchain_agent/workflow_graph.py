@@ -2445,9 +2445,16 @@ def _run_inner_workers_min() -> int:
 
 
 def _run_inner_workers_target() -> int:
-    raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS") or "").strip()
+    run_inner_raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS") or "").strip()
+    legacy_fork_raw = (os.environ.get("SHERPA_FUZZ_FORK") or "").strip()
+    raw = run_inner_raw
     if not raw:
-        raw = (os.environ.get("SHERPA_FUZZ_FORK") or "1").strip()
+        raw = legacy_fork_raw or "1"
+        if legacy_fork_raw:
+            print(
+                "[warn] SHERPA_FUZZ_FORK is deprecated for run parallel config. "
+                "Prefer SHERPA_RUN_INNER_WORKERS + SHERPA_RUN_PARALLEL_ENGINE."
+            )
     try:
         return max(1, min(int(raw), 128))
     except Exception:
@@ -6899,7 +6906,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         current_run_parallel_cfg = {
             bin_path.name: {
                 "parallel_engine": parallel_engine,
-                "parallel_role": "default",
+                "parallel_role": "reserved",
                 "outer_slot": idx % max(1, max_parallel),
                 "inner_workers": inner_workers,
                 "reload_enabled": reload_enabled,
@@ -7244,7 +7251,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "corpus_size_bytes": 0,
                 "seed_quality": {},
                 "parallel_engine": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_engine") or "single"),
-                "parallel_role": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_role") or "default"),
+                "parallel_role": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_role") or "reserved"),
                 "outer_slot": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("outer_slot") or 0),
                 "inner_workers": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("inner_workers") or 1),
                 "reload_enabled": bool((current_run_parallel_cfg.get(fuzzer_name) or {}).get("reload_enabled")),
@@ -7348,7 +7355,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "progress_sample_file": str(run.progress_sample_file or ""),
                     "seed_quality": dict(run.seed_quality or {}),
                     "parallel_engine": str(run.parallel_engine or "single"),
-                    "parallel_role": str(run.parallel_role or "default"),
+                    "parallel_role": str(run.parallel_role or "reserved"),
                     "outer_slot": int(run.outer_slot or 0),
                     "inner_workers": int(run.inner_workers or 1),
                     "reload_enabled": bool(run.reload_enabled),
@@ -7742,6 +7749,42 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 if profile:
                     current_seed_profile = profile
                     break
+        total_execs_per_sec = 0
+        try:
+            total_execs_per_sec = max(0, sum(int(detail.get("final_execs_per_sec") or 0) for detail in run_details))
+        except Exception:
+            total_execs_per_sec = 0
+        parallel_outer = max(1, int(state.get("run_parallel_outer") or 1))
+        parallel_inner = max(1, int(state.get("run_parallel_inner") or 1))
+        parallel_cpu_budget = max(1, int(state.get("run_parallel_cpu_budget") or 1))
+        parallel_engine = str(state.get("run_parallel_engine") or "single")
+        configured_parallel_units = max(1, parallel_outer * parallel_inner)
+        parallel_utilization_ratio = float(configured_parallel_units) / float(max(1, parallel_cpu_budget))
+        if parallel_utilization_ratio < 0.0:
+            parallel_utilization_ratio = 0.0
+        if parallel_utilization_ratio > 1.0:
+            parallel_utilization_ratio = 1.0
+        resource_underutilized = bool(
+            total_execs_per_sec <= 0 and configured_parallel_units < int(parallel_cpu_budget * 0.7)
+        )
+        strategy_mismatch = bool(
+            plateau_detected and total_execs_per_sec > 0 and current_cov <= prev_cov and current_ft <= prev_ft
+        )
+        if resource_underutilized:
+            parallel_diagnosis_code = "resource_underutilized"
+            parallel_diagnosis = (
+                "exec/s is low while configured parallel units are below cpu budget; "
+                "increase outer or inner workers"
+            )
+        elif strategy_mismatch:
+            parallel_diagnosis_code = "strategy_mismatch"
+            parallel_diagnosis = (
+                "exec/s is healthy but coverage/features are stalled; "
+                "reduce parallelism and prioritize target/seed strategy changes"
+            )
+        else:
+            parallel_diagnosis_code = "balanced"
+            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
         plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
         plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
         requested_replan = bool(
@@ -7826,6 +7869,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 )
             if seed_quality_issue:
                 reason += f"; seed_quality_flags={','.join(quality_flags) or 'none'}"
+            if parallel_diagnosis_code != "balanced":
+                reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
         elif round_budget_exhausted:
             if requested_replan:
                 reason = (
@@ -7870,6 +7915,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_missing": seed_families_missing,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
+                "parallel_diagnosis_code": parallel_diagnosis_code,
+                "parallel_diagnosis": parallel_diagnosis,
+                "parallel_engine": parallel_engine,
+                "parallel_outer": parallel_outer,
+                "parallel_inner": parallel_inner,
+                "parallel_cpu_budget": parallel_cpu_budget,
+                "parallel_utilization_ratio": parallel_utilization_ratio,
+                "total_execs_per_sec": total_execs_per_sec,
                 "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
                 "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
@@ -7897,6 +7950,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_seed_families_missing": seed_families_missing,
             "coverage_quality_flags": quality_flags,
             "coverage_quality_oracle": quality_oracle,
+            "coverage_parallel_diagnosis_code": parallel_diagnosis_code,
+            "coverage_parallel_diagnosis": parallel_diagnosis,
+            "coverage_parallel_engine": parallel_engine,
+            "coverage_parallel_outer": parallel_outer,
+            "coverage_parallel_inner": parallel_inner,
+            "coverage_parallel_cpu_budget": parallel_cpu_budget,
+            "coverage_parallel_utilization_ratio": parallel_utilization_ratio,
+            "coverage_total_execs_per_sec": total_execs_per_sec,
             "coverage_target_depth_score": current_depth_score,
             "coverage_target_depth_class": current_depth_class,
             "coverage_selection_bias_reason": current_selection_bias_reason,

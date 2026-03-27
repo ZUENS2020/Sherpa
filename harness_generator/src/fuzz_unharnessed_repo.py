@@ -930,7 +930,8 @@ class FuzzerRunResult:
     progress_sample_file: str = ""
     seed_quality: Dict[str, object] | None = None
     parallel_engine: str = "single"
-    parallel_role: str = "stability"
+    # Reserved for future role-based scheduling (explore/stability).
+    parallel_role: str = "reserved"
     outer_slot: int = 0
     inner_workers: int = 1
     reload_enabled: bool = False
@@ -5004,7 +5005,7 @@ EOF
         parallel_engine = str(run_parallel_cfg.get("parallel_engine") or "single").strip().lower()
         if parallel_engine not in {"single", "fork", "jobs_workers"}:
             parallel_engine = "single"
-        parallel_role = str(run_parallel_cfg.get("parallel_role") or "default").strip().lower() or "default"
+        parallel_role = str(run_parallel_cfg.get("parallel_role") or "reserved").strip().lower() or "reserved"
         try:
             outer_slot = max(0, int(run_parallel_cfg.get("outer_slot") or 0))
         except Exception:
