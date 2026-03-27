@@ -319,6 +319,67 @@ def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch
     assert plan[1]["round_budget_sec"] >= plan[0]["round_budget_sec"]
 
 
+def test_solve_parallelism_auto_prefers_outer_for_multi_target():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=8,
+        n_targets=4,
+        requested_outer=4,
+        outer_parallelism_max=8,
+        inner_workers_min=1,
+        requested_inner=6,
+        engine="auto",
+        sanitizer="address",
+    )
+    assert out["parallel_engine"] == "single"
+    assert out["outer_parallelism"] == 4
+    assert out["inner_workers"] == 1
+
+
+def test_solve_parallelism_keeps_outer_inner_within_budget():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=4,
+        n_targets=3,
+        requested_outer=3,
+        outer_parallelism_max=16,
+        inner_workers_min=1,
+        requested_inner=4,
+        engine="fork",
+        sanitizer="undefined",
+    )
+    assert out["outer_parallelism"] * out["inner_workers"] <= 4
+
+
+def test_node_run_exposes_parallel_metadata_in_details(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_ENGINE", "jobs_workers")
+    monkeypatch.setenv("SHERPA_RUN_INNER_WORKERS", "3")
+    monkeypatch.setenv("SHERPA_RUN_CPU_BUDGET", "4")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "0")
+
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            )
+        ],
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    details = out.get("run_details") or []
+    assert len(details) == 1
+    detail = details[0]
+    assert detail["parallel_engine"] in {"single", "jobs_workers"}
+    assert int(detail["inner_workers"]) >= 1
+    assert isinstance(detail["reload_enabled"], bool)
+
+
 def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
     artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +406,9 @@ def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
     assert out["crash_found"] is True
     assert out["last_crash_artifact"] == str(artifact)
     assert out["last_fuzzer"] == "demo_fuzz_1"
-    assert len(out.get("run_details") or []) == 1
+    details = out.get("run_details") or []
+    assert len(details) >= 1
+    assert details[0]["fuzzer"] == "demo_fuzz_1"
     assert gen.analysis_calls == [("demo_fuzz_1", artifact)]
     assert len(gen._run_results) == 0
 

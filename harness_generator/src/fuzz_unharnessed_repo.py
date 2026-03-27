@@ -929,6 +929,11 @@ class FuzzerRunResult:
     plateau_last_hit_at: float = 0.0
     progress_sample_file: str = ""
     seed_quality: Dict[str, object] | None = None
+    parallel_engine: str = "single"
+    parallel_role: str = "stability"
+    outer_slot: int = 0
+    inner_workers: int = 1
+    reload_enabled: bool = False
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
@@ -4993,16 +4998,41 @@ EOF
         if dict_path and dict_path.is_file():
             cmd.append(f"-dict={dict_path}")
 
-        # Fork mode for parallel exploration
-        fork_count_raw = os.environ.get("SHERPA_FUZZ_FORK", "0")
+        run_parallel_cfg = dict(
+            (getattr(self, "current_run_parallel_config_by_fuzzer", {}) or {}).get(bin_path.name) or {}
+        )
+        parallel_engine = str(run_parallel_cfg.get("parallel_engine") or "single").strip().lower()
+        if parallel_engine not in {"single", "fork", "jobs_workers"}:
+            parallel_engine = "single"
+        parallel_role = str(run_parallel_cfg.get("parallel_role") or "default").strip().lower() or "default"
         try:
-            fork_count = max(0, min(int(fork_count_raw), os.cpu_count() or 1))
-        except (ValueError, TypeError):
-            fork_count = 0
-        if fork_count > 1:
-            cmd.append(f"-fork={fork_count}")
-            cmd.append("-ignore_crashes=1")
-            print(f"[*] Fork mode enabled: {fork_count} workers")
+            outer_slot = max(0, int(run_parallel_cfg.get("outer_slot") or 0))
+        except Exception:
+            outer_slot = 0
+        try:
+            inner_workers = max(1, int(run_parallel_cfg.get("inner_workers") or 1))
+        except Exception:
+            inner_workers = 1
+        reload_enabled = bool(run_parallel_cfg.get("reload_enabled"))
+        ignore_non_fatal = bool(run_parallel_cfg.get("ignore_non_fatal"))
+
+        if inner_workers > 1:
+            if parallel_engine == "fork":
+                cmd.append(f"-fork={inner_workers}")
+                # libFuzzer fork mode requires ignore_crashes for stable crash handling.
+                cmd.append("-ignore_crashes=1")
+            elif parallel_engine == "jobs_workers":
+                cmd.append("-jobs=0")
+                cmd.append(f"-workers={inner_workers}")
+                if reload_enabled:
+                    cmd.append("-reload=1")
+            if ignore_non_fatal:
+                cmd.append("-ignore_ooms=1")
+                cmd.append("-ignore_timeouts=1")
+            print(
+                f"[*] Parallel engine={parallel_engine} role={parallel_role} "
+                f"inner_workers={inner_workers} outer_slot={outer_slot}"
+            )
 
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")
@@ -5196,6 +5226,11 @@ EOF
                     seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
                 ),
             ),
+            parallel_engine=parallel_engine,
+            parallel_role=parallel_role,
+            outer_slot=int(outer_slot),
+            inner_workers=int(inner_workers),
+            reload_enabled=bool(reload_enabled),
         )
 
     # ────────────────────────────────────────────────────────────────────

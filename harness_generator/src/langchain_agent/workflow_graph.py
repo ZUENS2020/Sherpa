@@ -2412,10 +2412,142 @@ def _run_stop_on_first_crash() -> bool:
 
 
 def _run_parallel_early_stop_enabled() -> bool:
-    raw = (os.environ.get("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED") or "0").strip().lower()
+    raw = (os.environ.get("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED") or "1").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _run_cpu_budget() -> int:
+    raw = (os.environ.get("SHERPA_RUN_CPU_BUDGET") or "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), 1024))
+        except Exception:
+            pass
+    return max(1, int(os.cpu_count() or 1))
+
+
+def _run_outer_parallelism_max(default_parallel: int) -> int:
+    raw = (os.environ.get("SHERPA_RUN_OUTER_PARALLELISM_MAX") or str(default_parallel)).strip()
+    try:
+        return max(1, min(int(raw), 64))
+    except Exception:
+        return max(1, default_parallel)
+
+
+def _run_inner_workers_min() -> int:
+    raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS_MIN") or "1").strip()
+    try:
+        return max(1, min(int(raw), 64))
+    except Exception:
+        return 1
+
+
+def _run_inner_workers_target() -> int:
+    raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS") or "").strip()
+    if not raw:
+        raw = (os.environ.get("SHERPA_FUZZ_FORK") or "1").strip()
+    try:
+        return max(1, min(int(raw), 128))
+    except Exception:
+        return 1
+
+
+def _run_parallel_engine() -> str:
+    raw = (os.environ.get("SHERPA_RUN_PARALLEL_ENGINE") or "auto").strip().lower()
+    if raw in {"auto", "fork", "jobs_workers", "single"}:
+        return raw
+    return "auto"
+
+
+def _run_ignore_non_fatal_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_IGNORE_NON_FATAL") or "0").strip().lower()
     if not raw:
         return False
     return raw in {"1", "true", "yes", "on"}
+
+
+def _solve_parallelism(
+    *,
+    cpu_budget: int,
+    n_targets: int,
+    requested_outer: int,
+    outer_parallelism_max: int,
+    inner_workers_min: int,
+    requested_inner: int,
+    engine: str,
+    sanitizer: str,
+) -> dict[str, Any]:
+    cpu = max(1, int(cpu_budget))
+    targets = max(1, int(n_targets))
+    outer_cap = max(1, min(int(requested_outer), int(outer_parallelism_max), targets, cpu))
+    inner_min = max(1, int(inner_workers_min))
+    inner_req = max(inner_min, int(requested_inner))
+    sanitizer_l = (sanitizer or "").strip().lower()
+
+    # ASAN/MSAN/TSAN are memory-heavy in multi-process mode; cap inner fanout.
+    if sanitizer_l in {"address", "memory", "thread"}:
+        inner_cap = max(1, min(cpu, 2))
+    else:
+        inner_cap = max(1, cpu)
+
+    resolved_engine = engine if engine in {"auto", "fork", "jobs_workers", "single"} else "auto"
+    reload_enabled = False
+
+    if resolved_engine == "auto":
+        if targets > 1:
+            resolved_engine = "single"
+            outer = outer_cap
+            inner = 1
+        else:
+            resolved_engine = "fork"
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+    elif resolved_engine == "single":
+        outer = outer_cap
+        inner = 1
+    elif resolved_engine == "fork":
+        if targets > 1:
+            outer = outer_cap
+            inner = max(inner_min, min(inner_req, inner_cap, max(1, cpu // max(1, outer))))
+        else:
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+    else:  # jobs_workers
+        reload_enabled = True
+        if targets > 1:
+            outer = outer_cap
+            inner = max(inner_min, min(inner_req, inner_cap, max(1, cpu // max(1, outer))))
+        else:
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+
+    warning = ""
+    if outer * inner > cpu:
+        warning = (
+            f"parallel_budget_clamped requested_outer={requested_outer} requested_inner={requested_inner} "
+            f"cpu_budget={cpu} resolved_outer={outer} resolved_inner={inner}"
+        )
+    while outer * inner > cpu and inner > inner_min:
+        inner -= 1
+    while outer * inner > cpu and outer > 1:
+        outer -= 1
+    if outer * inner > cpu:
+        inner = 1
+        outer = min(outer, cpu)
+
+    if inner <= 1 and resolved_engine != "single":
+        resolved_engine = "single"
+        reload_enabled = False
+
+    return {
+        "outer_parallelism": max(1, outer),
+        "inner_workers": max(1, inner),
+        "parallel_engine": resolved_engine,
+        "reload_enabled": bool(reload_enabled),
+        "warning": warning,
+    }
 
 
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
@@ -6732,27 +6864,63 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         max_same_timeout_repeats = _max_same_timeout_repeats()
         max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "3")
         try:
-            max_parallel = max(1, min(int(max_parallel_raw), 16))
+            requested_outer_parallelism = max(1, min(int(max_parallel_raw), 64))
         except Exception:
-            max_parallel = 3
+            requested_outer_parallelism = 3
         stop_on_first_crash = _run_stop_on_first_crash()
         parallel_early_stop = _run_parallel_early_stop_enabled()
         if stop_on_first_crash and len(bins) > 1 and not parallel_early_stop:
             # Compatibility mode: force serial when parallel early stop is disabled.
-            max_parallel = 1
-        if len(bins) <= 1:
-            max_parallel = 1
+            requested_outer_parallelism = 1
+        cpu_budget = _run_cpu_budget()
+        outer_parallelism_max = _run_outer_parallelism_max(requested_outer_parallelism)
+        inner_workers_min = _run_inner_workers_min()
+        requested_inner_workers = _run_inner_workers_target()
+        requested_engine = _run_parallel_engine()
+        ignore_non_fatal = _run_ignore_non_fatal_enabled()
+        solved_parallel = _solve_parallelism(
+            cpu_budget=cpu_budget,
+            n_targets=len(bins),
+            requested_outer=requested_outer_parallelism,
+            outer_parallelism_max=outer_parallelism_max,
+            inner_workers_min=inner_workers_min,
+            requested_inner=requested_inner_workers,
+            engine=requested_engine,
+            sanitizer=str(getattr(gen, "sanitizer", "") or ""),
+        )
+        max_parallel = int(solved_parallel.get("outer_parallelism") or 1)
+        inner_workers = int(solved_parallel.get("inner_workers") or 1)
+        parallel_engine = str(solved_parallel.get("parallel_engine") or "single")
+        reload_enabled = bool(solved_parallel.get("reload_enabled"))
+        parallel_warning = str(solved_parallel.get("warning") or "").strip()
         idle_timeout_sec = _run_idle_timeout_sec()
         finalize_timeout_sec = _run_finalize_timeout_sec()
+
+        current_run_parallel_cfg = {
+            bin_path.name: {
+                "parallel_engine": parallel_engine,
+                "parallel_role": "default",
+                "outer_slot": idx % max(1, max_parallel),
+                "inner_workers": inner_workers,
+                "reload_enabled": reload_enabled,
+                "ignore_non_fatal": ignore_non_fatal,
+            }
+            for idx, bin_path in enumerate(bins)
+        }
+        prev_run_parallel_cfg = getattr(gen, "current_run_parallel_config_by_fuzzer", None)
+        setattr(gen, "current_run_parallel_config_by_fuzzer", current_run_parallel_cfg)
 
         _wf_log(
             cast(dict[str, Any], state),
             (
-                f"run: fuzzers={len(bins)} parallel={max_parallel} "
+                f"run: fuzzers={len(bins)} parallel_outer={max_parallel} inner={inner_workers} "
+                f"engine={parallel_engine} cpu_budget={cpu_budget} "
                 f"stop_on_first_crash={int(stop_on_first_crash)} "
                 f"parallel_early_stop={int(parallel_early_stop)}"
             ),
         )
+        if parallel_warning:
+            _wf_log(cast(dict[str, Any], state), f"run: {parallel_warning}")
 
         def _calc_crash_signature(fuzzer_name: str, artifact_path: str) -> str:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
@@ -6879,6 +7047,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
         finalized_fuzzers: set[str] = set()
+        first_crash_fuzzer = ""
+        early_stop_reason = ""
+        early_stopped_fuzzers: list[str] = []
 
         def _run_one(bin_path: Path) -> tuple[str, FuzzerRunResult]:
             return bin_path.name, gen._run_fuzzer(bin_path)
@@ -6977,6 +7148,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     and parallel_early_stop
                                     and run.crash_found
                                 ):
+                                    first_crash_fuzzer = str(name)
+                                    early_stop_reason = "first_crash_parallel_early_stop"
                                     terminator = getattr(gen, "terminate_active_run_processes", None)
                                     if callable(terminator):
                                         try:
@@ -6986,6 +7159,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     for pending_fut in futures:
                                         if pending_fut is not fut:
                                             pending_fut.cancel()
+                                    for other_bin in batch:
+                                        if other_bin.name != name and other_bin.name not in early_stopped_fuzzers:
+                                            early_stopped_fuzzers.append(other_bin.name)
                                     batch_should_stop = True
                                     break
                             except Exception as e:
@@ -7001,11 +7177,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         if batch_should_stop:
                             pending_bins = []
                 if stop_on_first_crash and any(run.crash_found for run in run_results.values()):
+                    if not first_crash_fuzzer:
+                        for crash_name, crash_run in run_results.items():
+                            if crash_run.crash_found:
+                                first_crash_fuzzer = crash_name
+                                break
+                    if not early_stop_reason and first_crash_fuzzer:
+                        early_stop_reason = "first_crash_stop"
+                    for skipped in pending_bins:
+                        if skipped.name not in early_stopped_fuzzers:
+                            early_stopped_fuzzers.append(skipped.name)
                     pending_bins = []
                     break
         finally:
             setattr(gen, "current_run_time_budget_sec", prev_run_budget)
             setattr(gen, "current_run_hard_timeout_sec", prev_run_hard_timeout)
+            setattr(gen, "current_run_parallel_config_by_fuzzer", prev_run_parallel_cfg)
 
         _wf_log(cast(dict[str, Any], state), "run children exited, collecting results...")
         finalize_started = time.perf_counter()
@@ -7056,6 +7243,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "corpus_files": 0,
                 "corpus_size_bytes": 0,
                 "seed_quality": {},
+                "parallel_engine": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_engine") or "single"),
+                "parallel_role": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_role") or "default"),
+                "outer_slot": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("outer_slot") or 0),
+                "inner_workers": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("inner_workers") or 1),
+                "reload_enabled": bool((current_run_parallel_cfg.get(fuzzer_name) or {}).get("reload_enabled")),
             }
 
         for bin_path in bins:
@@ -7155,6 +7347,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "plateau_last_hit_at": float(run.plateau_last_hit_at or 0.0),
                     "progress_sample_file": str(run.progress_sample_file or ""),
                     "seed_quality": dict(run.seed_quality or {}),
+                    "parallel_engine": str(run.parallel_engine or "single"),
+                    "parallel_role": str(run.parallel_role or "default"),
+                    "outer_slot": int(run.outer_slot or 0),
+                    "inner_workers": int(run.inner_workers or 1),
+                    "reload_enabled": bool(run.reload_enabled),
                 }
             )
             if run.error and not run_last_error:
@@ -7279,6 +7476,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_children_exit_count": int(run_children_exit_count),
             "run_details": run_details,
             "run_batch_plan": run_batch_plan,
+            "run_parallel_engine": parallel_engine,
+            "run_parallel_outer": int(max_parallel),
+            "run_parallel_inner": int(inner_workers),
+            "run_parallel_cpu_budget": int(cpu_budget),
+            "first_crash_fuzzer": first_crash_fuzzer,
+            "early_stop_reason": early_stop_reason,
+            "early_stopped_fuzzers": list(early_stopped_fuzzers),
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
