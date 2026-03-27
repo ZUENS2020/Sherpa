@@ -45,3 +45,4 @@ frontend-next/node_modules/
 frontend-next/.next/
 frontend-next/coverage/
 
+/.claude/worktrees
