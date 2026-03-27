@@ -433,6 +433,22 @@ def _run_plateau_pulse_min_interval_sec() -> int:
         return 60
 
 
+def _run_plateau_hit_interval_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC") or "").strip()
+    if raw:
+        try:
+            return max(0, min(int(raw), 86_400))
+        except Exception:
+            return 60
+    # Backward-compatible fallback
+    return _run_plateau_pulse_min_interval_sec()
+
+
+def _run_progress_samples_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_PROGRESS_SAMPLES_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _run_libfuzzer_timeout_sec() -> int:
     raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "1200").strip()
     try:
@@ -909,12 +925,21 @@ class FuzzerRunResult:
     terminal_reason: str = ""
     plateau_detected: bool = False
     plateau_idle_seconds: int = 0
+    plateau_hit_count: int = 0
+    plateau_last_hit_at: float = 0.0
+    progress_sample_file: str = ""
     seed_quality: Dict[str, object] | None = None
+    parallel_engine: str = "single"
+    # Reserved for future role-based scheduling (explore/stability).
+    parallel_role: str = "reserved"
+    outer_slot: int = 0
+    inner_workers: int = 1
+    reload_enabled: bool = False
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
     r"#(?P<iter>\d+)\s+"
-    r"(?P<kind>NEW|REDUCE|pulse)\s+"
+    r"(?P<kind>INITED|NEW|REDUCE|pulse)\s+"
     r"cov:\s*(?P<cov>\d+)\s+"
     r"ft:\s*(?P<ft>\d+)\s+"
     r"corp:\s*(?P<corp_files>\d+)/(?P<corp_size>\S+)"
@@ -4871,8 +4896,14 @@ EOF
         last_ft_growth_at = now0
         plateau_pulse_hits = 0
         last_plateau_pulse_at = 0.0
-        plateau_pulse_min_interval_sec = _run_plateau_pulse_min_interval_sec()
+        plateau_hit_interval_sec = _run_plateau_hit_interval_sec()
         callback_stop_reason = ""
+        progress_sample_file = ""
+        progress_samples_enabled = _run_progress_samples_enabled()
+        progress_sample_path = self.fuzz_out_dir / "progress_samples" / f"{bin_path.name}.jsonl"
+        if progress_samples_enabled:
+            progress_sample_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_sample_file = str(progress_sample_path)
 
         def _line_callback(_kind: str, text: str) -> Optional[str]:
             nonlocal best_cov, best_ft, last_cov_growth_at, last_ft_growth_at, plateau_pulse_hits, callback_stop_reason
@@ -4882,8 +4913,30 @@ EOF
                 return None
             cov = int(m.group("cov") or 0)
             ft = int(m.group("ft") or 0)
-            kind = str(m.group("kind") or "").upper()
+            progress_kind = str(m.group("kind") or "").upper()
             now = time.monotonic()
+            if progress_samples_enabled:
+                try:
+                    with progress_sample_path.open("a", encoding="utf-8") as fp:
+                        fp.write(
+                            json.dumps(
+                                {
+                                    "ts": time.time(),
+                                    "iter": int(m.group("iter") or 0),
+                                    "kind": progress_kind,
+                                    "cov": cov,
+                                    "ft": ft,
+                                    "corpus_files": int(m.group("corp_files") or 0),
+                                    "corpus_size": str(m.group("corp_size") or ""),
+                                    "execs_per_sec": int(m.group("execs") or 0),
+                                    "rss_mb": int(m.group("rss") or 0),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
             cov_grew = cov > best_cov
             ft_grew = (ft - best_ft) >= ft_growth_threshold
             if cov_grew:
@@ -4902,25 +4955,26 @@ EOF
                 if plateau_pulse_hits > 0:
                     plateau_pulse_hits -= 1
                 return None
-            if kind == "PULSE":
-                # Coverage is the primary plateau signal. Recent feature-only growth
-                # can delay one pulse, but cannot suppress plateau indefinitely.
-                recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
-                if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
-                    idle_elapsed = now - last_cov_growth_at
-                    if plateau_pulse_min_interval_sec > 0:
-                        expected_hits = 1 + int(
-                            max(0.0, idle_elapsed - plateau_idle_growth_sec)
-                            // plateau_pulse_min_interval_sec
-                        )
-                        plateau_pulse_hits = max(plateau_pulse_hits + 1, expected_hits)
-                    else:
-                        plateau_pulse_hits += 1
+            # Coverage is the primary plateau signal. Recent feature-only growth
+            # can delay one hit, but cannot suppress plateau indefinitely.
+            recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
+            if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
+                eligible = (
+                    plateau_hit_interval_sec <= 0
+                    or last_plateau_pulse_at <= 0.0
+                    or (now - last_plateau_pulse_at) >= plateau_hit_interval_sec
+                )
+                if eligible:
+                    plateau_pulse_hits += 1
                     last_plateau_pulse_at = now
                     if plateau_pulse_hits >= plateau_pulses:
                         callback_stop_reason = (
                             "coverage_plateau "
-                            f"(idle_no_growth={plateau_idle_growth_sec}s pulse_hits={plateau_pulse_hits})"
+                            f"(idle_no_growth={plateau_idle_growth_sec}s "
+                            f"hit_interval={plateau_hit_interval_sec}s "
+                            f"pulse_hits={plateau_pulse_hits} "
+                            f"last_cov_growth_age={int(now - last_cov_growth_at)}s "
+                            f"last_ft_growth_age={int(now - last_ft_growth_at)}s)"
                         )
                         return callback_stop_reason
             return None
@@ -4945,16 +4999,41 @@ EOF
         if dict_path and dict_path.is_file():
             cmd.append(f"-dict={dict_path}")
 
-        # Fork mode for parallel exploration
-        fork_count_raw = os.environ.get("SHERPA_FUZZ_FORK", "0")
+        run_parallel_cfg = dict(
+            (getattr(self, "current_run_parallel_config_by_fuzzer", {}) or {}).get(bin_path.name) or {}
+        )
+        parallel_engine = str(run_parallel_cfg.get("parallel_engine") or "single").strip().lower()
+        if parallel_engine not in {"single", "fork", "jobs_workers"}:
+            parallel_engine = "single"
+        parallel_role = str(run_parallel_cfg.get("parallel_role") or "reserved").strip().lower() or "reserved"
         try:
-            fork_count = max(0, min(int(fork_count_raw), os.cpu_count() or 1))
-        except (ValueError, TypeError):
-            fork_count = 0
-        if fork_count > 1:
-            cmd.append(f"-fork={fork_count}")
-            cmd.append("-ignore_crashes=1")
-            print(f"[*] Fork mode enabled: {fork_count} workers")
+            outer_slot = max(0, int(run_parallel_cfg.get("outer_slot") or 0))
+        except Exception:
+            outer_slot = 0
+        try:
+            inner_workers = max(1, int(run_parallel_cfg.get("inner_workers") or 1))
+        except Exception:
+            inner_workers = 1
+        reload_enabled = bool(run_parallel_cfg.get("reload_enabled"))
+        ignore_non_fatal = bool(run_parallel_cfg.get("ignore_non_fatal"))
+
+        if inner_workers > 1:
+            if parallel_engine == "fork":
+                cmd.append(f"-fork={inner_workers}")
+                # libFuzzer fork mode requires ignore_crashes for stable crash handling.
+                cmd.append("-ignore_crashes=1")
+            elif parallel_engine == "jobs_workers":
+                cmd.append("-jobs=0")
+                cmd.append(f"-workers={inner_workers}")
+                if reload_enabled:
+                    cmd.append("-reload=1")
+            if ignore_non_fatal:
+                cmd.append("-ignore_ooms=1")
+                cmd.append("-ignore_timeouts=1")
+            print(
+                f"[*] Parallel engine={parallel_engine} role={parallel_role} "
+                f"inner_workers={inner_workers} outer_slot={outer_slot}"
+            )
 
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")
@@ -5127,6 +5206,9 @@ EOF
             terminal_reason="coverage_plateau" if plateau_detected else "",
             plateau_detected=plateau_detected,
             plateau_idle_seconds=plateau_idle_seconds,
+            plateau_hit_count=int(plateau_pulse_hits),
+            plateau_last_hit_at=float(last_plateau_pulse_at),
+            progress_sample_file=progress_sample_file,
             seed_quality=_seed_quality_from_run(
                 log=log,
                 initial_corpus_files=initial_corpus_files,
@@ -5145,6 +5227,11 @@ EOF
                     seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
                 ),
             ),
+            parallel_engine=parallel_engine,
+            parallel_role=parallel_role,
+            outer_slot=int(outer_slot),
+            inner_workers=int(inner_workers),
+            reload_enabled=bool(reload_enabled),
         )
 
     # ────────────────────────────────────────────────────────────────────

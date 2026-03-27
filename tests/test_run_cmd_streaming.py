@@ -27,6 +27,28 @@ def _fake_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     return gen
 
 
+def test_run_plateau_hit_interval_default_and_fallback(monkeypatch):
+    monkeypatch.delenv("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC", raising=False)
+    monkeypatch.delenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", raising=False)
+    assert fur._run_plateau_hit_interval_sec() == 60
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "-9")
+    assert fur._run_plateau_hit_interval_sec() == 0
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "999999")
+    assert fur._run_plateau_hit_interval_sec() == 86_400
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC", "30")
+    assert fur._run_plateau_hit_interval_sec() == 30
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC", "bad")
+    assert fur._run_plateau_hit_interval_sec() == 60
+
+    monkeypatch.delenv("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC", raising=False)
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "bad")
+    assert fur._run_plateau_hit_interval_sec() == 60
+
+
 def test_run_plateau_pulse_min_interval_default_and_bounds(monkeypatch):
     monkeypatch.delenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", raising=False)
     assert fur._run_plateau_pulse_min_interval_sec() == 60
@@ -721,6 +743,53 @@ def test_run_fuzzer_small_ft_growth_under_threshold_does_not_delay_plateau(tmp_p
     assert result.rc == 0
     assert result.plateau_detected is True
     assert result.terminal_reason == "coverage_plateau"
+
+
+def test_run_fuzzer_plateau_hits_on_non_pulse_progress_lines(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.time_budget = 900
+    gen.max_len = 1024
+    gen.rss_limit_mb = 32768
+    gen.fuzz_out_dir = tmp_path / "fuzz" / "out"
+    gen.fuzz_corpus_dir = tmp_path / "fuzz" / "corpus"
+    gen.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    bin_path = gen.fuzz_out_dir / "demo_fuzz"
+    bin_path.write_text("", encoding="utf-8")
+    os.chmod(bin_path, 0o755)
+
+    timeline = iter([0.0, 1.0, 2.0, 65.0, 130.0, 195.0, 260.0])
+    monkeypatch.setattr(fur.time, "monotonic", lambda: next(timeline))
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSES", "3")
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC", "60")
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC", "60")
+    monkeypatch.setenv("SHERPA_RUN_FT_RECENT_GROWTH_WINDOW_SEC", "60")
+
+    def _fake_run_cmd(_cmd, **kwargs):
+        cb = kwargs.get("line_callback")
+        lines = [
+            "#1 NEW cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#2 REDUCE cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#3 REDUCE cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#4 REDUCE cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+            "#5 REDUCE cov: 6 ft: 10 corp: 3/24b lim: 24 exec/s: 100 rss: 10Mb\n",
+        ]
+        stop_reason = ""
+        for line in lines:
+            if cb is not None:
+                reason = cb("stdout", line)
+                if reason:
+                    stop_reason = reason
+                    break
+        stderr = f"\n[callback-stop] {stop_reason}" if stop_reason else ""
+        return 143 if stop_reason else 0, "".join(lines), stderr
+
+    gen._run_cmd = _fake_run_cmd  # type: ignore[method-assign]
+    result = gen._run_fuzzer(bin_path)
+
+    assert result.plateau_detected is True
+    assert result.terminal_reason == "coverage_plateau"
+    assert result.plateau_hit_count >= 3
 
 
 def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_path: Path, monkeypatch):
