@@ -440,6 +440,53 @@ def _run_libfuzzer_timeout_sec() -> int:
         return 1200
 
 
+def _count_corpus_files_and_bytes(corpus_dir: Path) -> tuple[int, int]:
+    """Fast corpus counting with safe recursive fallback when subdirs exist."""
+    files = 0
+    total_size = 0
+    try:
+        has_subdir = False
+        for entry in os.scandir(corpus_dir):
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    files += 1
+                    try:
+                        total_size += int(entry.stat(follow_symlinks=False).st_size)
+                    except Exception:
+                        pass
+                elif entry.is_dir(follow_symlinks=False):
+                    has_subdir = True
+            except Exception:
+                continue
+        if not has_subdir:
+            return files, total_size
+        # Fallback to recursive traversal for nested corpus layouts.
+        files = 0
+        total_size = 0
+        for p in corpus_dir.rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    total_size += int(p.stat().st_size)
+                except Exception:
+                    pass
+        return files, total_size
+    except Exception:
+        return 0, 0
+
+
+_RE_LF_OOM = re.compile(r"ERROR:\s*libFuzzer:\s*out-of-memory", re.IGNORECASE)
+_RE_ASAN_ALLOC_FAIL = re.compile(r"AddressSanitizer failed to allocate", re.IGNORECASE)
+_RE_ASAN_SHADOW_FAIL = re.compile(r"ReserveShadowMemoryRange failed", re.IGNORECASE)
+_RE_FAILED_MMAP = re.compile(r"failed to mmap", re.IGNORECASE)
+_RE_SANITIZER_ERROR = re.compile(r"==[0-9]+==ERROR: (Address|Undefined|Memory|Thread|Leak)Sanitizer")
+_RE_SANITIZER_SUMMARY = re.compile(
+    r"SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)"
+)
+_RE_RUNTIME_ERROR = re.compile(r"\bruntime error:\b", re.IGNORECASE)
+_RE_LF_DEADLY_SIGNAL = re.compile(r"ERROR: libFuzzer: deadly signal")
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
@@ -4795,19 +4842,7 @@ EOF
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
         corpus_dir.mkdir(parents=True, exist_ok=True)
-        initial_corpus_files = 0
-        initial_corpus_bytes = 0
-        try:
-            for p in corpus_dir.rglob("*"):
-                if p.is_file():
-                    initial_corpus_files += 1
-                    try:
-                        initial_corpus_bytes += int(p.stat().st_size)
-                    except Exception:
-                        pass
-        except Exception:
-            initial_corpus_files = 0
-            initial_corpus_bytes = 0
+        initial_corpus_files, initial_corpus_bytes = _count_corpus_files_and_bytes(corpus_dir)
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
@@ -4953,16 +4988,15 @@ EOF
         timeout_artifact_count = 0
 
         if new_artifacts:
-            sorted_artifacts = sorted(new_artifacts)
             timeout_like_artifacts = [
-                p for p in sorted_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
+                p for p in new_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
             ]
             oom_like_artifacts = [
-                p for p in sorted_artifacts if p.name.startswith(("oom-", "oom-alloc-"))
+                p for p in new_artifacts if p.name.startswith(("oom-", "oom-alloc-"))
             ]
             timeout_artifact_count = len(timeout_like_artifacts)
             crash_like_artifacts = [
-                p for p in sorted_artifacts if p not in timeout_like_artifacts and p not in oom_like_artifacts
+                p for p in new_artifacts if p not in timeout_like_artifacts and p not in oom_like_artifacts
             ]
 
             if crash_like_artifacts:
@@ -4980,21 +5014,21 @@ EOF
         def _is_sanitizer_crash(text: str) -> bool:
             if not text:
                 return False
-            if re.search(r"ERROR:\s*libFuzzer:\s*out-of-memory", text, re.IGNORECASE):
+            if _RE_LF_OOM.search(text):
                 return False
-            if re.search(r"AddressSanitizer failed to allocate", text, re.IGNORECASE):
+            if _RE_ASAN_ALLOC_FAIL.search(text):
                 return False
-            if re.search(r"ReserveShadowMemoryRange failed", text, re.IGNORECASE):
+            if _RE_ASAN_SHADOW_FAIL.search(text):
                 return False
-            if re.search(r"failed to mmap", text, re.IGNORECASE):
+            if _RE_FAILED_MMAP.search(text):
                 return False
-            if re.search(r"==[0-9]+==ERROR: (Address|Undefined|Memory|Thread|Leak)Sanitizer", text):
+            if _RE_SANITIZER_ERROR.search(text):
                 return True
-            if re.search(r"SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)", text):
+            if _RE_SANITIZER_SUMMARY.search(text):
                 return True
-            if re.search(r"\bruntime error:\b", text, re.IGNORECASE):
+            if _RE_RUNTIME_ERROR.search(text):
                 return True
-            if re.search(r"ERROR: libFuzzer: deadly signal", text):
+            if _RE_LF_DEADLY_SIGNAL.search(text):
                 return True
             return False
 
@@ -5028,21 +5062,21 @@ EOF
             run_error_kind = "run_resource_exhaustion"
             error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
         if rc != 0 and not crash_found:
-            lowered = log.lower()
-            if "[callback-stop] coverage_plateau" in lowered:
+            log_lower = log.lower()
+            if "[callback-stop] coverage_plateau" in log_lower:
                 rc = 0
-            elif "error: libfuzzer: out-of-memory" in lowered:
+            elif "error: libfuzzer: out-of-memory" in log_lower:
                 if not run_error_kind:
                     run_error_kind = "run_resource_exhaustion"
                 if not error:
                     error = f"fuzzer hit resource exhaustion (out-of-memory) for {bin_path.name}"
-            elif "idle-timeout" in lowered:
+            elif "idle-timeout" in log_lower:
                 run_error_kind = "run_idle_timeout"
                 error = (
                     f"fuzzer run idle-timeout for {bin_path.name}: "
                     f"no output for {run_idle_timeout}s"
                 )
-            elif "[timeout]" in lowered:
+            elif "[timeout]" in log_lower:
                 if not run_error_kind:
                     run_error_kind = "run_timeout"
                 if not error:
@@ -5053,20 +5087,9 @@ EOF
                 if not error:
                     error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
 
-        corpus_files = 0
-        corpus_size_bytes = 0
-        try:
-            for p in corpus_dir.rglob("*"):
-                if p.is_file():
-                    corpus_files += 1
-                    try:
-                        corpus_size_bytes += int(p.stat().st_size)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        corpus_files, corpus_size_bytes = _count_corpus_files_and_bytes(corpus_dir)
 
-        plateau_detected = "[callback-stop] coverage_plateau" in log.lower()
+        plateau_detected = "[callback-stop] coverage_plateau" in (log_lower if "log_lower" in locals() else log.lower())
         plateau_idle_seconds = plateau_idle_growth_sec if plateau_detected else 0
 
         # Corpus minimization after run (non-fatal)

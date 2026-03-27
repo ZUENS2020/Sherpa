@@ -6771,6 +6771,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+
+        def _accumulate_seed_counts(dst: dict[str, int], src: Any) -> None:
+            if not isinstance(src, dict):
+                return
+            for key in ("repo_examples", "ai", "radamsa", "total"):
+                try:
+                    dst[key] = int(dst.get(key, 0)) + int(src.get(key) or 0)
+                except Exception:
+                    continue
+
         seed_sources: set[str] = set()
         repo_examples_filtered = False
         repo_examples_rejected_count = 0
@@ -6816,27 +6826,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
                     meta = bootstrap_map.get(fuzzer_name) or {}
                     if isinstance(meta, dict):
-                        counts = meta.get("counts") or {}
-                        if isinstance(counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_total[key] = int(seed_count_total.get(key, 0)) + int(counts.get(key) or 0)
-                                except Exception:
-                                    continue
-                        raw_counts = meta.get("seed_counts_raw") or {}
-                        if isinstance(raw_counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_raw_total[key] = int(seed_count_raw_total.get(key, 0)) + int(raw_counts.get(key) or 0)
-                                except Exception:
-                                    continue
-                        filtered_counts = meta.get("seed_counts_filtered") or {}
-                        if isinstance(filtered_counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_filtered_total[key] = int(seed_count_filtered_total.get(key, 0)) + int(filtered_counts.get(key) or 0)
-                                except Exception:
-                                    continue
+                        _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
+                        _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
+                        _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
                         sources = meta.get("sources") or []
                         if isinstance(sources, list):
                             for src in sources:
@@ -7006,6 +6998,37 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         first_nonzero_rc = 0
         crash_candidates: list[tuple[str, Path, FuzzerRunResult]] = []
 
+        def _make_run_detail_fallback(
+            *,
+            fuzzer_name: str,
+            rc: int,
+            run_error_kind_value: str,
+            exception_kind: str,
+            error: str,
+        ) -> dict[str, Any]:
+            return {
+                "fuzzer": fuzzer_name,
+                "rc": rc,
+                "effective_rc": rc,
+                "crash_found": False,
+                "crash_evidence": "none",
+                "run_error_kind": run_error_kind_value,
+                "exception_kind": exception_kind,
+                "error": error,
+                "new_artifacts": [],
+                "first_artifact": "",
+                "final_cov": 0,
+                "final_ft": 0,
+                "final_iteration": 0,
+                "final_execs_per_sec": 0,
+                "final_rss_mb": 0,
+                "final_corpus_files": 0,
+                "final_corpus_size_bytes": 0,
+                "corpus_files": 0,
+                "corpus_size_bytes": 0,
+                "seed_quality": {},
+            }
+
         for bin_path in bins:
             if _finalize_timed_out("collecting run details"):
                 break
@@ -7030,28 +7053,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if first_nonzero_rc == 0:
                     first_nonzero_rc = detail_rc
                 run_details.append(
-                    {
-                        "fuzzer": fuzzer_name,
-                        "rc": detail_rc,
-                        "effective_rc": detail_rc,
-                        "crash_found": False,
-                        "crash_evidence": "none",
-                        "run_error_kind": detail_kind,
-                        "exception_kind": detail_kind,
-                        "error": exec_err,
-                        "new_artifacts": [],
-                        "first_artifact": "",
-                        "final_cov": 0,
-                        "final_ft": 0,
-                        "final_iteration": 0,
-                        "final_execs_per_sec": 0,
-                        "final_rss_mb": 0,
-                        "final_corpus_files": 0,
-                        "final_corpus_size_bytes": 0,
-                        "corpus_files": 0,
-                        "corpus_size_bytes": 0,
-                        "seed_quality": {},
-                    }
+                    _make_run_detail_fallback(
+                        fuzzer_name=fuzzer_name,
+                        rc=detail_rc,
+                        run_error_kind_value=detail_kind,
+                        exception_kind=detail_kind,
+                        error=exec_err,
+                    )
                 )
                 continue
 
@@ -7065,28 +7073,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if first_nonzero_rc == 0:
                     first_nonzero_rc = 1
                 run_details.append(
-                    {
-                        "fuzzer": fuzzer_name,
-                        "rc": 1,
-                        "effective_rc": 1,
-                        "crash_found": False,
-                        "crash_evidence": "none",
-                        "run_error_kind": "run_exception",
-                        "exception_kind": "run_exception",
-                        "error": "missing run result",
-                        "new_artifacts": [],
-                        "first_artifact": "",
-                        "final_cov": 0,
-                        "final_ft": 0,
-                        "final_iteration": 0,
-                        "final_execs_per_sec": 0,
-                        "final_rss_mb": 0,
-                        "final_corpus_files": 0,
-                        "final_corpus_size_bytes": 0,
-                        "corpus_files": 0,
-                        "corpus_size_bytes": 0,
-                        "seed_quality": {},
-                    }
+                    _make_run_detail_fallback(
+                        fuzzer_name=fuzzer_name,
+                        rc=1,
+                        run_error_kind_value="run_exception",
+                        exception_kind="run_exception",
+                        error="missing run result",
+                    )
                 )
                 continue
 
@@ -7186,6 +7179,27 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         else:
             msg = "Fuzzing completed."
 
+        seed_bootstrap_all = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
+
+        def _first_seed_meta_list(*path: str) -> list[str]:
+            for meta in seed_bootstrap_all.values():
+                if not isinstance(meta, dict):
+                    continue
+                cur: Any = meta
+                ok = True
+                for key in path:
+                    if not isinstance(cur, dict):
+                        ok = False
+                        break
+                    cur = cur.get(key)
+                if not ok:
+                    continue
+                if isinstance(cur, (list, tuple, set)):
+                    out_vals = [str(v).strip() for v in cur if str(v).strip()]
+                    if out_vals:
+                        return out_vals
+            return []
+
         crash_signature = ""
         same_crash_repeats = 0
         if crash_found and last_fuzzer and last_artifact:
@@ -7240,34 +7254,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 dict(state.get("coverage_seed_quality") or {}),
             ),
             "coverage_seed_families_required": list(
-                next(
-                    (
-                        list((meta.get("seed_families_required") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and meta.get("seed_families_required")
-                    ),
-                    list(state.get("coverage_seed_families_required") or []),
-                )
+                _first_seed_meta_list("seed_families_required")
+                or list(state.get("coverage_seed_families_required") or [])
             ),
             "coverage_seed_families_covered": list(
-                next(
-                    (
-                        list(((meta.get("seed_family_coverage") or {}).get("covered") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("covered")
-                    ),
-                    list(state.get("coverage_seed_families_covered") or []),
-                )
+                _first_seed_meta_list("seed_family_coverage", "covered")
+                or list(state.get("coverage_seed_families_covered") or [])
             ),
             "coverage_seed_families_missing": list(
-                next(
-                    (
-                        list(((meta.get("seed_family_coverage") or {}).get("missing") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("missing") is not None
-                    ),
-                    list(state.get("coverage_seed_families_missing") or []),
-                )
+                _first_seed_meta_list("seed_family_coverage", "missing")
+                or list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
                 next(
