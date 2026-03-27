@@ -27,6 +27,20 @@ def _fake_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     return gen
 
 
+def test_run_plateau_pulse_min_interval_default_and_bounds(monkeypatch):
+    monkeypatch.delenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", raising=False)
+    assert fur._run_plateau_pulse_min_interval_sec() == 60
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "-9")
+    assert fur._run_plateau_pulse_min_interval_sec() == 0
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "999999")
+    assert fur._run_plateau_pulse_min_interval_sec() == 86_400
+
+    monkeypatch.setenv("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC", "bad")
+    assert fur._run_plateau_pulse_min_interval_sec() == 60
+
+
 def test_run_cmd_keeps_stream_loop_open_while_process_is_silent(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     script = (

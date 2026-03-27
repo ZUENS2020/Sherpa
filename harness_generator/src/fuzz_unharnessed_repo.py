@@ -425,9 +425,12 @@ def _run_ft_recent_growth_window_sec() -> int:
 
 
 def _run_plateau_pulse_min_interval_sec() -> int:
-    # libFuzzer pulse lines are execution-count based and can be very frequent.
-    # We intentionally sample pulse-based plateau checks every 10 minutes.
-    return 600
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC") or "60").strip()
+    try:
+        # Keep configurable and bounded; 0 disables spacing guard.
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 60
 
 
 def _run_libfuzzer_timeout_sec() -> int:
@@ -4900,17 +4903,20 @@ EOF
                     plateau_pulse_hits -= 1
                 return None
             if kind == "PULSE":
-                if (
-                    last_plateau_pulse_at > 0
-                    and (now - last_plateau_pulse_at) < plateau_pulse_min_interval_sec
-                ):
-                    return None
-                last_plateau_pulse_at = now
                 # Coverage is the primary plateau signal. Recent feature-only growth
                 # can delay one pulse, but cannot suppress plateau indefinitely.
                 recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
                 if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
-                    plateau_pulse_hits += 1
+                    idle_elapsed = now - last_cov_growth_at
+                    if plateau_pulse_min_interval_sec > 0:
+                        expected_hits = 1 + int(
+                            max(0.0, idle_elapsed - plateau_idle_growth_sec)
+                            // plateau_pulse_min_interval_sec
+                        )
+                        plateau_pulse_hits = max(plateau_pulse_hits + 1, expected_hits)
+                    else:
+                        plateau_pulse_hits += 1
+                    last_plateau_pulse_at = now
                     if plateau_pulse_hits >= plateau_pulses:
                         callback_stop_reason = (
                             "coverage_plateau "
