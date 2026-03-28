@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -236,6 +237,48 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_execs_per_sec"] == 777
     assert isinstance(out.get("coverage_seed_feedback"), dict)
     assert isinstance(out.get("coverage_harness_feedback"), dict)
+
+
+def test_node_run_writes_seed_feedback_json(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=5,
+                final_ft=8,
+                seed_quality={
+                    "seed_profile": "parser-token",
+                    "initial_inited_cov": 1,
+                    "final_cov": 5,
+                    "cov_delta": 4,
+                    "early_new_units_30s": 0,
+                    "early_new_units_60s": 0,
+                    "initial_corpus_files": 10,
+                    "final_corpus_files": 3,
+                    "quality_flags": ["low_early_yield"],
+                    "merge_retained_ratio_files": 0.3,
+                    "cold_start_failure": True,
+                },
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    feedback_path = tmp_path / "fuzz" / "seed_feedback.json"
+    assert feedback_path.is_file()
+    payload = json.loads(feedback_path.read_text(encoding="utf-8"))
+    by_fuzzer = payload.get("by_fuzzer") or {}
+    assert "demo_fuzz" in by_fuzzer
+    assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):

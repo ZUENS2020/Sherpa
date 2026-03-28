@@ -1995,6 +1995,19 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
     quality = dict(state.get("coverage_seed_quality") or {})
     return {
         "seed_profile": str(state.get("coverage_seed_profile") or ""),
+        "initial_inited_cov": int(quality.get("initial_inited_cov") or 0),
+        "final_cov": int(quality.get("final_cov") or 0),
+        "cov_delta": int(quality.get("cov_delta") or 0),
+        "initial_inited_ft": int(quality.get("initial_inited_ft") or 0),
+        "final_ft": int(quality.get("final_ft") or 0),
+        "ft_delta": int(quality.get("ft_delta") or 0),
+        "early_new_units_30s": int(quality.get("early_new_units_30s") or 0),
+        "early_new_units_60s": int(quality.get("early_new_units_60s") or 0),
+        "initial_corpus_files": int(quality.get("initial_corpus_files") or 0),
+        "final_corpus_files": int(quality.get("final_corpus_files") or 0),
+        "cold_start_failure": bool(quality.get("cold_start_failure") or False),
+        "merge_retained_ratio_files": float(quality.get("merge_retained_ratio_files") or 1.0),
+        "merge_retained_ratio_bytes": float(quality.get("merge_retained_ratio_bytes") or 1.0),
         "required_families": list(state.get("coverage_seed_families_required") or []),
         "covered_families": list(state.get("coverage_seed_families_covered") or []),
         "missing_families": list(state.get("coverage_seed_families_missing") or []),
@@ -7846,6 +7859,50 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         out["coverage_quality_flags"] = sorted({flag for flag in quality_flags if flag})
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
+        try:
+            seed_feedback_path = gen.repo_root / "fuzz" / "seed_feedback.json"
+            seed_feedback_path.parent.mkdir(parents=True, exist_ok=True)
+            by_fuzzer: dict[str, Any] = {}
+            for detail in run_details:
+                fuzzer_name = str(detail.get("fuzzer") or "").strip()
+                if not fuzzer_name:
+                    continue
+                seed_quality = dict(detail.get("seed_quality") or {})
+                if not seed_quality:
+                    continue
+                by_fuzzer[fuzzer_name] = {
+                    "seed_profile": str(seed_quality.get("seed_profile") or out.get("coverage_seed_profile") or ""),
+                    "initial_inited_cov": int(seed_quality.get("initial_inited_cov") or 0),
+                    "final_cov": int(seed_quality.get("final_cov") or 0),
+                    "cov_delta": int(seed_quality.get("cov_delta") or 0),
+                    "initial_inited_ft": int(seed_quality.get("initial_inited_ft") or 0),
+                    "final_ft": int(seed_quality.get("final_ft") or 0),
+                    "ft_delta": int(seed_quality.get("ft_delta") or 0),
+                    "early_new_units_30s": int(seed_quality.get("early_new_units_30s") or 0),
+                    "early_new_units_60s": int(seed_quality.get("early_new_units_60s") or 0),
+                    "initial_corpus_files": int(seed_quality.get("initial_corpus_files") or 0),
+                    "final_corpus_files": int(seed_quality.get("final_corpus_files") or 0),
+                    "quality_flags": list(seed_quality.get("quality_flags") or []),
+                    "missing_required_families": list(out.get("coverage_seed_families_missing") or []),
+                    "merge_retained_ratio_files": float(seed_quality.get("merge_retained_ratio_files") or 1.0),
+                    "merge_retained_ratio_bytes": float(seed_quality.get("merge_retained_ratio_bytes") or 1.0),
+                    "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
+                    "updated_at": int(time.time()),
+                }
+            seed_feedback_doc = {
+                "version": 1,
+                "updated_at": int(time.time()),
+                "job_id": str(state.get("job_id") or ""),
+                "repo_url": str(state.get("repo_url") or ""),
+                "by_fuzzer": by_fuzzer,
+            }
+            seed_feedback_path.write_text(
+                json.dumps(seed_feedback_doc, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            out["coverage_seed_feedback_path"] = str(seed_feedback_path)
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"run: failed to write seed_feedback.json: {exc}")
         if run_error_kind:
             last_detail = run_details[-1] if run_details else {}
             attempt_index = int(state.get("repair_attempt_index") or 0) + 1
@@ -7975,6 +8032,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_depth_class = str(state.get("coverage_target_depth_class") or "")
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
         seed_quality = dict(state.get("coverage_seed_quality") or {})
+        seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
         seed_families_required = list(state.get("coverage_seed_families_required") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
@@ -8037,6 +8095,9 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
+        cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
+        merge_retained_ratio = float(seed_feedback.get("merge_retained_ratio_files") or 1.0)
+        merge_retained_low = bool(merge_retained_ratio > 0.0 and merge_retained_ratio < 0.35)
         seed_quality_issue = bool(
             any(
                 flag in quality_flags
@@ -8051,6 +8112,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     "missing_execution_targets",
                 }
             )
+            or cold_start_failure
+            or merge_retained_low
         )
         quality_degraded = bool(
             seed_quality_issue
@@ -8073,7 +8136,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             if seed_quality_issue and can_in_place:
                 should_improve = True
                 improve_mode = "in_place"
-                replan_reason = "seed_quality_issue"
+                if cold_start_failure:
+                    replan_reason = "seed_cold_start_failure"
+                elif merge_retained_low:
+                    replan_reason = "seed_merge_retained_low"
+                else:
+                    replan_reason = "seed_quality_issue"
             elif requested_replan:
                 if can_replan:
                     should_improve = True
@@ -8108,6 +8176,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 )
             if seed_quality_issue:
                 reason += f"; seed_quality_flags={','.join(quality_flags) or 'none'}"
+            if cold_start_failure:
+                reason += "; cold_start_failure=1"
+            if merge_retained_low:
+                reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
             if parallel_diagnosis_code != "balanced":
                 reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
         elif round_budget_exhausted:
@@ -8313,6 +8385,11 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         harness_feedback = dict(state.get("coverage_harness_feedback") or _build_harness_feedback(cast(dict[str, Any], state)))
         quality_oracle = str(state.get("coverage_quality_oracle") or "ok")
+        seed_first_repair = bool(
+            seed_feedback.get("cold_start_failure")
+            or float(seed_feedback.get("merge_retained_ratio_files") or 1.0) < 0.35
+            or bool(seed_families_missing)
+        )
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
@@ -8358,6 +8435,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Seed noise rejected: {seed_noise_rejected_count}\n"
                 f"- Seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
                 f"- Quality oracle: {quality_oracle}\n"
+                f"- Repair focus decision: {'seed-first' if seed_first_repair else 'harness-first'}\n"
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
