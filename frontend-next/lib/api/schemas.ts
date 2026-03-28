@@ -1,5 +1,27 @@
 import { z } from 'zod';
 
+const normalizedErrorSchema = z
+  .unknown()
+  .transform((v) => {
+    if (v == null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object') {
+      const obj = v as Record<string, unknown>;
+      const detail = obj?.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail.trim();
+      const message = obj?.message;
+      if (typeof message === 'string' && message.trim()) return message.trim();
+      if (Object.keys(obj).length === 0) return '';
+      try {
+        return JSON.stringify(obj);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
+  })
+  .default('');
+
 export const opencodeProviderSchema = z.object({
   name: z.string().default(''),
   enabled: z.boolean().default(true),
@@ -53,7 +75,7 @@ export const taskSummarySchema = z.object({
   child_count: z.number().int().default(0),
   active_child_id: z.string().nullable().optional(),
   active_child_status: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.string().nullable().optional(),
 });
 
@@ -65,7 +87,7 @@ export const childJobSchema = z.object({
   job_id: z.string(),
   status: z.string(),
   repo: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   log: z.string().optional().default(''),
   updated_at: z.number().optional(),
@@ -77,7 +99,7 @@ export const taskDetailSchema = z.object({
   job_id: z.string(),
   status: z.string(),
   repo: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   children_status: childStatusSchema.optional(),
   children: z.array(childJobSchema).optional().default([]),
