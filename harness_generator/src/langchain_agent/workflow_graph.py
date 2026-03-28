@@ -233,12 +233,149 @@ class FuzzWorkflowState(TypedDict, total=False):
     repair_error_digest: dict[str, Any]
     repair_attempt_index: int
     repair_strategy_force_change: bool
+    error: dict[str, Any]
 
 
 class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
     generator: NonOssFuzzHarnessGenerator
     crash_found: bool
     message: str
+
+
+def _has_error_payload(err: dict[str, Any] | None) -> bool:
+    if not isinstance(err, dict):
+        return False
+    return bool(
+        str(err.get("code") or "").strip()
+        or str(err.get("message") or "").strip()
+        or bool(err.get("terminal"))
+    )
+
+
+def _coerce_error_payload(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    err = {
+        "stage": str(raw.get("stage") or "").strip().lower(),
+        "kind": str(raw.get("kind") or "").strip().lower(),
+        "code": str(raw.get("code") or "").strip().lower(),
+        "message": str(raw.get("message") or "").strip(),
+        "detail": str(raw.get("detail") or "").strip(),
+        "signature": str(raw.get("signature") or "").strip(),
+        "retryable": bool(raw.get("retryable")),
+        "terminal": bool(raw.get("terminal")),
+        "at": int(raw.get("at") or 0),
+    }
+    if err["at"] <= 0:
+        err["at"] = int(time.time())
+    return err
+
+
+def _derive_error_from_legacy(state: dict[str, Any]) -> dict[str, Any]:
+    stage = str(state.get("last_step") or "").strip().lower()
+    code = str(
+        state.get("build_error_code")
+        or state.get("run_error_kind")
+        or state.get("restart_to_plan_reason")
+        or state.get("error_code")
+        or ""
+    ).strip().lower()
+    kind = str(
+        state.get("build_error_kind")
+        or state.get("run_error_kind")
+        or state.get("repair_error_kind")
+        or state.get("error_kind")
+        or ""
+    ).strip().lower()
+    message = str(state.get("last_error") or "").strip()
+    if not message and bool(state.get("failed")):
+        message = str(state.get("message") or "").strip()
+    signature = str(
+        state.get("build_error_signature_short")
+        or state.get("build_error_signature")
+        or state.get("timeout_signature")
+        or state.get("crash_signature")
+        or state.get("error_signature")
+        or ""
+    ).strip()
+    terminal = bool(state.get("failed"))
+    if not code and (message or terminal):
+        code = "unknown_error"
+    if not kind and code:
+        if code.startswith("run_"):
+            kind = "run"
+        elif code.startswith("build_") or "build" in code:
+            kind = "build"
+        elif "crash" in code:
+            kind = "crash"
+        elif "timeout" in code:
+            kind = "timeout"
+        else:
+            kind = "generic_failure"
+    retryable = bool(code) and not terminal
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": message,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": int(time.time()),
+    }
+
+
+def _project_error_legacy_fields(state: dict[str, Any], err: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    if not _has_error_payload(err):
+        return out
+    code = str(err.get("code") or "").strip().lower()
+    kind = str(err.get("kind") or "").strip().lower()
+    message = str(err.get("message") or "").strip()
+    signature = str(err.get("signature") or "").strip()
+    stage = str(err.get("stage") or "").strip().lower()
+    if message:
+        out["last_error"] = message
+    out["error_code"] = code
+    out["error_kind"] = kind
+    if signature:
+        out["error_signature"] = signature
+    if not str(out.get("repair_error_code") or "").strip() and code:
+        out["repair_error_code"] = code
+    if not str(out.get("repair_error_kind") or "").strip() and kind:
+        out["repair_error_kind"] = kind
+    if bool(out.get("restart_to_plan")) and not str(out.get("restart_to_plan_error_text") or "").strip() and message:
+        out["restart_to_plan_error_text"] = message
+    if stage == "run":
+        if code and not str(out.get("run_error_kind") or "").strip():
+            out["run_error_kind"] = code
+        if code and not str(out.get("run_terminal_reason") or "").strip():
+            out["run_terminal_reason"] = code
+    if stage == "build" or kind == "build":
+        if code and not str(out.get("build_error_code") or "").strip():
+            out["build_error_code"] = code
+        if kind and not str(out.get("build_error_kind") or "").strip():
+            out["build_error_kind"] = kind
+        if signature and not str(out.get("build_error_signature_short") or "").strip():
+            out["build_error_signature_short"] = signature[:12]
+    return out
+
+
+def _normalize_error_state(state: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    existing = _coerce_error_payload(out.get("error"))
+    derived = _derive_error_from_legacy(out)
+    if _has_error_payload(existing):
+        err = {**derived, **existing}
+    else:
+        err = derived
+    if _has_error_payload(err):
+        out["error"] = err
+        out = _project_error_legacy_fields(out, err)
+    else:
+        out["error"] = {}
+    return out
 
 
 def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
@@ -540,7 +677,8 @@ def _write_stage_feedback(
     error_text: str,
     state: dict[str, Any] | None = None,
 ) -> str:
-    state = state or {}
+    state = _normalize_error_state(state or {})
+    err = dict(state.get("error") or {})
     parts: list[str] = [
         f"# Stage Failure Feedback: {stage}",
         "",
@@ -555,12 +693,13 @@ def _write_stage_feedback(
     structured = {
         "stage": str(stage or "").strip(),
         "error_code": str(
-            state.get("build_error_code")
+            err.get("code")
+            or state.get("build_error_code")
             or state.get("run_error_kind")
             or state.get("restart_to_plan_reason")
             or ""
         ).strip(),
-        "signature": str(state.get("build_error_signature_short") or "").strip(),
+        "signature": str(err.get("signature") or state.get("build_error_signature_short") or "").strip(),
         "action_taken": str(state.get("fix_action_type") or "").strip(),
         "diff_paths": list(state.get("fix_build_last_diff_paths") or []),
     }
@@ -666,22 +805,48 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
 
 
 def _repair_mode_active(state: dict[str, Any]) -> bool:
+    state = _normalize_error_state(state)
+    err = dict(state.get("error") or {})
     if bool(state.get("repair_mode")):
         return True
     if bool(state.get("restart_to_plan")):
         return True
-    return bool(str(state.get("last_error") or "").strip())
+    return _has_error_payload(err) or bool(str(state.get("last_error") or "").strip())
 
 
 def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    state = _normalize_error_state(state)
+    err = dict(state.get("error") or {})
     origin = _infer_repair_origin_stage(state)
-    error_text = str(state.get("restart_to_plan_error_text") or "").strip() or str(state.get("last_error") or "").strip()
+    error_text = (
+        str(state.get("restart_to_plan_error_text") or "").strip()
+        or str(err.get("message") or "").strip()
+        or str(state.get("last_error") or "").strip()
+    )
     snapshot = {
         "repair_mode": _repair_mode_active(state),
         "repair_origin_stage": origin,
-        "repair_error_kind": str(state.get("repair_error_kind") or state.get("build_error_kind") or state.get("run_error_kind") or "generic_failure").strip() or "generic_failure",
-        "repair_error_code": str(state.get("repair_error_code") or state.get("build_error_code") or state.get("restart_to_plan_reason") or "").strip(),
-        "repair_signature": str(state.get("repair_signature") or state.get("build_error_signature_short") or state.get("crash_signature") or "").strip(),
+        "repair_error_kind": str(
+            err.get("kind")
+            or state.get("repair_error_kind")
+            or state.get("build_error_kind")
+            or state.get("run_error_kind")
+            or "generic_failure"
+        ).strip() or "generic_failure",
+        "repair_error_code": str(
+            err.get("code")
+            or state.get("repair_error_code")
+            or state.get("build_error_code")
+            or state.get("restart_to_plan_reason")
+            or ""
+        ).strip(),
+        "repair_signature": str(
+            err.get("signature")
+            or state.get("repair_signature")
+            or state.get("build_error_signature_short")
+            or state.get("crash_signature")
+            or ""
+        ).strip(),
         "repair_stdout_tail": str(state.get("repair_stdout_tail") or state.get("build_stdout_tail") or "").strip(),
         "repair_stderr_tail": str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip(),
         "repair_error_text": error_text,
@@ -1902,8 +2067,9 @@ def _count_opencode_defunct_processes() -> int:
 
 
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
-    out, stop = _wf_common.enter_step(cast(dict[str, Any], state), step_name)
-    next_state = cast(FuzzWorkflowRuntimeState, out)
+    normalized_in = _normalize_error_state(cast(dict[str, Any], state))
+    out, stop = _wf_common.enter_step(normalized_in, step_name)
+    next_state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(out))
     if stop:
         return next_state, stop
     defunct_count = _count_opencode_defunct_processes()
@@ -1916,13 +2082,24 @@ def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWo
         )
         guarded = cast(
             FuzzWorkflowRuntimeState,
-            {
+            _normalize_error_state({
                 **next_state,
                 "last_step": step_name,
                 "failed": True,
                 "last_error": msg,
                 "message": "workflow stopped (opencode defunct safeguard)",
-            },
+                "error": {
+                    "stage": step_name,
+                    "kind": "infra",
+                    "code": "opencode_defunct_safeguard",
+                    "message": msg,
+                    "detail": msg,
+                    "signature": "",
+                    "retryable": False,
+                    "terminal": True,
+                    "at": int(time.time()),
+                },
+            }),
         )
         _wf_log(cast(dict[str, Any], guarded), f"<- {step_name} stop=opencode-defunct count={defunct_count} threshold={threshold}")
         return guarded, True
@@ -2473,6 +2650,13 @@ def _run_ignore_non_fatal_enabled() -> bool:
     if not raw:
         return False
     return raw in {"1", "true", "yes", "on"}
+
+
+def _auto_stop_policy() -> str:
+    raw = (os.environ.get("SHERPA_AUTO_STOP_POLICY") or "hard_fail_only").strip().lower()
+    if raw in {"hard_fail_only", "legacy_mixed"}:
+        return raw
+    return "hard_fail_only"
 
 
 def _coverage_underutilized_execs_threshold() -> int:
@@ -3432,6 +3616,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         except Exception:
             pass
 
+    out = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], out)))
     _wf_log(cast(dict[str, Any], out), f"<- init ok repo_root={out.get('repo_root')} dt={_fmt_dt(time.perf_counter()-t0)}")
     return out
 
@@ -3723,6 +3908,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 coverage_round_budget_exhausted = True
                 coverage_stop_reason = "no_material_change"
                 coverage_replan_reason = "no_material_change"
+                repair_force_strategy_change = True
         out = {
             **state,
             "last_step": "plan",
@@ -3773,6 +3959,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "repair_signature": str(repair_snapshot.get("repair_signature") or ""),
             "repair_stdout_tail": str(repair_snapshot.get("repair_stdout_tail") or ""),
             "repair_stderr_tail": str(repair_snapshot.get("repair_stderr_tail") or ""),
+            "repair_strategy_force_change": bool(repair_force_strategy_change),
             "repair_recent_attempts": (
                 (repair_recent_attempts + [{
                     "step": str(state.get("last_step") or ""),
@@ -3865,15 +4052,16 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     if repair_mode:
-        repair_error_kind = str(state.get("repair_error_kind") or state.get("build_error_kind") or state.get("run_error_kind") or "generic_failure").strip()
-        repair_error_code = str(state.get("repair_error_code") or state.get("build_error_code") or state.get("restart_to_plan_reason") or "").strip()
-        repair_signature = str(state.get("repair_signature") or state.get("build_error_signature_short") or state.get("crash_signature") or "").strip()
-        repair_stderr_tail = str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip()
-        repair_stdout_tail = str(state.get("repair_stdout_tail") or state.get("build_stdout_tail") or "").strip()
-        repair_recent_attempts = list(state.get("repair_recent_attempts") or [])
-        repair_attempt_index = int(state.get("repair_attempt_index") or 0)
-        repair_force_strategy_change = bool(state.get("repair_strategy_force_change") or False)
-        repair_error_digest = dict(state.get("repair_error_digest") or {})
+        repair_snapshot = _build_repair_snapshot(cast(dict[str, Any], state))
+        repair_error_kind = str(repair_snapshot.get("repair_error_kind") or "generic_failure").strip()
+        repair_error_code = str(repair_snapshot.get("repair_error_code") or "").strip()
+        repair_signature = str(repair_snapshot.get("repair_signature") or "").strip()
+        repair_stderr_tail = str(repair_snapshot.get("repair_stderr_tail") or "").strip()
+        repair_stdout_tail = str(repair_snapshot.get("repair_stdout_tail") or "").strip()
+        repair_recent_attempts = list(repair_snapshot.get("repair_recent_attempts") or [])
+        repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
+        repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
+        repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
         repair_lines: list[str] = [
             "Repair mode context (consume this before editing):",
             f"- repair_origin_stage: {repair_origin_stage}",
@@ -6880,6 +7068,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         except Exception:
             max_same_crash_repeats = 1
         max_same_timeout_repeats = _max_same_timeout_repeats()
+        auto_stop_policy = _auto_stop_policy()
         max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "3")
         try:
             requested_outer_parallelism = max(1, min(int(max_parallel_raw), 64))
@@ -7567,6 +7756,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "timeout_signature": timeout_signature,
             "same_timeout_repeats": same_timeout_repeats,
             "message": msg,
+            "auto_stop_policy": auto_stop_policy,
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
         if run_error_kind == "workflow_time_budget_exceeded":
             out["failed"] = True
@@ -7589,12 +7781,17 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             out["message"] = "workflow stopped (same crash repeated)"
         if run_error_kind in timeout_like_kinds and same_timeout_repeats >= max_same_timeout_repeats:
-            out["failed"] = True
-            out["last_error"] = (
-                "same timeout/no-progress signature repeated "
-                f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
-            )
-            out["message"] = "workflow stopped (same timeout/no-progress repeated)"
+            if auto_stop_policy == "legacy_mixed":
+                out["failed"] = True
+                out["last_error"] = (
+                    "same timeout/no-progress signature repeated "
+                    f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
+                )
+                out["message"] = "workflow stopped (same timeout/no-progress repeated)"
+            else:
+                out["auto_stop_blocked_reason"] = "same_timeout_repeats"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
+                out["message"] = "same timeout/no-progress repeated; continue under hard_fail_only"
         if crash_found and last_fuzzer and last_artifact:
             _write_repro_context(
                 gen.repo_root,
@@ -7833,6 +8030,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             or (requested_replan and plateau_no_gain)
         )
         quality_oracle = "quality_degraded" if quality_degraded else "ok"
+        auto_stop_policy = _auto_stop_policy()
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
@@ -7988,7 +8186,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "message": "coverage analysis done",
+            "auto_stop_policy": auto_stop_policy,
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
+        if auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
+            out["auto_stop_blocked_reason"] = "coverage_no_improve"
+            out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
 
@@ -8233,7 +8437,21 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 else dict(state.get("repair_error_digest") or {})
             ),
             "message": "improve-harness in-place edits applied" if opencode_applied else "improve-harness prepared plan hint",
+            "auto_stop_policy": _auto_stop_policy(),
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
+        if out["auto_stop_policy"] == "hard_fail_only":
+            replan_ineffective = str(out.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
+                out.get("coverage_replan_effective", True)
+            )
+            budget_exhausted = bool(out.get("coverage_round_budget_exhausted"))
+            if replan_ineffective:
+                out["auto_stop_blocked_reason"] = "coverage_replan_ineffective"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
+            elif budget_exhausted:
+                out["auto_stop_blocked_reason"] = "coverage_round_budget_exhausted"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         _wf_log(cast(dict[str, Any], out), f"<- improve-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -9502,24 +9720,28 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
 
 
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     if bool(state.get("restart_to_plan")):
         return "plan"
-    if not (state.get("last_error") or "").strip():
+    err = dict(state.get("error") or {})
+    if not _has_error_payload(err):
         return "run"
     return "plan"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     if bool(state.get("restart_to_plan")):
         return "plan"
     if bool(state.get("crash_found")):
         return "crash-triage"
-    terminal_reason = (state.get("run_terminal_reason") or "").strip().lower()
+    err = dict(state.get("error") or {})
+    terminal_reason = str(state.get("run_terminal_reason") or err.get("code") or "").strip().lower()
     # Coverage plateau is a coverage signal, not a hard run failure.
     # Let coverage-analysis decide in_place vs replan.
     if terminal_reason == "coverage_plateau":
         return "coverage-analysis"
-    run_error_kind = (state.get("run_error_kind") or "").strip().lower()
+    run_error_kind = str(state.get("run_error_kind") or err.get("code") or "").strip().lower()
     if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
         return "coverage-analysis"
     if run_error_kind in _FATAL_RUN_ERROR_KINDS:
@@ -9530,25 +9752,35 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
         return "stop"
-    if (state.get("last_error") or "").strip():
+    if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if bool(state.get("coverage_should_improve")):
         return "improve-harness"
+    if _auto_stop_policy() == "hard_fail_only":
+        return "run"
     return "stop"
 
 
 def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
         return "stop"
-    if (state.get("last_error") or "").strip():
+    if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if str(state.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
         state.get("coverage_replan_effective", True)
     ):
+        if _auto_stop_policy() == "hard_fail_only":
+            return "plan"
         return "stop"
     if bool(state.get("coverage_round_budget_exhausted")):
+        if _auto_stop_policy() == "hard_fail_only":
+            return "plan"
         return "stop"
     if bool(state.get("coverage_should_improve")):
         if str(state.get("coverage_improve_mode") or "").strip() == "in_place":
@@ -9558,13 +9790,17 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_plan_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")) or str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     return "synthesize"
 
 
 def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")) or str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     return "build"
 
@@ -9667,6 +9903,7 @@ def _route_after_crash_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     last_step = str(state.get("last_step") or "").strip().lower()
     if not last_step:
         return "stop"
@@ -9997,23 +10234,24 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "max_steps": max_steps,
         }
     )
-    out = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    out = _normalize_error_state(cast(dict[str, Any], raw) if isinstance(raw, dict) else {})
     try:
         _write_run_summary(out)
     except Exception:
         pass
     msg = str(out.get("message") or "Fuzzing completed.").strip()
     recommended_next = _recommended_next_step(cast(FuzzWorkflowRuntimeState, out))
-    if bool(out.get("failed")):
+    err = dict(out.get("error") or {})
+    if bool(out.get("failed")) or bool(err.get("terminal")):
         _wf_log(out, f"workflow end status=failed dt={_fmt_dt(time.perf_counter()-t0)}")
-        terminal_reason = str(out.get("run_terminal_reason") or "").strip() or str(
+        terminal_reason = str(out.get("run_terminal_reason") or err.get("code") or "").strip() or str(
             out.get("fix_build_terminal_reason") or ""
         ).strip()
         if terminal_reason:
             msg = f"{terminal_reason}: {msg}"
         raise RuntimeError(msg or "workflow failed")
     # If we stopped due to an error but didn't mark failed, still surface it.
-    last_error = str(out.get("last_error") or "").strip()
+    last_error = str(out.get("last_error") or err.get("message") or "").strip()
     if last_error and not bool(out.get("crash_found")):
         if stop_after_step and recommended_next != "stop":
             _wf_log(
@@ -10031,6 +10269,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
+        "error": dict(out.get("error") or {}),
         "repo_root": str(out.get("repo_root") or ""),
         "workflow_last_step": str(out.get("last_step") or ""),
         "workflow_active_step": str(out.get("next") or ""),

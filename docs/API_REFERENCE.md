@@ -140,15 +140,27 @@
   ],
   "phase": "task",
   "runtime_mode": "native",
-  "error_code": null,
-  "error_kind": null,
-  "error_signature": null
+  "error": {
+    "stage": "build",
+    "kind": "build",
+    "code": "missing_llvmfuzzer_entrypoint",
+    "message": "build failed rc=1",
+    "detail": "build failed rc=1",
+    "signature": "9f23ab41c2de",
+    "retryable": true,
+    "terminal": false,
+    "at": 1770000000
+  },
+  "error_code": "missing_llvmfuzzer_entrypoint",
+  "error_kind": "build",
+  "error_signature": "9f23ab41c2de"
 }
 ```
 
 增强字段（父子任务都可能出现）：
 - 工作流与恢复：`k8s_phase`、`cancel_requested`、`workflow_active_step`、`workflow_last_step`、`recoverable`、`resume_attempts`、`resume_error_code`、`last_resume_reason` 等
 - fuzz 指标：`fuzz_fuzzers`、`fuzz_max_cov`、`fuzz_max_ft`、`fuzz_total_execs_per_sec`、`fuzz_crash_found`、`fuzz_coverage_*`
+- 错误字段：`error` 为统一错误对象；`error_code/error_kind/error_signature` 为兼容字段（deprecated）
 
 ### POST `/api/task/{job_id}/resume`
 
@@ -217,6 +229,20 @@
         "success": 1,
         "error": 1
       },
+      "error": {
+        "stage": "build",
+        "kind": "build",
+        "code": "missing_llvmfuzzer_entrypoint",
+        "message": "build failed rc=1",
+        "detail": "build failed rc=1",
+        "signature": "9f23ab41c2de",
+        "retryable": true,
+        "terminal": false,
+        "at": 1770000000
+      },
+      "error_code": "missing_llvmfuzzer_entrypoint",
+      "error_kind": "build",
+      "error_signature": "9f23ab41c2de",
       "fuzz_fuzzers": {},
       "fuzz_max_cov": 0,
       "fuzz_max_ft": 0,
@@ -239,6 +265,7 @@
 - `repo`：用于 UI 展示的仓库名/短名；`repo_raw` 保留原始 URL
 - `fuzz_*`：来自 active child（若存在），否则来自主任务自身
 - `fuzz_coverage_plateau_streak`：按固定 30 秒无增长窗口统计的连续平台期轮次（`idle_no_growth=30s`）
+- `error`：统一错误对象；`error_code/error_kind/error_signature` 为兼容字段（deprecated）
 
 ## 5. 系统总览（前端 Overview/Tasks 顶部）
 

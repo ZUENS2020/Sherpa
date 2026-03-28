@@ -633,6 +633,22 @@ def test_route_after_coverage_analysis_routes_to_improve_harness():
     assert route == "improve-harness"
 
 
+def test_route_after_coverage_analysis_continues_run_when_no_improve_in_hard_fail_only(monkeypatch):
+    monkeypatch.delenv("SHERPA_AUTO_STOP_POLICY", raising=False)
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "run"
+
+
+def test_route_after_coverage_analysis_stops_when_no_improve_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "stop"
+
+
 def test_route_after_improve_harness_routes_back_to_plan():
     route = workflow_graph._route_after_improve_harness_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
@@ -641,6 +657,20 @@ def test_route_after_improve_harness_routes_back_to_plan():
 
 
 def test_route_after_improve_harness_stops_on_ineffective_replan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_effective": False,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_on_ineffective_replan_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -666,6 +696,20 @@ def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
 
 
 def test_route_after_improve_harness_stops_when_round_budget_exhausted():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_round_budget_exhausted": True,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_when_round_budget_exhausted_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -1286,9 +1330,48 @@ def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monk
             "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
         }
     )
-    assert second["failed"] is True
+    assert second.get("failed") is not True
     assert second["run_error_kind"] == "run_timeout"
     assert second["same_timeout_repeats"] >= 1
+    assert second["auto_stop_blocked_reason"] == "same_timeout_repeats"
+    assert int(second.get("continuous_loop_count") or 0) >= 1
+
+
+def test_node_run_stops_when_same_timeout_signature_repeats_in_legacy_mode(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
+    timeout_artifact.parent.mkdir(parents=True, exist_ok=True)
+    timeout_artifact.write_text("hang candidate", encoding="utf-8")
+
+    def _make_result() -> FuzzerRunResult:
+        return FuzzerRunResult(
+            rc=70,
+            new_artifacts=[timeout_artifact],
+            crash_found=False,
+            crash_evidence="timeout_artifact",
+            first_artifact=str(timeout_artifact),
+            log_tail="libFuzzer timeout",
+            error="fuzzer produced timeout-like artifacts for demo_fuzz (count=1)",
+            run_error_kind="run_timeout",
+        )
+
+    first = workflow_graph._node_run(
+        {"generator": _FakeRunGenerator(tmp_path, [_make_result()]), "crash_fix_attempts": 0}
+    )
+    sig = str(first.get("timeout_signature") or "")
+    assert sig
+
+    second = workflow_graph._node_run(
+        {
+            "generator": _FakeRunGenerator(tmp_path, [_make_result()]),
+            "crash_fix_attempts": 0,
+            "timeout_signature": sig,
+            "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
+        }
+    )
+    assert second["failed"] is True
+    assert second["run_error_kind"] == "run_timeout"
     assert "same timeout/no-progress signature repeated" in second["last_error"]
 
 
