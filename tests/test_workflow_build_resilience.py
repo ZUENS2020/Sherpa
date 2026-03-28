@@ -99,7 +99,52 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     assert out["build_attempts"] == 2
     assert out["build_error_kind"] == ""
     assert out["build_error_code"] == ""
+    assert out.get("run_error_kind") == ""
+    assert out.get("error") == {}
     assert len(gen.commands) == 2
+
+
+def test_build_success_clears_stale_error_markers(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build(
+        {
+            "generator": gen,
+            "build_attempts": 0,
+            "run_error_kind": "compile_error",
+            "error": {
+                "stage": "build",
+                "kind": "source",
+                "code": "compile_error",
+                "message": "stale",
+                "detail": "stale",
+                "signature": "stale",
+                "retryable": True,
+                "terminal": False,
+                "at": 1,
+            },
+        }
+    )
+
+    assert out["message"].startswith("built (")
+    assert out["last_error"] == ""
+    assert out.get("run_error_kind") == ""
+    assert out.get("error") == {}
+    assert workflow_graph._route_after_build_state(out) == "run"
 
 
 def test_find_static_lib_discovers_nested_archive_artifacts(tmp_path: Path):

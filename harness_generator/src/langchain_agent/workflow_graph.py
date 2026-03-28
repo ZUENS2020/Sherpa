@@ -378,6 +378,29 @@ def _normalize_error_state(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _clear_error_markers_on_success(state: dict[str, Any]) -> dict[str, Any]:
+    """Clear stale error markers after a stage succeeds.
+
+    This prevents previous recoverable errors (for example an old compile_error)
+    from polluting the next stage routing/summary when current stage output is valid.
+    """
+    out = dict(state)
+    out["error"] = {}
+    out["last_error"] = ""
+    out["error_code"] = ""
+    out["error_kind"] = ""
+    out["error_signature"] = ""
+    out["build_error_kind"] = ""
+    out["build_error_code"] = ""
+    out["build_error_signature"] = ""
+    out["build_error_signature_before"] = str(out.get("build_error_signature_before") or "")
+    out["build_error_signature_after"] = ""
+    out["build_error_signature_short"] = ""
+    out["run_error_kind"] = ""
+    out["run_terminal_reason"] = ""
+    return out
+
+
 def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
     _wf_common.wf_log(state, msg)
 
@@ -3987,6 +4010,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             ),
             "message": "planned",
         }
+        out = _clear_error_markers_on_success(out)
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -4709,7 +4733,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         out = {
             **state,
             "last_step": "synthesize",
-            "last_error": "",
             "codex_hint": "",
             "restart_to_plan": False,
             "restart_to_plan_reason": "",
@@ -4734,6 +4757,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
             "message": "synthesized",
         }
+        out = _clear_error_markers_on_success(out)
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -5373,6 +5397,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         next_state["target_build_matrix"] = target_build_matrix
         next_state["build_gate_reason"] = "ok"
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
+        next_state = _clear_error_markers_on_success(next_state)
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
     except Exception as e:
