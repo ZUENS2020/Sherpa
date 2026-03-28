@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -75,6 +76,29 @@ class _MultiRunGenerator(_FakeRunGenerator):
         if self._run_sleep_sec > 0:
             time.sleep(self._run_sleep_sec)
         return super()._run_fuzzer(_bin_path)
+
+
+class _DeterministicParallelGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, results_by_name: dict[str, FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, run_results=[])
+        self._bins = [self.fuzz_out_dir / "demo_fuzz_1", self.fuzz_out_dir / "demo_fuzz_2", self.fuzz_out_dir / "demo_fuzz_3"]
+        for p in self._bins:
+            p.write_text("", encoding="utf-8")
+        self._results_by_name = dict(results_by_name)
+        self.terminate_calls: list[str] = []
+
+    def _discover_fuzz_binaries(self) -> list[Path]:
+        return list(self._bins)
+
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
+        name = bin_path.name
+        result = self._results_by_name.get(name)
+        if result is None:
+            raise AssertionError(f"unexpected fuzzer name: {name}")
+        return result
+
+    def terminate_active_run_processes(self, *, reason: str = "") -> None:
+        self.terminate_calls.append(reason)
 
 
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
@@ -213,6 +237,48 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert detail["final_execs_per_sec"] == 777
     assert isinstance(out.get("coverage_seed_feedback"), dict)
     assert isinstance(out.get("coverage_harness_feedback"), dict)
+
+
+def test_node_run_writes_seed_feedback_json(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=5,
+                final_ft=8,
+                seed_quality={
+                    "seed_profile": "parser-token",
+                    "initial_inited_cov": 1,
+                    "final_cov": 5,
+                    "cov_delta": 4,
+                    "early_new_units_30s": 0,
+                    "early_new_units_60s": 0,
+                    "initial_corpus_files": 10,
+                    "final_corpus_files": 3,
+                    "quality_flags": ["low_early_yield"],
+                    "merge_retained_ratio_files": 0.3,
+                    "cold_start_failure": True,
+                },
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    feedback_path = tmp_path / "fuzz" / "seed_feedback.json"
+    assert feedback_path.is_file()
+    payload = json.loads(feedback_path.read_text(encoding="utf-8"))
+    by_fuzzer = payload.get("by_fuzzer") or {}
+    assert "demo_fuzz" in by_fuzzer
+    assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
@@ -458,6 +524,90 @@ def test_node_run_parallel_early_stop_records_metadata(tmp_path: Path, monkeypat
     assert str(out.get("early_stop_reason") or "") in {"first_crash_parallel_early_stop", "first_crash_stop"}
 
 
+def test_node_run_parallel_early_stop_collects_done_futures_and_tracks_cancel_stats(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "3")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "1")
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _DeterministicParallelGenerator(
+        tmp_path,
+        results_by_name={
+            "demo_fuzz_1": FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+            "demo_fuzz_2": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=11,
+                final_ft=22,
+            ),
+            "demo_fuzz_3": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=33,
+                final_ft=44,
+            ),
+        },
+    )
+
+    original_as_completed = workflow_graph.as_completed
+
+    def _yield_crash_first_only(futures):
+        future_list = list(futures)
+        crash_future = None
+        for f in future_list:
+            try:
+                name, _ = f.result(timeout=1)
+            except Exception:
+                continue
+            if name == "demo_fuzz_1":
+                crash_future = f
+                break
+        if crash_future is not None:
+            yield crash_future
+        else:
+            for f in future_list:
+                yield f
+
+    monkeypatch.setattr(workflow_graph, "as_completed", _yield_crash_first_only)
+    try:
+        out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    finally:
+        monkeypatch.setattr(workflow_graph, "as_completed", original_as_completed)
+
+    assert out["crash_found"] is True
+    assert out["first_crash_fuzzer"] == "demo_fuzz_1"
+    assert out["run_cancel_requested_count"] >= 2
+    assert 0 <= int(out.get("run_cancel_effective_count") or 0) <= int(out.get("run_cancel_requested_count") or 0)
+    details = out.get("run_details") or []
+    names = {str(d.get("fuzzer") or "") for d in details}
+    # demo_fuzz_2 was completed but intentionally not yielded by as_completed;
+    # it must still be captured by early-stop done-future harvesting.
+    assert "demo_fuzz_2" in names
+
+
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "1")
     gen = _MultiRunGenerator(
@@ -633,6 +783,22 @@ def test_route_after_coverage_analysis_routes_to_improve_harness():
     assert route == "improve-harness"
 
 
+def test_route_after_coverage_analysis_continues_run_when_no_improve_in_hard_fail_only(monkeypatch):
+    monkeypatch.delenv("SHERPA_AUTO_STOP_POLICY", raising=False)
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "run"
+
+
+def test_route_after_coverage_analysis_stops_when_no_improve_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "stop"
+
+
 def test_route_after_improve_harness_routes_back_to_plan():
     route = workflow_graph._route_after_improve_harness_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
@@ -641,6 +807,20 @@ def test_route_after_improve_harness_routes_back_to_plan():
 
 
 def test_route_after_improve_harness_stops_on_ineffective_replan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_effective": False,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_on_ineffective_replan_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -666,6 +846,20 @@ def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
 
 
 def test_route_after_improve_harness_stops_when_round_budget_exhausted():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_round_budget_exhausted": True,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_when_round_budget_exhausted_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -1286,9 +1480,48 @@ def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monk
             "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
         }
     )
-    assert second["failed"] is True
+    assert second.get("failed") is not True
     assert second["run_error_kind"] == "run_timeout"
     assert second["same_timeout_repeats"] >= 1
+    assert second["auto_stop_blocked_reason"] == "same_timeout_repeats"
+    assert int(second.get("continuous_loop_count") or 0) >= 1
+
+
+def test_node_run_stops_when_same_timeout_signature_repeats_in_legacy_mode(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
+    timeout_artifact.parent.mkdir(parents=True, exist_ok=True)
+    timeout_artifact.write_text("hang candidate", encoding="utf-8")
+
+    def _make_result() -> FuzzerRunResult:
+        return FuzzerRunResult(
+            rc=70,
+            new_artifacts=[timeout_artifact],
+            crash_found=False,
+            crash_evidence="timeout_artifact",
+            first_artifact=str(timeout_artifact),
+            log_tail="libFuzzer timeout",
+            error="fuzzer produced timeout-like artifacts for demo_fuzz (count=1)",
+            run_error_kind="run_timeout",
+        )
+
+    first = workflow_graph._node_run(
+        {"generator": _FakeRunGenerator(tmp_path, [_make_result()]), "crash_fix_attempts": 0}
+    )
+    sig = str(first.get("timeout_signature") or "")
+    assert sig
+
+    second = workflow_graph._node_run(
+        {
+            "generator": _FakeRunGenerator(tmp_path, [_make_result()]),
+            "crash_fix_attempts": 0,
+            "timeout_signature": sig,
+            "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
+        }
+    )
+    assert second["failed"] is True
+    assert second["run_error_kind"] == "run_timeout"
     assert "same timeout/no-progress signature repeated" in second["last_error"]
 
 

@@ -1787,7 +1787,7 @@ def _staged_sequence_from(raw_start: str | None) -> list[str]:
     return list(_STAGED_WORKFLOW_STEPS[idx:])
 
 
-def _error_code_for_job(job: dict | None) -> str:
+def _legacy_error_code_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     direct = str(job.get("error_code") or "").strip()
@@ -1815,7 +1815,7 @@ def _error_code_for_job(job: dict | None) -> str:
     return ""
 
 
-def _error_kind_for_job(job: dict | None) -> str:
+def _legacy_error_kind_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     result = job.get("result")
@@ -1830,7 +1830,7 @@ def _error_kind_for_job(job: dict | None) -> str:
     return ""
 
 
-def _error_signature_for_job(job: dict | None) -> str:
+def _legacy_error_signature_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     result = job.get("result")
@@ -1846,6 +1846,105 @@ def _error_signature_for_job(job: dict | None) -> str:
             if val:
                 return val
     return ""
+
+
+def _coerce_error_object(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    stage = str(raw.get("stage") or "").strip().lower()
+    kind = str(raw.get("kind") or "").strip().lower()
+    code = str(raw.get("code") or "").strip().lower()
+    message = str(raw.get("message") or "").strip()
+    detail = str(raw.get("detail") or "").strip()
+    signature = str(raw.get("signature") or "").strip()
+    retryable = bool(raw.get("retryable"))
+    terminal = bool(raw.get("terminal"))
+    at = int(_safe_float(raw.get("at")) or 0)
+    if not (code or message or signature or terminal):
+        return {}
+    if at <= 0:
+        at = int(time.time())
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": detail,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": at,
+    }
+
+
+def _error_object_for_job(job: dict | None) -> dict[str, object]:
+    if not isinstance(job, dict):
+        return {}
+    result = job.get("result")
+    result_dict = result if isinstance(result, dict) else {}
+    for source in (job.get("error"), result_dict.get("error")):
+        normalized = _coerce_error_object(source)
+        if normalized:
+            return normalized
+
+    code = _legacy_error_code_for_job(job)
+    kind = _legacy_error_kind_for_job(job)
+    signature = _legacy_error_signature_for_job(job)
+    message = str(
+        job.get("last_error")
+        or result_dict.get("last_error")
+        or job.get("error")
+        or ""
+    ).strip()
+    stage = str(
+        job.get("workflow_active_step")
+        or job.get("workflow_last_step")
+        or result_dict.get("last_step")
+        or job.get("k8s_phase")
+        or ""
+    ).strip().lower()
+    terminal = bool(result_dict.get("failed")) or str(job.get("status") or "").strip().lower() in {
+        "error",
+        "resume_failed",
+        "recoverable",
+    }
+    retryable = bool(code) and not terminal
+    if not (code or kind or signature or message or terminal):
+        return {}
+    if not kind and code:
+        if code.startswith("run_"):
+            kind = "run"
+        elif code.startswith("build_") or "build" in code:
+            kind = "build"
+        elif "crash" in code:
+            kind = "crash"
+        elif "timeout" in code:
+            kind = "timeout"
+        else:
+            kind = "generic_failure"
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": message,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": int(_safe_float(job.get("updated_at")) or _safe_float(job.get("finished_at")) or time.time()),
+    }
+
+
+def _error_code_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("code") or "")
+
+
+def _error_kind_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("kind") or "")
+
+
+def _error_signature_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("signature") or "")
 
 
 def _runtime_mode_for_job(job: dict | None) -> str:
@@ -3100,9 +3199,11 @@ def _derive_task_status(job: dict) -> dict:
     children = list(job.get("children") or [])
     if not children:
         view = dict(job)
-        view["error_code"] = _error_code_for_job(view)
-        view["error_kind"] = _error_kind_for_job(view)
-        view["error_signature"] = _error_signature_for_job(view)
+        err = _error_object_for_job(view)
+        view["error"] = err
+        view["error_code"] = str(err.get("code") or "")
+        view["error_kind"] = str(err.get("kind") or "")
+        view["error_signature"] = str(err.get("signature") or "")
         view["phase"] = _phase_for_job(view)
         view["runtime_mode"] = _runtime_mode_for_job(view)
         _enrich_job_view(view)
@@ -3139,16 +3240,20 @@ def _derive_task_status(job: dict) -> dict:
         "error": error,
     }
     for c in child_jobs:
-        c["error_code"] = _error_code_for_job(c)
-        c["error_kind"] = _error_kind_for_job(c)
-        c["error_signature"] = _error_signature_for_job(c)
+        cerr = _error_object_for_job(c)
+        c["error"] = cerr
+        c["error_code"] = str(cerr.get("code") or "")
+        c["error_kind"] = str(cerr.get("kind") or "")
+        c["error_signature"] = str(cerr.get("signature") or "")
         c["phase"] = _phase_for_job(c)
         c["runtime_mode"] = _runtime_mode_for_job(c)
         _enrich_job_view(c)
     view["children"] = child_jobs
-    view["error_code"] = _error_code_for_job(view)
-    view["error_kind"] = _error_kind_for_job(view)
-    view["error_signature"] = _error_signature_for_job(view)
+    err = _error_object_for_job(view)
+    view["error"] = err
+    view["error_code"] = str(err.get("code") or "")
+    view["error_kind"] = str(err.get("kind") or "")
+    view["error_signature"] = str(err.get("signature") or "")
     view["phase"] = _phase_for_job(view)
     view["runtime_mode"] = _runtime_mode_for_job(view)
     _enrich_job_view(view)
@@ -3224,7 +3329,7 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "started_at_iso": _iso_time(job.get("started_at")),
                 "finished_at": job.get("finished_at"),
                 "finished_at_iso": _iso_time(job.get("finished_at")),
-                "error": job.get("error"),
+                "error": _error_object_for_job(job),
                 "error_code": _error_code_for_job(job),
                 "error_kind": _error_kind_for_job(job),
                 "error_signature": _error_signature_for_job(job),

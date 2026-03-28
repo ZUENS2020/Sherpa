@@ -1058,6 +1058,10 @@ def _seed_quality_from_run(
     early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
     final_files = int(final_stats.get("corpus_files") or 0)
     final_bytes = int(final_stats.get("corpus_size_bytes") or 0)
+    final_cov = int(final_stats.get("cov") or 0)
+    final_ft = int(final_stats.get("ft") or 0)
+    cov_delta = max(0, final_cov - inited_cov)
+    ft_delta = max(0, final_ft - inited_ft)
     retention_files = (float(final_files) / float(initial_corpus_files)) if initial_corpus_files > 0 else 0.0
     retention_bytes = (float(final_bytes) / float(initial_corpus_bytes)) if initial_corpus_bytes > 0 else 0.0
 
@@ -1112,8 +1116,8 @@ def _seed_quality_from_run(
         ),
     )
 
-    cov_gain = max(0, int(final_stats.get("cov") or 0) - inited_cov)
-    ft_gain = max(0, int(final_stats.get("ft") or 0) - inited_ft)
+    cov_gain = cov_delta
+    ft_gain = ft_delta
     early_units_norm = max(0.0, min(1.0, float(max(early_new_units_30s, early_new_units_60s)) / 16.0))
     coverage_potential = max(
         0.0,
@@ -1162,6 +1166,10 @@ def _seed_quality_from_run(
         "initial_corpus_bytes": initial_corpus_bytes,
         "initial_inited_cov": inited_cov,
         "initial_inited_ft": inited_ft,
+        "final_cov": final_cov,
+        "final_ft": final_ft,
+        "cov_delta": cov_delta,
+        "ft_delta": ft_delta,
         "early_new_units_30s": early_new_units_30s,
         "early_new_units_60s": early_new_units_60s,
         "final_corpus_files": final_files,
@@ -1345,10 +1353,28 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
     return required, [x for x in optional if x not in required]
 
 
-def _classify_seed_family(path: Path) -> set[str]:
+def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
     name = path.name.lower()
-    text = read_text_safely(path)[:2048].lower()
+    try:
+        data = path.read_bytes()[:1024]
+    except Exception:
+        data = b""
+    text = data.decode("utf-8", errors="replace").lower()
+    profile = str(seed_profile or "").strip().lower()
     families: set[str] = set()
+    if profile == "archive-container" and data:
+        if data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08"):
+            families.add("archive_zip")
+        if len(data) >= 262 and data[257:262] == b"ustar":
+            families.add("archive_tar")
+        if data.startswith(b"\x1f\x8b\x08"):
+            families.add("archive_gzip")
+        if data.startswith(b"BZh"):
+            families.add("archive_bzip2")
+        if data.startswith(b"\xfd7zXZ\x00"):
+            families.add("archive_xz")
+        if any(f in families for f in {"archive_zip", "archive_tar", "archive_gzip", "archive_bzip2", "archive_xz"}):
+            families.add("valid_archive_sample")
     if "{}" in text or re.search(r"\{[^{}]*\}", text):
         families.add("replacement_fields")
     if "{{" in text or "}}" in text:
@@ -3386,7 +3412,7 @@ EOF
                     continue
                 selected.append(dest)
                 accepted += 1
-                for family in _classify_seed_family(dest):
+                for family in _classify_seed_family(dest, seed_profile):
                     family_limits[family] = family_limits.get(family, 0) + 1
                 if len(selected) >= 12:
                     break
@@ -3413,7 +3439,7 @@ EOF
                 seen_hashes.add(digest)
                 selected.append(dest)
                 accepted += 1
-                for family in _classify_seed_family(dest):
+                for family in _classify_seed_family(dest, seed_profile):
                     family_limits[family] = family_limits.get(family, 0) + 1
         if imported_zip_rejected > 0:
             rejected += imported_zip_rejected
@@ -3611,7 +3637,17 @@ EOF
 
     def _infer_seed_gaps(self, seed_profile: str, corpus_dir: Path) -> str:
         names = " ".join(p.name.lower() for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else ""
+        covered_families: set[str] = set()
+        if corpus_dir.is_dir():
+            for path in corpus_dir.iterdir():
+                if not path.is_file():
+                    continue
+                covered_families.update(_classify_seed_family(path, seed_profile))
+        required_families, _ = _seed_families_for_target(seed_profile)
+        missing_required = [f for f in required_families if f and f not in covered_families]
         gaps: list[str] = []
+        if missing_required:
+            gaps.append("missing required family coverage: " + ", ".join(missing_required[:6]))
         if seed_profile == "parser-structure":
             if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
                 gaps.append("missing malformed/truncated parser cases")
@@ -3642,7 +3678,8 @@ EOF
         elif seed_profile == "decoder-binary":
             gaps.append("missing malformed length/checksum and truncated binary frames")
         elif seed_profile == "archive-container":
-            gaps.append("ensure at least one valid archive sample exists first")
+            if "valid_archive_sample" not in covered_families:
+                gaps.append("ensure at least one valid archive sample exists first")
         return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
 
     def _seed_exploration_path(self, fuzzer_name: str) -> Path:
@@ -3652,6 +3689,30 @@ EOF
     def _seed_check_path(self, fuzzer_name: str) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
         return self.fuzz_dir / f"seed_check_{safe_name}.json"
+
+    def _seed_feedback_path(self) -> Path:
+        return self.fuzz_dir / "seed_feedback.json"
+
+    def _load_seed_feedback_doc(self) -> dict[str, object]:
+        path = self._seed_feedback_path()
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
+    def _seed_feedback_for_fuzzer(self, fuzzer_name: str) -> dict[str, object]:
+        doc = self._load_seed_feedback_doc()
+        by_fuzzer = doc.get("by_fuzzer")
+        if isinstance(by_fuzzer, dict):
+            entry = by_fuzzer.get(fuzzer_name)
+            if isinstance(entry, dict):
+                return dict(entry)
+        return {}
 
     def _seed_max_file_bytes(self) -> int:
         raw = (os.environ.get("SHERPA_SEED_MAX_FILE_BYTES") or "8192").strip()
@@ -3882,7 +3943,7 @@ EOF
                 reject_reason = "hash"
             if not reject:
                 content_hashes.add(digest)
-            families = _classify_seed_family(path)
+            families = _classify_seed_family(path, seed_profile)
             if (
                 textual_mode
                 and seed_profile not in {"parser-format", "parser-numeric"}
@@ -4125,6 +4186,12 @@ EOF
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
         target_corpus_files = max(self._seed_corpus_min_per_target(), len(required_families) * 2)
         per_family_target = 2 if required_families else 1
+        previous_seed_feedback = self._seed_feedback_for_fuzzer(fuzzer_name)
+        previous_seed_feedback_text = (
+            json.dumps(previous_seed_feedback, ensure_ascii=False, indent=2)
+            if previous_seed_feedback
+            else "{}"
+        )
 
         instructions = textwrap.dedent(
             f"""
@@ -4162,6 +4229,9 @@ EOF
             Coverage-oriented gap hints:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
+            Previous run seed feedback (if available):
+            {previous_seed_feedback_text}
+
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
             - For `archive-container`, real archive samples must come first: import/use repository examples from `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, or `tests/**` before adding synthetic variants.
@@ -4187,6 +4257,8 @@ EOF
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
             - Soft filtering keeps diverse seeds; do not assume near variants will always be removed.
+            - If previous feedback shows cold-start failure, low merge retained ratio, or low early yield, prioritize semantically different high-signal seeds over random variants.
+            - If previous feedback shows missing families, fill missing families first before adding more variants for already-covered families.
             - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
@@ -4221,6 +4293,7 @@ EOF
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+            "=== previous seed feedback ===\n" + previous_seed_feedback_text,
         ]
         stdout = self.patcher.run_codex_command(
             instructions,
@@ -4295,6 +4368,41 @@ EOF
         if int((filtered_meta.get("filtered_by_rule_breakdown") or {}).get("family") or 0) > 0:
             redundancy_penalty += 0.25
         redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
+        merge_gate_stats = {
+            "before_files": 0,
+            "after_files": 0,
+            "before_bytes": 0,
+            "after_bytes": 0,
+            "retained_ratio_files": 1.0,
+            "retained_ratio_bytes": 1.0,
+            "applied": False,
+            "error": "",
+        }
+        try:
+            bin_path = self.fuzz_out_dir / fuzzer_name
+            if bin_path.is_file():
+                merge_raw = self._minimize_corpus(bin_path, corpus_dir)
+                before_files = max(0, int(merge_raw.get("before_files") or 0))
+                after_files = max(0, int(merge_raw.get("after_files") or 0))
+                before_bytes = max(0, int(merge_raw.get("before_bytes") or 0))
+                after_bytes = max(0, int(merge_raw.get("after_bytes") or 0))
+                merge_gate_stats = {
+                    "before_files": before_files,
+                    "after_files": after_files,
+                    "before_bytes": before_bytes,
+                    "after_bytes": after_bytes,
+                    "retained_ratio_files": (
+                        float(after_files) / float(before_files) if before_files > 0 else 1.0
+                    ),
+                    "retained_ratio_bytes": (
+                        float(after_bytes) / float(before_bytes) if before_bytes > 0 else 1.0
+                    ),
+                    "applied": True,
+                    "error": "",
+                }
+        except Exception as exc:
+            merge_gate_stats["error"] = str(exc)
+            print(f"[warn] seed merge gate failed for {fuzzer_name}: {exc}")
         alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
         seed_score_prefuzz = max(
             0.0,
@@ -4350,6 +4458,14 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "merge_gate": merge_gate_stats,
+            "merge_retained_ratio_files": float(merge_gate_stats.get("retained_ratio_files") or 1.0),
+            "merge_retained_ratio_bytes": float(merge_gate_stats.get("retained_ratio_bytes") or 1.0),
+            "cold_start_failure": bool(
+                previous_seed_feedback.get("cold_start_failure")
+                if isinstance(previous_seed_feedback, dict)
+                else False
+            ),
             "seed_score": float(seed_score_prefuzz),
             "seed_score_components": {
                 "alpha": alpha,
@@ -4405,6 +4521,14 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "merge_gate": dict(merge_gate_stats),
+            "merge_retained_ratio_files": float(merge_gate_stats.get("retained_ratio_files") or 1.0),
+            "merge_retained_ratio_bytes": float(merge_gate_stats.get("retained_ratio_bytes") or 1.0),
+            "cold_start_failure": bool(
+                previous_seed_feedback.get("cold_start_failure")
+                if isinstance(previous_seed_feedback, dict)
+                else False
+            ),
             "seed_score": float(seed_quality_doc.get("seed_score") or 0.0),
             "seed_score_components": dict(seed_quality_doc.get("seed_score_components") or {}),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
@@ -5185,6 +5309,32 @@ EOF
             except Exception as exc:
                 print(f"[warn] corpus minimization skipped: {exc}")
 
+        seed_quality_data = _seed_quality_from_run(
+            log=log,
+            initial_corpus_files=initial_corpus_files,
+            initial_corpus_bytes=initial_corpus_bytes,
+            final_stats=libfuzzer_stats,
+            required_families=required_families,
+            covered_families=covered_families,
+            repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
+            plateau_idle_seconds=plateau_idle_seconds,
+            seed_profile=str(seed_bootstrap.get("seed_profile") or ""),
+            archive_valid_count=int(seed_bootstrap.get("archive_valid_count") or 0),
+            archive_valid_ratio=float(seed_bootstrap.get("archive_valid_ratio") or 1.0),
+            archive_min_valid_ratio=self._seed_archive_min_valid_ratio(),
+            archive_malformed_ratio=float(seed_bootstrap.get("archive_malformed_ratio") or 0.0),
+            archive_max_malformed_ratio=float(
+                seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
+            ),
+        )
+        if isinstance(seed_quality_data, dict):
+            seed_quality_data["merge_retained_ratio_files"] = float(seed_bootstrap.get("merge_retained_ratio_files") or 1.0)
+            seed_quality_data["merge_retained_ratio_bytes"] = float(seed_bootstrap.get("merge_retained_ratio_bytes") or 1.0)
+            seed_quality_data["cold_start_failure"] = bool(
+                int(seed_quality_data.get("early_new_units_30s") or 0) <= 0
+                and int(seed_quality_data.get("early_new_units_60s") or 0) <= 0
+            )
+
         return FuzzerRunResult(
             rc=int(rc),
             new_artifacts=list(new_artifacts),
@@ -5209,24 +5359,7 @@ EOF
             plateau_hit_count=int(plateau_pulse_hits),
             plateau_last_hit_at=float(last_plateau_pulse_at),
             progress_sample_file=progress_sample_file,
-            seed_quality=_seed_quality_from_run(
-                log=log,
-                initial_corpus_files=initial_corpus_files,
-                initial_corpus_bytes=initial_corpus_bytes,
-                final_stats=libfuzzer_stats,
-                required_families=required_families,
-                covered_families=covered_families,
-                repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
-                plateau_idle_seconds=plateau_idle_seconds,
-                seed_profile=str(seed_bootstrap.get("seed_profile") or ""),
-                archive_valid_count=int(seed_bootstrap.get("archive_valid_count") or 0),
-                archive_valid_ratio=float(seed_bootstrap.get("archive_valid_ratio") or 1.0),
-                archive_min_valid_ratio=self._seed_archive_min_valid_ratio(),
-                archive_malformed_ratio=float(seed_bootstrap.get("archive_malformed_ratio") or 0.0),
-                archive_max_malformed_ratio=float(
-                    seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
-                ),
-            ),
+            seed_quality=seed_quality_data,
             parallel_engine=parallel_engine,
             parallel_role=parallel_role,
             outer_slot=int(outer_slot),

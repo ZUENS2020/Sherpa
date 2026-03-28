@@ -150,6 +150,35 @@ def _build_fuzz_performance(run_details: list[dict[str, Any]], out: dict[str, An
     }
 
 
+def _coerce_error_object(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    code = str(raw.get("code") or "").strip().lower()
+    kind = str(raw.get("kind") or "").strip().lower()
+    stage = str(raw.get("stage") or "").strip().lower()
+    message = str(raw.get("message") or "").strip()
+    detail = str(raw.get("detail") or "").strip()
+    signature = str(raw.get("signature") or "").strip()
+    retryable = bool(raw.get("retryable"))
+    terminal = bool(raw.get("terminal"))
+    at = int(raw.get("at") or 0)
+    if at <= 0:
+        at = int(time.time())
+    if not (code or kind or message or signature or terminal):
+        return {}
+    return {
+        "code": code,
+        "kind": kind,
+        "stage": stage,
+        "message": message,
+        "detail": detail,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": at,
+    }
+
+
 def write_run_summary(out: dict[str, Any]) -> None:
     repo_root_raw = out.get("repo_root")
     if not repo_root_raw:
@@ -161,14 +190,24 @@ def write_run_summary(out: dict[str, Any]) -> None:
     crash_found = bool(out.get("crash_found"))
     crash_repro_done = bool(out.get("crash_repro_done"))
     crash_repro_ok = bool(out.get("crash_repro_ok"))
-    last_error = str(out.get("last_error") or "").strip()
+    error_obj = _coerce_error_object(out.get("error"))
+    last_error = str(out.get("last_error") or error_obj.get("message") or "").strip()
     failed = bool(out.get("failed"))
-    run_error_kind = str(out.get("run_error_kind") or "").strip()
-    error_kind = str(out.get("error_kind") or "").strip()
-    error_code = str(out.get("error_code") or "").strip()
+    run_error_kind = str(out.get("run_error_kind") or error_obj.get("code") or "").strip()
+    error_kind = str(out.get("error_kind") or error_obj.get("kind") or "").strip()
+    error_code = str(out.get("error_code") or error_obj.get("code") or "").strip()
+    error_signature = str(out.get("error_signature") or error_obj.get("signature") or "").strip()
     status = (
         "error"
-        if (failed or last_error or run_error_kind or error_kind or error_code or (crash_found and crash_repro_done and not crash_repro_ok))
+        if (
+            failed
+            or bool(error_obj.get("terminal"))
+            or last_error
+            or run_error_kind
+            or error_kind
+            or error_code
+            or (crash_found and crash_repro_done and not crash_repro_ok)
+        )
         else ("crash_found" if crash_found else "ok")
     )
     harness_error = detect_harness_error(repo_root)
@@ -200,6 +239,18 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "run_error_kind": run_error_kind,
         "error_kind": error_kind,
         "error_code": error_code,
+        "error_signature": error_signature,
+        "error": {
+            "code": error_code,
+            "kind": error_kind,
+            "stage": str(error_obj.get("stage") or ""),
+            "message": last_error,
+            "detail": str(error_obj.get("detail") or ""),
+            "signature": error_signature,
+            "retryable": bool(error_obj.get("retryable")),
+            "terminal": bool(error_obj.get("terminal") or failed),
+            "at": int(error_obj.get("at") or time.time()),
+        },
         "crash_repro_done": crash_repro_done,
         "crash_repro_ok": crash_repro_ok,
         "crash_repro_rc": int(out.get("crash_repro_rc") or 0),

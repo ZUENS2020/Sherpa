@@ -666,11 +666,14 @@ def test_list_tasks_exposes_error_code_for_task_and_children():
         listing = client.get("/api/tasks?limit=5").json()["items"]
 
     assert task["error_code"] == "unknown_error"
+    assert task["error"]["code"] == "unknown_error"
     assert task["phase"] == "error"
     assert task["children"][0]["error_code"] == "missing_llvmfuzzer_entrypoint"
+    assert task["children"][0]["error"]["code"] == "missing_llvmfuzzer_entrypoint"
     assert task["children"][0]["phase"] == "error"
     assert listing[0]["job_id"] == task_id
     assert listing[0]["error_code"] == "unknown_error"
+    assert listing[0]["error"]["code"] == "unknown_error"
     assert listing[0]["phase"] == "error"
 
 
