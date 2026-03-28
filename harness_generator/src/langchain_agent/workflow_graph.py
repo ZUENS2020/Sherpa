@@ -377,7 +377,6 @@ def _normalize_error_state(state: dict[str, Any]) -> dict[str, Any]:
         out["error"] = {}
     return out
 
-
 def _clear_error_markers_on_success(state: dict[str, Any]) -> dict[str, Any]:
     """Clear stale error markers after a stage succeeds.
 
