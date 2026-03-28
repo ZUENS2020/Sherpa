@@ -7049,6 +7049,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_details: list[dict[str, Any]] = []
         run_batch_plan: list[dict[str, Any]] = []
         run_children_exit_count = 0
+        run_cancel_requested_count = 0
+        run_cancel_effective_count = 0
         total_time_budget = _wf_common.parse_budget_value(state.get("time_budget"), default=900)
         run_time_budget_raw = state.get("run_time_budget")
         if run_time_budget_raw is None:
@@ -7343,8 +7345,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     with ThreadPoolExecutor(max_workers=len(batch)) as pool:
                         futures = {pool.submit(_run_one, bin_path): bin_path for bin_path in batch}
                         batch_should_stop = False
+                        processed_futures: set[Any] = set()
                         for fut in as_completed(futures):
                             bin_path = futures[fut]
+                            processed_futures.add(fut)
                             try:
                                 name, run = fut.result()
                                 run_results[name] = run
@@ -7365,10 +7369,32 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                             pass
                                     for pending_fut in futures:
                                         if pending_fut is not fut:
-                                            pending_fut.cancel()
+                                            run_cancel_requested_count += 1
+                                            try:
+                                                if pending_fut.cancel():
+                                                    run_cancel_effective_count += 1
+                                            except Exception:
+                                                pass
                                     for other_bin in batch:
                                         if other_bin.name != name and other_bin.name not in early_stopped_fuzzers:
                                             early_stopped_fuzzers.append(other_bin.name)
+                                    # Collect already-finished futures before leaving this batch
+                                    # so early-stop does not drop completed results.
+                                    for remaining_fut, remaining_bin in futures.items():
+                                        if remaining_fut in processed_futures or remaining_fut is fut:
+                                            continue
+                                        if not remaining_fut.done():
+                                            continue
+                                        processed_futures.add(remaining_fut)
+                                        try:
+                                            rname, rrun = remaining_fut.result(timeout=0)
+                                            run_results[rname] = rrun
+                                            finalized_fuzzers.add(rname)
+                                            run_children_exit_count += 1
+                                        except Exception as e:
+                                            run_exec_errors[remaining_bin.name] = str(e)
+                                            finalized_fuzzers.add(remaining_bin.name)
+                                            run_children_exit_count += 1
                                     batch_should_stop = True
                                     break
                             except Exception as e:
@@ -7681,6 +7707,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_terminal_reason": run_terminal_reason,
             "run_idle_seconds": int(run_idle_seconds or 0),
             "run_children_exit_count": int(run_children_exit_count),
+            "run_cancel_requested_count": int(run_cancel_requested_count),
+            "run_cancel_effective_count": int(run_cancel_effective_count),
             "run_details": run_details,
             "run_batch_plan": run_batch_plan,
             "run_parallel_engine": parallel_engine,

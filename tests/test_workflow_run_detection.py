@@ -77,6 +77,29 @@ class _MultiRunGenerator(_FakeRunGenerator):
         return super()._run_fuzzer(_bin_path)
 
 
+class _DeterministicParallelGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, results_by_name: dict[str, FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, run_results=[])
+        self._bins = [self.fuzz_out_dir / "demo_fuzz_1", self.fuzz_out_dir / "demo_fuzz_2", self.fuzz_out_dir / "demo_fuzz_3"]
+        for p in self._bins:
+            p.write_text("", encoding="utf-8")
+        self._results_by_name = dict(results_by_name)
+        self.terminate_calls: list[str] = []
+
+    def _discover_fuzz_binaries(self) -> list[Path]:
+        return list(self._bins)
+
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
+        name = bin_path.name
+        result = self._results_by_name.get(name)
+        if result is None:
+            raise AssertionError(f"unexpected fuzzer name: {name}")
+        return result
+
+    def terminate_active_run_processes(self, *, reason: str = "") -> None:
+        self.terminate_calls.append(reason)
+
+
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
     gen = _FakeRunGenerator(
         tmp_path,
@@ -456,6 +479,90 @@ def test_node_run_parallel_early_stop_records_metadata(tmp_path: Path, monkeypat
     assert out["crash_found"] is True
     assert str(out.get("first_crash_fuzzer") or "").startswith("demo_fuzz_")
     assert str(out.get("early_stop_reason") or "") in {"first_crash_parallel_early_stop", "first_crash_stop"}
+
+
+def test_node_run_parallel_early_stop_collects_done_futures_and_tracks_cancel_stats(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "3")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "1")
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _DeterministicParallelGenerator(
+        tmp_path,
+        results_by_name={
+            "demo_fuzz_1": FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+            "demo_fuzz_2": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=11,
+                final_ft=22,
+            ),
+            "demo_fuzz_3": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=33,
+                final_ft=44,
+            ),
+        },
+    )
+
+    original_as_completed = workflow_graph.as_completed
+
+    def _yield_crash_first_only(futures):
+        future_list = list(futures)
+        crash_future = None
+        for f in future_list:
+            try:
+                name, _ = f.result(timeout=1)
+            except Exception:
+                continue
+            if name == "demo_fuzz_1":
+                crash_future = f
+                break
+        if crash_future is not None:
+            yield crash_future
+        else:
+            for f in future_list:
+                yield f
+
+    monkeypatch.setattr(workflow_graph, "as_completed", _yield_crash_first_only)
+    try:
+        out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    finally:
+        monkeypatch.setattr(workflow_graph, "as_completed", original_as_completed)
+
+    assert out["crash_found"] is True
+    assert out["first_crash_fuzzer"] == "demo_fuzz_1"
+    assert out["run_cancel_requested_count"] >= 2
+    assert 0 <= int(out.get("run_cancel_effective_count") or 0) <= int(out.get("run_cancel_requested_count") or 0)
+    details = out.get("run_details") or []
+    names = {str(d.get("fuzzer") or "") for d in details}
+    # demo_fuzz_2 was completed but intentionally not yielded by as_completed;
+    # it must still be captured by early-stop done-future harvesting.
+    assert "demo_fuzz_2" in names
 
 
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
