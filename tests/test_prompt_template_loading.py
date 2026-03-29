@@ -117,12 +117,16 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     triage = workflow_common.render_opencode_prompt("crash_triage_with_hint", hint="triage-this")
     assert "classify crash into exactly one label" in triage
     assert "crash_triage.json" in triage
+    assert "do not classify `upstream_bug` from sanitizer keywords alone" in triage
+    assert "if evidence is insufficient, output `label=inconclusive`" in triage
     assert "triage-this" in triage
 
     analysis = workflow_common.render_opencode_prompt("crash_analysis_with_hint", hint="analyze-this")
     assert "produce `crash_analysis.json` and `crash_analysis.md`" in analysis
     assert "false_positive" in analysis
     assert "real_bug" in analysis
+    assert "do not classify `real_bug` from sanitizer keywords alone" in analysis
+    assert "if evidence is insufficient, output `verdict=unknown`" in analysis
     assert "analyze-this" in analysis
 
 

@@ -43,6 +43,8 @@ Use this skill in the `crash-analysis` stage after `re-run` has produced crash e
 - Analysis-only stage; no code edits.
 - Prefer explicit evidence lines over generic conclusions.
 - Use conservative verdict `unknown` when evidence is weak.
+- Do not classify `real_bug` from sanitizer keywords alone.
+- If evidence is weak or missing, output `unknown` and explain missing evidence explicitly.
 
 ## Command policy
 - Allowed: read-only commands (`find`, `grep`, `rg`, `cat`, `ls`, `sed`, `awk`, `head`, `tail`).

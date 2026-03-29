@@ -36,6 +36,8 @@ Use this skill in the `crash-triage` stage after `run` or `re-run` crash evidenc
 - Classification-only; no source edits.
 - Prefer conservative classification when uncertain.
 - Keep reason/evidence grounded in observed logs and traces.
+- Do not classify `upstream_bug` from sanitizer keywords alone.
+- If evidence is weak or missing, output `inconclusive` and explain missing evidence explicitly.
 
 ## Command policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `sed -n`, `head`, `tail`).
