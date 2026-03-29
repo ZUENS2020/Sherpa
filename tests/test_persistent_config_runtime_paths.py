@@ -128,3 +128,18 @@ def test_normalize_model_for_opencode_prefixes_single_configured_provider():
     out = pc.normalize_model_for_opencode("MiniMax-M2.7-highspeed", cfg=cfg)
 
     assert out == "minimax/MiniMax-M2.7-highspeed"
+
+
+def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: pytest.MonkeyPatch):
+    cfg = pc.WebPersistentConfig()
+    monkeypatch.setenv(
+        "SHERPA_OPENCODE_MCP_SERVERS_JSON",
+        '{"promefuzz":{"type":"remote","url":"http://promefuzz.svc:18080/mcp","enabled":true}}',
+    )
+
+    payload = pc.build_opencode_runtime_config(cfg)
+
+    assert "provider" in payload
+    assert payload.get("mcp", {}).get("promefuzz", {}).get("type") == "remote"
+    assert payload.get("mcp", {}).get("promefuzz", {}).get("url") == "http://promefuzz.svc:18080/mcp"
+    assert payload.get("mcp", {}).get("promefuzz", {}).get("enabled") is True

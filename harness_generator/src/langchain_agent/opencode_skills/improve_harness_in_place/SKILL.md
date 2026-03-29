@@ -1,34 +1,51 @@
-# Stage Skill: improve_harness_in_place
+---
+name: improve_harness_in_place
+description: Improve coverage in place for the current target without switching target identity.
+compatibility: opencode
+metadata:
+  stage: improve-harness-in-place
+  owner: sherpa
+---
 
-## Stage Goal
-Apply in-place coverage improvements for the current target without switching targets.
+## What this skill does
+Apply concrete in-place harness/seed-modeling improvements for coverage growth while keeping the current target stable.
 
-## Required Inputs
-- coordinator coverage diagnostics (`coverage_*`, `repair_*`, `codex_hint`)
-- `SeedFeedback` and `HarnessFeedback` blocks from coordinator context (when provided)
-- source coverage report (`fuzz/coverage_report.txt`) with uncovered functions list (when provided)
-- current files under `fuzz/`
-- `fuzz/execution_plan.json` (if present)
-- `fuzz/harness_index.json` (if present)
-- auto-generated dictionary (`fuzz/dict/*.dict`) (if present)
+## When to use this skill
+Use this skill after `coverage-analysis` selects `in_place` improvement mode.
 
-## Required Outputs
-- material code/scaffold updates under `fuzz/` for coverage improvement
+## Required inputs
+- coverage diagnostics from coordinator (`coverage_*`, `repair_*`, `codex_hint`)
+- `SeedFeedback` and `HarnessFeedback` (if provided)
+- `fuzz/coverage_report.txt` with uncovered functions (if provided)
+- current `fuzz/` scaffold files
+- `fuzz/execution_plan.json` and `fuzz/harness_index.json` (if present)
+- dictionaries under `fuzz/dict/*.dict` (if present)
+
+## Required outputs
+- material code/scaffold updates under `fuzz/`
 - consistent `fuzz/execution_plan.json`, harness sources, and `fuzz/harness_index.json`
-- updated dictionary tokens in `fuzz/dict/` if string constants or format tokens can improve coverage
-- no doc-only patch in this stage
+- updated dictionary entries when token modeling is part of the strategy
 
-## Acceptance Criteria
-- edits address concrete coverage diagnostic gaps first (seed family gaps, input modeling, dictionary/corpus strategy, call ordering/path depth).
-- when `fuzz/coverage_report.txt` lists uncovered functions, at least one edit targets exercising an uncovered function/branch.
-- edits consume `SeedFeedback`/`HarnessFeedback` first and include at least one directly mapped code/scaffold change.
-- keep current target identity stable for this stage (no target replacement).
-- include at least one strategy change versus the latest failed in-place cycle.
-- resulting scaffold remains ready for the next workflow build/run.
+## Workflow
+1. Consume coverage diagnostics, `SeedFeedback`, and `HarnessFeedback` first.
+2. Identify one or more concrete bottlenecks (input model, call path depth, tokenization, corpus quality).
+3. Apply minimal code/scaffold updates for those bottlenecks.
+4. Keep target identity unchanged for this stage.
 
-## Command Policy
+## Constraints
+- No target switching in this stage.
+- No doc-only patch in this stage.
+- Include at least one strategy change versus the previous failed in-place cycle.
+- Keep scaffold runnable for next build/run.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/out/` into `./done`.
+## Acceptance checklist
+- At least one change is directly mapped to `SeedFeedback` or `HarnessFeedback`.
+- If uncovered functions are listed, at least one edit attempts to exercise them.
+- `fuzz/execution_plan.json` and `fuzz/harness_index.json` remain consistent.
+
+## Done contract
+- Write `fuzz/out/` into `./done`.

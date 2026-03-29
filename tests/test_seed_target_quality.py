@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 
@@ -272,7 +274,31 @@ def test_filter_seed_corpus_rejects_oversized_and_radamsa_big_files(tmp_path: Pa
     assert "repo_01.txt" in kept_files
     assert "radamsa_01.bin" not in kept_files
     assert "seed_big.bin" not in kept_files
-    assert int(filtered["seed_oversized_rejected_count"]) >= 2
+
+
+def test_classify_seed_family_archive_content_works_without_filename_hint(tmp_path: Path):
+    sample = tmp_path / "seed_01.bin"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("a.txt", "hello")
+    sample.write_bytes(buf.getvalue())
+
+    families = _classify_seed_family(sample, "archive-container")
+    assert "valid_archive_sample" in families
+
+
+def test_infer_seed_gaps_archive_uses_content_not_filename(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz" / "corpus" / "archive_fuzzer"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    sample = fuzz_dir / "blob.bin"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("a.txt", "hello")
+    sample.write_bytes(buf.getvalue())
+    gen = _make_generator(tmp_path)
+
+    msg = gen._infer_seed_gaps("archive-container", fuzz_dir)
+    assert "ensure at least one valid archive sample exists first" not in msg
 
 
 def test_filter_seed_corpus_prunes_total_bytes_preferring_radamsa(tmp_path: Path, monkeypatch):

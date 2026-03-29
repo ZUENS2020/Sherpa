@@ -1,35 +1,51 @@
-# Stage Skill: synthesize_repair_crash
+---
+name: synthesize_repair_crash
+description: Repair scaffold for crash/repro failures while preserving crash-path reachability.
+compatibility: opencode
+metadata:
+  stage: synthesize-repair-crash
+  owner: sherpa
+---
 
-## Stage Goal
-Repair scaffold files under `fuzz/` for crash/repro-stage failures.
+## What this skill does
+Repairs harness/scaffold after crash/repro failures with crash evidence as the primary signal.
 
-## Required Inputs
+## When to use this skill
+Use this skill in repair mode for crash/repro failures.
+
+## Required inputs
 - `repair_*` diagnostics from coordinator context
 - crash/repro report tail and related error text (if provided)
 - current scaffold files under `fuzz/`
+- `fuzz/execution_plan.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
-## Required Outputs
-- harness source under `fuzz/`
-- `fuzz/build.py` or `fuzz/build.sh`
-- `fuzz/README.md`
-- `fuzz/repo_understanding.json`
-- `fuzz/build_strategy.json`
-- `fuzz/build_runtime_facts.json`
-- `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
+## Required outputs
+- updated harness/scaffold files under `fuzz/`
+- `fuzz/harness_index.json` aligned to execution plan
 
-## Acceptance Criteria
-- edits are tied to crash/repro evidence and keep crash-path reachability.
-- selected vs final runtime target relation is explicit and technically justified.
-- when signatures repeat, this round must change strategy.
-- update `fuzz/harness_index.json` so each execution target maps to an existing harness source file.
-- no “fix” by disabling harness behavior or deleting crash-relevant code paths.
-- public/stable APIs are mandatory by default in harness code.
-- if non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
-- when diagnostics contain `non_public_api_usage`, replace offending symbols first before any unrelated edits.
+## Workflow
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+2. Consume crash/repro evidence.
+3. Apply focused scaffold/harness repair for crash-path stability.
+4. Keep selected vs final runtime target relation explicit.
+5. Ensure strategy change when repeated signatures occur.
 
-## Command Policy
+## Constraints
+- Do not “fix” by disabling harness behavior or deleting crash-relevant paths.
+- Public/stable APIs are mandatory by default.
+- If non-public API is unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
+- If diagnostics contain `non_public_api_usage`, replace offending symbols first.
+- If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/out/` into `./done`.
+## Acceptance checklist
+- Edits are crash-evidence-driven.
+- Strategy changes on repeated signatures.
+- Execution target mapping remains valid.
+
+## Done contract
+- Write `fuzz/out/` into `./done`.

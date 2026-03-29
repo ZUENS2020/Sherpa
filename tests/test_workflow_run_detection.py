@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -75,6 +76,29 @@ class _MultiRunGenerator(_FakeRunGenerator):
         if self._run_sleep_sec > 0:
             time.sleep(self._run_sleep_sec)
         return super()._run_fuzzer(_bin_path)
+
+
+class _DeterministicParallelGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, results_by_name: dict[str, FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, run_results=[])
+        self._bins = [self.fuzz_out_dir / "demo_fuzz_1", self.fuzz_out_dir / "demo_fuzz_2", self.fuzz_out_dir / "demo_fuzz_3"]
+        for p in self._bins:
+            p.write_text("", encoding="utf-8")
+        self._results_by_name = dict(results_by_name)
+        self.terminate_calls: list[str] = []
+
+    def _discover_fuzz_binaries(self) -> list[Path]:
+        return list(self._bins)
+
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
+        name = bin_path.name
+        result = self._results_by_name.get(name)
+        if result is None:
+            raise AssertionError(f"unexpected fuzzer name: {name}")
+        return result
+
+    def terminate_active_run_processes(self, *, reason: str = "") -> None:
+        self.terminate_calls.append(reason)
 
 
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
@@ -215,6 +239,48 @@ def test_node_run_emits_run_details_metrics(tmp_path: Path):
     assert isinstance(out.get("coverage_harness_feedback"), dict)
 
 
+def test_node_run_writes_seed_feedback_json(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=5,
+                final_ft=8,
+                seed_quality={
+                    "seed_profile": "parser-token",
+                    "initial_inited_cov": 1,
+                    "final_cov": 5,
+                    "cov_delta": 4,
+                    "early_new_units_30s": 0,
+                    "early_new_units_60s": 0,
+                    "initial_corpus_files": 10,
+                    "final_corpus_files": 3,
+                    "quality_flags": ["low_early_yield"],
+                    "merge_retained_ratio_files": 0.3,
+                    "cold_start_failure": True,
+                },
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    feedback_path = tmp_path / "fuzz" / "seed_feedback.json"
+    assert feedback_path.is_file()
+    payload = json.loads(feedback_path.read_text(encoding="utf-8"))
+    by_fuzzer = payload.get("by_fuzzer") or {}
+    assert "demo_fuzz" in by_fuzzer
+    assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
+
+
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
     gen = _SlowSeedGenerator(
         tmp_path,
@@ -319,7 +385,86 @@ def test_node_run_records_stable_parallel_batch_plan(tmp_path: Path, monkeypatch
     assert plan[1]["round_budget_sec"] >= plan[0]["round_budget_sec"]
 
 
-def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
+def test_solve_parallelism_auto_prefers_outer_for_multi_target():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=8,
+        n_targets=4,
+        requested_outer=4,
+        outer_parallelism_max=8,
+        inner_workers_min=1,
+        requested_inner=6,
+        engine="auto",
+        sanitizer="address",
+    )
+    assert out["parallel_engine"] == "single"
+    assert out["outer_parallelism"] == 4
+    assert out["inner_workers"] == 1
+
+
+def test_solve_parallelism_keeps_outer_inner_within_budget():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=4,
+        n_targets=3,
+        requested_outer=3,
+        outer_parallelism_max=16,
+        inner_workers_min=1,
+        requested_inner=4,
+        engine="fork",
+        sanitizer="undefined",
+    )
+    assert out["outer_parallelism"] * out["inner_workers"] <= 4
+
+
+def test_solve_parallelism_warning_reports_pre_and_post_clamp():
+    out = workflow_graph._solve_parallelism(
+        cpu_budget=4,
+        n_targets=3,
+        requested_outer=3,
+        outer_parallelism_max=16,
+        inner_workers_min=2,
+        requested_inner=8,
+        engine="fork",
+        sanitizer="undefined",
+    )
+    warning = str(out.get("warning") or "")
+    assert "parallel_budget_clamped" in warning
+    assert "pre_outer=" in warning and "pre_inner=" in warning
+    assert "resolved_outer=" in warning and "resolved_inner=" in warning
+
+
+def test_node_run_exposes_parallel_metadata_in_details(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "2")
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_ENGINE", "jobs_workers")
+    monkeypatch.setenv("SHERPA_RUN_INNER_WORKERS", "3")
+    monkeypatch.setenv("SHERPA_RUN_CPU_BUDGET", "4")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "0")
+
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            )
+        ],
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    details = out.get("run_details") or []
+    assert len(details) == 1
+    detail = details[0]
+    assert detail["parallel_engine"] in {"single", "jobs_workers"}
+    assert int(detail["inner_workers"]) >= 1
+    assert isinstance(detail["reload_enabled"], bool)
+
+
+def test_node_run_stops_after_first_crash_serial_mode_has_single_detail(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "0")
     artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("asan", encoding="utf-8")
@@ -348,6 +493,119 @@ def test_node_run_stops_after_first_crash_by_default(tmp_path: Path):
     assert len(out.get("run_details") or []) == 1
     assert gen.analysis_calls == [("demo_fuzz_1", artifact)]
     assert len(gen._run_results) == 0
+
+
+def test_node_run_parallel_early_stop_records_metadata(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "3")
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["crash_found"] is True
+    assert str(out.get("first_crash_fuzzer") or "").startswith("demo_fuzz_")
+    assert str(out.get("early_stop_reason") or "") in {"first_crash_parallel_early_stop", "first_crash_stop"}
+
+
+def test_node_run_parallel_early_stop_collects_done_futures_and_tracks_cancel_stats(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_PARALLEL_FUZZERS", "3")
+    monkeypatch.setenv("SHERPA_RUN_STOP_ON_FIRST_CRASH", "1")
+    artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("asan", encoding="utf-8")
+
+    gen = _DeterministicParallelGenerator(
+        tmp_path,
+        results_by_name={
+            "demo_fuzz_1": FuzzerRunResult(
+                rc=76,
+                new_artifacts=[artifact],
+                crash_found=True,
+                crash_evidence="artifact",
+                first_artifact=str(artifact),
+                log_tail="asan",
+                error="",
+                run_error_kind="",
+            ),
+            "demo_fuzz_2": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=11,
+                final_ft=22,
+            ),
+            "demo_fuzz_3": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=33,
+                final_ft=44,
+            ),
+        },
+    )
+
+    original_as_completed = workflow_graph.as_completed
+
+    def _yield_crash_first_only(futures):
+        future_list = list(futures)
+        crash_future = None
+        for f in future_list:
+            try:
+                name, _ = f.result(timeout=1)
+            except Exception:
+                continue
+            if name == "demo_fuzz_1":
+                crash_future = f
+                break
+        if crash_future is not None:
+            yield crash_future
+        else:
+            for f in future_list:
+                yield f
+
+    monkeypatch.setattr(workflow_graph, "as_completed", _yield_crash_first_only)
+    try:
+        out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    finally:
+        monkeypatch.setattr(workflow_graph, "as_completed", original_as_completed)
+
+    assert out["crash_found"] is True
+    assert out["first_crash_fuzzer"] == "demo_fuzz_1"
+    assert out["run_cancel_requested_count"] >= 2
+    assert 0 <= int(out.get("run_cancel_effective_count") or 0) <= int(out.get("run_cancel_requested_count") or 0)
+    details = out.get("run_details") or []
+    names = {str(d.get("fuzzer") or "") for d in details}
+    # demo_fuzz_2 was completed but intentionally not yielded by as_completed;
+    # it must still be captured by early-stop done-future harvesting.
+    assert "demo_fuzz_2" in names
 
 
 def test_node_run_marks_budget_exhausted_when_run_phase_times_out(tmp_path: Path, monkeypatch):
@@ -411,9 +669,50 @@ def test_node_run_marks_no_progress_for_execs_zero_with_warning(tmp_path: Path):
     assert "no measurable progress" in out["last_error"]
 
 
+def test_node_run_marks_seed_rejected_for_no_interesting_with_zero_cov_and_tiny_corpus(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail=(
+                    "INFO: seed corpus: files: 1 min: 1b max: 1b total: 1b rss: 27Mb\n"
+                    "#134217728\tpulse  corp: 1/1b lim: 16384 exec/s: 762600 rss: 615Mb\n"
+                    "WARNING: no interesting inputs were found so far."
+                ),
+                error="",
+                run_error_kind="",
+                final_cov=0,
+                final_ft=0,
+                final_corpus_files=1,
+                final_corpus_size_bytes=1,
+                final_execs_per_sec=762600,
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["last_step"] == "run"
+    assert out["crash_found"] is False
+    assert out["run_error_kind"] == "run_seed_rejected"
+    assert "inputs were likely rejected" in out["last_error"]
+
+
 def test_route_after_run_routes_recoverable_run_errors_to_coverage_analysis():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
+    )
+    assert route == "coverage-analysis"
+
+
+def test_route_after_run_routes_seed_rejected_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {"run_error_kind": "run_seed_rejected", "failed": False, "crash_found": False}
     )
     assert route == "coverage-analysis"
 
@@ -484,6 +783,22 @@ def test_route_after_coverage_analysis_routes_to_improve_harness():
     assert route == "improve-harness"
 
 
+def test_route_after_coverage_analysis_continues_run_when_no_improve_in_hard_fail_only(monkeypatch):
+    monkeypatch.delenv("SHERPA_AUTO_STOP_POLICY", raising=False)
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "run"
+
+
+def test_route_after_coverage_analysis_stops_when_no_improve_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {"failed": False, "last_error": "", "coverage_should_improve": False}
+    )
+    assert route == "stop"
+
+
 def test_route_after_improve_harness_routes_back_to_plan():
     route = workflow_graph._route_after_improve_harness_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
@@ -492,6 +807,20 @@ def test_route_after_improve_harness_routes_back_to_plan():
 
 
 def test_route_after_improve_harness_stops_on_ineffective_replan():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_effective": False,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_on_ineffective_replan_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -517,6 +846,20 @@ def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
 
 
 def test_route_after_improve_harness_stops_when_round_budget_exhausted():
+    route = workflow_graph._route_after_improve_harness_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_round_budget_exhausted": True,
+        }
+    )
+    assert route == "plan"
+
+
+def test_route_after_improve_harness_stops_when_round_budget_exhausted_in_legacy_mode(monkeypatch):
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -746,6 +1089,134 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert isinstance(out.get("coverage_harness_feedback"), dict)
 
 
+def test_node_coverage_analysis_marks_parallel_resource_underutilized():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_parallel_engine": "single",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 1,
+            "run_parallel_cpu_budget": 8,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "final_execs_per_sec": 0,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "resource_underutilized"
+    assert "increase outer or inner workers" in out["coverage_parallel_diagnosis"]
+
+
+def test_node_coverage_analysis_marks_parallel_resource_underutilized_with_low_nonzero_execs():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "run_parallel_engine": "single",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 1,
+            "run_parallel_cpu_budget": 8,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 12,
+                    "final_execs_per_sec": 42,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "resource_underutilized"
+    assert int(out["coverage_underutilized_execs_threshold"]) == 100
+
+
+def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 1,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "run_parallel_engine": "fork",
+            "run_parallel_outer": 1,
+            "run_parallel_inner": 2,
+            "run_parallel_cpu_budget": 2,
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "final_execs_per_sec": 500000,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_parallel_diagnosis_code"] == "strategy_mismatch"
+    assert "reduce parallelism" in out["coverage_parallel_diagnosis"]
+
+
+def test_node_coverage_analysis_sets_seed_limited_bottleneck_on_cold_start():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "blast_fuzz",
+            "coverage_seed_profile": "archive-container",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "merge_retained_ratio_files": 0.2,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "blast_fuzz",
+                    "final_cov": 1,
+                    "final_ft": 2,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "seed_limited"
+    assert out["coverage_bottleneck_reason"] == "cold_start_failure"
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {
@@ -798,6 +1269,114 @@ def test_route_after_re_run_routes_to_plan_on_failure():
         }
     )
     assert route == "plan"
+
+
+def test_node_crash_triage_defaults_to_inconclusive_when_model_output_invalid(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            # Intentionally do not write crash_triage.json.
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-1",
+        }
+    )
+    assert out["crash_triage_label"] == "inconclusive"
+    assert out["crash_triage_reason"].startswith("model output invalid/incomplete")
+    assert out["crash_triage_signal_lines"] == ["model output invalid/incomplete"]
+
+
+def test_node_crash_triage_records_constraint_memory_after_repeat_threshold(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-constraint-1",
+            "same_crash_repeats": 1,
+        }
+    )
+    assert int(out.get("constraint_memory_count") or 0) >= 1
+    path = Path(str(out.get("constraint_memory_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entry = dict((doc.get("entries") or {}).get("sig-constraint-1") or {})
+    assert entry.get("classification") == "inconclusive"
+    assert entry.get("source_stage") == "crash-triage"
+
+
+def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            # Intentionally do not write crash_analysis.json.
+            return None
+
+    triage_doc = {
+        "label": "harness_bug",
+        "confidence": 0.9,
+        "reason": "example",
+        "evidence": ["line"],
+    }
+    (tmp_path / "crash_triage.json").write_text(json.dumps(triage_doc), encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-1",
+        }
+    )
+    assert out["crash_analysis_verdict"] == "unknown"
+    assert out["crash_analysis_reason"].startswith("model output invalid/incomplete")
+
+
+def test_node_crash_analysis_records_constraint_memory_when_model_returns_false_positive(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "verdict": "false_positive",
+                        "reason": "harness violated parser precondition",
+                        "evidence": ["stack frame points to harness parser wrapper"],
+                        "recommended_action": "repair_harness",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-constraint-2",
+            "same_crash_repeats": 1,
+        }
+    )
+    assert out["crash_analysis_verdict"] == "false_positive"
+    assert out["repair_mode"] is True
+    assert int(out.get("constraint_memory_count") or 0) >= 1
+    path = Path(str(out.get("constraint_memory_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entry = dict((doc.get("entries") or {}).get("sig-constraint-2") or {})
+    assert entry.get("classification") == "false_positive"
+    assert entry.get("source_stage") == "crash-analysis"
 
 
 def test_route_after_crash_analysis_routes_to_plan_on_false_positive():
@@ -870,7 +1449,13 @@ def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):
         assert out["run_terminal_reason"] == "run_finalize_timeout"
     else:
         assert out["last_step"] == "run"
-        assert out["run_error_kind"] in {"", "run_no_progress", "nonzero_exit_without_crash", "run_finalize_timeout"}
+        assert out["run_error_kind"] in {
+            "",
+            "run_no_progress",
+            "run_seed_rejected",
+            "nonzero_exit_without_crash",
+            "run_finalize_timeout",
+        }
 
 
 def test_calc_parallel_batch_budget_caps_unlimited_round_by_default(monkeypatch):
@@ -1035,9 +1620,48 @@ def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monk
             "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
         }
     )
-    assert second["failed"] is True
+    assert second.get("failed") is not True
     assert second["run_error_kind"] == "run_timeout"
     assert second["same_timeout_repeats"] >= 1
+    assert second["auto_stop_blocked_reason"] == "same_timeout_repeats"
+    assert int(second.get("continuous_loop_count") or 0) >= 1
+
+
+def test_node_run_stops_when_same_timeout_signature_repeats_in_legacy_mode(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_WORKFLOW_MAX_SAME_TIMEOUT_REPEATS", "1")
+    monkeypatch.setenv("SHERPA_AUTO_STOP_POLICY", "legacy_mixed")
+    timeout_artifact = tmp_path / "fuzz" / "out" / "artifacts" / "timeout-same"
+    timeout_artifact.parent.mkdir(parents=True, exist_ok=True)
+    timeout_artifact.write_text("hang candidate", encoding="utf-8")
+
+    def _make_result() -> FuzzerRunResult:
+        return FuzzerRunResult(
+            rc=70,
+            new_artifacts=[timeout_artifact],
+            crash_found=False,
+            crash_evidence="timeout_artifact",
+            first_artifact=str(timeout_artifact),
+            log_tail="libFuzzer timeout",
+            error="fuzzer produced timeout-like artifacts for demo_fuzz (count=1)",
+            run_error_kind="run_timeout",
+        )
+
+    first = workflow_graph._node_run(
+        {"generator": _FakeRunGenerator(tmp_path, [_make_result()]), "crash_fix_attempts": 0}
+    )
+    sig = str(first.get("timeout_signature") or "")
+    assert sig
+
+    second = workflow_graph._node_run(
+        {
+            "generator": _FakeRunGenerator(tmp_path, [_make_result()]),
+            "crash_fix_attempts": 0,
+            "timeout_signature": sig,
+            "same_timeout_repeats": int(first.get("same_timeout_repeats") or 0),
+        }
+    )
+    assert second["failed"] is True
+    assert second["run_error_kind"] == "run_timeout"
     assert "same timeout/no-progress signature repeated" in second["last_error"]
 
 

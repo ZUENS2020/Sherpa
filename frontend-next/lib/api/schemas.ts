@@ -1,5 +1,27 @@
 import { z } from 'zod';
 
+const normalizedErrorSchema = z
+  .unknown()
+  .transform((v) => {
+    if (v == null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object') {
+      const obj = v as Record<string, unknown>;
+      const detail = obj?.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail.trim();
+      const message = obj?.message;
+      if (typeof message === 'string' && message.trim()) return message.trim();
+      if (Object.keys(obj).length === 0) return '';
+      try {
+        return JSON.stringify(obj);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
+  })
+  .default('');
+
 export const opencodeProviderSchema = z.object({
   name: z.string().default(''),
   enabled: z.boolean().default(true),
@@ -24,6 +46,7 @@ export const configSchema = z.object({
   openrouter_model: z.string().optional().default(''),
   fuzz_time_budget: z.number().int().nonnegative().default(900),
   sherpa_run_unlimited_round_budget_sec: z.number().int().nonnegative().default(7200),
+  sherpa_run_plateau_idle_growth_sec: z.number().int().min(30).max(86400).default(600),
   fuzz_use_docker: z.boolean().default(true),
   fuzz_docker_image: z.string().default('auto'),
   sherpa_git_mirrors: z.string().default(''),
@@ -52,7 +75,7 @@ export const taskSummarySchema = z.object({
   child_count: z.number().int().default(0),
   active_child_id: z.string().nullable().optional(),
   active_child_status: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.string().nullable().optional(),
 });
 
@@ -64,7 +87,7 @@ export const childJobSchema = z.object({
   job_id: z.string(),
   status: z.string(),
   repo: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   log: z.string().optional().default(''),
   updated_at: z.number().optional(),
@@ -76,7 +99,7 @@ export const taskDetailSchema = z.object({
   job_id: z.string(),
   status: z.string(),
   repo: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   children_status: childStatusSchema.optional(),
   children: z.array(childJobSchema).optional().default([]),

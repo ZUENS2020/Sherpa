@@ -44,7 +44,8 @@
 
 ```json
 {
-  "apiBaseUrl": "https://dev.zuens2020.work/"
+  "apiBaseUrl": "https://dev.zuens2020.work/",
+  "sherpa_run_plateau_idle_growth_sec": 600
 }
 ```
 
@@ -61,6 +62,7 @@
 约束：
 - `fuzz_time_budget >= 0`（`0` 表示 unlimited）
 - `sherpa_run_unlimited_round_budget_sec >= 0`（`0` 表示 fully unlimited）
+- `sherpa_run_plateau_idle_growth_sec` 范围 `[30, 86400]`（秒）
 - `apiBaseUrl` 与 `api_base_url` 均可用，最终统一存为 `api_base_url`
 - 若 payload 非法返回 `400`
 
@@ -138,15 +140,29 @@
   ],
   "phase": "task",
   "runtime_mode": "native",
-  "error_code": null,
-  "error_kind": null,
-  "error_signature": null
+  "error": {
+    "stage": "build",
+    "kind": "build",
+    "code": "missing_llvmfuzzer_entrypoint",
+    "message": "build failed rc=1",
+    "detail": "build failed rc=1",
+    "signature": "9f23ab41c2de",
+    "retryable": true,
+    "terminal": false,
+    "at": 1770000000
+  },
+  "error_code": "missing_llvmfuzzer_entrypoint",
+  "error_kind": "build",
+  "error_signature": "9f23ab41c2de"
 }
 ```
 
 增强字段（父子任务都可能出现）：
 - 工作流与恢复：`k8s_phase`、`cancel_requested`、`workflow_active_step`、`workflow_last_step`、`recoverable`、`resume_attempts`、`resume_error_code`、`last_resume_reason` 等
 - fuzz 指标：`fuzz_fuzzers`、`fuzz_max_cov`、`fuzz_max_ft`、`fuzz_total_execs_per_sec`、`fuzz_crash_found`、`fuzz_coverage_*`
+- analysis/target 诊断：`analysis_evidence_count`、`target_scoring_enabled`、`constraint_memory_count`、`fuzz_coverage_bottleneck_kind`
+- analysis companion：`analysis_companion_pod`、`analysis_companion_service`、`analysis_companion_url`、`analysis_companion_ready`、`analysis_companion_error`、`analysis_companion_last_error`、`analysis_companion_state`、`analysis_companion_backend`、`analysis_companion_rag_ok`、`analysis_companion_rag_knowledge_base_path`、`analysis_companion_rag_document_count`、`analysis_companion_rag_chunk_count`、`analysis_companion_embedding_provider`、`analysis_companion_embedding_model`、`analysis_companion_embedding_ok`、`analysis_companion_rag_degraded`、`analysis_companion_rag_degraded_reason`、`analysis_companion_semantic_query_count`、`analysis_companion_semantic_hit_count`、`analysis_companion_semantic_hit_rate`、`analysis_companion_cache_hit_rate`
+- 错误字段：`error` 为统一错误对象；`error_code/error_kind/error_signature` 为兼容字段（deprecated）
 
 ### POST `/api/task/{job_id}/resume`
 
@@ -215,6 +231,20 @@
         "success": 1,
         "error": 1
       },
+      "error": {
+        "stage": "build",
+        "kind": "build",
+        "code": "missing_llvmfuzzer_entrypoint",
+        "message": "build failed rc=1",
+        "detail": "build failed rc=1",
+        "signature": "9f23ab41c2de",
+        "retryable": true,
+        "terminal": false,
+        "at": 1770000000
+      },
+      "error_code": "missing_llvmfuzzer_entrypoint",
+      "error_kind": "build",
+      "error_signature": "9f23ab41c2de",
       "fuzz_fuzzers": {},
       "fuzz_max_cov": 0,
       "fuzz_max_ft": 0,
@@ -224,7 +254,11 @@
       "fuzz_coverage_loop_max_rounds": 3,
       "fuzz_coverage_plateau_streak": 0,
       "fuzz_coverage_seed_profile": "parser-format",
-      "fuzz_coverage_quality_flags": []
+      "fuzz_coverage_quality_flags": [],
+      "fuzz_coverage_bottleneck_kind": "seed_limited",
+      "analysis_evidence_count": 24,
+      "target_scoring_enabled": true,
+      "constraint_memory_count": 2
     }
   ]
 }
@@ -236,6 +270,12 @@
 - `progress`：由子任务完成度估算（0-100）
 - `repo`：用于 UI 展示的仓库名/短名；`repo_raw` 保留原始 URL
 - `fuzz_*`：来自 active child（若存在），否则来自主任务自身
+- `fuzz_coverage_plateau_streak`：按固定 30 秒无增长窗口统计的连续平台期轮次（`idle_no_growth=30s`）
+- `fuzz_coverage_bottleneck_kind`：coverage-analysis 诊断的瓶颈类别（`seed_limited|target_limited|harness_limited|none`）
+- `analysis_evidence_count`：analysis 阶段聚合证据条目数量（来源 `fuzz/analysis_context.json`）
+- `target_scoring_enabled`：是否启用 target 加权评分（`selected_targets.json` 含 `target_score_breakdown`）
+- `constraint_memory_count`：当前任务累积的 crash 约束记忆条目数（来源 `fuzz/constraint_memory.json`）
+- `error`：统一错误对象；`error_code/error_kind/error_signature` 为兼容字段（deprecated）
 
 ## 5. 系统总览（前端 Overview/Tasks 顶部）
 

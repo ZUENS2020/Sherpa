@@ -424,6 +424,357 @@ def _k8s_result_paths(job_id: str, *, stage: str | None = None, seq: int | None 
     return (root / f"{prefix}.json", root / f"{prefix}.error.txt")
 
 
+def _k8s_analysis_companion_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_ENABLED", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _k8s_analysis_companion_name(job_id: str) -> str:
+    return f"sherpa-promefuzz-{job_id[:10]}"
+
+
+def _k8s_analysis_companion_service_name(job_id: str) -> str:
+    return _k8s_analysis_companion_name(job_id)
+
+
+def _k8s_analysis_companion_image() -> str:
+    return (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_IMAGE") or _k8s_worker_image()).strip()
+
+
+def _k8s_analysis_companion_port() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_PORT") or "18080").strip()
+    try:
+        port = int(raw)
+    except Exception:
+        port = 18080
+    return max(1, min(port, 65535))
+
+
+def _k8s_analysis_companion_mcp_path() -> str:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_MCP_PATH") or "/mcp").strip()
+    if not raw:
+        return "/mcp"
+    if not raw.startswith("/"):
+        return f"/{raw}"
+    return raw
+
+
+def _k8s_openrouter_embedding_secret_name() -> str:
+    return (os.environ.get("SHERPA_K8S_OPENROUTER_EMBEDDING_SECRET_NAME", "sherpa-openrouter-embedding") or "").strip()
+
+
+def _k8s_analysis_companion_url(job_id: str) -> str:
+    svc = _k8s_analysis_companion_service_name(job_id)
+    ns = _k8s_namespace()
+    port = _k8s_analysis_companion_port()
+    path = _k8s_analysis_companion_mcp_path()
+    return f"http://{svc}.{ns}.svc.cluster.local:{port}{path}"
+
+
+def _k8s_analysis_companion_manifest(*, pod_name: str, job_id: str) -> str:
+    pvc_output = (os.environ.get("SHERPA_K8S_PVC_OUTPUT", "sherpa-shared-output") or "").strip()
+    image = _k8s_analysis_companion_image()
+    mcp_port = _k8s_analysis_companion_port()
+    mcp_path = _k8s_analysis_companion_mcp_path()
+    mcp_url = _k8s_analysis_companion_url(job_id)
+    command = (
+        os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_COMMAND")
+        or (
+            "set -eu\n"
+            "export PYTHONUNBUFFERED=1\n"
+            "/usr/local/bin/python /app/harness_generator/src/langchain_agent/promefuzz_companion.py &\n"
+            "COMPANION_PID=$!\n"
+            "exec /usr/local/bin/python -m promefuzz_mcp.server start "
+            "--skip-build --transport streamable-http --host 0.0.0.0 "
+            f"--port {mcp_port} --mcp-path {mcp_path}\n"
+        )
+    ).strip()
+    companion_env_names = [
+        "SHERPA_PROMEFUZZ_MCP_ROOT",
+        "SHERPA_PROMEFUZZ_BUILD_BINARIES",
+        "SHERPA_PROMEFUZZ_MAX_SOURCE_FILES",
+        "SHERPA_PROMEFUZZ_POLL_SEC",
+        "SHERPA_PROMEFUZZ_REFRESH_SEC",
+        "SHERPA_PROMEFUZZ_RUN_ONCE",
+        "SHERPA_PROMEFUZZ_REPO_ROOT_HINT",
+    ]
+    companion_env: list[dict[str, str]] = [
+        {"name": "SHERPA_JOB_ID", "value": job_id},
+        {"name": "SHERPA_OUTPUT_DIR", "value": (os.environ.get("SHERPA_OUTPUT_DIR") or "/shared/output").strip()},
+        {"name": "SHERPA_PROMEFUZZ_MCP_PORT", "value": str(mcp_port)},
+        {"name": "SHERPA_PROMEFUZZ_MCP_PATH", "value": mcp_path},
+        {"name": "SHERPA_PROMEFUZZ_MCP_URL", "value": mcp_url},
+        {"name": "PYTHONPATH", "value": "/app/promefuzz-mcp"},
+    ]
+    companion_env_from: list[dict[str, object]] = []
+    embedding_secret = _k8s_openrouter_embedding_secret_name()
+    if embedding_secret:
+        companion_env_from.append({"secretRef": {"name": embedding_secret, "optional": True}})
+    for name in companion_env_names:
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            companion_env.append({"name": name, "value": value})
+    if not any(str(item.get("name") or "") == "SHERPA_PROMEFUZZ_RUN_ONCE" for item in companion_env):
+        companion_env.append({"name": "SHERPA_PROMEFUZZ_RUN_ONCE", "value": "0"})
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": pod_name,
+            "labels": {
+                "app.kubernetes.io/name": "sherpa",
+                "sherpa/job-id": job_id,
+                "sherpa/job-kind": "analysis-companion",
+            },
+        },
+        "spec": {
+            "restartPolicy": "Never",
+            "serviceAccountName": (os.environ.get("SHERPA_K8S_JOB_SERVICE_ACCOUNT", "sherpa-web") or "sherpa-web"),
+            "containers": [
+                {
+                    "name": "analysis-companion",
+                    "image": image,
+                    "imagePullPolicy": (os.environ.get("SHERPA_K8S_WORKER_IMAGE_PULL_POLICY", "IfNotPresent") or "IfNotPresent"),
+                    "command": ["sh", "-lc", command],
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "runAsNonRoot": True,
+                        "runAsUser": 10001,
+                        "runAsGroup": 10001,
+                        "capabilities": {"drop": ["ALL"]},
+                    },
+                    "env": companion_env,
+                    "envFrom": companion_env_from,
+                    "ports": [{"containerPort": mcp_port, "name": "mcp"}],
+                    "volumeMounts": [
+                        {"name": "shared-output", "mountPath": "/shared/output"},
+                    ],
+                }
+            ],
+            "volumes": [
+                {"name": "shared-output", "persistentVolumeClaim": {"claimName": pvc_output}},
+            ],
+        },
+    }
+    return yaml.safe_dump(manifest, sort_keys=False)
+
+
+def _k8s_analysis_companion_service_manifest(*, service_name: str, job_id: str) -> str:
+    mcp_port = _k8s_analysis_companion_port()
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": service_name,
+            "labels": {
+                "app.kubernetes.io/name": "sherpa",
+                "sherpa/job-kind": "analysis-companion",
+            },
+        },
+        "spec": {
+            "selector": {
+                "app.kubernetes.io/name": "sherpa",
+                "sherpa/job-kind": "analysis-companion",
+                "sherpa/job-id": job_id,
+            },
+            "ports": [
+                {
+                    "name": "mcp",
+                    "port": mcp_port,
+                    "targetPort": mcp_port,
+                }
+            ],
+        },
+    }
+    return yaml.safe_dump(manifest, sort_keys=False)
+
+
+def _k8s_start_analysis_companion(job_id: str) -> tuple[str, str, str]:
+    if not _k8s_analysis_companion_enabled():
+        return "", "", ""
+    pod_name = _k8s_analysis_companion_name(job_id)
+    service_name = _k8s_analysis_companion_service_name(job_id)
+    mcp_url = _k8s_analysis_companion_url(job_id)
+    pod_ok = False
+    svc_ok = False
+    pod_rc, pod_out, _ = _kubectl(["get", "pod", pod_name, "-o", "json"], timeout=15)
+    if pod_rc == 0:
+        try:
+            pod_doc = json.loads(pod_out)
+            phase = str(((pod_doc.get("status") or {}) if isinstance(pod_doc, dict) else {}).get("phase") or "").strip().lower()
+            pod_ok = phase == "running"
+        except Exception:
+            pod_ok = False
+    svc_rc, _, _ = _kubectl(["get", "service", service_name], timeout=15)
+    svc_ok = svc_rc == 0
+    if pod_ok and svc_ok:
+        return pod_name, service_name, mcp_url
+    _kubectl(["delete", "pod", pod_name, "--ignore-not-found=true"], timeout=20)
+    _kubectl(["delete", "service", service_name, "--ignore-not-found=true"], timeout=20)
+    service_manifest = _k8s_analysis_companion_service_manifest(service_name=service_name, job_id=job_id)
+    svc_rc, svc_out, svc_err = _kubectl(["apply", "-f", "-"], input_text=service_manifest, timeout=30)
+    if svc_rc != 0:
+        raise RuntimeError(
+            f"failed to create analysis companion service {service_name}: {(svc_out + svc_err).strip()}"
+        )
+    manifest = _k8s_analysis_companion_manifest(pod_name=pod_name, job_id=job_id)
+    rc, out, err = _kubectl(["apply", "-f", "-"], input_text=manifest, timeout=30)
+    if rc != 0:
+        raise RuntimeError(f"failed to start analysis companion {pod_name}: {(out + err).strip()}")
+    return pod_name, service_name, mcp_url
+
+
+def _k8s_stop_analysis_companion(pod_name: str, service_name: str = "") -> None:
+    if not pod_name and not service_name:
+        return
+    if pod_name:
+        _kubectl(["delete", "pod", pod_name, "--ignore-not-found=true"], timeout=20)
+    if service_name:
+        _kubectl(["delete", "service", service_name, "--ignore-not-found=true"], timeout=20)
+
+
+def _analysis_companion_status_for_job(job_id: str) -> dict[str, object]:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return {}
+    base = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+    status_path = base / "_k8s_jobs" / jid / "promefuzz" / "status.json"
+    if not status_path.is_file():
+        return {}
+    try:
+        raw = status_path.read_text(encoding="utf-8", errors="replace")
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, object] = {}
+    for key in (
+        "state",
+        "analysis_backend",
+        "candidate_count",
+        "updated_at",
+        "repo_root",
+        "error",
+        "last_error",
+        "preprocess_path",
+        "coverage_hints_path",
+        "rag_ok",
+        "rag_knowledge_base_path",
+        "rag_document_count",
+        "rag_chunk_count",
+        "embedding_provider",
+        "embedding_model",
+        "embedding_ok",
+        "rag_degraded",
+        "rag_degraded_reason",
+        "semantic_query_count",
+        "semantic_hit_count",
+        "semantic_hit_rate",
+        "cache_hit_rate",
+        "mcp_url",
+        "mcp_ready",
+    ):
+        if key in parsed:
+            out[key] = parsed.get(key)
+    if "mcp_url" not in out:
+        out["mcp_url"] = _k8s_analysis_companion_url(jid)
+    if "mcp_ready" not in out:
+        out["mcp_ready"] = False
+    if "last_error" not in out:
+        out["last_error"] = out.get("error")
+    return out
+
+
+def _analysis_context_path_for_repo(repo_root: str | None) -> Path | None:
+    raw = str(repo_root or "").strip()
+    if not raw:
+        return None
+    try:
+        root = Path(raw).expanduser()
+    except Exception:
+        return None
+    return root / "fuzz" / "analysis_context.json"
+
+
+def _has_reusable_analysis_context(repo_root: str | None) -> bool:
+    analysis_path = _analysis_context_path_for_repo(repo_root)
+    return bool(analysis_path and analysis_path.is_file())
+
+
+def _k8s_analysis_companion_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_TIMEOUT_SEC") or "180").strip()
+    try:
+        return max(10, min(int(raw), 3600))
+    except Exception:
+        return 180
+
+
+def _k8s_analysis_require_rag_ready() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_REQUIRE_RAG_READY", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _k8s_analysis_rag_wait_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC", "120") or "").strip()
+    try:
+        return max(10, min(int(raw), 3600))
+    except Exception:
+        return 120
+
+
+def _analysis_companion_is_ready(status_doc: dict[str, object], *, require_rag: bool) -> bool:
+    if not isinstance(status_doc, dict) or not status_doc:
+        return False
+    state = str(status_doc.get("state") or "").strip().lower()
+    if state in {"failed", "pod_failed", "pod_succeeded"}:
+        return False
+    mcp_ready = bool(status_doc.get("mcp_ready"))
+    if not mcp_ready:
+        return False
+    if not require_rag:
+        return True
+    return bool(status_doc.get("rag_ok"))
+
+
+def _k8s_wait_analysis_companion_result(
+    job_id: str,
+    pod_name: str,
+    *,
+    timeout_sec: int,
+    require_rag: bool = False,
+) -> dict[str, object]:
+    start = time.time()
+    poll_sec = max(1, min(10, int((os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_POLL_SEC") or "2").strip() or "2")))
+    latest_status: dict[str, object] = {}
+    while (time.time() - start) < timeout_sec:
+        status_doc = _analysis_companion_status_for_job(job_id)
+        if status_doc:
+            latest_status = dict(status_doc)
+            if _analysis_companion_is_ready(status_doc, require_rag=require_rag):
+                return latest_status
+            state = str(status_doc.get("state") or "").strip().lower()
+            if state in {"degraded", "failed"}:
+                return latest_status
+        rc, out, _ = _kubectl(["get", "pod", pod_name, "-o", "json"], timeout=10)
+        if rc == 0:
+            try:
+                doc = json.loads(out)
+            except Exception:
+                doc = {}
+            phase = str(((doc.get("status") or {}) if isinstance(doc, dict) else {}).get("phase") or "").strip().lower()
+            if phase in {"succeeded", "failed"}:
+                status_doc = _analysis_companion_status_for_job(job_id)
+                if status_doc:
+                    return dict(status_doc)
+                if not latest_status:
+                    latest_status = {"state": f"pod_{phase}", "pod_phase": phase}
+                return latest_status
+        time.sleep(poll_sec)
+    wait_mode = "rag_ready" if require_rag else "mcp_ready"
+    raise TimeoutError(f"analysis companion timeout waiting for {wait_mode} after {timeout_sec}s")
+
+
 def _k8s_proxy_env_from_items() -> list[dict[str, object]]:
     secret_name = (os.environ.get("SHERPA_K8S_PROXY_SECRET_NAME", "sherpa-runtime-proxy") or "").strip()
     if not secret_name:
@@ -1516,6 +1867,10 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_coverage_plateau_streak=int(payload.get("coverage_plateau_streak") or 0),
                 fuzz_coverage_seed_profile=str(payload.get("coverage_seed_profile") or ""),
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
+                fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
+                analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
+                target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
+                constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
             )
         except Exception:
             pass
@@ -1729,6 +2084,7 @@ def _is_status_terminal(raw: str | None) -> bool:
 
 
 _RESUMABLE_WORKFLOW_STEPS = {
+    "analysis",
     "plan",
     "synthesize",
     "build",
@@ -1745,6 +2101,7 @@ _RESUMABLE_WORKFLOW_STEPS = {
     "fix_crash",
 }
 _STAGED_WORKFLOW_STEPS = (
+    "analysis",
     "plan",
     "synthesize",
     "build",
@@ -1773,7 +2130,7 @@ def _normalize_resume_step(raw: str | None) -> str:
         return "crash-analysis"
     if s in _RESUMABLE_WORKFLOW_STEPS:
         return s
-    return "plan"
+    return "analysis"
 
 
 def _staged_sequence_from(raw_start: str | None) -> list[str]:
@@ -1787,7 +2144,7 @@ def _staged_sequence_from(raw_start: str | None) -> list[str]:
     return list(_STAGED_WORKFLOW_STEPS[idx:])
 
 
-def _error_code_for_job(job: dict | None) -> str:
+def _legacy_error_code_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     direct = str(job.get("error_code") or "").strip()
@@ -1815,7 +2172,7 @@ def _error_code_for_job(job: dict | None) -> str:
     return ""
 
 
-def _error_kind_for_job(job: dict | None) -> str:
+def _legacy_error_kind_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     result = job.get("result")
@@ -1830,7 +2187,7 @@ def _error_kind_for_job(job: dict | None) -> str:
     return ""
 
 
-def _error_signature_for_job(job: dict | None) -> str:
+def _legacy_error_signature_for_job(job: dict | None) -> str:
     if not isinstance(job, dict):
         return ""
     result = job.get("result")
@@ -1846,6 +2203,105 @@ def _error_signature_for_job(job: dict | None) -> str:
             if val:
                 return val
     return ""
+
+
+def _coerce_error_object(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+    stage = str(raw.get("stage") or "").strip().lower()
+    kind = str(raw.get("kind") or "").strip().lower()
+    code = str(raw.get("code") or "").strip().lower()
+    message = str(raw.get("message") or "").strip()
+    detail = str(raw.get("detail") or "").strip()
+    signature = str(raw.get("signature") or "").strip()
+    retryable = bool(raw.get("retryable"))
+    terminal = bool(raw.get("terminal"))
+    at = int(_safe_float(raw.get("at")) or 0)
+    if not (code or message or signature or terminal):
+        return {}
+    if at <= 0:
+        at = int(time.time())
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": detail,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": at,
+    }
+
+
+def _error_object_for_job(job: dict | None) -> dict[str, object]:
+    if not isinstance(job, dict):
+        return {}
+    result = job.get("result")
+    result_dict = result if isinstance(result, dict) else {}
+    for source in (job.get("error"), result_dict.get("error")):
+        normalized = _coerce_error_object(source)
+        if normalized:
+            return normalized
+
+    code = _legacy_error_code_for_job(job)
+    kind = _legacy_error_kind_for_job(job)
+    signature = _legacy_error_signature_for_job(job)
+    message = str(
+        job.get("last_error")
+        or result_dict.get("last_error")
+        or job.get("error")
+        or ""
+    ).strip()
+    stage = str(
+        job.get("workflow_active_step")
+        or job.get("workflow_last_step")
+        or result_dict.get("last_step")
+        or job.get("k8s_phase")
+        or ""
+    ).strip().lower()
+    terminal = bool(result_dict.get("failed")) or str(job.get("status") or "").strip().lower() in {
+        "error",
+        "resume_failed",
+        "recoverable",
+    }
+    retryable = bool(code) and not terminal
+    if not (code or kind or signature or message or terminal):
+        return {}
+    if not kind and code:
+        if code.startswith("run_"):
+            kind = "run"
+        elif code.startswith("build_") or "build" in code:
+            kind = "build"
+        elif "crash" in code:
+            kind = "crash"
+        elif "timeout" in code:
+            kind = "timeout"
+        else:
+            kind = "generic_failure"
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": message,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": int(_safe_float(job.get("updated_at")) or _safe_float(job.get("finished_at")) or time.time()),
+    }
+
+
+def _error_code_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("code") or "")
+
+
+def _error_kind_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("kind") or "")
+
+
+def _error_signature_for_job(job: dict | None) -> str:
+    return str(_error_object_for_job(job).get("signature") or "")
 
 
 def _runtime_mode_for_job(job: dict | None) -> str:
@@ -2717,13 +3173,19 @@ def put_config(request: dict = Body(...)):
 
     current = _cfg_get()
     payload = current.model_dump()
-    lightweight_only_keys = {"apiBaseUrl", "api_base_url"}
+    lightweight_only_keys = {
+        "apiBaseUrl",
+        "api_base_url",
+        "sherpa_run_plateau_idle_growth_sec",
+    }
     request_keys = set(request.keys())
     is_lightweight_update = bool(request_keys) and request_keys.issubset(lightweight_only_keys)
 
     if is_lightweight_update:
         api_base_url = str(request.get("apiBaseUrl") or request.get("api_base_url") or "").strip()
         payload["api_base_url"] = api_base_url
+        if "sherpa_run_plateau_idle_growth_sec" in request:
+            payload["sherpa_run_plateau_idle_growth_sec"] = request.get("sherpa_run_plateau_idle_growth_sec")
     else:
         merged = dict(payload)
         for key, value in request.items():
@@ -2747,6 +3209,12 @@ def put_config(request: dict = Body(...)):
         raise HTTPException(
             status_code=400,
             detail="sherpa_run_unlimited_round_budget_sec must be >= 0 (0 means fully unlimited).",
+        )
+    plateau_idle = int(candidate.sherpa_run_plateau_idle_growth_sec)
+    if plateau_idle < 30 or plateau_idle > 86_400:
+        raise HTTPException(
+            status_code=400,
+            detail="sherpa_run_plateau_idle_growth_sec must be in [30, 86400].",
         )
 
     # Frontend no longer controls provider/API fields.
@@ -3067,6 +3535,35 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("last_resume_finished_at", None)
     view.setdefault("last_interrupted_at", None)
     view.setdefault("request", None)
+    view.setdefault("analysis_companion_pod", None)
+    view.setdefault("analysis_companion_service", None)
+    view.setdefault("analysis_companion_url", "")
+    view.setdefault("analysis_companion_ready", False)
+    view.setdefault("analysis_companion_active", False)
+    view.setdefault("analysis_companion_error", None)
+    view.setdefault("analysis_companion_last_error", None)
+    view.setdefault("analysis_companion_stopped_at", None)
+    view.setdefault("analysis_companion_state", "")
+    view.setdefault("analysis_companion_backend", "")
+    view.setdefault("analysis_companion_candidate_count", 0)
+    view.setdefault("analysis_companion_updated_at", "")
+    view.setdefault("analysis_companion_repo_root", "")
+    view.setdefault("analysis_companion_status_error", "")
+    view.setdefault("analysis_companion_preprocess_path", "")
+    view.setdefault("analysis_companion_coverage_hints_path", "")
+    view.setdefault("analysis_companion_rag_ok", False)
+    view.setdefault("analysis_companion_rag_knowledge_base_path", "")
+    view.setdefault("analysis_companion_rag_document_count", 0)
+    view.setdefault("analysis_companion_rag_chunk_count", 0)
+    view.setdefault("analysis_companion_embedding_provider", "openrouter")
+    view.setdefault("analysis_companion_embedding_model", "")
+    view.setdefault("analysis_companion_embedding_ok", False)
+    view.setdefault("analysis_companion_rag_degraded", False)
+    view.setdefault("analysis_companion_rag_degraded_reason", "")
+    view.setdefault("analysis_companion_semantic_query_count", 0)
+    view.setdefault("analysis_companion_semantic_hit_count", 0)
+    view.setdefault("analysis_companion_semantic_hit_rate", 0.0)
+    view.setdefault("analysis_companion_cache_hit_rate", 0.0)
     # -- per-fuzzer performance metrics --
     view.setdefault("fuzz_metrics", None)
     view.setdefault("fuzz_metrics_ts", None)
@@ -3082,15 +3579,77 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_coverage_plateau_streak", 0)
     view.setdefault("fuzz_coverage_seed_profile", "")
     view.setdefault("fuzz_coverage_quality_flags", [])
+    view.setdefault("fuzz_coverage_bottleneck_kind", "")
+    view.setdefault("analysis_evidence_count", 0)
+    view.setdefault("target_scoring_enabled", False)
+    view.setdefault("constraint_memory_count", 0)
+
+    companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
+    if companion_status:
+        view["analysis_companion_state"] = str(companion_status.get("state") or "")
+        view["analysis_companion_backend"] = str(companion_status.get("analysis_backend") or "")
+        view["analysis_companion_url"] = str(companion_status.get("mcp_url") or view.get("analysis_companion_url") or "")
+        view["analysis_companion_ready"] = bool(companion_status.get("mcp_ready"))
+        try:
+            view["analysis_companion_candidate_count"] = int(companion_status.get("candidate_count") or 0)
+        except Exception:
+            view["analysis_companion_candidate_count"] = 0
+        view["analysis_companion_updated_at"] = str(companion_status.get("updated_at") or "")
+        view["analysis_companion_repo_root"] = str(companion_status.get("repo_root") or "")
+        view["analysis_companion_status_error"] = str(companion_status.get("error") or "")
+        view["analysis_companion_last_error"] = str(
+            companion_status.get("last_error")
+            or companion_status.get("error")
+            or ""
+        )
+        view["analysis_companion_preprocess_path"] = str(companion_status.get("preprocess_path") or "")
+        view["analysis_companion_coverage_hints_path"] = str(companion_status.get("coverage_hints_path") or "")
+        view["analysis_companion_rag_ok"] = bool(companion_status.get("rag_ok"))
+        view["analysis_companion_rag_knowledge_base_path"] = str(companion_status.get("rag_knowledge_base_path") or "")
+        try:
+            view["analysis_companion_rag_document_count"] = int(companion_status.get("rag_document_count") or 0)
+        except Exception:
+            view["analysis_companion_rag_document_count"] = 0
+        try:
+            view["analysis_companion_rag_chunk_count"] = int(companion_status.get("rag_chunk_count") or 0)
+        except Exception:
+            view["analysis_companion_rag_chunk_count"] = 0
+        view["analysis_companion_embedding_provider"] = str(
+            companion_status.get("embedding_provider") or "openrouter"
+        )
+        view["analysis_companion_embedding_model"] = str(companion_status.get("embedding_model") or "")
+        view["analysis_companion_embedding_ok"] = bool(companion_status.get("embedding_ok"))
+        view["analysis_companion_rag_degraded"] = bool(companion_status.get("rag_degraded"))
+        view["analysis_companion_rag_degraded_reason"] = str(
+            companion_status.get("rag_degraded_reason") or ""
+        )
+        try:
+            view["analysis_companion_semantic_query_count"] = int(companion_status.get("semantic_query_count") or 0)
+        except Exception:
+            view["analysis_companion_semantic_query_count"] = 0
+        try:
+            view["analysis_companion_semantic_hit_count"] = int(companion_status.get("semantic_hit_count") or 0)
+        except Exception:
+            view["analysis_companion_semantic_hit_count"] = 0
+        try:
+            view["analysis_companion_semantic_hit_rate"] = float(companion_status.get("semantic_hit_rate") or 0.0)
+        except Exception:
+            view["analysis_companion_semantic_hit_rate"] = 0.0
+        try:
+            view["analysis_companion_cache_hit_rate"] = float(companion_status.get("cache_hit_rate") or 0.0)
+        except Exception:
+            view["analysis_companion_cache_hit_rate"] = 0.0
 
 
 def _derive_task_status(job: dict) -> dict:
     children = list(job.get("children") or [])
     if not children:
         view = dict(job)
-        view["error_code"] = _error_code_for_job(view)
-        view["error_kind"] = _error_kind_for_job(view)
-        view["error_signature"] = _error_signature_for_job(view)
+        err = _error_object_for_job(view)
+        view["error"] = err
+        view["error_code"] = str(err.get("code") or "")
+        view["error_kind"] = str(err.get("kind") or "")
+        view["error_signature"] = str(err.get("signature") or "")
         view["phase"] = _phase_for_job(view)
         view["runtime_mode"] = _runtime_mode_for_job(view)
         _enrich_job_view(view)
@@ -3127,16 +3686,20 @@ def _derive_task_status(job: dict) -> dict:
         "error": error,
     }
     for c in child_jobs:
-        c["error_code"] = _error_code_for_job(c)
-        c["error_kind"] = _error_kind_for_job(c)
-        c["error_signature"] = _error_signature_for_job(c)
+        cerr = _error_object_for_job(c)
+        c["error"] = cerr
+        c["error_code"] = str(cerr.get("code") or "")
+        c["error_kind"] = str(cerr.get("kind") or "")
+        c["error_signature"] = str(cerr.get("signature") or "")
         c["phase"] = _phase_for_job(c)
         c["runtime_mode"] = _runtime_mode_for_job(c)
         _enrich_job_view(c)
     view["children"] = child_jobs
-    view["error_code"] = _error_code_for_job(view)
-    view["error_kind"] = _error_kind_for_job(view)
-    view["error_signature"] = _error_signature_for_job(view)
+    err = _error_object_for_job(view)
+    view["error"] = err
+    view["error_code"] = str(err.get("code") or "")
+    view["error_kind"] = str(err.get("kind") or "")
+    view["error_signature"] = str(err.get("signature") or "")
     view["phase"] = _phase_for_job(view)
     view["runtime_mode"] = _runtime_mode_for_job(view)
     _enrich_job_view(view)
@@ -3212,7 +3775,7 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "started_at_iso": _iso_time(job.get("started_at")),
                 "finished_at": job.get("finished_at"),
                 "finished_at_iso": _iso_time(job.get("finished_at")),
-                "error": job.get("error"),
+                "error": _error_object_for_job(job),
                 "error_code": _error_code_for_job(job),
                 "error_kind": _error_kind_for_job(job),
                 "error_signature": _error_signature_for_job(job),
@@ -3247,6 +3810,10 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_plateau_streak": (active_child or job).get("fuzz_coverage_plateau_streak", 0),
                 "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
+                "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
+                "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
+                "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
+                "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
@@ -3304,6 +3871,9 @@ def _run_fuzz_job(
     tee = _Tee(job_id, log_file=log_file)
     out_token = _ACTIVE_JOB_STDOUT_TEE.set(tee)
     err_token = _ACTIVE_JOB_STDERR_TEE.set(tee)
+    companion_pod = ""
+    companion_service = ""
+    companion_url = ""
     try:
         print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
         if _is_cancel_requested(job_id):
@@ -3374,7 +3944,7 @@ def _run_fuzz_job(
         if _is_cancel_requested(job_id):
             raise RuntimeError(cancel_error)
         try:
-                start_step = _normalize_resume_step(resume_from_step) if resumed else "plan"
+                start_step = _normalize_resume_step(resume_from_step) if resumed else "analysis"
                 stage_results: list[dict[str, object]] = []
                 stage_job_names: list[str] = []
                 current_repo_root = str(resume_repo_root or "").strip()
@@ -3396,12 +3966,62 @@ def _run_fuzz_job(
                 if current_stage in {"fix_build", "fix_crash"}:
                     current_stage = "build"
                 if current_stage not in _STAGED_WORKFLOW_STEPS:
-                    current_stage = "plan"
+                    current_stage = "analysis"
                 try:
                     max_stage_dispatches = int((os.environ.get("SHERPA_STAGE_DISPATCH_MAX") or "0").strip())
                 except Exception:
                     max_stage_dispatches = 0
                 dispatch_count = 0
+                companion_mcp_ready = False
+                if mode == "k8s_job" and _k8s_analysis_companion_enabled():
+                    try:
+                        companion_pod, companion_service, companion_url = _k8s_start_analysis_companion(job_id)
+                        if companion_pod:
+                            print(
+                                f"[job {job_id}] analysis companion started pod={companion_pod} "
+                                f"service={companion_service or '-'}"
+                            )
+                            _job_update(
+                                job_id,
+                                analysis_companion_pod=companion_pod,
+                                analysis_companion_service=companion_service,
+                                analysis_companion_url=companion_url,
+                                analysis_companion_active=True,
+                                analysis_companion_error=None,
+                            )
+                            status_doc = _k8s_wait_analysis_companion_result(
+                                job_id,
+                                companion_pod,
+                                timeout_sec=_k8s_analysis_companion_timeout_sec(),
+                                require_rag=False,
+                            )
+                            state_txt = str(status_doc.get("state") or "").strip()
+                            backend_txt = str(status_doc.get("analysis_backend") or "").strip()
+                            err_txt = str(status_doc.get("error") or "").strip()
+                            mcp_url_txt = str(status_doc.get("mcp_url") or companion_url).strip()
+                            mcp_ready = _analysis_companion_is_ready(status_doc, require_rag=False)
+                            print(
+                                f"[job {job_id}] analysis companion ready "
+                                f"state={state_txt or '-'} backend={backend_txt or '-'} "
+                                f"mcp_ready={int(mcp_ready)}"
+                            )
+                            _job_update(
+                                job_id,
+                                analysis_companion_url=mcp_url_txt or companion_url,
+                                analysis_companion_ready=mcp_ready,
+                                analysis_companion_error=(err_txt or None),
+                            )
+                            companion_mcp_ready = bool(mcp_ready)
+                    except Exception as e:
+                        print(f"[job {job_id}] analysis companion failed (continuing): {e}")
+                        _job_update(
+                            job_id,
+                            analysis_companion_error=str(e),
+                            analysis_companion_active=False,
+                            analysis_companion_ready=False,
+                        )
+                        companion_mcp_ready = False
+
                 while current_stage:
                     stage = current_stage
                     dispatch_count += 1
@@ -3410,6 +4030,82 @@ def _run_fuzz_job(
                     idx = dispatch_count
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
+                    if (
+                        stage == "plan"
+                        and companion_pod
+                        and _k8s_analysis_require_rag_ready()
+                    ):
+                        try:
+                            rag_status = _k8s_wait_analysis_companion_result(
+                                job_id,
+                                companion_pod,
+                                timeout_sec=_k8s_analysis_rag_wait_timeout_sec(),
+                                require_rag=True,
+                            )
+                            rag_ready = _analysis_companion_is_ready(rag_status, require_rag=True)
+                            mcp_url_txt = str(rag_status.get("mcp_url") or companion_url).strip()
+                            err_txt = str(rag_status.get("error") or rag_status.get("last_error") or "").strip()
+                            companion_mcp_ready = rag_ready
+                            _job_update(
+                                job_id,
+                                analysis_companion_url=mcp_url_txt or companion_url,
+                                analysis_companion_ready=rag_ready,
+                                analysis_companion_error=(None if rag_ready else (err_txt or "rag_not_ready")),
+                            )
+                            if not rag_ready:
+                                print(
+                                    f"[job {job_id}] analysis companion not rag-ready before plan "
+                                    f"(state={str(rag_status.get('state') or '-')} rag_ok={int(bool(rag_status.get('rag_ok')))}); "
+                                    "degraded continue without MCP injection"
+                                )
+                        except Exception as e:
+                            companion_mcp_ready = False
+                            _job_update(
+                                job_id,
+                                analysis_companion_ready=False,
+                                analysis_companion_error=f"rag_wait_timeout:{e}",
+                            )
+                            print(
+                                f"[job {job_id}] analysis companion rag wait failed (continuing): {e}"
+                            )
+                    if stage == "analysis" and _has_reusable_analysis_context(current_repo_root):
+                        analysis_context_path = _analysis_context_path_for_repo(current_repo_root)
+                        reusable_path = str(analysis_context_path or "")
+                        stage_result = {
+                            "message": "analysis skipped: reuse existing analysis context",
+                            "repo_root": current_repo_root,
+                            "workflow_last_step": "analysis",
+                            "workflow_recommended_next": "plan",
+                            "restart_to_plan": False,
+                            "analysis_done": True,
+                            "analysis_degraded": False,
+                            "analysis_context_path": reusable_path,
+                            "analysis_report_path": reusable_path,
+                            "analysis_reused": True,
+                        }
+                        stage_results.append(
+                            {
+                                "stage": stage,
+                                "job_name": "",
+                                "ok": True,
+                                "repo_root": current_repo_root,
+                                "stage_ctx": dict(stage_ctx),
+                                "result": stage_result,
+                            }
+                        )
+                        _job_update(
+                            job_id,
+                            workflow_last_step=stage,
+                            workflow_active_step="",
+                            k8s_phase="analysis:Reused",
+                        )
+                        print(
+                            f"[job {job_id}] stage {stage} reused existing analysis context: "
+                            f"{reusable_path or '(unknown path)'}"
+                        )
+                        last_result = stage_result
+                        current_stage = "plan"
+                        continue
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
                     result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=idx)
                     stage_job_names.append(job_name)
@@ -3467,6 +4163,8 @@ def _run_fuzz_job(
                         "run_unlimited_round_budget_sec": int(
                             stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                         ),
+                        "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
+                        "analysis_companion_ready": bool(companion_mcp_ready),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
@@ -3780,6 +4478,23 @@ def _run_fuzz_job(
             last_resume_finished_at=time.time() if resumed else None,
         )
     finally:
+        try:
+            if companion_pod or companion_service:
+                _k8s_stop_analysis_companion(companion_pod, companion_service)
+                print(
+                    f"[job {job_id}] analysis companion stopped pod={companion_pod or '-'} "
+                    f"service={companion_service or '-'}"
+                )
+        except Exception as e:
+            print(f"[job {job_id}] analysis companion stop failed: {e}")
+            _job_update(job_id, analysis_companion_error=str(e))
+        finally:
+            _job_update(
+                job_id,
+                analysis_companion_active=False,
+                analysis_companion_ready=False,
+                analysis_companion_stopped_at=time.time(),
+            )
         _ACTIVE_JOB_STDOUT_TEE.reset(out_token)
         _ACTIVE_JOB_STDERR_TEE.reset(err_token)
         try:
@@ -3835,7 +4550,7 @@ def _resume_fuzz_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
         or "build"
     )
     resume_repo_root = str(job.get("resume_repo_root") or job.get("workflow_repo_root") or "").strip()
-    if resume_step != "plan" and not resume_repo_root:
+    if resume_step not in {"analysis", "plan"} and not resume_repo_root:
         _mark_resume_failed(
             job_id,
             code="missing_resume_workspace",

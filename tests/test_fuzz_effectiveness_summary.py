@@ -180,3 +180,5 @@ def test_write_run_summary_marks_run_resource_exhaustion_as_error(tmp_path: Path
     assert summary["run_error_kind"] == "run_resource_exhaustion"
     assert summary["error_kind"] == "resource"
     assert summary["error_code"] == "oom_killed"
+    assert summary["error"]["code"] == "oom_killed"
+    assert summary["error"]["kind"] == "resource"

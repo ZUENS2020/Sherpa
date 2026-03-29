@@ -345,6 +345,8 @@ jobs:
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_PROD }}
           MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL_PROD || vars.MINIMAX_MODEL_PROD || 'MiniMax-M2.7-highspeed' }}
+          OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_PROD }}
+          OPENROUTER_EMBEDDING_MODEL: ${{ secrets.OPENROUTER_EMBEDDING_MODEL_PROD || vars.OPENROUTER_EMBEDDING_MODEL_PROD || 'text-embedding-3-small' }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_PROD }}
           POSTGRES_DB: ${{ vars.POSTGRES_DB_PROD || 'sherpa' }}
           POSTGRES_USER: ${{ vars.POSTGRES_USER_PROD || 'sherpa' }}
@@ -419,6 +421,8 @@ jobs:
           }
 
           require_non_empty MINIMAX_API_KEY sherpa-minimax MINIMAX_API_KEY
+          require_non_empty OPENROUTER_EMBEDDING_API_KEY sherpa-openrouter-embedding OPENROUTER_EMBEDDING_API_KEY
+          require_non_empty OPENROUTER_EMBEDDING_MODEL sherpa-openrouter-embedding OPENROUTER_EMBEDDING_MODEL
           require_non_empty POSTGRES_PASSWORD sherpa-postgres POSTGRES_PASSWORD
           require_non_empty CLOUDFLARE_TUNNEL_TOKEN cloudflare-tunnel token
           require_non_empty CLOUDFLARE_PUBLIC_HOST cloudflare-public-host host
@@ -433,6 +437,11 @@ jobs:
             --from-literal=OPENAI_BASE_URL="https://api.minimaxi.com/anthropic/v1" \
             --from-literal=OPENAI_MODEL="${MINIMAX_MODEL}" \
             --from-literal=OPENCODE_MODEL="${MINIMAX_MODEL}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-openrouter-embedding \
+            --from-literal=OPENROUTER_EMBEDDING_API_KEY="${OPENROUTER_EMBEDDING_API_KEY}" \
+            --from-literal=OPENROUTER_EMBEDDING_MODEL="${OPENROUTER_EMBEDDING_MODEL}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl -n "${NAMESPACE}" create secret generic sherpa-postgres \

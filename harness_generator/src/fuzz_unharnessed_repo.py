@@ -399,11 +399,111 @@ def _run_plateau_pulses() -> int:
 
 
 def _run_plateau_idle_growth_sec() -> int:
-    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "180").strip()
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC") or "600").strip()
     try:
         return max(30, min(int(raw), 86_400))
     except Exception:
-        return 180
+        return 600
+
+
+def _run_ft_growth_threshold() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FT_GROWTH_THRESHOLD") or "8").strip()
+    try:
+        return max(1, min(int(raw), 1_000_000))
+    except Exception:
+        return 8
+
+
+def _run_ft_recent_growth_window_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_FT_RECENT_GROWTH_WINDOW_SEC") or "").strip()
+    if raw:
+        try:
+            return max(30, min(int(raw), 86_400))
+        except Exception:
+            pass
+    return _run_plateau_idle_growth_sec()
+
+
+def _run_plateau_pulse_min_interval_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_PULSE_MIN_INTERVAL_SEC") or "60").strip()
+    try:
+        # Keep configurable and bounded; 0 disables spacing guard.
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 60
+
+
+def _run_plateau_hit_interval_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_PLATEAU_HIT_INTERVAL_SEC") or "").strip()
+    if raw:
+        try:
+            return max(0, min(int(raw), 86_400))
+        except Exception:
+            return 60
+    # Backward-compatible fallback
+    return _run_plateau_pulse_min_interval_sec()
+
+
+def _run_progress_samples_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_PROGRESS_SAMPLES_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _run_libfuzzer_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_RUN_LIBFUZZER_TIMEOUT_SEC") or "1200").strip()
+    try:
+        # Keep libFuzzer per-input timeout enabled by default to avoid
+        # single-unit hangs blocking long-running jobs indefinitely.
+        return max(0, min(int(raw), 86_400))
+    except Exception:
+        return 1200
+
+
+def _count_corpus_files_and_bytes(corpus_dir: Path) -> tuple[int, int]:
+    """Fast corpus counting with safe recursive fallback when subdirs exist."""
+    files = 0
+    total_size = 0
+    try:
+        has_subdir = False
+        for entry in os.scandir(corpus_dir):
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    files += 1
+                    try:
+                        total_size += int(entry.stat(follow_symlinks=False).st_size)
+                    except Exception:
+                        pass
+                elif entry.is_dir(follow_symlinks=False):
+                    has_subdir = True
+            except Exception:
+                continue
+        if not has_subdir:
+            return files, total_size
+        # Fallback to recursive traversal for nested corpus layouts.
+        files = 0
+        total_size = 0
+        for p in corpus_dir.rglob("*"):
+            if p.is_file():
+                files += 1
+                try:
+                    total_size += int(p.stat().st_size)
+                except Exception:
+                    pass
+        return files, total_size
+    except Exception:
+        return 0, 0
+
+
+_RE_LF_OOM = re.compile(r"ERROR:\s*libFuzzer:\s*out-of-memory", re.IGNORECASE)
+_RE_ASAN_ALLOC_FAIL = re.compile(r"AddressSanitizer failed to allocate", re.IGNORECASE)
+_RE_ASAN_SHADOW_FAIL = re.compile(r"ReserveShadowMemoryRange failed", re.IGNORECASE)
+_RE_FAILED_MMAP = re.compile(r"failed to mmap", re.IGNORECASE)
+_RE_SANITIZER_ERROR = re.compile(r"==[0-9]+==ERROR: (Address|Undefined|Memory|Thread|Leak)Sanitizer")
+_RE_SANITIZER_SUMMARY = re.compile(
+    r"SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)"
+)
+_RE_RUNTIME_ERROR = re.compile(r"\bruntime error:\b", re.IGNORECASE)
+_RE_LF_DEADLY_SIGNAL = re.compile(r"ERROR: libFuzzer: deadly signal")
 
 
 def _default_diff_excludes() -> set[str]:
@@ -825,12 +925,21 @@ class FuzzerRunResult:
     terminal_reason: str = ""
     plateau_detected: bool = False
     plateau_idle_seconds: int = 0
+    plateau_hit_count: int = 0
+    plateau_last_hit_at: float = 0.0
+    progress_sample_file: str = ""
     seed_quality: Dict[str, object] | None = None
+    parallel_engine: str = "single"
+    # Reserved for future role-based scheduling (explore/stability).
+    parallel_role: str = "reserved"
+    outer_slot: int = 0
+    inner_workers: int = 1
+    reload_enabled: bool = False
 
 
 _LIBFUZZER_PROGRESS_RE = re.compile(
     r"#(?P<iter>\d+)\s+"
-    r"(?P<kind>NEW|REDUCE|pulse)\s+"
+    r"(?P<kind>INITED|NEW|REDUCE|pulse)\s+"
     r"cov:\s*(?P<cov>\d+)\s+"
     r"ft:\s*(?P<ft>\d+)\s+"
     r"corp:\s*(?P<corp_files>\d+)/(?P<corp_size>\S+)"
@@ -949,6 +1058,10 @@ def _seed_quality_from_run(
     early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
     final_files = int(final_stats.get("corpus_files") or 0)
     final_bytes = int(final_stats.get("corpus_size_bytes") or 0)
+    final_cov = int(final_stats.get("cov") or 0)
+    final_ft = int(final_stats.get("ft") or 0)
+    cov_delta = max(0, final_cov - inited_cov)
+    ft_delta = max(0, final_ft - inited_ft)
     retention_files = (float(final_files) / float(initial_corpus_files)) if initial_corpus_files > 0 else 0.0
     retention_bytes = (float(final_bytes) / float(initial_corpus_bytes)) if initial_corpus_bytes > 0 else 0.0
 
@@ -1003,8 +1116,8 @@ def _seed_quality_from_run(
         ),
     )
 
-    cov_gain = max(0, int(final_stats.get("cov") or 0) - inited_cov)
-    ft_gain = max(0, int(final_stats.get("ft") or 0) - inited_ft)
+    cov_gain = cov_delta
+    ft_gain = ft_delta
     early_units_norm = max(0.0, min(1.0, float(max(early_new_units_30s, early_new_units_60s)) / 16.0))
     coverage_potential = max(
         0.0,
@@ -1053,6 +1166,10 @@ def _seed_quality_from_run(
         "initial_corpus_bytes": initial_corpus_bytes,
         "initial_inited_cov": inited_cov,
         "initial_inited_ft": inited_ft,
+        "final_cov": final_cov,
+        "final_ft": final_ft,
+        "cov_delta": cov_delta,
+        "ft_delta": ft_delta,
         "early_new_units_30s": early_new_units_30s,
         "early_new_units_60s": early_new_units_60s,
         "final_corpus_files": final_files,
@@ -1236,10 +1353,28 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
     return required, [x for x in optional if x not in required]
 
 
-def _classify_seed_family(path: Path) -> set[str]:
+def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
     name = path.name.lower()
-    text = read_text_safely(path)[:2048].lower()
+    try:
+        data = path.read_bytes()[:1024]
+    except Exception:
+        data = b""
+    text = data.decode("utf-8", errors="replace").lower()
+    profile = str(seed_profile or "").strip().lower()
     families: set[str] = set()
+    if profile == "archive-container" and data:
+        if data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08"):
+            families.add("archive_zip")
+        if len(data) >= 262 and data[257:262] == b"ustar":
+            families.add("archive_tar")
+        if data.startswith(b"\x1f\x8b\x08"):
+            families.add("archive_gzip")
+        if data.startswith(b"BZh"):
+            families.add("archive_bzip2")
+        if data.startswith(b"\xfd7zXZ\x00"):
+            families.add("archive_xz")
+        if any(f in families for f in {"archive_zip", "archive_tar", "archive_gzip", "archive_bzip2", "archive_xz"}):
+            families.add("valid_archive_sample")
     if "{}" in text or re.search(r"\{[^{}]*\}", text):
         families.add("replacement_fields")
     if "{{" in text or "}}" in text:
@@ -3277,7 +3412,7 @@ EOF
                     continue
                 selected.append(dest)
                 accepted += 1
-                for family in _classify_seed_family(dest):
+                for family in _classify_seed_family(dest, seed_profile):
                     family_limits[family] = family_limits.get(family, 0) + 1
                 if len(selected) >= 12:
                     break
@@ -3304,7 +3439,7 @@ EOF
                 seen_hashes.add(digest)
                 selected.append(dest)
                 accepted += 1
-                for family in _classify_seed_family(dest):
+                for family in _classify_seed_family(dest, seed_profile):
                     family_limits[family] = family_limits.get(family, 0) + 1
         if imported_zip_rejected > 0:
             rejected += imported_zip_rejected
@@ -3502,7 +3637,17 @@ EOF
 
     def _infer_seed_gaps(self, seed_profile: str, corpus_dir: Path) -> str:
         names = " ".join(p.name.lower() for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else ""
+        covered_families: set[str] = set()
+        if corpus_dir.is_dir():
+            for path in corpus_dir.iterdir():
+                if not path.is_file():
+                    continue
+                covered_families.update(_classify_seed_family(path, seed_profile))
+        required_families, _ = _seed_families_for_target(seed_profile)
+        missing_required = [f for f in required_families if f and f not in covered_families]
         gaps: list[str] = []
+        if missing_required:
+            gaps.append("missing required family coverage: " + ", ".join(missing_required[:6]))
         if seed_profile == "parser-structure":
             if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
                 gaps.append("missing malformed/truncated parser cases")
@@ -3533,7 +3678,8 @@ EOF
         elif seed_profile == "decoder-binary":
             gaps.append("missing malformed length/checksum and truncated binary frames")
         elif seed_profile == "archive-container":
-            gaps.append("ensure at least one valid archive sample exists first")
+            if "valid_archive_sample" not in covered_families:
+                gaps.append("ensure at least one valid archive sample exists first")
         return "; ".join(gaps[:4]) or "cover valid, malformed, truncation, and boundary-value cases"
 
     def _seed_exploration_path(self, fuzzer_name: str) -> Path:
@@ -3543,6 +3689,30 @@ EOF
     def _seed_check_path(self, fuzzer_name: str) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(fuzzer_name or "").strip()) or "seed"
         return self.fuzz_dir / f"seed_check_{safe_name}.json"
+
+    def _seed_feedback_path(self) -> Path:
+        return self.fuzz_dir / "seed_feedback.json"
+
+    def _load_seed_feedback_doc(self) -> dict[str, object]:
+        path = self._seed_feedback_path()
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
+    def _seed_feedback_for_fuzzer(self, fuzzer_name: str) -> dict[str, object]:
+        doc = self._load_seed_feedback_doc()
+        by_fuzzer = doc.get("by_fuzzer")
+        if isinstance(by_fuzzer, dict):
+            entry = by_fuzzer.get(fuzzer_name)
+            if isinstance(entry, dict):
+                return dict(entry)
+        return {}
 
     def _seed_max_file_bytes(self) -> int:
         raw = (os.environ.get("SHERPA_SEED_MAX_FILE_BYTES") or "8192").strip()
@@ -3773,7 +3943,7 @@ EOF
                 reject_reason = "hash"
             if not reject:
                 content_hashes.add(digest)
-            families = _classify_seed_family(path)
+            families = _classify_seed_family(path, seed_profile)
             if (
                 textual_mode
                 and seed_profile not in {"parser-format", "parser-numeric"}
@@ -4016,6 +4186,12 @@ EOF
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
         target_corpus_files = max(self._seed_corpus_min_per_target(), len(required_families) * 2)
         per_family_target = 2 if required_families else 1
+        previous_seed_feedback = self._seed_feedback_for_fuzzer(fuzzer_name)
+        previous_seed_feedback_text = (
+            json.dumps(previous_seed_feedback, ensure_ascii=False, indent=2)
+            if previous_seed_feedback
+            else "{}"
+        )
 
         instructions = textwrap.dedent(
             f"""
@@ -4053,6 +4229,9 @@ EOF
             Coverage-oriented gap hints:
             {self._infer_seed_gaps(seed_profile, corpus_dir)}
 
+            Previous run seed feedback (if available):
+            {previous_seed_feedback_text}
+
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
             - For `archive-container`, real archive samples must come first: import/use repository examples from `contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, or `tests/**` before adding synthetic variants.
@@ -4078,6 +4257,8 @@ EOF
             - For textual targets, avoid random binary noise, large opaque blobs, or mostly non-printable bytes unless the harness clearly expects binary input.
             - Keep seeds semantically distinct by family bucket; do not create many near-duplicate seeds that only change one random byte.
             - Soft filtering keeps diverse seeds; do not assume near variants will always be removed.
+            - If previous feedback shows cold-start failure, low merge retained ratio, or low early yield, prioritize semantically different high-signal seeds over random variants.
+            - If previous feedback shows missing families, fill missing families first before adding more variants for already-covered families.
             - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
@@ -4112,6 +4293,7 @@ EOF
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+            "=== previous seed feedback ===\n" + previous_seed_feedback_text,
         ]
         stdout = self.patcher.run_codex_command(
             instructions,
@@ -4186,6 +4368,41 @@ EOF
         if int((filtered_meta.get("filtered_by_rule_breakdown") or {}).get("family") or 0) > 0:
             redundancy_penalty += 0.25
         redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
+        merge_gate_stats = {
+            "before_files": 0,
+            "after_files": 0,
+            "before_bytes": 0,
+            "after_bytes": 0,
+            "retained_ratio_files": 1.0,
+            "retained_ratio_bytes": 1.0,
+            "applied": False,
+            "error": "",
+        }
+        try:
+            bin_path = self.fuzz_out_dir / fuzzer_name
+            if bin_path.is_file():
+                merge_raw = self._minimize_corpus(bin_path, corpus_dir)
+                before_files = max(0, int(merge_raw.get("before_files") or 0))
+                after_files = max(0, int(merge_raw.get("after_files") or 0))
+                before_bytes = max(0, int(merge_raw.get("before_bytes") or 0))
+                after_bytes = max(0, int(merge_raw.get("after_bytes") or 0))
+                merge_gate_stats = {
+                    "before_files": before_files,
+                    "after_files": after_files,
+                    "before_bytes": before_bytes,
+                    "after_bytes": after_bytes,
+                    "retained_ratio_files": (
+                        float(after_files) / float(before_files) if before_files > 0 else 1.0
+                    ),
+                    "retained_ratio_bytes": (
+                        float(after_bytes) / float(before_bytes) if before_bytes > 0 else 1.0
+                    ),
+                    "applied": True,
+                    "error": "",
+                }
+        except Exception as exc:
+            merge_gate_stats["error"] = str(exc)
+            print(f"[warn] seed merge gate failed for {fuzzer_name}: {exc}")
         alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
         seed_score_prefuzz = max(
             0.0,
@@ -4241,6 +4458,14 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "merge_gate": merge_gate_stats,
+            "merge_retained_ratio_files": float(merge_gate_stats.get("retained_ratio_files") or 1.0),
+            "merge_retained_ratio_bytes": float(merge_gate_stats.get("retained_ratio_bytes") or 1.0),
+            "cold_start_failure": bool(
+                previous_seed_feedback.get("cold_start_failure")
+                if isinstance(previous_seed_feedback, dict)
+                else False
+            ),
             "seed_score": float(seed_score_prefuzz),
             "seed_score_components": {
                 "alpha": alpha,
@@ -4296,6 +4521,14 @@ EOF
             "archive_malformed_ratio": archive_malformed_ratio,
             "archive_max_malformed_ratio": archive_max_malformed_ratio,
             "archive_valid_ratio": archive_valid_ratio,
+            "merge_gate": dict(merge_gate_stats),
+            "merge_retained_ratio_files": float(merge_gate_stats.get("retained_ratio_files") or 1.0),
+            "merge_retained_ratio_bytes": float(merge_gate_stats.get("retained_ratio_bytes") or 1.0),
+            "cold_start_failure": bool(
+                previous_seed_feedback.get("cold_start_failure")
+                if isinstance(previous_seed_feedback, dict)
+                else False
+            ),
             "seed_score": float(seed_quality_doc.get("seed_score") or 0.0),
             "seed_score_components": dict(seed_quality_doc.get("seed_score_components") or {}),
             "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
@@ -4761,19 +4994,7 @@ EOF
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
         corpus_dir.mkdir(parents=True, exist_ok=True)
-        initial_corpus_files = 0
-        initial_corpus_bytes = 0
-        try:
-            for p in corpus_dir.rglob("*"):
-                if p.is_file():
-                    initial_corpus_files += 1
-                    try:
-                        initial_corpus_bytes += int(p.stat().st_size)
-                    except Exception:
-                        pass
-        except Exception:
-            initial_corpus_files = 0
-            initial_corpus_bytes = 0
+        initial_corpus_files, initial_corpus_bytes = _count_corpus_files_and_bytes(corpus_dir)
 
         pre_existing = set(p for p in artifacts_dir.glob("*") if p.is_file())
 
@@ -4793,23 +5014,55 @@ EOF
         plateau_idle_growth_sec = _run_plateau_idle_growth_sec()
         best_cov = 0
         best_ft = 0
+        ft_growth_threshold = _run_ft_growth_threshold()
         now0 = time.monotonic()
         last_cov_growth_at = now0
         last_ft_growth_at = now0
         plateau_pulse_hits = 0
+        last_plateau_pulse_at = 0.0
+        plateau_hit_interval_sec = _run_plateau_hit_interval_sec()
         callback_stop_reason = ""
+        progress_sample_file = ""
+        progress_samples_enabled = _run_progress_samples_enabled()
+        progress_sample_path = self.fuzz_out_dir / "progress_samples" / f"{bin_path.name}.jsonl"
+        if progress_samples_enabled:
+            progress_sample_path.parent.mkdir(parents=True, exist_ok=True)
+            progress_sample_file = str(progress_sample_path)
 
         def _line_callback(_kind: str, text: str) -> Optional[str]:
             nonlocal best_cov, best_ft, last_cov_growth_at, last_ft_growth_at, plateau_pulse_hits, callback_stop_reason
+            nonlocal last_plateau_pulse_at
             m = _LIBFUZZER_PROGRESS_RE.search(text or "")
             if not m:
                 return None
             cov = int(m.group("cov") or 0)
             ft = int(m.group("ft") or 0)
-            kind = str(m.group("kind") or "").upper()
+            progress_kind = str(m.group("kind") or "").upper()
             now = time.monotonic()
+            if progress_samples_enabled:
+                try:
+                    with progress_sample_path.open("a", encoding="utf-8") as fp:
+                        fp.write(
+                            json.dumps(
+                                {
+                                    "ts": time.time(),
+                                    "iter": int(m.group("iter") or 0),
+                                    "kind": progress_kind,
+                                    "cov": cov,
+                                    "ft": ft,
+                                    "corpus_files": int(m.group("corp_files") or 0),
+                                    "corpus_size": str(m.group("corp_size") or ""),
+                                    "execs_per_sec": int(m.group("execs") or 0),
+                                    "rss_mb": int(m.group("rss") or 0),
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
             cov_grew = cov > best_cov
-            ft_grew = ft > best_ft
+            ft_grew = (ft - best_ft) >= ft_growth_threshold
             if cov_grew:
                 best_cov = cov
                 if ft_grew:
@@ -4826,16 +5079,26 @@ EOF
                 if plateau_pulse_hits > 0:
                     plateau_pulse_hits -= 1
                 return None
-            if kind == "PULSE":
-                # Coverage is the primary plateau signal. Recent feature-only growth
-                # can delay one pulse, but cannot suppress plateau indefinitely.
-                recent_ft_growth = (now - last_ft_growth_at) < max(1, plateau_idle_growth_sec // 3)
-                if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
+            # Coverage is the primary plateau signal. Recent feature-only growth
+            # can delay one hit, but cannot suppress plateau indefinitely.
+            recent_ft_growth = (now - last_ft_growth_at) < _run_ft_recent_growth_window_sec()
+            if (now - last_cov_growth_at) >= plateau_idle_growth_sec and not recent_ft_growth:
+                eligible = (
+                    plateau_hit_interval_sec <= 0
+                    or last_plateau_pulse_at <= 0.0
+                    or (now - last_plateau_pulse_at) >= plateau_hit_interval_sec
+                )
+                if eligible:
                     plateau_pulse_hits += 1
+                    last_plateau_pulse_at = now
                     if plateau_pulse_hits >= plateau_pulses:
                         callback_stop_reason = (
                             "coverage_plateau "
-                            f"(idle_no_growth={plateau_idle_growth_sec}s pulse_hits={plateau_pulse_hits})"
+                            f"(idle_no_growth={plateau_idle_growth_sec}s "
+                            f"hit_interval={plateau_hit_interval_sec}s "
+                            f"pulse_hits={plateau_pulse_hits} "
+                            f"last_cov_growth_age={int(now - last_cov_growth_at)}s "
+                            f"last_ft_growth_age={int(now - last_ft_growth_at)}s)"
                         )
                         return callback_stop_reason
             return None
@@ -4845,6 +5108,7 @@ EOF
             "-artifact_prefix=" + str(artifacts_dir) + "/",
             "-print_final_stats=1",
             f"-rss_limit_mb={self.rss_limit_mb}",
+            f"-timeout={_run_libfuzzer_timeout_sec()}",
         ]
 
         # Adaptive max_len based on seed_profile
@@ -4859,16 +5123,41 @@ EOF
         if dict_path and dict_path.is_file():
             cmd.append(f"-dict={dict_path}")
 
-        # Fork mode for parallel exploration
-        fork_count_raw = os.environ.get("SHERPA_FUZZ_FORK", "0")
+        run_parallel_cfg = dict(
+            (getattr(self, "current_run_parallel_config_by_fuzzer", {}) or {}).get(bin_path.name) or {}
+        )
+        parallel_engine = str(run_parallel_cfg.get("parallel_engine") or "single").strip().lower()
+        if parallel_engine not in {"single", "fork", "jobs_workers"}:
+            parallel_engine = "single"
+        parallel_role = str(run_parallel_cfg.get("parallel_role") or "reserved").strip().lower() or "reserved"
         try:
-            fork_count = max(0, min(int(fork_count_raw), os.cpu_count() or 1))
-        except (ValueError, TypeError):
-            fork_count = 0
-        if fork_count > 1:
-            cmd.append(f"-fork={fork_count}")
-            cmd.append("-ignore_crashes=1")
-            print(f"[*] Fork mode enabled: {fork_count} workers")
+            outer_slot = max(0, int(run_parallel_cfg.get("outer_slot") or 0))
+        except Exception:
+            outer_slot = 0
+        try:
+            inner_workers = max(1, int(run_parallel_cfg.get("inner_workers") or 1))
+        except Exception:
+            inner_workers = 1
+        reload_enabled = bool(run_parallel_cfg.get("reload_enabled"))
+        ignore_non_fatal = bool(run_parallel_cfg.get("ignore_non_fatal"))
+
+        if inner_workers > 1:
+            if parallel_engine == "fork":
+                cmd.append(f"-fork={inner_workers}")
+                # libFuzzer fork mode requires ignore_crashes for stable crash handling.
+                cmd.append("-ignore_crashes=1")
+            elif parallel_engine == "jobs_workers":
+                cmd.append("-jobs=0")
+                cmd.append(f"-workers={inner_workers}")
+                if reload_enabled:
+                    cmd.append("-reload=1")
+            if ignore_non_fatal:
+                cmd.append("-ignore_ooms=1")
+                cmd.append("-ignore_timeouts=1")
+            print(
+                f"[*] Parallel engine={parallel_engine} role={parallel_role} "
+                f"inner_workers={inner_workers} outer_slot={outer_slot}"
+            )
 
         if run_time_budget > 0:
             cmd.append(f"-max_total_time={run_time_budget}")
@@ -4908,16 +5197,15 @@ EOF
         timeout_artifact_count = 0
 
         if new_artifacts:
-            sorted_artifacts = sorted(new_artifacts)
             timeout_like_artifacts = [
-                p for p in sorted_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
+                p for p in new_artifacts if p.name.startswith(("timeout-", "slow-unit-"))
             ]
             oom_like_artifacts = [
-                p for p in sorted_artifacts if p.name.startswith(("oom-", "oom-alloc-"))
+                p for p in new_artifacts if p.name.startswith(("oom-", "oom-alloc-"))
             ]
             timeout_artifact_count = len(timeout_like_artifacts)
             crash_like_artifacts = [
-                p for p in sorted_artifacts if p not in timeout_like_artifacts and p not in oom_like_artifacts
+                p for p in new_artifacts if p not in timeout_like_artifacts and p not in oom_like_artifacts
             ]
 
             if crash_like_artifacts:
@@ -4935,21 +5223,21 @@ EOF
         def _is_sanitizer_crash(text: str) -> bool:
             if not text:
                 return False
-            if re.search(r"ERROR:\s*libFuzzer:\s*out-of-memory", text, re.IGNORECASE):
+            if _RE_LF_OOM.search(text):
                 return False
-            if re.search(r"AddressSanitizer failed to allocate", text, re.IGNORECASE):
+            if _RE_ASAN_ALLOC_FAIL.search(text):
                 return False
-            if re.search(r"ReserveShadowMemoryRange failed", text, re.IGNORECASE):
+            if _RE_ASAN_SHADOW_FAIL.search(text):
                 return False
-            if re.search(r"failed to mmap", text, re.IGNORECASE):
+            if _RE_FAILED_MMAP.search(text):
                 return False
-            if re.search(r"==[0-9]+==ERROR: (Address|Undefined|Memory|Thread|Leak)Sanitizer", text):
+            if _RE_SANITIZER_ERROR.search(text):
                 return True
-            if re.search(r"SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|ThreadSanitizer)", text):
+            if _RE_SANITIZER_SUMMARY.search(text):
                 return True
-            if re.search(r"\bruntime error:\b", text, re.IGNORECASE):
+            if _RE_RUNTIME_ERROR.search(text):
                 return True
-            if re.search(r"ERROR: libFuzzer: deadly signal", text):
+            if _RE_LF_DEADLY_SIGNAL.search(text):
                 return True
             return False
 
@@ -4983,21 +5271,21 @@ EOF
             run_error_kind = "run_resource_exhaustion"
             error = f"fuzzer produced oom-like artifacts for {bin_path.name}"
         if rc != 0 and not crash_found:
-            lowered = log.lower()
-            if "[callback-stop] coverage_plateau" in lowered:
+            log_lower = log.lower()
+            if "[callback-stop] coverage_plateau" in log_lower:
                 rc = 0
-            elif "error: libfuzzer: out-of-memory" in lowered:
+            elif "error: libfuzzer: out-of-memory" in log_lower:
                 if not run_error_kind:
                     run_error_kind = "run_resource_exhaustion"
                 if not error:
                     error = f"fuzzer hit resource exhaustion (out-of-memory) for {bin_path.name}"
-            elif "idle-timeout" in lowered:
+            elif "idle-timeout" in log_lower:
                 run_error_kind = "run_idle_timeout"
                 error = (
                     f"fuzzer run idle-timeout for {bin_path.name}: "
                     f"no output for {run_idle_timeout}s"
                 )
-            elif "[timeout]" in lowered:
+            elif "[timeout]" in log_lower:
                 if not run_error_kind:
                     run_error_kind = "run_timeout"
                 if not error:
@@ -5008,20 +5296,9 @@ EOF
                 if not error:
                     error = f"fuzzer run failed rc={rc} for {bin_path.name}; no crash artifact/sanitizer evidence found"
 
-        corpus_files = 0
-        corpus_size_bytes = 0
-        try:
-            for p in corpus_dir.rglob("*"):
-                if p.is_file():
-                    corpus_files += 1
-                    try:
-                        corpus_size_bytes += int(p.stat().st_size)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        corpus_files, corpus_size_bytes = _count_corpus_files_and_bytes(corpus_dir)
 
-        plateau_detected = "[callback-stop] coverage_plateau" in log.lower()
+        plateau_detected = "[callback-stop] coverage_plateau" in (log_lower if "log_lower" in locals() else log.lower())
         plateau_idle_seconds = plateau_idle_growth_sec if plateau_detected else 0
 
         # Corpus minimization after run (non-fatal)
@@ -5031,6 +5308,32 @@ EOF
                 corpus_min_stats = self._minimize_corpus(bin_path, corpus_dir)
             except Exception as exc:
                 print(f"[warn] corpus minimization skipped: {exc}")
+
+        seed_quality_data = _seed_quality_from_run(
+            log=log,
+            initial_corpus_files=initial_corpus_files,
+            initial_corpus_bytes=initial_corpus_bytes,
+            final_stats=libfuzzer_stats,
+            required_families=required_families,
+            covered_families=covered_families,
+            repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
+            plateau_idle_seconds=plateau_idle_seconds,
+            seed_profile=str(seed_bootstrap.get("seed_profile") or ""),
+            archive_valid_count=int(seed_bootstrap.get("archive_valid_count") or 0),
+            archive_valid_ratio=float(seed_bootstrap.get("archive_valid_ratio") or 1.0),
+            archive_min_valid_ratio=self._seed_archive_min_valid_ratio(),
+            archive_malformed_ratio=float(seed_bootstrap.get("archive_malformed_ratio") or 0.0),
+            archive_max_malformed_ratio=float(
+                seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
+            ),
+        )
+        if isinstance(seed_quality_data, dict):
+            seed_quality_data["merge_retained_ratio_files"] = float(seed_bootstrap.get("merge_retained_ratio_files") or 1.0)
+            seed_quality_data["merge_retained_ratio_bytes"] = float(seed_bootstrap.get("merge_retained_ratio_bytes") or 1.0)
+            seed_quality_data["cold_start_failure"] = bool(
+                int(seed_quality_data.get("early_new_units_30s") or 0) <= 0
+                and int(seed_quality_data.get("early_new_units_60s") or 0) <= 0
+            )
 
         return FuzzerRunResult(
             rc=int(rc),
@@ -5053,24 +5356,15 @@ EOF
             terminal_reason="coverage_plateau" if plateau_detected else "",
             plateau_detected=plateau_detected,
             plateau_idle_seconds=plateau_idle_seconds,
-            seed_quality=_seed_quality_from_run(
-                log=log,
-                initial_corpus_files=initial_corpus_files,
-                initial_corpus_bytes=initial_corpus_bytes,
-                final_stats=libfuzzer_stats,
-                required_families=required_families,
-                covered_families=covered_families,
-                repo_examples_count=int((seed_bootstrap.get("counts") or {}).get("repo_examples") or 0),
-                plateau_idle_seconds=plateau_idle_seconds,
-                seed_profile=str(seed_bootstrap.get("seed_profile") or ""),
-                archive_valid_count=int(seed_bootstrap.get("archive_valid_count") or 0),
-                archive_valid_ratio=float(seed_bootstrap.get("archive_valid_ratio") or 1.0),
-                archive_min_valid_ratio=self._seed_archive_min_valid_ratio(),
-                archive_malformed_ratio=float(seed_bootstrap.get("archive_malformed_ratio") or 0.0),
-                archive_max_malformed_ratio=float(
-                    seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
-                ),
-            ),
+            plateau_hit_count=int(plateau_pulse_hits),
+            plateau_last_hit_at=float(last_plateau_pulse_at),
+            progress_sample_file=progress_sample_file,
+            seed_quality=seed_quality_data,
+            parallel_engine=parallel_engine,
+            parallel_role=parallel_role,
+            outer_slot=int(outer_slot),
+            inner_workers=int(inner_workers),
+            reload_enabled=bool(reload_enabled),
         )
 
     # ────────────────────────────────────────────────────────────────────

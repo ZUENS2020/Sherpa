@@ -99,7 +99,52 @@ def test_build_retries_after_nonzero_exit(tmp_path: Path, monkeypatch, _no_sleep
     assert out["build_attempts"] == 2
     assert out["build_error_kind"] == ""
     assert out["build_error_code"] == ""
+    assert out.get("run_error_kind") == ""
+    assert out.get("error") == {}
     assert len(gen.commands) == 2
+
+
+def test_build_success_clears_stale_error_markers(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    fuzzer_bin = fuzz_dir / "out" / "demo_fuzz"
+    fuzzer_bin.write_text("", encoding="utf-8")
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[fuzzer_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build(
+        {
+            "generator": gen,
+            "build_attempts": 0,
+            "run_error_kind": "compile_error",
+            "error": {
+                "stage": "build",
+                "kind": "source",
+                "code": "compile_error",
+                "message": "stale",
+                "detail": "stale",
+                "signature": "stale",
+                "retryable": True,
+                "terminal": False,
+                "at": 1,
+            },
+        }
+    )
+
+    assert out["message"].startswith("built (")
+    assert out["last_error"] == ""
+    assert out.get("run_error_kind") == ""
+    assert out.get("error") == {}
+    assert workflow_graph._route_after_build_state(out) == "run"
 
 
 def test_find_static_lib_discovers_nested_archive_artifacts(tmp_path: Path):
@@ -399,6 +444,61 @@ def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
     assert len(list(written.get("mappings") or [])) == 2
 
 
+def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build ok')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    out_dir = fuzz_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    decode_bin = out_dir / "decode_fuzz"
+    inflate_bin = out_dir / "inflateBack9_fuzz"
+    fread_bin = out_dir / "fread_file_func_fuzz"
+    for p in (decode_bin, inflate_bin, fread_bin):
+        p.write_text("", encoding="utf-8")
+
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "min_required_built_targets": 2,
+                "execution_targets": [
+                    {"target_name": "decode", "expected_fuzzer_name": "decode"},
+                    {"target_name": "inflateBack9", "expected_fuzzer_name": "inflateBack9"},
+                    {"target_name": "fread_file_func", "expected_fuzzer_name": "fread_file_func"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "harness_index.json").write_text(
+        json.dumps(
+            {
+                "mappings": [
+                    {"target_name": "decode", "source_path": "fuzz/decode_fuzz.c"},
+                    {"target_name": "inflateBack9", "source_path": "fuzz/inflateBack9_fuzz.c"},
+                    {"target_name": "fread_file_func", "source_path": "fuzz/fread_file_func_fuzz.c"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "ok", "")],
+        bin_results=[[decode_bin, inflate_bin, fread_bin]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_RETRY_WITH_CLEAN", "0")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_error_code"] == ""
+    assert out["build_gate_reason"] == "ok"
+    assert out["last_error"] == ""
+    assert set(out.get("built_targets") or []) >= {"decode_fuzz", "inflateBack9_fuzz", "fread_file_func_fuzz"}
+
+
 def test_build_repair_contract_requires_entrypoint_when_missing_llvmfuzzer(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -631,7 +731,7 @@ def test_route_after_init_resumes_from_requested_step() -> None:
     assert route == "run"
 
 
-def test_route_after_init_defaults_to_plan_for_invalid_resume_step() -> None:
+def test_route_after_init_defaults_to_analysis_for_invalid_resume_step() -> None:
     route = workflow_graph._route_after_init_state(
         {
             "failed": False,
@@ -639,7 +739,16 @@ def test_route_after_init_defaults_to_plan_for_invalid_resume_step() -> None:
             "resume_from_step": "unknown-step",
         }
     )
-    assert route == "plan"
+    assert route == "analysis"
+
+
+def test_route_after_analysis_goes_to_plan_on_success_or_degraded() -> None:
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "", "analysis_degraded": False}
+    ) == "plan"
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "analysis failed", "analysis_degraded": True}
+    ) == "plan"
 
 
 def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
@@ -1549,3 +1658,32 @@ def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monke
     assert "c_compiler_for_cpp_source_mismatch" in (out.get("fix_build_rule_hits") or [])
     txt = build_py.read_text(encoding="utf-8")
     assert "clang++" in txt
+
+
+def test_collect_analysis_companion_context_includes_status_summary(tmp_path: Path, monkeypatch):
+    job_id = "job-analysis-1"
+    companion_root = tmp_path / "_k8s_jobs" / job_id / "promefuzz"
+    companion_root.mkdir(parents=True, exist_ok=True)
+    (companion_root / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "ready",
+                "analysis_backend": "promefuzz-mcp",
+                "candidate_count": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (companion_root / "coverage_hints.json").write_text(
+        json.dumps({"recommended_targets": [{"name": "inflate"}, {"name": "deflate"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHERPA_JOB_ID", job_id)
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(tmp_path))
+
+    doc, summary = workflow_graph._collect_analysis_companion_context()
+
+    assert doc.get("companion_root")
+    assert "state=ready" in summary
+    assert "backend=promefuzz-mcp" in summary
+    assert "hint_targets=2" in summary

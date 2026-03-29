@@ -11,6 +11,7 @@ LEGACY = ROOT / "harness_generator" / "src" / "fuzz_unharnessed_repo.py"
 def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
     text = WF.read_text(encoding="utf-8")
     expected = [
+        'stage_skill="analysis"',
         'stage_skill="plan_fix_targets_schema"',
         'stage_skill="synthesize_complete_scaffold"',
         'stage_skill="crash_triage"',
@@ -35,6 +36,7 @@ def test_main_workflow_stage_skills_exist() -> None:
     root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
     required = [
         "plan",
+        "analysis",
         "plan_fix_targets_schema",
         "synthesize",
         "synthesize_complete_scaffold",

@@ -78,6 +78,7 @@ class WebPersistentConfig(BaseModel):
     # Per-round cap (seconds) when both total/run budgets are unlimited (0).
     # 0 means fully unlimited.
     sherpa_run_unlimited_round_budget_sec: int = 7200
+    sherpa_run_plateau_idle_growth_sec: int = 600
     fuzz_use_docker: bool = False
     fuzz_docker_image: str = ""
 
@@ -486,6 +487,71 @@ def _build_provider_node(entry: OpencodeProviderConfig) -> dict[str, Any]:
     return node
 
 
+def _normalize_mcp_server_entry(name: str, entry: Any) -> dict[str, Any] | None:
+    server_name = str(name or "").strip()
+    if not server_name:
+        return None
+    if isinstance(entry, str):
+        url = entry.strip()
+        if not url:
+            return None
+        return {"type": "remote", "url": url, "enabled": True}
+    if not isinstance(entry, dict):
+        return None
+    node = dict(entry)
+    raw_type = str(node.get("type") or "").strip().lower()
+    if not raw_type:
+        raw_type = "remote" if str(node.get("url") or "").strip() else "local"
+    if raw_type not in {"remote", "local"}:
+        return None
+    node["type"] = raw_type
+    if "enabled" not in node:
+        node["enabled"] = True
+    if raw_type == "remote":
+        url = str(node.get("url") or "").strip()
+        if not url:
+            return None
+        node["url"] = url
+    if raw_type == "local":
+        cmd = node.get("command")
+        if not isinstance(cmd, list) or not all(isinstance(x, str) and str(x).strip() for x in cmd):
+            return None
+    return node
+
+
+def _opencode_mcp_servers_from_env() -> dict[str, Any]:
+    raw = (os.environ.get("SHERPA_OPENCODE_MCP_SERVERS_JSON") or "").strip()
+    if not raw:
+        single_url = (os.environ.get("SHERPA_OPENCODE_MCP_URL") or "").strip()
+        if not single_url:
+            return {}
+        return {"promefuzz": {"type": "remote", "url": single_url, "enabled": True}}
+
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(parsed, dict):
+        for name, item in parsed.items():
+            normalized = _normalize_mcp_server_entry(str(name), item)
+            if normalized:
+                out[str(name)] = normalized
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            payload = dict(item)
+            payload.pop("name", None)
+            normalized = _normalize_mcp_server_entry(name, payload)
+            if normalized:
+                out[name] = normalized
+    return out
+
+
 def build_opencode_runtime_config(cfg: WebPersistentConfig) -> dict[str, Any]:
     providers: dict[str, Any] = {}
     for item in normalize_opencode_providers(cfg.opencode_providers):
@@ -493,10 +559,14 @@ def build_opencode_runtime_config(cfg: WebPersistentConfig) -> dict[str, Any]:
             continue
         providers[item.name] = _build_provider_node(item)
 
-    return {
+    out = {
         "$schema": _OPENCODE_SCHEMA_URL,
         "provider": providers,
     }
+    mcp_servers = _opencode_mcp_servers_from_env()
+    if mcp_servers:
+        out["mcp"] = mcp_servers
+    return out
 
 
 def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
@@ -623,6 +693,10 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     _set_env_if_value(
         "SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC",
         str(int(cfg.sherpa_run_unlimited_round_budget_sec)),
+    )
+    _set_env_if_value(
+        "SHERPA_RUN_PLATEAU_IDLE_GROWTH_SEC",
+        str(int(cfg.sherpa_run_plateau_idle_growth_sec)),
     )
 
     # Keep the OpenCode key file in sync for fuzz pipeline.

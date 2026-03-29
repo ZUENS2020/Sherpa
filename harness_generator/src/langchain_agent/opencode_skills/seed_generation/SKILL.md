@@ -1,45 +1,57 @@
-# Stage Skill: seed_generation
+---
+name: seed_generation
+description: Generate high-signal seed corpus with real samples first and controlled synthetic expansion.
+compatibility: opencode
+metadata:
+  stage: seed-generation
+  owner: sherpa
+---
 
-## Stage Goal
-Generate high-signal warm-up corpus files for the current harness, with real repository samples prioritized over synthetic noise.
+## What this skill does
+Creates warm-up corpus files and seed diagnostics for a target fuzzer, favoring valid and diverse inputs.
 
-## Required Inputs
+## When to use this skill
+Use this skill during pre-run seed generation and seed repair cycles.
+
+## Required inputs
 - `fuzz/observed_target.json` (when present)
 - `fuzz/selected_targets.json`
 - `fuzz/target_analysis.json`
 - harness source under `fuzz/`
-- current corpus directory for the active fuzzer
+- current corpus directory for active fuzzer
 
-## Required Outputs
+## Required outputs
 - seed files under `fuzz/corpus/<fuzzer_name>/`
 - `seed_exploration_<fuzzer>.json`
 - `seed_check_<fuzzer>.json`
 
-## Key File Templates
-- Global seed filtering behavior defaults to `soft` mode:
-  - preserve semantically distinct seeds and avoid over-compressing corpus diversity
-  - still avoid oversized files and exact-content duplicates
-  - malformed-only growth is discouraged when required families are missing
-- For `archive-container` profiles:
-  - import real archive samples first from:
-    - `contrib/oss-fuzz/corpus.zip`
-    - `contrib/oss-fuzz/**`
-    - `test/**` or `tests/**`
-  - Avoid hand-crafted magic-only files (header bytes without valid archive structure)
-  - keep malformed/truncated seeds <= 30% of corpus
+## Workflow
+1. Explore target format and available repository examples.
+2. Import real samples first, then add controlled synthetic variants.
+3. Keep family coverage balanced and noise bounded.
+4. Write required seed diagnostics JSON files.
+
+## Constraints
+- Global filtering defaults to `soft` mode:
+  - preserve semantically distinct seeds
+  - still reject oversized files and exact-content duplicates
+  - avoid malformed-only growth when required families are missing
+- For `archive-container`:
+  - use real archive samples first (`contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, `tests/**`)
+  - avoid hand-crafted magic-only files
+  - keep malformed/truncated seeds <= 30%
   - ensure at least one semantically valid archive sample exists
-- `seed_exploration_*.json` and `seed_check_*.json` must follow coordinator-required JSON keys exactly.
+- `seed_exploration_*.json` and `seed_check_*.json` must follow coordinator-required schema.
+- When diagnostics include concrete paths, use `Read and fix <path>[:line]`.
 
-## Acceptance Criteria
-- required family buckets are covered or explicitly documented as missing with reason.
-- corpus is not dominated by malformed archive samples.
-- archive-focused corpus includes valid real samples before synthetic edge cases.
-- when filtering is `soft`, retain family-diverse samples instead of aggressively collapsing near variants.
-- when diagnostics/context include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
-
-## Command Policy
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write one created/updated seed file path into `./done`.
+## Acceptance checklist
+- Required family buckets are covered or explicitly documented with reason.
+- Corpus is not dominated by malformed archive samples.
+- Valid real samples are present before synthetic edge cases.
+
+## Done contract
+- Write one created/updated seed file path into `./done`.

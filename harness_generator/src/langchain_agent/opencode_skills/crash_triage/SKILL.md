@@ -1,37 +1,54 @@
-# Stage Skill: crash_triage
+---
+name: crash_triage
+description: Classify reproduced crashes into harness bug, upstream bug, or inconclusive using evidence only.
+compatibility: opencode
+metadata:
+  stage: crash-triage
+  owner: sherpa
+---
 
-## Stage Goal
-Classify the crash root cause into exactly one label using crash evidence only:
-- `harness_bug`
-- `upstream_bug`
-- `inconclusive`
+## What this skill does
+This skill performs classification-only crash triage and outputs a structured label for downstream routing.
 
-This stage is classification-only. Do not patch source code here.
+## When to use this skill
+Use this skill in the `crash-triage` stage after `run` or `re-run` crash evidence is available.
 
-## Required Inputs
+## Required inputs
 - `crash_info.md` (if present)
 - `crash_analysis.md` (if present)
 - `re_build_report.md` / `re_run_report.md` tails (if present)
 - runtime fields from coordinator: `last_fuzzer`, `last_crash_artifact`, `crash_signature`
 
-## Required Outputs
+## Required outputs
 - `crash_triage.json` with non-empty fields:
   - `label` (`harness_bug|upstream_bug|inconclusive`)
   - `confidence` (0.0-1.0)
   - `reason` (short English sentence)
-  - `evidence` (non-empty string array with concrete log/report signals)
+  - `evidence` (non-empty string array with concrete signals)
 
-## Acceptance Criteria
-- label is exactly one of the three allowed values.
-- reason is English and references observed signals.
-- evidence is non-empty and points to concrete lines/patterns.
-- classification is conservative when uncertain (`inconclusive`).
-- no source files are modified.
+## Workflow
+1. Read crash artifacts and report tails.
+2. Identify whether root-cause evidence points to harness, upstream, or remains inconclusive.
+3. Write `crash_triage.json` with concise reason and evidence.
+4. Do not patch code in this stage.
 
-## Command Policy
+## Constraints
+- Classification-only; no source edits.
+- Prefer conservative classification when uncertain.
+- Keep reason/evidence grounded in observed logs and traces.
+- Do not classify `upstream_bug` from sanitizer keywords alone.
+- If evidence is weak or missing, output `inconclusive` and explain missing evidence explicitly.
+
+## Command policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `sed -n`, `head`, `tail`).
 - Forbidden: build, run, execute, package install, or any mutating command.
 
-## Done Sentinel Contract
-- Must create `./done`.
-- `./done` must contain exactly one line: `crash_triage.json`.
+## Acceptance checklist
+- `label` is exactly one of `harness_bug`, `upstream_bug`, `inconclusive`.
+- `reason` is English and tied to concrete signals.
+- `evidence` is non-empty and traceable.
+- No source files are modified.
+
+## Done contract
+- Create `./done`.
+- Write exactly `crash_triage.json` into `./done`.

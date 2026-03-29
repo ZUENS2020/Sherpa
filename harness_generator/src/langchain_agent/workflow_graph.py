@@ -36,6 +36,7 @@ from fuzz_unharnessed_repo import (
 
 _RECOVERABLE_RUN_ERROR_KINDS = {
     "run_no_progress",
+    "run_seed_rejected",
     "run_idle_timeout",
     "run_timeout",
     "run_finalize_timeout",
@@ -91,6 +92,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_feedback: dict[str, Any]
     coverage_harness_feedback: dict[str, Any]
     coverage_quality_oracle: str
+    coverage_bottleneck_kind: str
+    coverage_bottleneck_reason: str
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
     coverage_exhausted_targets: list[str]
@@ -104,6 +107,12 @@ class FuzzWorkflowState(TypedDict, total=False):
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
+    analysis_context_path: str
+    analysis_done: bool
+    analysis_degraded: bool
+    analysis_error: str
+    analysis_report_path: str
+    analysis_evidence_count: int
     selected_targets_path: str
     execution_plan_path: str
     harness_index_path: str
@@ -232,12 +241,174 @@ class FuzzWorkflowState(TypedDict, total=False):
     repair_error_digest: dict[str, Any]
     repair_attempt_index: int
     repair_strategy_force_change: bool
+    target_scoring_enabled: bool
+    constraint_memory_count: int
+    constraint_memory_path: str
+    error: dict[str, Any]
 
 
 class FuzzWorkflowRuntimeState(FuzzWorkflowState, total=False):
     generator: NonOssFuzzHarnessGenerator
     crash_found: bool
     message: str
+
+
+def _has_error_payload(err: dict[str, Any] | None) -> bool:
+    if not isinstance(err, dict):
+        return False
+    return bool(
+        str(err.get("code") or "").strip()
+        or str(err.get("message") or "").strip()
+        or bool(err.get("terminal"))
+    )
+
+
+def _coerce_error_payload(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    err = {
+        "stage": str(raw.get("stage") or "").strip().lower(),
+        "kind": str(raw.get("kind") or "").strip().lower(),
+        "code": str(raw.get("code") or "").strip().lower(),
+        "message": str(raw.get("message") or "").strip(),
+        "detail": str(raw.get("detail") or "").strip(),
+        "signature": str(raw.get("signature") or "").strip(),
+        "retryable": bool(raw.get("retryable")),
+        "terminal": bool(raw.get("terminal")),
+        "at": int(raw.get("at") or 0),
+    }
+    if err["at"] <= 0:
+        err["at"] = int(time.time())
+    return err
+
+
+def _derive_error_from_legacy(state: dict[str, Any]) -> dict[str, Any]:
+    stage = str(state.get("last_step") or "").strip().lower()
+    code = str(
+        state.get("build_error_code")
+        or state.get("run_error_kind")
+        or state.get("restart_to_plan_reason")
+        or state.get("error_code")
+        or ""
+    ).strip().lower()
+    kind = str(
+        state.get("build_error_kind")
+        or state.get("run_error_kind")
+        or state.get("repair_error_kind")
+        or state.get("error_kind")
+        or ""
+    ).strip().lower()
+    message = str(state.get("last_error") or "").strip()
+    if not message and bool(state.get("failed")):
+        message = str(state.get("message") or "").strip()
+    signature = str(
+        state.get("build_error_signature_short")
+        or state.get("build_error_signature")
+        or state.get("timeout_signature")
+        or state.get("crash_signature")
+        or state.get("error_signature")
+        or ""
+    ).strip()
+    terminal = bool(state.get("failed"))
+    if not code and (message or terminal):
+        code = "unknown_error"
+    if not kind and code:
+        if code.startswith("run_"):
+            kind = "run"
+        elif code.startswith("build_") or "build" in code:
+            kind = "build"
+        elif "crash" in code:
+            kind = "crash"
+        elif "timeout" in code:
+            kind = "timeout"
+        else:
+            kind = "generic_failure"
+    retryable = bool(code) and not terminal
+    return {
+        "stage": stage,
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": message,
+        "signature": signature,
+        "retryable": retryable,
+        "terminal": terminal,
+        "at": int(time.time()),
+    }
+
+
+def _project_error_legacy_fields(state: dict[str, Any], err: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    if not _has_error_payload(err):
+        return out
+    code = str(err.get("code") or "").strip().lower()
+    kind = str(err.get("kind") or "").strip().lower()
+    message = str(err.get("message") or "").strip()
+    signature = str(err.get("signature") or "").strip()
+    stage = str(err.get("stage") or "").strip().lower()
+    if message:
+        out["last_error"] = message
+    out["error_code"] = code
+    out["error_kind"] = kind
+    if signature:
+        out["error_signature"] = signature
+    if not str(out.get("repair_error_code") or "").strip() and code:
+        out["repair_error_code"] = code
+    if not str(out.get("repair_error_kind") or "").strip() and kind:
+        out["repair_error_kind"] = kind
+    if bool(out.get("restart_to_plan")) and not str(out.get("restart_to_plan_error_text") or "").strip() and message:
+        out["restart_to_plan_error_text"] = message
+    if stage == "run":
+        if code and not str(out.get("run_error_kind") or "").strip():
+            out["run_error_kind"] = code
+        if code and not str(out.get("run_terminal_reason") or "").strip():
+            out["run_terminal_reason"] = code
+    if stage == "build" or kind == "build":
+        if code and not str(out.get("build_error_code") or "").strip():
+            out["build_error_code"] = code
+        if kind and not str(out.get("build_error_kind") or "").strip():
+            out["build_error_kind"] = kind
+        if signature and not str(out.get("build_error_signature_short") or "").strip():
+            out["build_error_signature_short"] = signature[:12]
+    return out
+
+
+def _normalize_error_state(state: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    existing = _coerce_error_payload(out.get("error"))
+    derived = _derive_error_from_legacy(out)
+    if _has_error_payload(existing):
+        err = {**derived, **existing}
+    else:
+        err = derived
+    if _has_error_payload(err):
+        out["error"] = err
+        out = _project_error_legacy_fields(out, err)
+    else:
+        out["error"] = {}
+    return out
+
+def _clear_error_markers_on_success(state: dict[str, Any]) -> dict[str, Any]:
+    """Clear stale error markers after a stage succeeds.
+
+    This prevents previous recoverable errors (for example an old compile_error)
+    from polluting the next stage routing/summary when current stage output is valid.
+    """
+    out = dict(state)
+    out["error"] = {}
+    out["last_error"] = ""
+    out["error_code"] = ""
+    out["error_kind"] = ""
+    out["error_signature"] = ""
+    out["build_error_kind"] = ""
+    out["build_error_code"] = ""
+    out["build_error_signature"] = ""
+    out["build_error_signature_before"] = str(out.get("build_error_signature_before") or "")
+    out["build_error_signature_after"] = ""
+    out["build_error_signature_short"] = ""
+    out["run_error_kind"] = ""
+    out["run_terminal_reason"] = ""
+    return out
 
 
 def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
@@ -296,6 +467,11 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
         "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
         "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
         "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
+        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
+        "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
+        "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+        "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
     }
     try:
         line = json.dumps(payload, separators=(",", ":"), default=str)
@@ -539,7 +715,8 @@ def _write_stage_feedback(
     error_text: str,
     state: dict[str, Any] | None = None,
 ) -> str:
-    state = state or {}
+    state = _normalize_error_state(state or {})
+    err = dict(state.get("error") or {})
     parts: list[str] = [
         f"# Stage Failure Feedback: {stage}",
         "",
@@ -554,12 +731,13 @@ def _write_stage_feedback(
     structured = {
         "stage": str(stage or "").strip(),
         "error_code": str(
-            state.get("build_error_code")
+            err.get("code")
+            or state.get("build_error_code")
             or state.get("run_error_kind")
             or state.get("restart_to_plan_reason")
             or ""
         ).strip(),
-        "signature": str(state.get("build_error_signature_short") or "").strip(),
+        "signature": str(err.get("signature") or state.get("build_error_signature_short") or "").strip(),
         "action_taken": str(state.get("fix_action_type") or "").strip(),
         "diff_paths": list(state.get("fix_build_last_diff_paths") or []),
     }
@@ -665,22 +843,169 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
 
 
 def _repair_mode_active(state: dict[str, Any]) -> bool:
+    state = _normalize_error_state(state)
+    err = dict(state.get("error") or {})
     if bool(state.get("repair_mode")):
         return True
     if bool(state.get("restart_to_plan")):
         return True
-    return bool(str(state.get("last_error") or "").strip())
+    return _has_error_payload(err) or bool(str(state.get("last_error") or "").strip())
+
+
+def _constraint_memory_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "constraint_memory.json"
+
+
+def _constraint_repeat_threshold() -> int:
+    raw = (os.environ.get("SHERPA_CONSTRAINT_MEMORY_REPEAT_THRESHOLD") or "2").strip()
+    try:
+        return max(2, min(int(raw), 10))
+    except Exception:
+        return 2
+
+
+def _load_constraint_memory(repo_root: Path) -> dict[str, Any]:
+    path = _constraint_memory_path(repo_root)
+    if not path.is_file():
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    return {
+        "schema_version": 1,
+        "updated_at": int(raw.get("updated_at") or 0),
+        "entries": entries,
+    }
+
+
+def _write_constraint_memory(repo_root: Path, doc: dict[str, Any]) -> str:
+    path = _constraint_memory_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "entries": dict(doc.get("entries") or {}),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _constraint_fix_hint(label_or_verdict: str) -> str:
+    key = str(label_or_verdict or "").strip().lower()
+    if key in {"harness_bug", "false_positive"}:
+        return "Validate harness preconditions and replace brittle behavior with stable public API usage."
+    if key in {"upstream_bug", "real_bug"}:
+        return "Keep reproducer stable and preserve upstream crash evidence for triage/reporting."
+    return "Collect stronger evidence before committing a narrow fix."
+
+
+def _record_constraint_memory_observation(
+    *,
+    repo_root: Path,
+    signature: str,
+    stage: str,
+    classification: str,
+    reason: str,
+    evidence: list[str],
+    confidence: float,
+    repeats: int,
+) -> tuple[int, str, dict[str, Any]]:
+    signature_key = str(signature or "").strip()
+    doc = _load_constraint_memory(repo_root)
+    entries = dict(doc.get("entries") or {})
+    if not signature_key or repeats < _constraint_repeat_threshold():
+        return len(entries), str(_constraint_memory_path(repo_root)), {}
+    now = int(time.time())
+    prev = dict(entries.get(signature_key) or {})
+    entry = {
+        "signature": signature_key,
+        "source_stage": str(stage or "").strip() or "unknown",
+        "classification": str(classification or "").strip() or "unknown",
+        "reason": str(reason or "").strip()[:1024],
+        "evidence": [str(x).strip()[:512] for x in list(evidence or []) if str(x).strip()][:12],
+        "confidence": max(0.0, min(float(confidence), 1.0)),
+        "suspected_precondition": str(reason or "").strip()[:512],
+        "fix_hint": _constraint_fix_hint(classification),
+        "first_seen": int(prev.get("first_seen") or now),
+        "latest_seen": now,
+        "occurrence_count": int(prev.get("occurrence_count") or 0) + 1,
+    }
+    entries[signature_key] = entry
+    _write_constraint_memory(repo_root, {"entries": entries})
+    return len(entries), str(_constraint_memory_path(repo_root)), entry
+
+
+def _constraint_memory_snapshot_from_state(state: dict[str, Any]) -> tuple[dict[str, Any], int, str]:
+    repo_root_text = str(state.get("repo_root") or "").strip()
+    if not repo_root_text:
+        return {}, 0, ""
+    try:
+        repo_root = Path(repo_root_text)
+    except Exception:
+        return {}, 0, ""
+    doc = _load_constraint_memory(repo_root)
+    entries = dict(doc.get("entries") or {})
+    if not entries:
+        return {}, 0, str(_constraint_memory_path(repo_root))
+    candidates = [
+        str(state.get("repair_signature") or "").strip(),
+        str(state.get("crash_signature") or "").strip(),
+        str(state.get("timeout_signature") or "").strip(),
+    ]
+    for sig in candidates:
+        if sig and sig in entries and isinstance(entries[sig], dict):
+            return dict(entries[sig]), len(entries), str(_constraint_memory_path(repo_root))
+    latest_entry: dict[str, Any] = {}
+    latest_ts = 0
+    for raw in entries.values():
+        if not isinstance(raw, dict):
+            continue
+        ts = int(raw.get("latest_seen") or 0)
+        if ts >= latest_ts:
+            latest_ts = ts
+            latest_entry = dict(raw)
+    return latest_entry, len(entries), str(_constraint_memory_path(repo_root))
 
 
 def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    state = _normalize_error_state(state)
+    err = dict(state.get("error") or {})
     origin = _infer_repair_origin_stage(state)
-    error_text = str(state.get("restart_to_plan_error_text") or "").strip() or str(state.get("last_error") or "").strip()
+    error_text = (
+        str(state.get("restart_to_plan_error_text") or "").strip()
+        or str(err.get("message") or "").strip()
+        or str(state.get("last_error") or "").strip()
+    )
     snapshot = {
         "repair_mode": _repair_mode_active(state),
         "repair_origin_stage": origin,
-        "repair_error_kind": str(state.get("repair_error_kind") or state.get("build_error_kind") or state.get("run_error_kind") or "generic_failure").strip() or "generic_failure",
-        "repair_error_code": str(state.get("repair_error_code") or state.get("build_error_code") or state.get("restart_to_plan_reason") or "").strip(),
-        "repair_signature": str(state.get("repair_signature") or state.get("build_error_signature_short") or state.get("crash_signature") or "").strip(),
+        "repair_error_kind": str(
+            err.get("kind")
+            or state.get("repair_error_kind")
+            or state.get("build_error_kind")
+            or state.get("run_error_kind")
+            or "generic_failure"
+        ).strip() or "generic_failure",
+        "repair_error_code": str(
+            err.get("code")
+            or state.get("repair_error_code")
+            or state.get("build_error_code")
+            or state.get("restart_to_plan_reason")
+            or ""
+        ).strip(),
+        "repair_signature": str(
+            err.get("signature")
+            or state.get("repair_signature")
+            or state.get("build_error_signature_short")
+            or state.get("crash_signature")
+            or ""
+        ).strip(),
         "repair_stdout_tail": str(state.get("repair_stdout_tail") or state.get("build_stdout_tail") or "").strip(),
         "repair_stderr_tail": str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip(),
         "repair_error_text": error_text,
@@ -689,6 +1014,10 @@ def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "repair_strategy_force_change": bool(state.get("repair_strategy_force_change") or False),
         "repair_error_digest": dict(state.get("repair_error_digest") or {}),
     }
+    constraint_entry, constraint_count, constraint_path = _constraint_memory_snapshot_from_state(state)
+    snapshot["constraint_memory_entry"] = constraint_entry
+    snapshot["constraint_memory_count"] = int(constraint_count)
+    snapshot["constraint_memory_path"] = constraint_path
     return snapshot
 
 
@@ -902,6 +1231,98 @@ def _runtime_viability_rank(value: str) -> int:
     return 0
 
 
+def _target_scoring_weights() -> dict[str, float]:
+    return {
+        "coverage_gap": 0.35,
+        "complexity": 0.25,
+        "api_relevance": 0.25,
+        "consumer_order_support": 0.15,
+    }
+
+
+def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _target_component_coverage_gap(item: dict[str, Any]) -> float:
+    explicit = item.get("coverage_gap")
+    if explicit is not None:
+        try:
+            return _clamp_score(float(explicit))
+        except Exception:
+            pass
+    depth_score = max(0, int(item.get("depth_score") or 0))
+    depth_class = str(item.get("depth_class") or "").strip().lower()
+    target_type = str(item.get("target_type") or "").strip().lower()
+    base = min(7.0, float(depth_score) / 2.0)
+    if depth_class == "deep":
+        base += 2.0
+    elif depth_class == "medium":
+        base += 1.0
+    if target_type in {"parser", "decoder", "archive"}:
+        base += 1.0
+    return _clamp_score(base)
+
+
+def _target_component_complexity(item: dict[str, Any]) -> float:
+    depth_score = max(0, int(item.get("depth_score") or 0))
+    risk_signals = list(item.get("risk_signals") or [])
+    base = min(8.0, float(depth_score) / 3.0)
+    base += min(2.0, 0.4 * float(len(risk_signals)))
+    return _clamp_score(base)
+
+
+def _target_component_api_relevance(item: dict[str, Any]) -> float:
+    runtime_rank = _runtime_viability_rank(str(item.get("runtime_viability") or ""))
+    target_type = str(item.get("target_type") or "").strip().lower()
+    api = str(item.get("api") or "")
+    score = 2.0 + float(runtime_rank) * 2.5
+    if target_type in {"parser", "decoder", "archive"}:
+        score += 1.5
+    if "::" in api or re.search(r"[A-Za-z_][A-Za-z0-9_]*", api):
+        score += 1.0
+    return _clamp_score(score)
+
+
+def _target_component_consumer_order_support(item: dict[str, Any]) -> float:
+    target_type = str(item.get("target_type") or "").strip().lower()
+    rationale = str(item.get("selection_rationale") or "").lower()
+    bias = str(item.get("selection_bias_reason") or "").lower()
+    signals = " ".join(str(x).lower() for x in (item.get("risk_signals") or []))
+    score = 2.0
+    if target_type in {"parser", "archive", "decoder"}:
+        score += 2.0
+    if any(tok in rationale for tok in ("runtime", "entrypoint", "stream", "state")):
+        score += 2.0
+    if any(tok in bias for tok in ("state", "parse", "decode", "deep")):
+        score += 1.5
+    if "state-machine" in signals or "parser-like" in signals:
+        score += 1.5
+    return _clamp_score(score)
+
+
+def _target_score_breakdown(item: dict[str, Any]) -> dict[str, Any]:
+    weights = _target_scoring_weights()
+    coverage_gap = _target_component_coverage_gap(item)
+    complexity = _target_component_complexity(item)
+    api_relevance = _target_component_api_relevance(item)
+    consumer_order_support = _target_component_consumer_order_support(item)
+    weighted_total = (
+        coverage_gap * float(weights["coverage_gap"])
+        + complexity * float(weights["complexity"])
+        + api_relevance * float(weights["api_relevance"])
+        + consumer_order_support * float(weights["consumer_order_support"])
+    )
+    return {
+        "coverage_gap": round(coverage_gap, 4),
+        "complexity": round(complexity, 4),
+        "api_relevance": round(api_relevance, 4),
+        "consumer_order_support": round(consumer_order_support, 4),
+        "weights": {k: round(float(v), 4) for k, v in weights.items()},
+        "weighted_total": round(weighted_total, 6),
+    }
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
@@ -921,6 +1342,18 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             )
             selection_rationale = selection_rationale or auto_rationale
             runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
+        scoring_source = {
+            "api": api,
+            "target_type": target_type,
+            "depth_score": int(item.get("depth_score") or 0),
+            "depth_class": str(item.get("depth_class") or ""),
+            "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+            "runtime_viability": runtime_viability,
+            "selection_rationale": selection_rationale,
+            "risk_signals": list(item.get("risk_signals") or []),
+            "coverage_gap": item.get("coverage_gap"),
+        }
+        score_breakdown = _target_score_breakdown(scoring_source)
         ranked_items.append(
             {
                 "target_name": target_name,
@@ -938,10 +1371,14 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "seed_families_required": required,
                 "seed_families_optional": optional,
                 "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
+                "target_score_breakdown": score_breakdown,
+                "target_score": float(score_breakdown.get("weighted_total") or 0.0),
+                "target_scoring_enabled": True,
             }
         )
     ranked_items.sort(
         key=lambda row: (
+            -float(row.get("target_score") or 0.0),
             -int(row.get("depth_score") or 0),
             -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
             str(row.get("target_name") or ""),
@@ -1829,6 +2266,19 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
     quality = dict(state.get("coverage_seed_quality") or {})
     return {
         "seed_profile": str(state.get("coverage_seed_profile") or ""),
+        "initial_inited_cov": int(quality.get("initial_inited_cov") or 0),
+        "final_cov": int(quality.get("final_cov") or 0),
+        "cov_delta": int(quality.get("cov_delta") or 0),
+        "initial_inited_ft": int(quality.get("initial_inited_ft") or 0),
+        "final_ft": int(quality.get("final_ft") or 0),
+        "ft_delta": int(quality.get("ft_delta") or 0),
+        "early_new_units_30s": int(quality.get("early_new_units_30s") or 0),
+        "early_new_units_60s": int(quality.get("early_new_units_60s") or 0),
+        "initial_corpus_files": int(quality.get("initial_corpus_files") or 0),
+        "final_corpus_files": int(quality.get("final_corpus_files") or 0),
+        "cold_start_failure": bool(quality.get("cold_start_failure") or False),
+        "merge_retained_ratio_files": float(quality.get("merge_retained_ratio_files") or 1.0),
+        "merge_retained_ratio_bytes": float(quality.get("merge_retained_ratio_bytes") or 1.0),
         "required_families": list(state.get("coverage_seed_families_required") or []),
         "covered_families": list(state.get("coverage_seed_families_covered") or []),
         "missing_families": list(state.get("coverage_seed_families_missing") or []),
@@ -1901,8 +2351,9 @@ def _count_opencode_defunct_processes() -> int:
 
 
 def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWorkflowRuntimeState, bool]:
-    out, stop = _wf_common.enter_step(cast(dict[str, Any], state), step_name)
-    next_state = cast(FuzzWorkflowRuntimeState, out)
+    normalized_in = _normalize_error_state(cast(dict[str, Any], state))
+    out, stop = _wf_common.enter_step(normalized_in, step_name)
+    next_state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(out))
     if stop:
         return next_state, stop
     defunct_count = _count_opencode_defunct_processes()
@@ -1915,13 +2366,24 @@ def _enter_step(state: FuzzWorkflowRuntimeState, step_name: str) -> tuple[FuzzWo
         )
         guarded = cast(
             FuzzWorkflowRuntimeState,
-            {
+            _normalize_error_state({
                 **next_state,
                 "last_step": step_name,
                 "failed": True,
                 "last_error": msg,
                 "message": "workflow stopped (opencode defunct safeguard)",
-            },
+                "error": {
+                    "stage": step_name,
+                    "kind": "infra",
+                    "code": "opencode_defunct_safeguard",
+                    "message": msg,
+                    "detail": msg,
+                    "signature": "",
+                    "retryable": False,
+                    "terminal": True,
+                    "at": int(time.time()),
+                },
+            }),
         )
         _wf_log(cast(dict[str, Any], guarded), f"<- {step_name} stop=opencode-defunct count={defunct_count} threshold={threshold}")
         return guarded, True
@@ -2411,10 +2873,167 @@ def _run_stop_on_first_crash() -> bool:
 
 
 def _run_parallel_early_stop_enabled() -> bool:
-    raw = (os.environ.get("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED") or "0").strip().lower()
+    raw = (os.environ.get("SHERPA_RUN_PARALLEL_EARLY_STOP_ENABLED") or "1").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _run_cpu_budget() -> int:
+    raw = (os.environ.get("SHERPA_RUN_CPU_BUDGET") or "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), 1024))
+        except Exception:
+            pass
+    return max(1, int(os.cpu_count() or 1))
+
+
+def _run_outer_parallelism_max(default_parallel: int) -> int:
+    raw = (os.environ.get("SHERPA_RUN_OUTER_PARALLELISM_MAX") or str(default_parallel)).strip()
+    try:
+        return max(1, min(int(raw), 64))
+    except Exception:
+        return max(1, default_parallel)
+
+
+def _run_inner_workers_min() -> int:
+    raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS_MIN") or "1").strip()
+    try:
+        return max(1, min(int(raw), 64))
+    except Exception:
+        return 1
+
+
+def _run_inner_workers_target() -> int:
+    run_inner_raw = (os.environ.get("SHERPA_RUN_INNER_WORKERS") or "").strip()
+    legacy_fork_raw = (os.environ.get("SHERPA_FUZZ_FORK") or "").strip()
+    raw = run_inner_raw
+    if not raw:
+        raw = legacy_fork_raw or "1"
+        if legacy_fork_raw:
+            print(
+                "[warn] SHERPA_FUZZ_FORK is deprecated for run parallel config. "
+                "Prefer SHERPA_RUN_INNER_WORKERS + SHERPA_RUN_PARALLEL_ENGINE."
+            )
+    try:
+        return max(1, min(int(raw), 128))
+    except Exception:
+        return 1
+
+
+def _run_parallel_engine() -> str:
+    raw = (os.environ.get("SHERPA_RUN_PARALLEL_ENGINE") or "auto").strip().lower()
+    if raw in {"auto", "fork", "jobs_workers", "single"}:
+        return raw
+    return "auto"
+
+
+def _run_ignore_non_fatal_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_RUN_IGNORE_NON_FATAL") or "0").strip().lower()
     if not raw:
         return False
     return raw in {"1", "true", "yes", "on"}
+
+
+def _auto_stop_policy() -> str:
+    raw = (os.environ.get("SHERPA_AUTO_STOP_POLICY") or "hard_fail_only").strip().lower()
+    if raw in {"hard_fail_only", "legacy_mixed"}:
+        return raw
+    return "hard_fail_only"
+
+
+def _coverage_underutilized_execs_threshold() -> int:
+    raw = (os.environ.get("SHERPA_COVERAGE_UNDERUTILIZED_EXECS_THRESHOLD") or "100").strip()
+    try:
+        return max(0, min(int(raw), 10_000_000))
+    except Exception:
+        return 100
+
+
+def _solve_parallelism(
+    *,
+    cpu_budget: int,
+    n_targets: int,
+    requested_outer: int,
+    outer_parallelism_max: int,
+    inner_workers_min: int,
+    requested_inner: int,
+    engine: str,
+    sanitizer: str,
+) -> dict[str, Any]:
+    cpu = max(1, int(cpu_budget))
+    targets = max(1, int(n_targets))
+    outer_cap = max(1, min(int(requested_outer), int(outer_parallelism_max), targets, cpu))
+    inner_min = max(1, int(inner_workers_min))
+    inner_req = max(inner_min, int(requested_inner))
+    sanitizer_l = (sanitizer or "").strip().lower()
+
+    # ASAN/MSAN/TSAN are memory-heavy in multi-process mode; cap inner fanout.
+    if sanitizer_l in {"address", "memory", "thread"}:
+        inner_cap = max(1, min(cpu, 2))
+    else:
+        inner_cap = max(1, cpu)
+
+    resolved_engine = engine if engine in {"auto", "fork", "jobs_workers", "single"} else "auto"
+    reload_enabled = False
+
+    if resolved_engine == "auto":
+        if targets > 1:
+            resolved_engine = "single"
+            outer = outer_cap
+            inner = 1
+        else:
+            resolved_engine = "fork"
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+    elif resolved_engine == "single":
+        outer = outer_cap
+        inner = 1
+    elif resolved_engine == "fork":
+        if targets > 1:
+            outer = outer_cap
+            inner = max(inner_min, min(inner_req, inner_cap, max(1, cpu // max(1, outer))))
+        else:
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+    else:  # jobs_workers
+        reload_enabled = True
+        if targets > 1:
+            outer = outer_cap
+            inner = max(inner_min, min(inner_req, inner_cap, max(1, cpu // max(1, outer))))
+        else:
+            outer = 1
+            inner = max(inner_min, min(inner_req, inner_cap, cpu))
+
+    warning = ""
+    pre_clamp_outer = int(outer)
+    pre_clamp_inner = int(inner)
+    while outer * inner > cpu and inner > inner_min:
+        inner -= 1
+    while outer * inner > cpu and outer > 1:
+        outer -= 1
+    if outer * inner > cpu:
+        inner = 1
+        outer = min(outer, cpu)
+    if pre_clamp_outer != int(outer) or pre_clamp_inner != int(inner):
+        warning = (
+            f"parallel_budget_clamped requested_outer={requested_outer} requested_inner={requested_inner} "
+            f"cpu_budget={cpu} pre_outer={pre_clamp_outer} pre_inner={pre_clamp_inner} "
+            f"resolved_outer={outer} resolved_inner={inner}"
+        )
+
+    if inner <= 1 and resolved_engine != "single":
+        resolved_engine = "single"
+        reload_enabled = False
+
+    return {
+        "outer_parallelism": max(1, outer),
+        "inner_workers": max(1, inner),
+        "parallel_engine": resolved_engine,
+        "reload_enabled": bool(reload_enabled),
+        "warning": warning,
+    }
 
 
 def _time_budget_exceeded_state(state: FuzzWorkflowRuntimeState, *, step_name: str) -> FuzzWorkflowRuntimeState:
@@ -2938,6 +3557,295 @@ def _prepare_target_analysis_context(repo_root: Path) -> tuple[str, str]:
         return "", ""
 
 
+def _collect_analysis_companion_context() -> tuple[dict[str, Any], str]:
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    base_output = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+    companion_root = (
+        (base_output / "_k8s_jobs" / job_id / "promefuzz").resolve()
+        if job_id
+        else None
+    )
+    out: dict[str, Any] = {
+        "job_id": job_id,
+        "companion_root": str(companion_root) if companion_root else "",
+        "artifacts": {},
+    }
+    if not companion_root or not companion_root.is_dir():
+        return out, "companion_artifacts=0"
+
+    artifacts: dict[str, Any] = {}
+    found = 0
+    for name in ("status.json", "preprocess.json", "coverage_hints.json"):
+        p = companion_root / name
+        doc: dict[str, Any] = {
+            "path": str(p),
+            "exists": p.is_file(),
+        }
+        if p.is_file():
+            found += 1
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+                parsed = json.loads(raw)
+                if isinstance(parsed, (dict, list)):
+                    doc["json"] = parsed
+                else:
+                    doc["text"] = str(parsed)[:4000]
+            except Exception:
+                try:
+                    doc["text"] = p.read_text(encoding="utf-8", errors="replace")[-4000:]
+                except Exception:
+                    doc["text"] = ""
+        artifacts[name] = doc
+    out["artifacts"] = artifacts
+    summary_parts = [f"companion_artifacts={found}", f"companion_root={companion_root}"]
+    status_doc = ((artifacts.get("status.json") or {}) if isinstance(artifacts, dict) else {}).get("json")
+    if isinstance(status_doc, dict):
+        state_val = str(status_doc.get("state") or "").strip()
+        backend_val = str(status_doc.get("analysis_backend") or "").strip()
+        candidate_count = status_doc.get("candidate_count")
+        embedding_ok = status_doc.get("embedding_ok")
+        rag_degraded = status_doc.get("rag_degraded")
+        semantic_hit_rate = status_doc.get("semantic_hit_rate")
+        if state_val:
+            summary_parts.append(f"state={state_val}")
+        if backend_val:
+            summary_parts.append(f"backend={backend_val}")
+        if candidate_count is not None:
+            try:
+                summary_parts.append(f"candidates={int(candidate_count)}")
+            except Exception:
+                pass
+        if embedding_ok is not None:
+            summary_parts.append(f"embedding_ok={int(bool(embedding_ok))}")
+        if rag_degraded is not None:
+            summary_parts.append(f"rag_degraded={int(bool(rag_degraded))}")
+        if semantic_hit_rate is not None:
+            try:
+                summary_parts.append(f"semantic_hit_rate={round(float(semantic_hit_rate), 3)}")
+            except Exception:
+                pass
+    hints_doc = ((artifacts.get("coverage_hints.json") or {}) if isinstance(artifacts, dict) else {}).get("json")
+    if isinstance(hints_doc, dict):
+        targets = hints_doc.get("recommended_targets")
+        if isinstance(targets, list):
+            summary_parts.append(f"hint_targets={len(targets)}")
+    return out, "; ".join(summary_parts)
+
+
+def _read_json_doc(path_text: str) -> dict[str, Any]:
+    path = Path(str(path_text or "").strip())
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _build_analysis_evidence_index(
+    *,
+    repo_root: Path,
+    antlr_doc: dict[str, Any],
+    target_doc: dict[str, Any],
+    companion_doc: dict[str, Any],
+) -> dict[str, Any]:
+    evidence_counter = 0
+    evidence_index: dict[str, dict[str, Any]] = {}
+
+    def _new_evidence_id() -> str:
+        nonlocal evidence_counter
+        evidence_counter += 1
+        return f"EV{evidence_counter:04d}"
+
+    def _add_evidence(
+        *,
+        kind: str,
+        source_path: str,
+        summary: str,
+        score: float | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        ev_id = _new_evidence_id()
+        evidence_index[ev_id] = {
+            "id": ev_id,
+            "kind": str(kind or "").strip() or "unknown",
+            "source_path": str(source_path or "").strip(),
+            "summary": str(summary or "").strip()[:800],
+            "score": float(score) if score is not None else None,
+            "payload": dict(payload or {}),
+        }
+        return ev_id
+
+    api_inventory: list[dict[str, Any]] = []
+    seen_api_keys: set[tuple[str, str, str]] = set()
+    for item in list(target_doc.get("recommended_targets") or [])[:80]:
+        if not isinstance(item, dict):
+            continue
+        api = str(item.get("api") or item.get("name") or "").strip()
+        file_hint = str(item.get("file") or "").strip()
+        target_type = str(item.get("target_type") or "").strip().lower()
+        if not api:
+            continue
+        key = (api, file_hint, target_type)
+        if key in seen_api_keys:
+            continue
+        seen_api_keys.add(key)
+        ev_id = _add_evidence(
+            kind="target_analysis",
+            source_path="fuzz/target_analysis.json",
+            summary=f"recommended target `{api}` ({target_type or 'generic'})",
+            score=float(item.get("depth_score") or 0.0),
+            payload={
+                "target_type": target_type,
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+                "file": file_hint,
+            },
+        )
+        api_inventory.append(
+            {
+                "evidence_id": ev_id,
+                "api": api,
+                "file": file_hint,
+                "target_type": target_type or "generic",
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+            }
+        )
+
+    for item in list(antlr_doc.get("entrypoint_candidates") or [])[:80]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        file_hint = str(item.get("file") or "").strip()
+        if not name:
+            continue
+        key = (name, file_hint, "entrypoint")
+        if key in seen_api_keys:
+            continue
+        seen_api_keys.add(key)
+        ev_id = _add_evidence(
+            kind="antlr_entrypoint",
+            source_path="fuzz/antlr_plan_context.json",
+            summary=f"antlr/static entrypoint candidate `{name}`",
+            payload={
+                "file": file_hint,
+                "signature": str(item.get("signature") or ""),
+                "line": int(item.get("line") or 0),
+            },
+        )
+        api_inventory.append(
+            {
+                "evidence_id": ev_id,
+                "api": name,
+                "file": file_hint,
+                "target_type": str(item.get("target_type") or "generic"),
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+            }
+        )
+
+    callgraph_summary: list[dict[str, Any]] = []
+    artifacts = dict(companion_doc.get("artifacts") or {})
+    coverage_hints = dict(((artifacts.get("coverage_hints.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+    preprocess_doc = dict(((artifacts.get("preprocess.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+    status_doc = dict(((artifacts.get("status.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+
+    for item in list(coverage_hints.get("callgraph_summary") or [])[:40]:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("edge") or "").strip()
+        if not summary:
+            continue
+        ev_id = _add_evidence(
+            kind="callgraph_summary",
+            source_path="promefuzz/coverage_hints.json",
+            summary=summary,
+            score=float(item.get("score") or 0.0) if item.get("score") is not None else None,
+            payload=item,
+        )
+        callgraph_summary.append({"evidence_id": ev_id, **item})
+
+    consumer_patterns: list[dict[str, Any]] = []
+    for item in list(preprocess_doc.get("consumer_patterns") or preprocess_doc.get("api_usage_patterns") or [])[:40]:
+        if not isinstance(item, dict):
+            continue
+        pattern = str(item.get("pattern") or item.get("summary") or item.get("api") or "").strip()
+        if not pattern:
+            continue
+        ev_id = _add_evidence(
+            kind="consumer_pattern",
+            source_path="promefuzz/preprocess.json",
+            summary=pattern,
+            payload=item,
+        )
+        consumer_patterns.append({"evidence_id": ev_id, **item})
+
+    semantic_evidence: list[dict[str, Any]] = []
+    semantic_sources: list[Any] = []
+    for key in ("semantic_evidence", "semantic_findings", "retrieved_documents"):
+        value = coverage_hints.get(key)
+        if isinstance(value, list):
+            semantic_sources.extend(value[:50])
+    for item in semantic_sources[:80]:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("snippet") or item.get("summary") or item.get("claim") or "").strip()
+        if not summary:
+            continue
+        score_raw = item.get("score")
+        score: float | None = None
+        if score_raw is not None:
+            try:
+                score = float(score_raw)
+            except Exception:
+                score = None
+        ev_id = _add_evidence(
+            kind="semantic_evidence",
+            source_path=str(item.get("source_path") or item.get("source") or "promefuzz/coverage_hints.json"),
+            summary=summary,
+            score=score,
+            payload=item,
+        )
+        semantic_evidence.append({"evidence_id": ev_id, **item})
+
+    if status_doc:
+        _add_evidence(
+            kind="companion_status",
+            source_path="promefuzz/status.json",
+            summary=(
+                f"companion state={status_doc.get('state') or 'unknown'}, "
+                f"backend={status_doc.get('analysis_backend') or 'unknown'}, "
+                f"rag_ok={int(bool(status_doc.get('rag_ok')))}"
+            ),
+            payload={
+                "state": str(status_doc.get("state") or ""),
+                "analysis_backend": str(status_doc.get("analysis_backend") or ""),
+                "semantic_hit_rate": status_doc.get("semantic_hit_rate"),
+                "cache_hit_rate": status_doc.get("cache_hit_rate"),
+            },
+        )
+
+    return {
+        "analysis_version": 2,
+        "generated_at": int(time.time()),
+        "repo_root": str(repo_root),
+        "api_inventory": api_inventory,
+        "callgraph_summary": callgraph_summary,
+        "consumer_patterns": consumer_patterns,
+        "semantic_evidence": semantic_evidence,
+        "evidence_index": evidence_index,
+        "summary": {
+            "evidence_count": len(evidence_index),
+            "api_inventory_count": len(api_inventory),
+            "callgraph_summary_count": len(callgraph_summary),
+            "consumer_pattern_count": len(consumer_patterns),
+            "semantic_evidence_count": len(semantic_evidence),
+        },
+    }
+
+
 @dataclass(frozen=True)
 class FuzzWorkflowInput:
     repo_url: str
@@ -2961,6 +3869,31 @@ class FuzzWorkflowInput:
     restart_to_plan_stage: str = ""
     restart_to_plan_error_text: str = ""
     restart_to_plan_report_path: str = ""
+
+
+def _analysis_companion_enabled() -> bool:
+    raw = str(os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_ENABLED", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _promefuzz_mcp_root_exists() -> bool:
+    root = Path(str(os.environ.get("SHERPA_PROMEFUZZ_MCP_ROOT") or "/app/promefuzz-mcp")).expanduser()
+    return root.exists() and root.is_dir()
+
+
+def _check_promefuzz_runtime_deps() -> tuple[bool, str]:
+    # PromeFuzz C++ processors now depend on system nlohmann-json3-dev.
+    candidates = [
+        Path("/usr/include/nlohmann/json.hpp"),
+        Path("/usr/local/include/nlohmann/json.hpp"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return True, ""
+    return (
+        False,
+        "missing system header nlohmann/json.hpp; install nlohmann-json3-dev in the runtime image",
+    )
 
 
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
@@ -2988,6 +3921,11 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     max_len = int(max_len_raw) if max_len_raw is not None else 0
     docker_image = (state.get("docker_image") or "").strip() or None
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
+
+    if _analysis_companion_enabled() and _promefuzz_mcp_root_exists():
+        dep_ok, dep_err = _check_promefuzz_runtime_deps()
+        if not dep_ok:
+            raise RuntimeError(f"init prerequisite failed: {dep_err}")
 
     raw_resume_repo_root = (state.get("resume_repo_root") or "").strip()
     workdir: Path | None = None
@@ -3121,6 +4059,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
             "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
             "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
+            "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
+            "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
             "coverage_history": list(state.get("coverage_history") or []),
             "coverage_target_name": str(state.get("coverage_target_name") or ""),
             "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
@@ -3133,10 +4073,19 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_stop_reason": str(state.get("coverage_stop_reason") or ""),
             "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
             "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
+            "analysis_done": bool(state.get("analysis_done") or False),
+            "analysis_degraded": bool(state.get("analysis_degraded") or False),
+            "analysis_error": str(state.get("analysis_error") or ""),
+            "analysis_report_path": str(state.get("analysis_report_path") or ""),
+            "analysis_context_path": str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
             "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
             "target_analysis_path": str(state.get("target_analysis_path") or ""),
             "target_analysis_summary": str(state.get("target_analysis_summary") or ""),
+            "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+            "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
+            "constraint_memory_path": str(state.get("constraint_memory_path") or ""),
         },
     )
 
@@ -3144,6 +4093,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
     if resume_step in {
+        "analysis",
         "plan",
         "synthesize",
         "build",
@@ -3281,7 +4231,137 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         except Exception:
             pass
 
+    out = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], out)))
     _wf_log(cast(dict[str, Any], out), f"<- init ok repo_root={out.get('repo_root')} dt={_fmt_dt(time.perf_counter()-t0)}")
+    return out
+
+
+def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "analysis")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> analysis")
+    hint = (state.get("codex_hint") or "").strip()
+    attempts = 2
+    last_err = ""
+    antlr_context_path = str(state.get("antlr_context_path") or "")
+    antlr_context_summary = str(state.get("antlr_context_summary") or "")
+    target_analysis_path = str(state.get("target_analysis_path") or "")
+    target_analysis_summary = str(state.get("target_analysis_summary") or "")
+    analysis_context_path = str(state.get("analysis_context_path") or "")
+    analysis_report_path = ""
+    companion_doc: dict[str, Any] = {}
+    companion_summary = ""
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+            target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+            companion_doc, companion_summary = _collect_analysis_companion_context()
+            antlr_doc = _read_json_doc(antlr_context_path)
+            target_doc = _read_json_doc(target_analysis_path)
+            evidence_doc = _build_analysis_evidence_index(
+                repo_root=gen.repo_root,
+                antlr_doc=antlr_doc,
+                target_doc=target_doc,
+                companion_doc=companion_doc,
+            )
+            analysis_evidence_count = int((evidence_doc.get("summary") or {}).get("evidence_count") or 0)
+            fuzz_dir = gen.repo_root / "fuzz"
+            fuzz_dir.mkdir(parents=True, exist_ok=True)
+            analysis_doc = {
+                "mode": "pre-plan-analysis",
+                "generated_at": int(time.time()),
+                "repo_root": str(gen.repo_root),
+                "antlr_context_path": antlr_context_path,
+                "antlr_context_summary": antlr_context_summary,
+                "target_analysis_path": target_analysis_path,
+                "target_analysis_summary": target_analysis_summary,
+                "companion": companion_doc,
+                "analysis_evidence": evidence_doc,
+            }
+            analysis_path = fuzz_dir / "analysis_context.json"
+            analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            analysis_context_path = str(analysis_path)
+            analysis_report_path = str(analysis_path)
+
+            if _has_codex_key():
+                analysis_lines: list[str] = [
+                    "Generate analysis artifacts for downstream planning.",
+                    "Write/update `fuzz/analysis_context.json` with concise actionable signals.",
+                ]
+                if antlr_context_summary:
+                    analysis_lines.append(f"ANTLR context: {antlr_context_summary}")
+                if target_analysis_summary:
+                    analysis_lines.append(f"Target analysis: {target_analysis_summary}")
+                if companion_summary:
+                    analysis_lines.append(f"Companion signals: {companion_summary}")
+                analysis_lines.append(f"Evidence index count: {analysis_evidence_count}")
+                analysis_hint = "\n".join(analysis_lines)
+                if hint:
+                    analysis_hint = f"{analysis_hint}\n\nCoordinator hint:\n{hint}"
+                prompt = _render_opencode_prompt("analysis_with_hint", hint=analysis_hint)
+                gen.patcher.run_codex_command(
+                    prompt,
+                    stage_skill="analysis",
+                    timeout=_remaining_time_budget_sec(state),
+                    max_attempts=1,
+                    max_cli_retries=_opencode_cli_retries(),
+                )
+                if not analysis_path.is_file():
+                    analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            out = {
+                **state,
+                "last_step": "analysis",
+                "last_error": "",
+                "failed": False,
+                "analysis_done": True,
+                "analysis_degraded": False,
+                "analysis_error": "",
+                "analysis_report_path": analysis_report_path,
+                "analysis_context_path": analysis_context_path,
+                "analysis_evidence_count": analysis_evidence_count,
+                "antlr_context_path": antlr_context_path,
+                "antlr_context_summary": antlr_context_summary,
+                "target_analysis_path": target_analysis_path,
+                "target_analysis_summary": target_analysis_summary,
+                "message": "analysis completed",
+            }
+            out = _clear_error_markers_on_success(out)
+            _wf_log(cast(dict[str, Any], out), f"<- analysis ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+        except Exception as e:
+            last_err = str(e)
+            if attempt < attempts:
+                _wf_log(cast(dict[str, Any], state), f"analysis attempt {attempt} failed; retrying once: {last_err}")
+                continue
+            break
+
+    fallback_error = last_err or "analysis_failed"
+    out = {
+        **state,
+        "last_step": "analysis",
+        "last_error": "",
+        "failed": False,
+        "analysis_done": False,
+        "analysis_degraded": True,
+        "analysis_error": fallback_error[:4096],
+        "analysis_report_path": analysis_report_path,
+        "analysis_context_path": analysis_context_path,
+        "analysis_evidence_count": analysis_evidence_count,
+        "antlr_context_path": antlr_context_path,
+        "antlr_context_summary": antlr_context_summary,
+        "target_analysis_path": target_analysis_path,
+        "target_analysis_summary": target_analysis_summary,
+        "message": "analysis degraded",
+    }
+    out = _clear_error_markers_on_success(out)
+    _wf_log(cast(dict[str, Any], out), f"<- analysis degraded err={fallback_error} dt={_fmt_dt(time.perf_counter()-t0)}")
     return out
 
 
@@ -3307,8 +4387,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
     repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
     repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
-    antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
-    target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+    constraint_memory_entry = dict(repair_snapshot.get("constraint_memory_entry") or {})
+    constraint_memory_count = int(repair_snapshot.get("constraint_memory_count") or 0)
+    constraint_memory_path = str(repair_snapshot.get("constraint_memory_path") or "")
+    antlr_context_path = str(state.get("antlr_context_path") or "").strip()
+    antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
+    target_analysis_path = str(state.get("target_analysis_path") or "").strip()
+    target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    analysis_context_path = str(state.get("analysis_context_path") or "").strip()
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
+    if not antlr_context_path and not antlr_context_summary:
+        antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+    if not target_analysis_path and not target_analysis_summary:
+        target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
     if antlr_context_summary:
         antlr_note = (
             "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
@@ -3321,6 +4412,13 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             f"{target_analysis_summary}"
         )
         hint = (hint + "\n\n" + target_note).strip() if hint else target_note
+    if analysis_context_path:
+        analysis_note = (
+            "Unified analysis context is available at `fuzz/analysis_context.json`; "
+            f"evidence_count={analysis_evidence_count}. "
+            "Prefer evidence-backed target choices and cite evidence ids in PLAN rationale."
+        )
+        hint = (hint + "\n\n" + analysis_note).strip() if hint else analysis_note
     injected_ctx = ""
     prev_plan_text = ""
     prev_targets_text = ""
@@ -3395,6 +4493,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             repair_blocks.append(
                 "=== recent repair attempts ===\n"
                 + json.dumps(repair_recent_attempts[-5:], ensure_ascii=False, indent=2)
+            )
+        if constraint_memory_entry:
+            repair_blocks.append(
+                "=== constraint memory (repeated crash guidance) ===\n"
+                + json.dumps(
+                    {
+                        "path": constraint_memory_path,
+                        "entry_count": constraint_memory_count,
+                        "active_entry": constraint_memory_entry,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             )
         repair_hint = "\n\n".join(part for part in repair_blocks if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
@@ -3526,6 +4637,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_families_required = list(selected_primary.get("seed_families_required") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
+        target_scoring_enabled = bool(
+            selected_primary.get("target_scoring_enabled")
+            or any(bool(item.get("target_score_breakdown")) for item in selected_targets_doc)
+        )
         replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
         replan_effective = bool(state.get("coverage_replan_effective") or False)
         replan_stop_reason = ""
@@ -3572,6 +4687,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 coverage_round_budget_exhausted = True
                 coverage_stop_reason = "no_material_change"
                 coverage_replan_reason = "no_material_change"
+                repair_force_strategy_change = True
         out = {
             **state,
             "last_step": "plan",
@@ -3588,6 +4704,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "antlr_context_summary": antlr_context_summary,
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
+            "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": analysis_evidence_count,
             "selected_targets_path": selected_targets_path,
             "execution_plan_path": execution_plan_path,
             "coverage_target_name": new_target_name or prev_target_name,
@@ -3622,6 +4740,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "repair_signature": str(repair_snapshot.get("repair_signature") or ""),
             "repair_stdout_tail": str(repair_snapshot.get("repair_stdout_tail") or ""),
             "repair_stderr_tail": str(repair_snapshot.get("repair_stderr_tail") or ""),
+            "repair_strategy_force_change": bool(repair_force_strategy_change),
             "repair_recent_attempts": (
                 (repair_recent_attempts + [{
                     "step": str(state.get("last_step") or ""),
@@ -3634,8 +4753,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if repair_mode
                 else []
             ),
+            "constraint_memory_count": constraint_memory_count,
+            "constraint_memory_path": constraint_memory_path,
+            "target_scoring_enabled": target_scoring_enabled,
             "message": "planned",
         }
+        out = _clear_error_markers_on_success(out)
         _wf_log(cast(dict[str, Any], out), f"<- plan ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -3668,6 +4791,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
     target_analysis_path = str(state.get("target_analysis_path") or "").strip()
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    analysis_context_path = str(state.get("analysis_context_path") or "").strip()
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
     selected_targets_path = str(state.get("selected_targets_path") or "").strip()
     selected_target_api = str(state.get("selected_target_api") or "").strip()
     selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
@@ -3689,6 +4814,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         ) + (
             "Use `fuzz/target_analysis.json` to preserve the selected target's seed_profile and risk signals while generating harness/build glue.\n"
             f"{target_analysis_summary}"
+        )
+    if analysis_context_path and "analysis_context.json" not in hint:
+        hint = (
+            (hint.strip() + "\n\n") if hint.strip() else ""
+        ) + (
+            "Use `fuzz/analysis_context.json` as the canonical evidence index for API/callgraph/consumer pattern decisions.\n"
+            f"Available evidence_count={analysis_evidence_count}."
         )
     if selected_targets_path:
         selected_target_soft_hint = (
@@ -3714,15 +4846,19 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
         hint = (hint + "\n\n" + feedback_hint).strip() if hint else feedback_hint
     if repair_mode:
-        repair_error_kind = str(state.get("repair_error_kind") or state.get("build_error_kind") or state.get("run_error_kind") or "generic_failure").strip()
-        repair_error_code = str(state.get("repair_error_code") or state.get("build_error_code") or state.get("restart_to_plan_reason") or "").strip()
-        repair_signature = str(state.get("repair_signature") or state.get("build_error_signature_short") or state.get("crash_signature") or "").strip()
-        repair_stderr_tail = str(state.get("repair_stderr_tail") or state.get("build_stderr_tail") or "").strip()
-        repair_stdout_tail = str(state.get("repair_stdout_tail") or state.get("build_stdout_tail") or "").strip()
-        repair_recent_attempts = list(state.get("repair_recent_attempts") or [])
-        repair_attempt_index = int(state.get("repair_attempt_index") or 0)
-        repair_force_strategy_change = bool(state.get("repair_strategy_force_change") or False)
-        repair_error_digest = dict(state.get("repair_error_digest") or {})
+        repair_snapshot = _build_repair_snapshot(cast(dict[str, Any], state))
+        repair_error_kind = str(repair_snapshot.get("repair_error_kind") or "generic_failure").strip()
+        repair_error_code = str(repair_snapshot.get("repair_error_code") or "").strip()
+        repair_signature = str(repair_snapshot.get("repair_signature") or "").strip()
+        repair_stderr_tail = str(repair_snapshot.get("repair_stderr_tail") or "").strip()
+        repair_stdout_tail = str(repair_snapshot.get("repair_stdout_tail") or "").strip()
+        repair_recent_attempts = list(repair_snapshot.get("repair_recent_attempts") or [])
+        repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
+        repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
+        repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
+        constraint_memory_entry = dict(repair_snapshot.get("constraint_memory_entry") or {})
+        constraint_memory_count = int(repair_snapshot.get("constraint_memory_count") or 0)
+        constraint_memory_path = str(repair_snapshot.get("constraint_memory_path") or "")
         repair_lines: list[str] = [
             "Repair mode context (consume this before editing):",
             f"- repair_origin_stage: {repair_origin_stage}",
@@ -3757,6 +4893,19 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             repair_lines.append(
                 "=== repair recent attempts ===\n"
                 + json.dumps(repair_recent_attempts[-5:], ensure_ascii=False, indent=2)
+            )
+        if constraint_memory_entry:
+            repair_lines.append(
+                "=== constraint memory (repeated crash guidance) ===\n"
+                + json.dumps(
+                    {
+                        "path": constraint_memory_path,
+                        "entry_count": constraint_memory_count,
+                        "active_entry": constraint_memory_entry,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             )
         repair_hint = "\n\n".join(part for part in repair_lines if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
@@ -4168,6 +5317,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         ctx += "\n=== fuzz/target_analysis.json ===\n" + analysis_path_obj.read_text(
                             encoding="utf-8", errors="replace"
                         )
+                if analysis_context_path:
+                    analysis_ctx_obj = Path(analysis_context_path)
+                    if not analysis_ctx_obj.is_absolute():
+                        analysis_ctx_obj = gen.repo_root / analysis_ctx_obj
+                    if analysis_ctx_obj.is_file():
+                        ctx += "\n=== fuzz/analysis_context.json ===\n" + analysis_ctx_obj.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
                 if selected_targets_path:
                     selected_path_obj = Path(selected_targets_path)
                     if not selected_path_obj.is_absolute():
@@ -4357,7 +5514,6 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         out = {
             **state,
             "last_step": "synthesize",
-            "last_error": "",
             "codex_hint": "",
             "restart_to_plan": False,
             "restart_to_plan_reason": "",
@@ -4380,8 +5536,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
             "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
+            "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": analysis_evidence_count,
+            "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+            "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
             "message": "synthesized",
         }
+        out = _clear_error_markers_on_success(out)
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -4863,14 +6024,42 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 mapping_by_target[key] = row
         built_names = {p.name for p in final_bins}
         built_stems = {Path(name).stem for name in built_names}
+        built_norm_tokens = {
+            token
+            for token in (
+                _normalize_exec_target_token(name)
+                for name in (list(built_names) + list(built_stems))
+            )
+            if token
+        }
         target_build_matrix: list[dict[str, Any]] = []
         built_execution_targets = 0
         for item in execution_targets:
             target_name = str(item.get("target_name") or "").strip()
             expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
-            matched = expected in built_names or Path(expected).stem in built_stems
             mapping = mapping_by_target.get(target_name)
             source_path = str(mapping.get("source_path") or "").strip() if isinstance(mapping, dict) else ""
+            source_stem = Path(source_path).stem if source_path else ""
+            raw_candidates = {
+                expected,
+                f"{expected}_fuzz" if expected else "",
+                f"{expected}_fuzzer" if expected else "",
+                target_name,
+                f"{target_name}_fuzz" if target_name else "",
+                f"{target_name}_fuzzer" if target_name else "",
+                source_stem,
+            }
+            raw_candidates = {c for c in raw_candidates if c}
+            norm_candidates = {
+                _normalize_exec_target_token(c)
+                for c in (list(raw_candidates) + [Path(c).stem for c in raw_candidates])
+            }
+            norm_candidates = {c for c in norm_candidates if c}
+            matched = bool(
+                (raw_candidates & built_names)
+                or ({Path(c).stem for c in raw_candidates} & built_stems)
+                or (norm_candidates & built_norm_tokens)
+            )
             has_source = bool(source_path)
             if matched and has_source:
                 built_execution_targets += 1
@@ -4993,6 +6182,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         next_state["target_build_matrix"] = target_build_matrix
         next_state["build_gate_reason"] = "ok"
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
+        next_state = _clear_error_markers_on_success(next_state)
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
         return next_state
     except Exception as e:
@@ -6682,6 +7872,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_details: list[dict[str, Any]] = []
         run_batch_plan: list[dict[str, Any]] = []
         run_children_exit_count = 0
+        run_cancel_requested_count = 0
+        run_cancel_effective_count = 0
         total_time_budget = _wf_common.parse_budget_value(state.get("time_budget"), default=900)
         run_time_budget_raw = state.get("run_time_budget")
         if run_time_budget_raw is None:
@@ -6701,29 +7893,66 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         except Exception:
             max_same_crash_repeats = 1
         max_same_timeout_repeats = _max_same_timeout_repeats()
+        auto_stop_policy = _auto_stop_policy()
         max_parallel_raw = os.environ.get("SHERPA_PARALLEL_FUZZERS", "3")
         try:
-            max_parallel = max(1, min(int(max_parallel_raw), 16))
+            requested_outer_parallelism = max(1, min(int(max_parallel_raw), 64))
         except Exception:
-            max_parallel = 3
+            requested_outer_parallelism = 3
         stop_on_first_crash = _run_stop_on_first_crash()
         parallel_early_stop = _run_parallel_early_stop_enabled()
         if stop_on_first_crash and len(bins) > 1 and not parallel_early_stop:
             # Compatibility mode: force serial when parallel early stop is disabled.
-            max_parallel = 1
-        if len(bins) <= 1:
-            max_parallel = 1
+            requested_outer_parallelism = 1
+        cpu_budget = _run_cpu_budget()
+        outer_parallelism_max = _run_outer_parallelism_max(requested_outer_parallelism)
+        inner_workers_min = _run_inner_workers_min()
+        requested_inner_workers = _run_inner_workers_target()
+        requested_engine = _run_parallel_engine()
+        ignore_non_fatal = _run_ignore_non_fatal_enabled()
+        solved_parallel = _solve_parallelism(
+            cpu_budget=cpu_budget,
+            n_targets=len(bins),
+            requested_outer=requested_outer_parallelism,
+            outer_parallelism_max=outer_parallelism_max,
+            inner_workers_min=inner_workers_min,
+            requested_inner=requested_inner_workers,
+            engine=requested_engine,
+            sanitizer=str(getattr(gen, "sanitizer", "") or ""),
+        )
+        max_parallel = int(solved_parallel.get("outer_parallelism") or 1)
+        inner_workers = int(solved_parallel.get("inner_workers") or 1)
+        parallel_engine = str(solved_parallel.get("parallel_engine") or "single")
+        reload_enabled = bool(solved_parallel.get("reload_enabled"))
+        parallel_warning = str(solved_parallel.get("warning") or "").strip()
         idle_timeout_sec = _run_idle_timeout_sec()
         finalize_timeout_sec = _run_finalize_timeout_sec()
+
+        current_run_parallel_cfg = {
+            bin_path.name: {
+                "parallel_engine": parallel_engine,
+                "parallel_role": "reserved",
+                "outer_slot": idx % max(1, max_parallel),
+                "inner_workers": inner_workers,
+                "reload_enabled": reload_enabled,
+                "ignore_non_fatal": ignore_non_fatal,
+            }
+            for idx, bin_path in enumerate(bins)
+        }
+        prev_run_parallel_cfg = getattr(gen, "current_run_parallel_config_by_fuzzer", None)
+        setattr(gen, "current_run_parallel_config_by_fuzzer", current_run_parallel_cfg)
 
         _wf_log(
             cast(dict[str, Any], state),
             (
-                f"run: fuzzers={len(bins)} parallel={max_parallel} "
+                f"run: fuzzers={len(bins)} parallel_outer={max_parallel} inner={inner_workers} "
+                f"engine={parallel_engine} cpu_budget={cpu_budget} "
                 f"stop_on_first_crash={int(stop_on_first_crash)} "
                 f"parallel_early_stop={int(parallel_early_stop)}"
             ),
         )
+        if parallel_warning:
+            _wf_log(cast(dict[str, Any], state), f"run: {parallel_warning}")
 
         def _calc_crash_signature(fuzzer_name: str, artifact_path: str) -> str:
             parts: list[str] = [f"fuzzer={fuzzer_name}", f"artifact={artifact_path}"]
@@ -6771,6 +8000,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+
+        def _accumulate_seed_counts(dst: dict[str, int], src: Any) -> None:
+            if not isinstance(src, dict):
+                return
+            for key in ("repo_examples", "ai", "radamsa", "total"):
+                try:
+                    dst[key] = int(dst.get(key, 0)) + int(src.get(key) or 0)
+                except Exception:
+                    continue
+
         seed_sources: set[str] = set()
         repo_examples_filtered = False
         repo_examples_rejected_count = 0
@@ -6816,27 +8055,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
                     meta = bootstrap_map.get(fuzzer_name) or {}
                     if isinstance(meta, dict):
-                        counts = meta.get("counts") or {}
-                        if isinstance(counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_total[key] = int(seed_count_total.get(key, 0)) + int(counts.get(key) or 0)
-                                except Exception:
-                                    continue
-                        raw_counts = meta.get("seed_counts_raw") or {}
-                        if isinstance(raw_counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_raw_total[key] = int(seed_count_raw_total.get(key, 0)) + int(raw_counts.get(key) or 0)
-                                except Exception:
-                                    continue
-                        filtered_counts = meta.get("seed_counts_filtered") or {}
-                        if isinstance(filtered_counts, dict):
-                            for key in ("repo_examples", "ai", "radamsa", "total"):
-                                try:
-                                    seed_count_filtered_total[key] = int(seed_count_filtered_total.get(key, 0)) + int(filtered_counts.get(key) or 0)
-                                except Exception:
-                                    continue
+                        _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
+                        _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
+                        _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
                         sources = meta.get("sources") or []
                         if isinstance(sources, list):
                             for src in sources:
@@ -6858,6 +8079,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
         finalized_fuzzers: set[str] = set()
+        first_crash_fuzzer = ""
+        early_stop_reason = ""
+        early_stopped_fuzzers: list[str] = []
 
         def _run_one(bin_path: Path) -> tuple[str, FuzzerRunResult]:
             return bin_path.name, gen._run_fuzzer(bin_path)
@@ -6944,8 +8168,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     with ThreadPoolExecutor(max_workers=len(batch)) as pool:
                         futures = {pool.submit(_run_one, bin_path): bin_path for bin_path in batch}
                         batch_should_stop = False
+                        processed_futures: set[Any] = set()
                         for fut in as_completed(futures):
                             bin_path = futures[fut]
+                            processed_futures.add(fut)
                             try:
                                 name, run = fut.result()
                                 run_results[name] = run
@@ -6956,6 +8182,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                     and parallel_early_stop
                                     and run.crash_found
                                 ):
+                                    first_crash_fuzzer = str(name)
+                                    early_stop_reason = "first_crash_parallel_early_stop"
                                     terminator = getattr(gen, "terminate_active_run_processes", None)
                                     if callable(terminator):
                                         try:
@@ -6964,7 +8192,32 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                                             pass
                                     for pending_fut in futures:
                                         if pending_fut is not fut:
-                                            pending_fut.cancel()
+                                            run_cancel_requested_count += 1
+                                            try:
+                                                if pending_fut.cancel():
+                                                    run_cancel_effective_count += 1
+                                            except Exception:
+                                                pass
+                                    for other_bin in batch:
+                                        if other_bin.name != name and other_bin.name not in early_stopped_fuzzers:
+                                            early_stopped_fuzzers.append(other_bin.name)
+                                    # Collect already-finished futures before leaving this batch
+                                    # so early-stop does not drop completed results.
+                                    for remaining_fut, remaining_bin in futures.items():
+                                        if remaining_fut in processed_futures or remaining_fut is fut:
+                                            continue
+                                        if not remaining_fut.done():
+                                            continue
+                                        processed_futures.add(remaining_fut)
+                                        try:
+                                            rname, rrun = remaining_fut.result(timeout=0)
+                                            run_results[rname] = rrun
+                                            finalized_fuzzers.add(rname)
+                                            run_children_exit_count += 1
+                                        except Exception as e:
+                                            run_exec_errors[remaining_bin.name] = str(e)
+                                            finalized_fuzzers.add(remaining_bin.name)
+                                            run_children_exit_count += 1
                                     batch_should_stop = True
                                     break
                             except Exception as e:
@@ -6980,11 +8233,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         if batch_should_stop:
                             pending_bins = []
                 if stop_on_first_crash and any(run.crash_found for run in run_results.values()):
+                    if not first_crash_fuzzer:
+                        for crash_name, crash_run in run_results.items():
+                            if crash_run.crash_found:
+                                first_crash_fuzzer = crash_name
+                                break
+                    if not early_stop_reason and first_crash_fuzzer:
+                        early_stop_reason = "first_crash_stop"
+                    for skipped in pending_bins:
+                        if skipped.name not in early_stopped_fuzzers:
+                            early_stopped_fuzzers.append(skipped.name)
                     pending_bins = []
                     break
         finally:
             setattr(gen, "current_run_time_budget_sec", prev_run_budget)
             setattr(gen, "current_run_hard_timeout_sec", prev_run_hard_timeout)
+            setattr(gen, "current_run_parallel_config_by_fuzzer", prev_run_parallel_cfg)
 
         _wf_log(cast(dict[str, Any], state), "run children exited, collecting results...")
         finalize_started = time.perf_counter()
@@ -7005,6 +8269,42 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         first_nonzero_rc = 0
         crash_candidates: list[tuple[str, Path, FuzzerRunResult]] = []
+
+        def _make_run_detail_fallback(
+            *,
+            fuzzer_name: str,
+            rc: int,
+            run_error_kind_value: str,
+            exception_kind: str,
+            error: str,
+        ) -> dict[str, Any]:
+            return {
+                "fuzzer": fuzzer_name,
+                "rc": rc,
+                "effective_rc": rc,
+                "crash_found": False,
+                "crash_evidence": "none",
+                "run_error_kind": run_error_kind_value,
+                "exception_kind": exception_kind,
+                "error": error,
+                "new_artifacts": [],
+                "first_artifact": "",
+                "final_cov": 0,
+                "final_ft": 0,
+                "final_iteration": 0,
+                "final_execs_per_sec": 0,
+                "final_rss_mb": 0,
+                "final_corpus_files": 0,
+                "final_corpus_size_bytes": 0,
+                "corpus_files": 0,
+                "corpus_size_bytes": 0,
+                "seed_quality": {},
+                "parallel_engine": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_engine") or "single"),
+                "parallel_role": str((current_run_parallel_cfg.get(fuzzer_name) or {}).get("parallel_role") or "reserved"),
+                "outer_slot": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("outer_slot") or 0),
+                "inner_workers": int((current_run_parallel_cfg.get(fuzzer_name) or {}).get("inner_workers") or 1),
+                "reload_enabled": bool((current_run_parallel_cfg.get(fuzzer_name) or {}).get("reload_enabled")),
+            }
 
         for bin_path in bins:
             if _finalize_timed_out("collecting run details"):
@@ -7030,28 +8330,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if first_nonzero_rc == 0:
                     first_nonzero_rc = detail_rc
                 run_details.append(
-                    {
-                        "fuzzer": fuzzer_name,
-                        "rc": detail_rc,
-                        "effective_rc": detail_rc,
-                        "crash_found": False,
-                        "crash_evidence": "none",
-                        "run_error_kind": detail_kind,
-                        "exception_kind": detail_kind,
-                        "error": exec_err,
-                        "new_artifacts": [],
-                        "first_artifact": "",
-                        "final_cov": 0,
-                        "final_ft": 0,
-                        "final_iteration": 0,
-                        "final_execs_per_sec": 0,
-                        "final_rss_mb": 0,
-                        "final_corpus_files": 0,
-                        "final_corpus_size_bytes": 0,
-                        "corpus_files": 0,
-                        "corpus_size_bytes": 0,
-                        "seed_quality": {},
-                    }
+                    _make_run_detail_fallback(
+                        fuzzer_name=fuzzer_name,
+                        rc=detail_rc,
+                        run_error_kind_value=detail_kind,
+                        exception_kind=detail_kind,
+                        error=exec_err,
+                    )
                 )
                 continue
 
@@ -7065,28 +8350,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if first_nonzero_rc == 0:
                     first_nonzero_rc = 1
                 run_details.append(
-                    {
-                        "fuzzer": fuzzer_name,
-                        "rc": 1,
-                        "effective_rc": 1,
-                        "crash_found": False,
-                        "crash_evidence": "none",
-                        "run_error_kind": "run_exception",
-                        "exception_kind": "run_exception",
-                        "error": "missing run result",
-                        "new_artifacts": [],
-                        "first_artifact": "",
-                        "final_cov": 0,
-                        "final_ft": 0,
-                        "final_iteration": 0,
-                        "final_execs_per_sec": 0,
-                        "final_rss_mb": 0,
-                        "final_corpus_files": 0,
-                        "final_corpus_size_bytes": 0,
-                        "corpus_files": 0,
-                        "corpus_size_bytes": 0,
-                        "seed_quality": {},
-                    }
+                    _make_run_detail_fallback(
+                        fuzzer_name=fuzzer_name,
+                        rc=1,
+                        run_error_kind_value="run_exception",
+                        exception_kind="run_exception",
+                        error="missing run result",
+                    )
                 )
                 continue
 
@@ -7129,7 +8399,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "terminal_reason": str(run.terminal_reason or ""),
                     "plateau_detected": bool(run.plateau_detected),
                     "plateau_idle_seconds": int(run.plateau_idle_seconds or 0),
+                    "plateau_hit_count": int(run.plateau_hit_count or 0),
+                    "plateau_last_hit_at": float(run.plateau_last_hit_at or 0.0),
+                    "progress_sample_file": str(run.progress_sample_file or ""),
                     "seed_quality": dict(run.seed_quality or {}),
+                    "parallel_engine": str(run.parallel_engine or "single"),
+                    "parallel_role": str(run.parallel_role or "reserved"),
+                    "outer_slot": int(run.outer_slot or 0),
+                    "inner_workers": int(run.inner_workers or 1),
+                    "reload_enabled": bool(run.reload_enabled),
                 }
             )
             if run.error and not run_last_error:
@@ -7141,27 +8419,44 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         # ending in a false-success/false-running state.
         if not crash_candidates and not run_last_error:
             no_progress_fuzzers: list[str] = []
+            seed_rejected_fuzzers: list[str] = []
             for detail in run_details:
                 if bool(detail.get("crash_found")):
                     continue
                 if int(detail.get("rc") or 0) != 0:
                     continue
                 final_execs = int(detail.get("final_execs_per_sec") or 0)
+                final_cov = int(detail.get("final_cov") or 0)
+                final_ft = int(detail.get("final_ft") or 0)
+                final_corpus_files = int(detail.get("final_corpus_files") or 0)
+                final_corpus_size_bytes = int(detail.get("final_corpus_size_bytes") or 0)
                 log_or_err = f"{detail.get('error') or ''}\n{detail.get('log_tail') or ''}".lower()
                 warned_no_progress = (
                     "no interesting inputs were found so far" in log_or_err
                     or "inited exec/s: 0" in log_or_err
                     or "exec/s: 0" in log_or_err
                 )
+                if warned_no_progress and final_execs > 0 and final_cov <= 0 and final_ft <= 0 and (
+                    final_corpus_files <= 1 or final_corpus_size_bytes <= 1
+                ):
+                    seed_rejected_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
                 if final_execs <= 0 and warned_no_progress:
                     no_progress_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
-            if no_progress_fuzzers:
-                run_error_kind = "run_no_progress"
-                joined = ", ".join(no_progress_fuzzers[:5])
+            if seed_rejected_fuzzers:
+                run_error_kind = "run_seed_rejected"
+                joined = ", ".join(seed_rejected_fuzzers[:5])
                 run_last_error = (
-                    "fuzzer run made no measurable progress "
-                    f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    "fuzzer inputs were likely rejected by target parser "
+                    f"(no interesting inputs, zero cov/ft, tiny corpus): {joined}"
                 )
+            if no_progress_fuzzers:
+                if not run_error_kind:
+                    run_error_kind = "run_no_progress"
+                    joined = ", ".join(no_progress_fuzzers[:5])
+                    run_last_error = (
+                        "fuzzer run made no measurable progress "
+                        f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    )
 
         if crash_candidates:
             if _finalize_timed_out("packaging crash artifacts"):
@@ -7185,6 +8480,27 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             msg = "Fuzzing run failed."
         else:
             msg = "Fuzzing completed."
+
+        seed_bootstrap_all = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
+
+        def _first_seed_meta_list(*path: str) -> list[str]:
+            for meta in seed_bootstrap_all.values():
+                if not isinstance(meta, dict):
+                    continue
+                cur: Any = meta
+                ok = True
+                for key in path:
+                    if not isinstance(cur, dict):
+                        ok = False
+                        break
+                    cur = cur.get(key)
+                if not ok:
+                    continue
+                if isinstance(cur, (list, tuple, set)):
+                    out_vals = [str(v).strip() for v in cur if str(v).strip()]
+                    if out_vals:
+                        return out_vals
+            return []
 
         crash_signature = ""
         same_crash_repeats = 0
@@ -7214,8 +8530,17 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "run_terminal_reason": run_terminal_reason,
             "run_idle_seconds": int(run_idle_seconds or 0),
             "run_children_exit_count": int(run_children_exit_count),
+            "run_cancel_requested_count": int(run_cancel_requested_count),
+            "run_cancel_effective_count": int(run_cancel_effective_count),
             "run_details": run_details,
             "run_batch_plan": run_batch_plan,
+            "run_parallel_engine": parallel_engine,
+            "run_parallel_outer": int(max_parallel),
+            "run_parallel_inner": int(inner_workers),
+            "run_parallel_cpu_budget": int(cpu_budget),
+            "first_crash_fuzzer": first_crash_fuzzer,
+            "early_stop_reason": early_stop_reason,
+            "early_stopped_fuzzers": list(early_stopped_fuzzers),
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
@@ -7240,34 +8565,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 dict(state.get("coverage_seed_quality") or {}),
             ),
             "coverage_seed_families_required": list(
-                next(
-                    (
-                        list((meta.get("seed_families_required") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and meta.get("seed_families_required")
-                    ),
-                    list(state.get("coverage_seed_families_required") or []),
-                )
+                _first_seed_meta_list("seed_families_required")
+                or list(state.get("coverage_seed_families_required") or [])
             ),
             "coverage_seed_families_covered": list(
-                next(
-                    (
-                        list(((meta.get("seed_family_coverage") or {}).get("covered") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("covered")
-                    ),
-                    list(state.get("coverage_seed_families_covered") or []),
-                )
+                _first_seed_meta_list("seed_family_coverage", "covered")
+                or list(state.get("coverage_seed_families_covered") or [])
             ),
             "coverage_seed_families_missing": list(
-                next(
-                    (
-                        list(((meta.get("seed_family_coverage") or {}).get("missing") or []))
-                        for meta in (getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}).values()
-                        if isinstance(meta, dict) and (meta.get("seed_family_coverage") or {}).get("missing") is not None
-                    ),
-                    list(state.get("coverage_seed_families_missing") or []),
-                )
+                _first_seed_meta_list("seed_family_coverage", "missing")
+                or list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
                 next(
@@ -7300,6 +8607,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "timeout_signature": timeout_signature,
             "same_timeout_repeats": same_timeout_repeats,
             "message": msg,
+            "auto_stop_policy": auto_stop_policy,
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
         if run_error_kind == "workflow_time_budget_exceeded":
             out["failed"] = True
@@ -7322,12 +8632,17 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             out["message"] = "workflow stopped (same crash repeated)"
         if run_error_kind in timeout_like_kinds and same_timeout_repeats >= max_same_timeout_repeats:
-            out["failed"] = True
-            out["last_error"] = (
-                "same timeout/no-progress signature repeated "
-                f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
-            )
-            out["message"] = "workflow stopped (same timeout/no-progress repeated)"
+            if auto_stop_policy == "legacy_mixed":
+                out["failed"] = True
+                out["last_error"] = (
+                    "same timeout/no-progress signature repeated "
+                    f"(repeats={same_timeout_repeats + 1}, threshold={max_same_timeout_repeats + 1})"
+                )
+                out["message"] = "workflow stopped (same timeout/no-progress repeated)"
+            else:
+                out["auto_stop_blocked_reason"] = "same_timeout_repeats"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
+                out["message"] = "same timeout/no-progress repeated; continue under hard_fail_only"
         if crash_found and last_fuzzer and last_artifact:
             _write_repro_context(
                 gen.repo_root,
@@ -7354,6 +8669,50 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         out["coverage_quality_flags"] = sorted({flag for flag in quality_flags if flag})
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
+        try:
+            seed_feedback_path = gen.repo_root / "fuzz" / "seed_feedback.json"
+            seed_feedback_path.parent.mkdir(parents=True, exist_ok=True)
+            by_fuzzer: dict[str, Any] = {}
+            for detail in run_details:
+                fuzzer_name = str(detail.get("fuzzer") or "").strip()
+                if not fuzzer_name:
+                    continue
+                seed_quality = dict(detail.get("seed_quality") or {})
+                if not seed_quality:
+                    continue
+                by_fuzzer[fuzzer_name] = {
+                    "seed_profile": str(seed_quality.get("seed_profile") or out.get("coverage_seed_profile") or ""),
+                    "initial_inited_cov": int(seed_quality.get("initial_inited_cov") or 0),
+                    "final_cov": int(seed_quality.get("final_cov") or 0),
+                    "cov_delta": int(seed_quality.get("cov_delta") or 0),
+                    "initial_inited_ft": int(seed_quality.get("initial_inited_ft") or 0),
+                    "final_ft": int(seed_quality.get("final_ft") or 0),
+                    "ft_delta": int(seed_quality.get("ft_delta") or 0),
+                    "early_new_units_30s": int(seed_quality.get("early_new_units_30s") or 0),
+                    "early_new_units_60s": int(seed_quality.get("early_new_units_60s") or 0),
+                    "initial_corpus_files": int(seed_quality.get("initial_corpus_files") or 0),
+                    "final_corpus_files": int(seed_quality.get("final_corpus_files") or 0),
+                    "quality_flags": list(seed_quality.get("quality_flags") or []),
+                    "missing_required_families": list(out.get("coverage_seed_families_missing") or []),
+                    "merge_retained_ratio_files": float(seed_quality.get("merge_retained_ratio_files") or 1.0),
+                    "merge_retained_ratio_bytes": float(seed_quality.get("merge_retained_ratio_bytes") or 1.0),
+                    "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
+                    "updated_at": int(time.time()),
+                }
+            seed_feedback_doc = {
+                "version": 1,
+                "updated_at": int(time.time()),
+                "job_id": str(state.get("job_id") or ""),
+                "repo_url": str(state.get("repo_url") or ""),
+                "by_fuzzer": by_fuzzer,
+            }
+            seed_feedback_path.write_text(
+                json.dumps(seed_feedback_doc, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            out["coverage_seed_feedback_path"] = str(seed_feedback_path)
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"run: failed to write seed_feedback.json: {exc}")
         if run_error_kind:
             last_detail = run_details[-1] if run_details else {}
             attempt_index = int(state.get("repair_attempt_index") or 0) + 1
@@ -7483,6 +8842,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_depth_class = str(state.get("coverage_target_depth_class") or "")
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
         seed_quality = dict(state.get("coverage_seed_quality") or {})
+        seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
         seed_families_required = list(state.get("coverage_seed_families_required") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
@@ -7493,6 +8853,44 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 if profile:
                     current_seed_profile = profile
                     break
+        total_execs_per_sec = 0
+        try:
+            total_execs_per_sec = max(0, sum(int(detail.get("final_execs_per_sec") or 0) for detail in run_details))
+        except Exception:
+            total_execs_per_sec = 0
+        parallel_outer = max(1, int(state.get("run_parallel_outer") or 1))
+        parallel_inner = max(1, int(state.get("run_parallel_inner") or 1))
+        parallel_cpu_budget = max(1, int(state.get("run_parallel_cpu_budget") or 1))
+        parallel_engine = str(state.get("run_parallel_engine") or "single")
+        configured_parallel_units = max(1, parallel_outer * parallel_inner)
+        parallel_utilization_ratio = float(configured_parallel_units) / float(max(1, parallel_cpu_budget))
+        if parallel_utilization_ratio < 0.0:
+            parallel_utilization_ratio = 0.0
+        if parallel_utilization_ratio > 1.0:
+            parallel_utilization_ratio = 1.0
+        underutilized_execs_threshold = _coverage_underutilized_execs_threshold()
+        resource_underutilized = bool(
+            configured_parallel_units < int(parallel_cpu_budget * 0.7)
+            and total_execs_per_sec < underutilized_execs_threshold
+        )
+        strategy_mismatch = bool(
+            plateau_detected and total_execs_per_sec > 0 and current_cov <= prev_cov and current_ft <= prev_ft
+        )
+        if resource_underutilized:
+            parallel_diagnosis_code = "resource_underutilized"
+            parallel_diagnosis = (
+                "exec/s is low while configured parallel units are below cpu budget; "
+                "increase outer or inner workers"
+            )
+        elif strategy_mismatch:
+            parallel_diagnosis_code = "strategy_mismatch"
+            parallel_diagnosis = (
+                "exec/s is healthy but coverage/features are stalled; "
+                "reduce parallelism and prioritize target/seed strategy changes"
+            )
+        else:
+            parallel_diagnosis_code = "balanced"
+            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
         plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
         plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
         requested_replan = bool(
@@ -7507,6 +8905,9 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
+        cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
+        merge_retained_ratio = float(seed_feedback.get("merge_retained_ratio_files") or 1.0)
+        merge_retained_low = bool(merge_retained_ratio > 0.0 and merge_retained_ratio < 0.35)
         seed_quality_issue = bool(
             any(
                 flag in quality_flags
@@ -7521,6 +8922,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     "missing_execution_targets",
                 }
             )
+            or cold_start_failure
+            or merge_retained_low
         )
         quality_degraded = bool(
             seed_quality_issue
@@ -7528,6 +8931,26 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             or (requested_replan and plateau_no_gain)
         )
         quality_oracle = "quality_degraded" if quality_degraded else "ok"
+        if seed_quality_issue:
+            coverage_bottleneck_kind = "seed_limited"
+            if cold_start_failure:
+                coverage_bottleneck_reason = "cold_start_failure"
+            elif merge_retained_low:
+                coverage_bottleneck_reason = "merge_retained_low"
+            elif seed_families_missing:
+                coverage_bottleneck_reason = "missing_seed_families"
+            else:
+                coverage_bottleneck_reason = "seed_quality_flags"
+        elif requested_replan or (plateau_no_gain and str(current_depth_class or "").lower() == "shallow"):
+            coverage_bottleneck_kind = "target_limited"
+            coverage_bottleneck_reason = "target_plateau_or_shallow_depth"
+        elif plateau_no_gain:
+            coverage_bottleneck_kind = "harness_limited"
+            coverage_bottleneck_reason = "plateau_without_seed_or_target_signal"
+        else:
+            coverage_bottleneck_kind = "none"
+            coverage_bottleneck_reason = ""
+        auto_stop_policy = _auto_stop_policy()
         base_should_improve = (
             (not bool(state.get("crash_found")))
             and (not bool(state.get("failed")))
@@ -7542,7 +8965,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             if seed_quality_issue and can_in_place:
                 should_improve = True
                 improve_mode = "in_place"
-                replan_reason = "seed_quality_issue"
+                if cold_start_failure:
+                    replan_reason = "seed_cold_start_failure"
+                elif merge_retained_low:
+                    replan_reason = "seed_merge_retained_low"
+                else:
+                    replan_reason = "seed_quality_issue"
             elif requested_replan:
                 if can_replan:
                     should_improve = True
@@ -7577,6 +9005,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 )
             if seed_quality_issue:
                 reason += f"; seed_quality_flags={','.join(quality_flags) or 'none'}"
+            if cold_start_failure:
+                reason += "; cold_start_failure=1"
+            if merge_retained_low:
+                reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
+            if parallel_diagnosis_code != "balanced":
+                reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
+            if coverage_bottleneck_kind != "none":
+                reason += f"; bottleneck={coverage_bottleneck_kind}:{coverage_bottleneck_reason}"
         elif round_budget_exhausted:
             if requested_replan:
                 reason = (
@@ -7621,6 +9057,17 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_missing": seed_families_missing,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
+                "coverage_bottleneck_kind": coverage_bottleneck_kind,
+                "coverage_bottleneck_reason": coverage_bottleneck_reason,
+                "parallel_diagnosis_code": parallel_diagnosis_code,
+                "parallel_diagnosis": parallel_diagnosis,
+                "parallel_engine": parallel_engine,
+                "parallel_outer": parallel_outer,
+                "parallel_inner": parallel_inner,
+                "parallel_cpu_budget": parallel_cpu_budget,
+                "parallel_utilization_ratio": parallel_utilization_ratio,
+                "total_execs_per_sec": total_execs_per_sec,
+                "underutilized_execs_threshold": underutilized_execs_threshold,
                 "repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
                 "repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
@@ -7648,6 +9095,17 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_seed_families_missing": seed_families_missing,
             "coverage_quality_flags": quality_flags,
             "coverage_quality_oracle": quality_oracle,
+            "coverage_bottleneck_kind": coverage_bottleneck_kind,
+            "coverage_bottleneck_reason": coverage_bottleneck_reason,
+            "coverage_parallel_diagnosis_code": parallel_diagnosis_code,
+            "coverage_parallel_diagnosis": parallel_diagnosis,
+            "coverage_parallel_engine": parallel_engine,
+            "coverage_parallel_outer": parallel_outer,
+            "coverage_parallel_inner": parallel_inner,
+            "coverage_parallel_cpu_budget": parallel_cpu_budget,
+            "coverage_parallel_utilization_ratio": parallel_utilization_ratio,
+            "coverage_total_execs_per_sec": total_execs_per_sec,
+            "coverage_underutilized_execs_threshold": underutilized_execs_threshold,
             "coverage_target_depth_score": current_depth_score,
             "coverage_target_depth_class": current_depth_class,
             "coverage_selection_bias_reason": current_selection_bias_reason,
@@ -7663,7 +9121,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "message": "coverage analysis done",
+            "auto_stop_policy": auto_stop_policy,
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
+        if auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
+            out["auto_stop_blocked_reason"] = "coverage_no_improve"
+            out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
 
@@ -7756,6 +9220,16 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         harness_feedback = dict(state.get("coverage_harness_feedback") or _build_harness_feedback(cast(dict[str, Any], state)))
         quality_oracle = str(state.get("coverage_quality_oracle") or "ok")
+        coverage_bottleneck_kind = str(state.get("coverage_bottleneck_kind") or "").strip() or "none"
+        coverage_bottleneck_reason = str(state.get("coverage_bottleneck_reason") or "").strip()
+        seed_first_repair = bool(
+            coverage_bottleneck_kind == "seed_limited"
+            or (
+            seed_feedback.get("cold_start_failure")
+            or float(seed_feedback.get("merge_retained_ratio_files") or 1.0) < 0.35
+            or bool(seed_families_missing)
+            )
+        )
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
             hint = (
@@ -7770,6 +9244,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Replan reason: {replan_reason or cov_reason or 'coverage plateau'}\n"
                 f"- Quality oracle: {quality_oracle}\n"
+                f"- Coverage bottleneck: {coverage_bottleneck_kind} ({coverage_bottleneck_reason or 'n/a'})\n"
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
@@ -7801,6 +9276,8 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Seed noise rejected: {seed_noise_rejected_count}\n"
                 f"- Seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
                 f"- Quality oracle: {quality_oracle}\n"
+                f"- Coverage bottleneck: {coverage_bottleneck_kind} ({coverage_bottleneck_reason or 'n/a'})\n"
+                f"- Repair focus decision: {'seed-first' if seed_first_repair else 'harness-first'}\n"
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 f"- Current depth: {depth_class or 'unknown'} (score={depth_score})\n"
@@ -7901,6 +9378,8 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                     "seed_noise_rejected_count": seed_noise_rejected_count,
                     "seed_quality": seed_quality,
                     "quality_oracle": quality_oracle,
+                    "coverage_bottleneck_kind": coverage_bottleneck_kind,
+                    "coverage_bottleneck_reason": coverage_bottleneck_reason,
                     "seed_feedback": seed_feedback,
                     "harness_feedback": harness_feedback,
                 }
@@ -7908,7 +9387,21 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 else dict(state.get("repair_error_digest") or {})
             ),
             "message": "improve-harness in-place edits applied" if opencode_applied else "improve-harness prepared plan hint",
+            "auto_stop_policy": _auto_stop_policy(),
+            "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
+            "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
+        if out["auto_stop_policy"] == "hard_fail_only":
+            replan_ineffective = str(out.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
+                out.get("coverage_replan_effective", True)
+            )
+            budget_exhausted = bool(out.get("coverage_round_budget_exhausted"))
+            if replan_ineffective:
+                out["auto_stop_blocked_reason"] = "coverage_replan_ineffective"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
+            elif budget_exhausted:
+                out["auto_stop_blocked_reason"] = "coverage_round_budget_exhausted"
+                out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         _wf_log(cast(dict[str, Any], out), f"<- improve-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -8054,48 +9547,6 @@ def _normalize_crash_analysis_verdict(raw: str) -> str:
         return "real_bug"
     return "unknown"
 
-
-def _heuristic_crash_triage(*, info_text: str, analysis_text: str, stderr_tail: str) -> tuple[str, float, str, list[str]]:
-    blob = "\n".join([info_text or "", analysis_text or "", stderr_tail or ""]).lower()
-    signals: list[str] = []
-    if "harness error" in blob:
-        signals.append("crash_analysis indicates HARNESS ERROR")
-    if "terminate called after throwing" in blob or "format_error" in blob:
-        signals.append("uncaught C++ exception found in reproducer output")
-    if "addresssanitizer" in blob or "heap-buffer-overflow" in blob or "use-after-free" in blob:
-        signals.append("sanitizer memory-safety signal observed")
-    if signals and any("sanitizer memory-safety signal observed" in s for s in signals):
-        return "upstream_bug", 0.72, "memory-safety sanitizer signature suggests upstream defect", signals
-    if signals and any("harness" in s.lower() or "uncaught" in s.lower() for s in signals):
-        return "harness_bug", 0.78, "uncaught exception / harness misuse signal found", signals
-    return "inconclusive", 0.35, "no high-confidence harness/upstream signal", signals
-
-
-def _heuristic_crash_analysis_verdict(*, info_text: str, re_run_text: str, triage_doc: dict[str, Any]) -> tuple[str, str, list[str]]:
-    signals: list[str] = []
-    label = _normalize_crash_triage_label(str(triage_doc.get("label") or ""))
-    reason = str(triage_doc.get("reason") or "").strip()
-    confidence = float(triage_doc.get("confidence") or 0.0)
-    if label == "harness_bug":
-        signals.append("crash_triage label is harness_bug")
-        if reason:
-            signals.append(f"crash_triage reason: {reason}")
-        return "false_positive", "triage indicates harness-side root cause", signals
-    if label == "upstream_bug":
-        signals.append("crash_triage label is upstream_bug")
-        if reason:
-            signals.append(f"crash_triage reason: {reason}")
-        return "real_bug", "triage indicates upstream bug with memory-safety signal", signals
-    if confidence >= 0.8 and label == "inconclusive":
-        signals.append("triage confidence is high but label remains inconclusive")
-    blob = "\n".join([info_text or "", re_run_text or ""]).lower()
-    if "addresssanitizer" in blob and "segv on unknown address 0x000000000000" in blob:
-        signals.append("asan null dereference signal observed in reproducible crash")
-    if "terminate called after throwing" in blob or "format_error" in blob:
-        signals.append("uncaught exception signal observed")
-    return "unknown", "insufficient confidence to classify false positive vs real bug", signals
-
-
 def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -8141,8 +9592,9 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
 
     label = "inconclusive"
     confidence = 0.35
-    reason = "triage output missing; fallback heuristic applied"
+    reason = "model output invalid/incomplete"
     signal_lines: list[str] = []
+    model_output_valid = False
     try:
         gen.patcher.run_codex_command(
             prompt,
@@ -8158,24 +9610,29 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
                 parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 parsed = {}
-        label = _normalize_crash_triage_label(parsed.get("label") if isinstance(parsed, dict) else "")
-        raw_conf = parsed.get("confidence") if isinstance(parsed, dict) else None
-        try:
-            confidence = max(0.0, min(float(raw_conf), 1.0))
-        except Exception:
-            confidence = 0.35
-        reason = str(parsed.get("reason") or "").strip() if isinstance(parsed, dict) else ""
-        signal_lines = [str(x).strip() for x in (parsed.get("evidence") or []) if str(x).strip()] if isinstance(parsed, dict) else []
-        if not reason:
-            reason = "triage JSON missing reason; fallback heuristic applied"
+        if isinstance(parsed, dict) and parsed:
+            label = _normalize_crash_triage_label(parsed.get("label"))
+            raw_conf = parsed.get("confidence")
+            try:
+                confidence = max(0.0, min(float(raw_conf), 1.0))
+            except Exception:
+                confidence = 0.35
+            reason = str(parsed.get("reason") or "").strip()
+            evidence = parsed.get("evidence")
+            if not evidence:
+                evidence = parsed.get("signals")
+            signal_lines = [str(x).strip() for x in (evidence or []) if str(x).strip()]
+            model_output_valid = bool(reason and signal_lines)
     except Exception as e:
-        reason = f"triage execution failed: {e}"
+        reason = f"model output invalid/incomplete: {e}"
+        model_output_valid = False
 
-    if label == "inconclusive" and not signal_lines:
-        h_label, h_conf, h_reason, h_signals = _heuristic_crash_triage(
-            info_text=info_text, analysis_text=analysis_text, stderr_tail=stderr_tail
-        )
-        label, confidence, reason, signal_lines = h_label, h_conf, h_reason, h_signals
+    if not model_output_valid:
+        label = "inconclusive"
+        confidence = min(confidence, 0.35)
+        if not reason.startswith("model output invalid/incomplete"):
+            reason = "model output invalid/incomplete"
+        signal_lines = ["model output invalid/incomplete"]
 
     triage_doc = {
         "label": label,
@@ -8202,6 +9659,23 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         triage_md.append("- (none)")
     triage_md_path.write_text("\n".join(triage_md) + "\n", encoding="utf-8")
 
+    constraint_count = int(state.get("constraint_memory_count") or 0)
+    constraint_path = str(_constraint_memory_path(repo_root))
+    if str(state.get("crash_signature") or "").strip():
+        try:
+            constraint_count, constraint_path, _ = _record_constraint_memory_observation(
+                repo_root=repo_root,
+                signature=str(state.get("crash_signature") or ""),
+                stage="crash-triage",
+                classification=label,
+                reason=reason,
+                evidence=signal_lines,
+                confidence=float(confidence),
+                repeats=int(state.get("same_crash_repeats") or 0) + 1,
+            )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"crash-triage: constraint memory update skipped: {exc}")
+
     out = {
         **state,
         "last_step": "crash-triage",
@@ -8213,6 +9687,8 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "crash_triage_signal_lines": signal_lines,
         "crash_triage_report_path": str(triage_md_path),
         "crash_triage_json_path": str(triage_json_path),
+        "constraint_memory_count": constraint_count,
+        "constraint_memory_path": constraint_path,
         "message": f"crash triage classified as {label}",
     }
     _wf_log(cast(dict[str, Any], out), f"<- crash-triage label={label} conf={confidence:.2f} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -8263,9 +9739,10 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
     context = "\n\n".join(context_parts)
 
     verdict = "unknown"
-    reason = "analysis output missing; fallback heuristic applied"
+    reason = "model output invalid/incomplete"
     evidence: list[str] = []
     recommended_action = "stop_report"
+    model_output_valid = False
     try:
         gen.patcher.run_codex_command(
             prompt,
@@ -8283,27 +9760,27 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
                     parsed_doc = loaded
             except Exception:
                 parsed_doc = {}
-        verdict = _normalize_crash_analysis_verdict(str(parsed_doc.get("verdict") or ""))
-        reason = str(parsed_doc.get("reason") or "").strip() or reason
-        evidence = [str(x).strip() for x in list(parsed_doc.get("evidence") or []) if str(x).strip()]
-        recommended_action = str(parsed_doc.get("recommended_action") or "").strip().lower() or (
-            "repair_harness" if verdict == "false_positive" else "stop_report"
-        )
+        if parsed_doc:
+            verdict = _normalize_crash_analysis_verdict(str(parsed_doc.get("verdict") or ""))
+            reason = str(parsed_doc.get("reason") or "").strip()
+            ev = parsed_doc.get("evidence")
+            if not ev:
+                ev = parsed_doc.get("signals")
+            evidence = [str(x).strip() for x in list(ev or []) if str(x).strip()]
+            recommended_action = str(parsed_doc.get("recommended_action") or "").strip().lower() or (
+                "repair_harness" if verdict == "false_positive" else "stop_report"
+            )
+            model_output_valid = bool(reason and evidence)
     except Exception as e:
-        reason = f"crash-analysis agent error: {e}"
+        reason = f"model output invalid/incomplete: {e}"
+        model_output_valid = False
 
-    if verdict == "unknown" or not evidence:
-        h_verdict, h_reason, h_signals = _heuristic_crash_analysis_verdict(
-            info_text=info_text,
-            re_run_text=re_run_text,
-            triage_doc=triage_doc,
-        )
-        if verdict == "unknown":
-            verdict = h_verdict
-        if not reason.strip() or "fallback heuristic" in reason.lower() or "agent error" in reason.lower():
-            reason = h_reason
-        if not evidence:
-            evidence = h_signals
+    if not model_output_valid:
+        verdict = "unknown"
+        recommended_action = "stop_report"
+        if not reason.startswith("model output invalid/incomplete"):
+            reason = "model output invalid/incomplete"
+        evidence = ["model output invalid/incomplete"]
 
     if not evidence:
         evidence = ["no concrete crash-analysis evidence captured"]
@@ -8335,6 +9812,24 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
     for line in evidence:
         md_lines.append(f"- {line}")
     analysis_md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    constraint_count = int(state.get("constraint_memory_count") or 0)
+    constraint_path = str(_constraint_memory_path(repo_root))
+    if str(state.get("crash_signature") or "").strip():
+        try:
+            analysis_confidence = 0.8 if verdict in {"false_positive", "real_bug"} else 0.45
+            constraint_count, constraint_path, _ = _record_constraint_memory_observation(
+                repo_root=repo_root,
+                signature=str(state.get("crash_signature") or ""),
+                stage="crash-analysis",
+                classification=verdict,
+                reason=reason,
+                evidence=evidence,
+                confidence=analysis_confidence,
+                repeats=int(state.get("same_crash_repeats") or 0) + 1,
+            )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"crash-analysis: constraint memory update skipped: {exc}")
 
     false_positive = verdict == "false_positive"
     restart_reason = "crash_false_positive" if false_positive else ""
@@ -8390,6 +9885,8 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
             if false_positive
             else []
         ),
+        "constraint_memory_count": constraint_count,
+        "constraint_memory_path": constraint_path,
         "message": "crash-analysis false_positive" if false_positive else "crash-analysis stop",
     }
     _wf_log(
@@ -9177,24 +10674,28 @@ def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSta
 
 
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     if bool(state.get("restart_to_plan")):
         return "plan"
-    if not (state.get("last_error") or "").strip():
+    err = dict(state.get("error") or {})
+    if not _has_error_payload(err):
         return "run"
     return "plan"
 
 
 def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     if bool(state.get("restart_to_plan")):
         return "plan"
     if bool(state.get("crash_found")):
         return "crash-triage"
-    terminal_reason = (state.get("run_terminal_reason") or "").strip().lower()
+    err = dict(state.get("error") or {})
+    terminal_reason = str(state.get("run_terminal_reason") or err.get("code") or "").strip().lower()
     # Coverage plateau is a coverage signal, not a hard run failure.
     # Let coverage-analysis decide in_place vs replan.
     if terminal_reason == "coverage_plateau":
         return "coverage-analysis"
-    run_error_kind = (state.get("run_error_kind") or "").strip().lower()
+    run_error_kind = str(state.get("run_error_kind") or err.get("code") or "").strip().lower()
     if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
         return "coverage-analysis"
     if run_error_kind in _FATAL_RUN_ERROR_KINDS:
@@ -9205,25 +10706,35 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
         return "stop"
-    if (state.get("last_error") or "").strip():
+    if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if bool(state.get("coverage_should_improve")):
         return "improve-harness"
+    if _auto_stop_policy() == "hard_fail_only":
+        return "run"
     return "stop"
 
 
 def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")):
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
         return "stop"
-    if (state.get("last_error") or "").strip():
+    if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if str(state.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
         state.get("coverage_replan_effective", True)
     ):
+        if _auto_stop_policy() == "hard_fail_only":
+            return "plan"
         return "stop"
     if bool(state.get("coverage_round_budget_exhausted")):
+        if _auto_stop_policy() == "hard_fail_only":
+            return "plan"
         return "stop"
     if bool(state.get("coverage_should_improve")):
         if str(state.get("coverage_improve_mode") or "").strip() == "in_place":
@@ -9232,14 +10743,28 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     return "stop"
 
 
+def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
+        return "stop"
+    if str(state.get("last_error") or err.get("message") or "").strip() and not bool(state.get("analysis_degraded")):
+        return "stop"
+    return "plan"
+
+
 def _route_after_plan_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")) or str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     return "synthesize"
 
 
 def _route_after_synthesize_state(state: FuzzWorkflowRuntimeState) -> str:
-    if bool(state.get("failed")) or (state.get("last_error") or "").strip():
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")) or str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     return "build"
 
@@ -9342,11 +10867,14 @@ def _route_after_crash_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     last_step = str(state.get("last_step") or "").strip().lower()
     if not last_step:
         return "stop"
     if last_step == "init":
         return _route_after_init_state(state)
+    if last_step == "analysis":
+        return _route_after_analysis_state(state)
     if last_step == "plan":
         return _route_after_plan_state(state)
     if last_step == "synthesize":
@@ -9381,6 +10909,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
     allowed = {
+        "analysis",
         "plan",
         "synthesize",
         "build",
@@ -9400,7 +10929,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         raw = "re-build"
     if raw in allowed:
         return raw
-    return "plan"
+    return "analysis"
 
 
 def _should_stage_stop(state: FuzzWorkflowRuntimeState, step_name: str) -> bool:
@@ -9418,6 +10947,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
     graph.add_node("init", _node_init)
+    graph.add_node("analysis", _node_analysis)
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
@@ -9441,6 +10971,10 @@ def build_fuzz_workflow() -> StateGraph:
         if _should_stage_stop(state, "plan"):
             return "stop"
         return "synthesize"
+
+    def _route_after_analysis(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_analysis_state(state)
+        return _apply_stage_stop_guard(state, "analysis", nxt)
 
     def _route_after_synthesize(state: FuzzWorkflowRuntimeState) -> str:
         if (state.get("last_error") or "").strip():
@@ -9499,6 +11033,7 @@ def build_fuzz_workflow() -> StateGraph:
         "init",
         _route_after_init_state,
         {
+            "analysis": "analysis",
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
@@ -9516,6 +11051,7 @@ def build_fuzz_workflow() -> StateGraph:
             "stop": END,
         },
     )
+    graph.add_conditional_edges("analysis", _route_after_analysis, {"plan": "plan", "stop": END})
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
     graph.add_conditional_edges(
@@ -9672,23 +11208,24 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "max_steps": max_steps,
         }
     )
-    out = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
+    out = _normalize_error_state(cast(dict[str, Any], raw) if isinstance(raw, dict) else {})
     try:
         _write_run_summary(out)
     except Exception:
         pass
     msg = str(out.get("message") or "Fuzzing completed.").strip()
     recommended_next = _recommended_next_step(cast(FuzzWorkflowRuntimeState, out))
-    if bool(out.get("failed")):
+    err = dict(out.get("error") or {})
+    if bool(out.get("failed")) or bool(err.get("terminal")):
         _wf_log(out, f"workflow end status=failed dt={_fmt_dt(time.perf_counter()-t0)}")
-        terminal_reason = str(out.get("run_terminal_reason") or "").strip() or str(
+        terminal_reason = str(out.get("run_terminal_reason") or err.get("code") or "").strip() or str(
             out.get("fix_build_terminal_reason") or ""
         ).strip()
         if terminal_reason:
             msg = f"{terminal_reason}: {msg}"
         raise RuntimeError(msg or "workflow failed")
     # If we stopped due to an error but didn't mark failed, still surface it.
-    last_error = str(out.get("last_error") or "").strip()
+    last_error = str(out.get("last_error") or err.get("message") or "").strip()
     if last_error and not bool(out.get("crash_found")):
         if stop_after_step and recommended_next != "stop":
             _wf_log(
@@ -9706,6 +11243,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
+        "error": dict(out.get("error") or {}),
         "repo_root": str(out.get("repo_root") or ""),
         "workflow_last_step": str(out.get("last_step") or ""),
         "workflow_active_step": str(out.get("next") or ""),
@@ -9727,7 +11265,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_loop_round": int(out.get("coverage_loop_round") or 0),
         "coverage_should_improve": bool(out.get("coverage_should_improve") or False),
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
+        "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "coverage_history": list(out.get("coverage_history") or []),
+        "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),
+        "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
+        "constraint_memory_count": int(out.get("constraint_memory_count") or 0),
+        "constraint_memory_path": str(out.get("constraint_memory_path") or ""),
         "plan_retry_reason": str(out.get("plan_retry_reason") or ""),
         "plan_targets_schema_valid_before_retry": bool(out.get("plan_targets_schema_valid_before_retry") or False),
         "plan_targets_schema_valid_after_retry": bool(out.get("plan_targets_schema_valid_after_retry") or False),

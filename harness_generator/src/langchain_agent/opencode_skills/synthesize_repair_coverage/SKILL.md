@@ -1,35 +1,50 @@
-# Stage Skill: synthesize_repair_coverage
+---
+name: synthesize_repair_coverage
+description: Repair scaffold for coverage replan cycles using seed and harness feedback as primary signals.
+compatibility: opencode
+metadata:
+  stage: synthesize-repair-coverage
+  owner: sherpa
+---
 
-## Stage Goal
-Repair scaffold files under `fuzz/` for coverage-improvement replan cycles.
+## What this skill does
+Applies coverage-oriented scaffold updates after replan decisions.
 
-## Required Inputs
-- coverage diagnostics from coordinator context (`coverage_*`, `repair_*`)
-- `SeedFeedback` and `HarnessFeedback` blocks from coordinator context (when provided)
+## When to use this skill
+Use this skill when `coverage-analysis` selected replan and returned coverage diagnostics.
+
+## Required inputs
+- coverage diagnostics (`coverage_*`, `repair_*`)
+- `SeedFeedback` and `HarnessFeedback` blocks (if provided)
 - current scaffold files under `fuzz/`
-- `fuzz/execution_plan.json` (if present)
-- `fuzz/harness_index.json` (if present)
+- `fuzz/execution_plan.json` and `fuzz/harness_index.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
-## Required Outputs
-- harness source under `fuzz/`
-- `fuzz/build.py` or `fuzz/build.sh`
-- `fuzz/README.md`
-- `fuzz/repo_understanding.json`
-- `fuzz/build_strategy.json`
-- `fuzz/build_runtime_facts.json`
-- `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
+## Required outputs
+- updated harness/scaffold files under `fuzz/`
+- `fuzz/harness_index.json` aligned with `fuzz/execution_plan.json`
 
-## Acceptance Criteria
-- edits are coverage-repair-driven (seed/modeling/call-path/depth), not cosmetic.
-- edits explicitly consume `SeedFeedback` and `HarnessFeedback` and link changes to those signals.
-- this cycle must include a strategy change from the previous failed coverage cycle.
-- no doc-only no-op patches; scaffold must materially change where needed.
-- `fuzz/execution_plan.json`, harness files, and `fuzz/harness_index.json` stay consistent.
-- preserve runtime viability for the next build/run cycle.
+## Workflow
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+2. Consume `SeedFeedback` and `HarnessFeedback`.
+3. Identify coverage bottlenecks and propose concrete fixes.
+4. Apply at least one strategy change from previous failed coverage cycle.
+5. Keep execution plan and harness index consistent.
 
-## Command Policy
+## Constraints
+- Edits must be coverage-repair-driven (seed/modeling/call-path/depth).
+- No doc-only no-op patch.
+- Preserve runtime viability for next build/run cycle.
+- If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
+
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write `fuzz/out/` into `./done`.
+## Acceptance checklist
+- Changes map to coverage diagnostics.
+- Strategy change is explicit.
+- Execution-plan/harness-index consistency is preserved.
+
+## Done contract
+- Write `fuzz/out/` into `./done`.

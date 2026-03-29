@@ -1,31 +1,46 @@
-# Stage Skill: fix_crash_upstream_bug
+---
+name: fix_crash_upstream_bug
+description: Apply minimal upstream source fixes for verified real crashes without masking behavior.
+compatibility: opencode
+metadata:
+  stage: fix-crash-upstream-bug
+  owner: sherpa
+---
 
-## Stage Goal
-Fix the upstream bug so the same crashing input no longer reproduces the fault.
+## What this skill does
+Apply minimal correctness/security fixes in upstream code paths for reproducible real bugs.
 
-## Required Inputs
+## When to use this skill
+Use this skill only when crash analysis indicates `real_bug` and fix should target upstream code.
+
+## Required inputs
 - `crash_info.md`
 - `crash_analysis.md`
-- crashing artifact metadata from coordinator
+- crash artifact metadata from coordinator context
 
-## Required Outputs
-- minimal correctness/security fix for upstream cause
+## Required outputs
+- minimal upstream fix patch (not harness workaround)
 
-## Key File Templates
-- patch should preserve harness behavior and keep crash reproduction semantics valid
-- avoid disabling checks or bypassing parsing paths
+## Workflow
+1. Locate the upstream fault path from crash evidence.
+2. Implement a minimal root-cause fix.
+3. Preserve harness behavior and crash-path semantics.
 
-## Acceptance Criteria
-- fix addresses root cause in upstream code path.
-- no broad refactor or behavior masking.
-- clear, minimal code delta.
-- must produce textual code changes; pure no-op is invalid.
-- do not bypass acceptance by tampering with `fuzz/repo_understanding.json` semantics.
-- when diagnostics include concrete file paths, issue explicit actions as `Read and fix <path>[:line]`.
+## Constraints
+- Avoid broad refactors and behavior masking.
+- Do not "fix" by disabling checks or bypassing parser logic.
+- Must produce textual code changes; pure no-op is invalid.
+- Do not bypass acceptance by tampering with `fuzz/repo_understanding.json`.
+- Use explicit actions when diagnostics include concrete paths: `Read and fix <path>[:line]`.
 
-## Command Policy
+## Command policy
 - Allowed: read-only commands only.
 - Forbidden: build/execute commands.
 
-## Done Sentinel Contract
-- write the key modified path into `./done`.
+## Acceptance checklist
+- Fix addresses upstream root cause directly.
+- Delta is minimal, targeted, and auditable.
+- No doc-only/no-op patch.
+
+## Done contract
+- Write one key modified path into `./done`.

@@ -16,7 +16,10 @@
 4. [`API_REFERENCE.md`](API_REFERENCE.md)
    当前后端 API 契约，供前端联调与任务控制使用。
 
-5. [`STANDARD_CHANGE_PROCESS.md`](STANDARD_CHANGE_PROCESS.md)
+5. [`PROMEFUZZ_MCP_TECHNICAL_SPEC.md`](PROMEFUZZ_MCP_TECHNICAL_SPEC.md)
+   PromeFuzz companion + HTTP MCP + embedding/RAG + 新增字段技术细节。
+
+6. [`STANDARD_CHANGE_PROCESS.md`](STANDARD_CHANGE_PROCESS.md)
    变更、验证、发布与文档同步流程。
 
 ## 部署与运行

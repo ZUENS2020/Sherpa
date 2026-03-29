@@ -55,6 +55,7 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         unzip \
         zip \
         xz-utils \
+        nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
     # Seed a local vcpkg template for repo-local bootstrap (repo/vcpkg at runtime).
@@ -143,6 +144,7 @@ COPY docker/requirements.web.txt /app/docker/requirements.web.txt
 RUN python -m pip install -r /app/docker/requirements.web.txt
 
 COPY . /app
+RUN python -m pip install -e /app/promefuzz-mcp
 
 RUN set -e; \
     groupadd --system --gid 10001 sherpa; \

@@ -46,6 +46,7 @@ export function ConfigPanel() {
   const [runBudgetUnlimited, setRunBudgetUnlimited] = useState(false);
   const [maxTokens, setMaxTokens] = useState('0');
   const [unlimitedRoundBudget, setUnlimitedRoundBudget] = useState('7200');
+  const [plateauIdleGrowthSec, setPlateauIdleGrowthSec] = useState('600');
 
   const [statusText, setStatusText] = useState('');
   const [statusType, setStatusType] = useState<'success' | 'error' | 'info'>('info');
@@ -67,20 +68,28 @@ export function ConfigPanel() {
         ? Math.floor(configuredUnlimitedRoundBudget)
         : 7200;
     setUnlimitedRoundBudget(String(normalizedUnlimitedRoundBudget));
+    const configuredPlateauWindow = Number(cfgQuery.data.sherpa_run_plateau_idle_growth_sec);
+    const normalizedPlateauWindow =
+      Number.isFinite(configuredPlateauWindow) && configuredPlateauWindow >= 30 && configuredPlateauWindow <= 86400
+        ? Math.floor(configuredPlateauWindow)
+        : 600;
+    setPlateauIdleGrowthSec(String(normalizedPlateauWindow));
   }, [cfgQuery.data]);
 
   const mergedConfig = useMemo<WebConfig | null>(() => {
     if (!cfgQuery.data) return null;
     const total = parseBudgetSeconds(totalBudget, 900, totalBudgetUnlimited);
     const unlimitedRoundBudgetSec = toNonNegativeInt(unlimitedRoundBudget, 7200);
+    const plateauWindowSec = toNonNegativeInt(plateauIdleGrowthSec, 600);
     return {
       ...cfgQuery.data,
       fuzz_time_budget: total,
       sherpa_run_unlimited_round_budget_sec: unlimitedRoundBudgetSec,
+      sherpa_run_plateau_idle_growth_sec: Math.max(30, Math.min(plateauWindowSec, 86400)),
       fuzz_use_docker: true,
       fuzz_docker_image: cfgQuery.data.fuzz_docker_image || 'auto',
     };
-  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, unlimitedRoundBudget]);
+  }, [cfgQuery.data, totalBudget, totalBudgetUnlimited, unlimitedRoundBudget, plateauIdleGrowthSec]);
 
   const handleSave = async () => {
     if (!mergedConfig) return;
@@ -208,6 +217,17 @@ export function ConfigPanel() {
             type="number"
             fullWidth
             helperText="0 表示完全不限时；建议默认 7200（2小时）"
+          />
+
+          <TextField
+            label="Plateau Idle Window (sec)"
+            value={plateauIdleGrowthSec}
+            onChange={(e) => setPlateauIdleGrowthSec(e.target.value)}
+            size="small"
+            type="number"
+            fullWidth
+            inputProps={{ min: 30, max: 86400 }}
+            helperText="平台期判定间隔，范围 30-86400 秒（默认 600）"
           />
 
           <Stack direction="row" spacing={1}>
