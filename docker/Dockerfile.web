@@ -55,6 +55,8 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         unzip \
         zip \
         xz-utils \
+        llvm-dev \
+        libclang-dev \
         nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -145,6 +147,11 @@ RUN python -m pip install -r /app/docker/requirements.web.txt
 
 COPY . /app
 RUN python -m pip install -e /app/promefuzz-mcp
+RUN set -e; \
+    cd /app/promefuzz-mcp; \
+    python -m promefuzz_mcp.server build; \
+    test -x /app/promefuzz-mcp/processor/build/bin/preprocessor; \
+    test -x /app/promefuzz-mcp/processor/build/bin/cgprocessor
 
 RUN set -e; \
     groupadd --system --gid 10001 sherpa; \
