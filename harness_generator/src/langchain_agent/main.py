@@ -680,8 +680,7 @@ def _analysis_companion_status_for_job(job_id: str) -> dict[str, object]:
     if "mcp_url" not in out:
         out["mcp_url"] = _k8s_analysis_companion_url(jid)
     if "mcp_ready" not in out:
-        state = str(out.get("state") or "").strip().lower()
-        out["mcp_ready"] = state in {"starting", "waiting_repo_root", "running", "ready", "idle", "degraded"}
+        out["mcp_ready"] = False
     if "last_error" not in out:
         out["last_error"] = out.get("error")
     return out
@@ -711,7 +710,40 @@ def _k8s_analysis_companion_timeout_sec() -> int:
         return 180
 
 
-def _k8s_wait_analysis_companion_result(job_id: str, pod_name: str, *, timeout_sec: int) -> dict[str, object]:
+def _k8s_analysis_require_rag_ready() -> bool:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_REQUIRE_RAG_READY", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _k8s_analysis_rag_wait_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC", "120") or "").strip()
+    try:
+        return max(10, min(int(raw), 3600))
+    except Exception:
+        return 120
+
+
+def _analysis_companion_is_ready(status_doc: dict[str, object], *, require_rag: bool) -> bool:
+    if not isinstance(status_doc, dict) or not status_doc:
+        return False
+    state = str(status_doc.get("state") or "").strip().lower()
+    if state in {"failed", "pod_failed", "pod_succeeded"}:
+        return False
+    mcp_ready = bool(status_doc.get("mcp_ready"))
+    if not mcp_ready:
+        return False
+    if not require_rag:
+        return True
+    return bool(status_doc.get("rag_ok"))
+
+
+def _k8s_wait_analysis_companion_result(
+    job_id: str,
+    pod_name: str,
+    *,
+    timeout_sec: int,
+    require_rag: bool = False,
+) -> dict[str, object]:
     start = time.time()
     poll_sec = max(1, min(10, int((os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_POLL_SEC") or "2").strip() or "2")))
     latest_status: dict[str, object] = {}
@@ -719,8 +751,10 @@ def _k8s_wait_analysis_companion_result(job_id: str, pod_name: str, *, timeout_s
         status_doc = _analysis_companion_status_for_job(job_id)
         if status_doc:
             latest_status = dict(status_doc)
+            if _analysis_companion_is_ready(status_doc, require_rag=require_rag):
+                return latest_status
             state = str(status_doc.get("state") or "").strip().lower()
-            if state in {"starting", "waiting_repo_root", "running", "ready", "idle", "degraded", "failed"}:
+            if state in {"degraded", "failed"}:
                 return latest_status
         rc, out, _ = _kubectl(["get", "pod", pod_name, "-o", "json"], timeout=10)
         if rc == 0:
@@ -737,7 +771,8 @@ def _k8s_wait_analysis_companion_result(job_id: str, pod_name: str, *, timeout_s
                     latest_status = {"state": f"pod_{phase}", "pod_phase": phase}
                 return latest_status
         time.sleep(poll_sec)
-    raise TimeoutError(f"analysis companion timeout after {timeout_sec}s")
+    wait_mode = "rag_ready" if require_rag else "mcp_ready"
+    raise TimeoutError(f"analysis companion timeout waiting for {wait_mode} after {timeout_sec}s")
 
 
 def _k8s_proxy_env_from_items() -> list[dict[str, object]]:
@@ -3946,12 +3981,13 @@ def _run_fuzz_job(
                                 job_id,
                                 companion_pod,
                                 timeout_sec=_k8s_analysis_companion_timeout_sec(),
+                                require_rag=False,
                             )
                             state_txt = str(status_doc.get("state") or "").strip()
                             backend_txt = str(status_doc.get("analysis_backend") or "").strip()
                             err_txt = str(status_doc.get("error") or "").strip()
                             mcp_url_txt = str(status_doc.get("mcp_url") or companion_url).strip()
-                            mcp_ready = bool(status_doc.get("mcp_ready"))
+                            mcp_ready = _analysis_companion_is_ready(status_doc, require_rag=False)
                             print(
                                 f"[job {job_id}] analysis companion ready "
                                 f"state={state_txt or '-'} backend={backend_txt or '-'} "
@@ -3982,6 +4018,44 @@ def _run_fuzz_job(
                     idx = dispatch_count
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
+                    if (
+                        stage == "plan"
+                        and companion_pod
+                        and _k8s_analysis_require_rag_ready()
+                    ):
+                        try:
+                            rag_status = _k8s_wait_analysis_companion_result(
+                                job_id,
+                                companion_pod,
+                                timeout_sec=_k8s_analysis_rag_wait_timeout_sec(),
+                                require_rag=True,
+                            )
+                            rag_ready = _analysis_companion_is_ready(rag_status, require_rag=True)
+                            mcp_url_txt = str(rag_status.get("mcp_url") or companion_url).strip()
+                            err_txt = str(rag_status.get("error") or rag_status.get("last_error") or "").strip()
+                            companion_mcp_ready = rag_ready
+                            _job_update(
+                                job_id,
+                                analysis_companion_url=mcp_url_txt or companion_url,
+                                analysis_companion_ready=rag_ready,
+                                analysis_companion_error=(None if rag_ready else (err_txt or "rag_not_ready")),
+                            )
+                            if not rag_ready:
+                                print(
+                                    f"[job {job_id}] analysis companion not rag-ready before plan "
+                                    f"(state={str(rag_status.get('state') or '-')} rag_ok={int(bool(rag_status.get('rag_ok')))}); "
+                                    "degraded continue without MCP injection"
+                                )
+                        except Exception as e:
+                            companion_mcp_ready = False
+                            _job_update(
+                                job_id,
+                                analysis_companion_ready=False,
+                                analysis_companion_error=f"rag_wait_timeout:{e}",
+                            )
+                            print(
+                                f"[job {job_id}] analysis companion rag wait failed (continuing): {e}"
+                            )
                     if stage == "analysis" and _has_reusable_analysis_context(current_repo_root):
                         analysis_context_path = _analysis_context_path_for_repo(current_repo_root)
                         reusable_path = str(analysis_context_path or "")

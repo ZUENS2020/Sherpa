@@ -243,15 +243,40 @@ def test_wait_analysis_companion_result_returns_first_available_state(monkeypatc
     def _fake_status(_job_id: str):
         calls["n"] += 1
         if calls["n"] < 2:
-            return {"state": "running"}
-        return {"state": "ready", "analysis_backend": "fallback-heuristic"}
+            return {"state": "running", "mcp_ready": False}
+        return {"state": "ready", "analysis_backend": "fallback-heuristic", "mcp_ready": True}
 
     monkeypatch.setattr(web_main, "_analysis_companion_status_for_job", _fake_status)
     monkeypatch.setattr(web_main, "_kubectl", lambda *a, **k: (0, '{"status":{"phase":"Running"}}', ""))
     monkeypatch.setattr(web_main.time, "sleep", lambda _s: None)
 
     out = web_main._k8s_wait_analysis_companion_result("job-1", "pod-1", timeout_sec=10)
-    assert out["state"] in {"running", "ready"}
+    assert out["state"] == "ready"
+    assert out["mcp_ready"] is True
+
+
+def test_wait_analysis_companion_result_require_rag(monkeypatch: pytest.MonkeyPatch):
+    calls = {"n": 0}
+
+    def _fake_status(_job_id: str):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return {"state": "ready", "mcp_ready": True, "rag_ok": False}
+        return {"state": "ready", "mcp_ready": True, "rag_ok": True}
+
+    monkeypatch.setattr(web_main, "_analysis_companion_status_for_job", _fake_status)
+    monkeypatch.setattr(web_main, "_kubectl", lambda *a, **k: (0, '{"status":{"phase":"Running"}}', ""))
+    monkeypatch.setattr(web_main.time, "sleep", lambda _s: None)
+
+    out = web_main._k8s_wait_analysis_companion_result(
+        "job-1",
+        "pod-1",
+        timeout_sec=10,
+        require_rag=True,
+    )
+    assert out["state"] == "ready"
+    assert out["mcp_ready"] is True
+    assert out["rag_ok"] is True
 
 
 def test_wait_analysis_companion_result_times_out(monkeypatch: pytest.MonkeyPatch):
