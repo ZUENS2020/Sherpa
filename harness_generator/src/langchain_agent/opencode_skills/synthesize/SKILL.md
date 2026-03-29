@@ -19,7 +19,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/execution_plan.json` (if present)
 - `fuzz/selected_targets.json` (if present)
 - `fuzz/observed_target.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - at least one harness source file under `fuzz/` (`*.c`, `*.cc`, `*.cpp`, `*.cxx`, or `*.java`) before docs/json completion
@@ -31,7 +31,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Read planning artifacts and lock target alignment first.
 3. Create harness source(s) before scaffold documentation (`harness-first contract`).
 4. Create build glue with runtime artifact discovery and compiler-by-suffix behavior.

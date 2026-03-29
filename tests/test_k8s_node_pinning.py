@@ -200,6 +200,13 @@ def test_analysis_companion_manifest_uses_promefuzz_runner(monkeypatch: pytest.M
     assert "SHERPA_JOB_ID" in env_names
     assert "SHERPA_OUTPUT_DIR" in env_names
     assert "SHERPA_PROMEFUZZ_RUN_ONCE" in env_names
+    env_from = doc["spec"]["containers"][0].get("envFrom") or []
+    assert isinstance(env_from, list)
+    assert any(
+        str(((x.get("secretRef") or {}) if isinstance(x, dict) else {}).get("name") or "")
+        == "sherpa-openrouter-embedding"
+        for x in env_from
+    )
 
 
 def test_enrich_job_view_reads_analysis_companion_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -207,7 +214,7 @@ def test_enrich_job_view_reads_analysis_companion_status(tmp_path: Path, monkeyp
     status_path = tmp_path / "_k8s_jobs" / job_id / "promefuzz" / "status.json"
     status_path.parent.mkdir(parents=True, exist_ok=True)
     status_path.write_text(
-        '{"state":"ready","analysis_backend":"promefuzz-mcp","candidate_count":7,"updated_at":"2026-03-29T00:00:00Z"}',
+        '{"state":"ready","analysis_backend":"promefuzz-mcp","candidate_count":7,"updated_at":"2026-03-29T00:00:00Z","rag_ok":true,"rag_document_count":12,"rag_chunk_count":51,"rag_knowledge_base_path":"/shared/output/_k8s_jobs/job-analysis-status-1/promefuzz/work/knowledge","embedding_provider":"openrouter","embedding_model":"text-embedding-3-small","embedding_ok":true,"rag_degraded":false,"rag_degraded_reason":"","semantic_query_count":8,"semantic_hit_count":6,"semantic_hit_rate":0.75,"cache_hit_rate":1.0}',
         encoding="utf-8",
     )
     monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(tmp_path))
@@ -217,6 +224,17 @@ def test_enrich_job_view_reads_analysis_companion_status(tmp_path: Path, monkeyp
     assert view["analysis_companion_state"] == "ready"
     assert view["analysis_companion_backend"] == "promefuzz-mcp"
     assert view["analysis_companion_candidate_count"] == 7
+    assert view["analysis_companion_rag_ok"] is True
+    assert view["analysis_companion_rag_document_count"] == 12
+    assert view["analysis_companion_rag_chunk_count"] == 51
+    assert view["analysis_companion_embedding_provider"] == "openrouter"
+    assert view["analysis_companion_embedding_model"] == "text-embedding-3-small"
+    assert view["analysis_companion_embedding_ok"] is True
+    assert view["analysis_companion_rag_degraded"] is False
+    assert view["analysis_companion_semantic_query_count"] == 8
+    assert view["analysis_companion_semantic_hit_count"] == 6
+    assert view["analysis_companion_semantic_hit_rate"] == pytest.approx(0.75)
+    assert view["analysis_companion_cache_hit_rate"] == pytest.approx(1.0)
 
 
 def test_wait_analysis_companion_result_returns_first_available_state(monkeypatch: pytest.MonkeyPatch):
@@ -250,6 +268,34 @@ def test_wait_analysis_companion_result_times_out(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(TimeoutError):
         web_main._k8s_wait_analysis_companion_result("job-1", "pod-1", timeout_sec=2)
+
+
+def test_k8s_start_analysis_companion_reuses_running_resources(monkeypatch: pytest.MonkeyPatch):
+    job_id = "job-reuse-123"
+    expected_name = web_main._k8s_analysis_companion_name(job_id)
+    calls: list[list[str]] = []
+
+    def _fake_kubectl(args, **_kwargs):
+        calls.append(list(args))
+        if args[:3] == ["get", "pod", expected_name]:
+            return (
+                0,
+                '{"status":{"phase":"Running"}}',
+                "",
+            )
+        if args[:3] == ["get", "service", expected_name]:
+            return (0, "ok", "")
+        raise AssertionError(f"unexpected kubectl call: {args}")
+
+    monkeypatch.setattr(web_main, "_kubectl", _fake_kubectl)
+    monkeypatch.setattr(web_main, "_k8s_analysis_companion_enabled", lambda: True)
+
+    pod, svc, url = web_main._k8s_start_analysis_companion(job_id)
+    assert pod == expected_name
+    assert svc == expected_name
+    assert expected_name in url
+    # In reuse path there should be no delete/apply calls.
+    assert all(cmd[0] == "get" for cmd in calls)
 
 
 def test_run_fuzz_job_reuses_analysis_context_on_reentry(

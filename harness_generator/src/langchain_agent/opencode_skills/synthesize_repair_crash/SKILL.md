@@ -18,14 +18,14 @@ Use this skill in repair mode for crash/repro failures.
 - crash/repro report tail and related error text (if provided)
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - updated harness/scaffold files under `fuzz/`
 - `fuzz/harness_index.json` aligned to execution plan
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Consume crash/repro evidence.
 3. Apply focused scaffold/harness repair for crash-path stability.
 4. Keep selected vs final runtime target relation explicit.

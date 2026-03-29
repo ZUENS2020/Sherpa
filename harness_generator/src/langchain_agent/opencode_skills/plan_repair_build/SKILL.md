@@ -17,7 +17,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - `repair_*` diagnostics from coordinator context
 - `repair_error_digest` (if provided)
 - `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - updated `fuzz/PLAN.md`
@@ -27,7 +27,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - `Known Issues` section in `fuzz/PLAN.md`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Read repair diagnostics.
 3. Identify root build failure pattern (compile/link/toolchain/path).
 4. Produce planning changes with at least one strategy change.

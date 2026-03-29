@@ -42,6 +42,23 @@ python -m promefuzz_mcp.server start \
 2. `extract_api_functions`：从 header + meta 中提取 API 函数集合。
 3. `build_library_callgraph`：构建基础调用边集合并导出 JSON。
 
+### 3) RAG 能力（OpenRouter Embedding，已实现）
+
+1. `init_knowledge_base`：真实初始化知识库（文档收集、切片、索引落盘）。
+2. `retrieve_documents`：优先使用 OpenRouter embedding 相似度检索；不可用时自动降级 lexical 检索。
+3. companion 会把知识库状态写入任务级状态文件：
+   - `embedding_provider/embedding_model/embedding_ok`
+   - `rag_degraded/rag_degraded_reason`
+   - `semantic_query_count/semantic_hit_rate/cache_hit_rate`
+   - `rag_ok`、文档数、chunk 数、知识库路径。
+
+默认运行策略：
+
+1. 默认仅启用上述预处理主线工具。
+2. `SHERPA_PROMEFUZZ_ENABLE_RAG=1`（默认）时启用 `init_knowledge_base/retrieve_documents`。
+3. `SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1`（默认）时启用 `comprehend_*` 语义工具。
+4. 语义工具输出统一结构：`claim/evidence[]/confidence/limitations/degraded/degraded_reason`。
+
 ### 3) 与 Sherpa 工作流的实际接入（已接入）
 
 当前主流程接线（代码已接入）：
@@ -72,14 +89,10 @@ python -m promefuzz_mcp.server start \
 3. `calculate_call_relevance`：当前为占位实现。
 4. complexity/incidental 等模块仍有 placeholder。
 
-### B. Comprehender / RAG
+### B. Comprehender（剩余增强项）
 
-1. `retrieve_documents`：当前未完成，返回空结果。
-2. `KnowledgeBase.retrieve(...)`：当前为占位，未形成真实向量检索闭环。
-3. `comprehend_library_purpose`：当前为固定模板输出。
-4. `comprehend_function_usage`：当前为固定模板输出。
-5. `comprehend_all_functions`：当前仅进度框架。
-6. `comprehend_function_relevance`：当前仅框架。
+1. 目前已提供证据化输出，但仍属于轻量启发式总结，尚未接完整推理模型链路。
+2. `comprehend_function_relevance` 当前基于 usage overlap 近似计算，后续可替换为更强语义模型。
 
 ### C. 其他工具
 
@@ -103,6 +116,13 @@ sudo apt-get install -y clang llvm libclang-dev nlohmann-json3-dev
 ```
 
 在 Sherpa 的 k8s 默认运行镜像中，这些依赖应在镜像构建阶段预装；`init` 仅做依赖检查，不在运行期安装。
+
+RAG embedding 运行时依赖（K8s secret）：
+
+1. `OPENROUTER_EMBEDDING_API_KEY`
+2. `OPENROUTER_EMBEDDING_MODEL`
+
+默认 secret 名：`sherpa-openrouter-embedding`（可通过 `SHERPA_K8S_OPENROUTER_EMBEDDING_SECRET_NAME` 覆盖）。
 
 ```bash
 cd promefuzz-mcp

@@ -17,7 +17,7 @@ Use this skill when `coverage-analysis` selects replan mode.
 - coverage diagnostics (`coverage_*`, `repair_*`)
 - `SeedFeedback` and `HarnessFeedback` blocks (if provided)
 - `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json`, `fuzz/harness_index.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - updated `fuzz/PLAN.md`
@@ -27,7 +27,7 @@ Use this skill when `coverage-analysis` selects replan mode.
 - `Known Issues` section in `fuzz/PLAN.md`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Read coverage diagnostics.
 3. Map seed/harness quality gaps to concrete actions.
 4. Produce at least one material strategy change.

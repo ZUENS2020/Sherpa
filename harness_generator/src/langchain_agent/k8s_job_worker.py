@@ -121,6 +121,12 @@ def _merge_opencode_mcp_servers(companion_url: str) -> None:
 
 
 def _resolve_analysis_companion_url(payload: dict, job_id: str) -> str:
+    enabled_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_ENABLED", "1") or "").strip().lower()
+    if enabled_raw not in {"1", "true", "yes", "on"}:
+        return ""
+    ready = payload.get("analysis_companion_ready")
+    if ready is not None and not bool(ready):
+        return ""
     explicit = str(payload.get("analysis_companion_url") or "").strip()
     if explicit:
         return explicit

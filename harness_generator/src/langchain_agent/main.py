@@ -459,6 +459,10 @@ def _k8s_analysis_companion_mcp_path() -> str:
     return raw
 
 
+def _k8s_openrouter_embedding_secret_name() -> str:
+    return (os.environ.get("SHERPA_K8S_OPENROUTER_EMBEDDING_SECRET_NAME", "sherpa-openrouter-embedding") or "").strip()
+
+
 def _k8s_analysis_companion_url(job_id: str) -> str:
     svc = _k8s_analysis_companion_service_name(job_id)
     ns = _k8s_namespace()
@@ -502,6 +506,10 @@ def _k8s_analysis_companion_manifest(*, pod_name: str, job_id: str) -> str:
         {"name": "SHERPA_PROMEFUZZ_MCP_URL", "value": mcp_url},
         {"name": "PYTHONPATH", "value": "/app/promefuzz-mcp"},
     ]
+    companion_env_from: list[dict[str, object]] = []
+    embedding_secret = _k8s_openrouter_embedding_secret_name()
+    if embedding_secret:
+        companion_env_from.append({"secretRef": {"name": embedding_secret, "optional": True}})
     for name in companion_env_names:
         value = str(os.environ.get(name) or "").strip()
         if value:
@@ -536,6 +544,7 @@ def _k8s_analysis_companion_manifest(*, pod_name: str, job_id: str) -> str:
                         "capabilities": {"drop": ["ALL"]},
                     },
                     "env": companion_env,
+                    "envFrom": companion_env_from,
                     "ports": [{"containerPort": mcp_port, "name": "mcp"}],
                     "volumeMounts": [
                         {"name": "shared-output", "mountPath": "/shared/output"},
@@ -586,6 +595,20 @@ def _k8s_start_analysis_companion(job_id: str) -> tuple[str, str, str]:
     pod_name = _k8s_analysis_companion_name(job_id)
     service_name = _k8s_analysis_companion_service_name(job_id)
     mcp_url = _k8s_analysis_companion_url(job_id)
+    pod_ok = False
+    svc_ok = False
+    pod_rc, pod_out, _ = _kubectl(["get", "pod", pod_name, "-o", "json"], timeout=15)
+    if pod_rc == 0:
+        try:
+            pod_doc = json.loads(pod_out)
+            phase = str(((pod_doc.get("status") or {}) if isinstance(pod_doc, dict) else {}).get("phase") or "").strip().lower()
+            pod_ok = phase == "running"
+        except Exception:
+            pod_ok = False
+    svc_rc, _, _ = _kubectl(["get", "service", service_name], timeout=15)
+    svc_ok = svc_rc == 0
+    if pod_ok and svc_ok:
+        return pod_name, service_name, mcp_url
     _kubectl(["delete", "pod", pod_name, "--ignore-not-found=true"], timeout=20)
     _kubectl(["delete", "service", service_name, "--ignore-not-found=true"], timeout=20)
     service_manifest = _k8s_analysis_companion_service_manifest(service_name=service_name, job_id=job_id)
@@ -633,8 +656,22 @@ def _analysis_companion_status_for_job(job_id: str) -> dict[str, object]:
         "updated_at",
         "repo_root",
         "error",
+        "last_error",
         "preprocess_path",
         "coverage_hints_path",
+        "rag_ok",
+        "rag_knowledge_base_path",
+        "rag_document_count",
+        "rag_chunk_count",
+        "embedding_provider",
+        "embedding_model",
+        "embedding_ok",
+        "rag_degraded",
+        "rag_degraded_reason",
+        "semantic_query_count",
+        "semantic_hit_count",
+        "semantic_hit_rate",
+        "cache_hit_rate",
         "mcp_url",
         "mcp_ready",
     ):
@@ -645,6 +682,8 @@ def _analysis_companion_status_for_job(job_id: str) -> dict[str, object]:
     if "mcp_ready" not in out:
         state = str(out.get("state") or "").strip().lower()
         out["mcp_ready"] = state in {"starting", "waiting_repo_root", "running", "ready", "idle", "degraded"}
+    if "last_error" not in out:
+        out["last_error"] = out.get("error")
     return out
 
 
@@ -3463,6 +3502,7 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("analysis_companion_ready", False)
     view.setdefault("analysis_companion_active", False)
     view.setdefault("analysis_companion_error", None)
+    view.setdefault("analysis_companion_last_error", None)
     view.setdefault("analysis_companion_stopped_at", None)
     view.setdefault("analysis_companion_state", "")
     view.setdefault("analysis_companion_backend", "")
@@ -3472,6 +3512,19 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("analysis_companion_status_error", "")
     view.setdefault("analysis_companion_preprocess_path", "")
     view.setdefault("analysis_companion_coverage_hints_path", "")
+    view.setdefault("analysis_companion_rag_ok", False)
+    view.setdefault("analysis_companion_rag_knowledge_base_path", "")
+    view.setdefault("analysis_companion_rag_document_count", 0)
+    view.setdefault("analysis_companion_rag_chunk_count", 0)
+    view.setdefault("analysis_companion_embedding_provider", "openrouter")
+    view.setdefault("analysis_companion_embedding_model", "")
+    view.setdefault("analysis_companion_embedding_ok", False)
+    view.setdefault("analysis_companion_rag_degraded", False)
+    view.setdefault("analysis_companion_rag_degraded_reason", "")
+    view.setdefault("analysis_companion_semantic_query_count", 0)
+    view.setdefault("analysis_companion_semantic_hit_count", 0)
+    view.setdefault("analysis_companion_semantic_hit_rate", 0.0)
+    view.setdefault("analysis_companion_cache_hit_rate", 0.0)
     # -- per-fuzzer performance metrics --
     view.setdefault("fuzz_metrics", None)
     view.setdefault("fuzz_metrics_ts", None)
@@ -3501,8 +3554,48 @@ def _enrich_job_view(view: dict) -> None:
         view["analysis_companion_updated_at"] = str(companion_status.get("updated_at") or "")
         view["analysis_companion_repo_root"] = str(companion_status.get("repo_root") or "")
         view["analysis_companion_status_error"] = str(companion_status.get("error") or "")
+        view["analysis_companion_last_error"] = str(
+            companion_status.get("last_error")
+            or companion_status.get("error")
+            or ""
+        )
         view["analysis_companion_preprocess_path"] = str(companion_status.get("preprocess_path") or "")
         view["analysis_companion_coverage_hints_path"] = str(companion_status.get("coverage_hints_path") or "")
+        view["analysis_companion_rag_ok"] = bool(companion_status.get("rag_ok"))
+        view["analysis_companion_rag_knowledge_base_path"] = str(companion_status.get("rag_knowledge_base_path") or "")
+        try:
+            view["analysis_companion_rag_document_count"] = int(companion_status.get("rag_document_count") or 0)
+        except Exception:
+            view["analysis_companion_rag_document_count"] = 0
+        try:
+            view["analysis_companion_rag_chunk_count"] = int(companion_status.get("rag_chunk_count") or 0)
+        except Exception:
+            view["analysis_companion_rag_chunk_count"] = 0
+        view["analysis_companion_embedding_provider"] = str(
+            companion_status.get("embedding_provider") or "openrouter"
+        )
+        view["analysis_companion_embedding_model"] = str(companion_status.get("embedding_model") or "")
+        view["analysis_companion_embedding_ok"] = bool(companion_status.get("embedding_ok"))
+        view["analysis_companion_rag_degraded"] = bool(companion_status.get("rag_degraded"))
+        view["analysis_companion_rag_degraded_reason"] = str(
+            companion_status.get("rag_degraded_reason") or ""
+        )
+        try:
+            view["analysis_companion_semantic_query_count"] = int(companion_status.get("semantic_query_count") or 0)
+        except Exception:
+            view["analysis_companion_semantic_query_count"] = 0
+        try:
+            view["analysis_companion_semantic_hit_count"] = int(companion_status.get("semantic_hit_count") or 0)
+        except Exception:
+            view["analysis_companion_semantic_hit_count"] = 0
+        try:
+            view["analysis_companion_semantic_hit_rate"] = float(companion_status.get("semantic_hit_rate") or 0.0)
+        except Exception:
+            view["analysis_companion_semantic_hit_rate"] = 0.0
+        try:
+            view["analysis_companion_cache_hit_rate"] = float(companion_status.get("cache_hit_rate") or 0.0)
+        except Exception:
+            view["analysis_companion_cache_hit_rate"] = 0.0
 
 
 def _derive_task_status(job: dict) -> dict:
@@ -3832,6 +3925,7 @@ def _run_fuzz_job(
                 except Exception:
                     max_stage_dispatches = 0
                 dispatch_count = 0
+                companion_mcp_ready = False
                 if mode == "k8s_job" and _k8s_analysis_companion_enabled():
                     try:
                         companion_pod, companion_service, companion_url = _k8s_start_analysis_companion(job_id)
@@ -3869,6 +3963,7 @@ def _run_fuzz_job(
                                 analysis_companion_ready=mcp_ready,
                                 analysis_companion_error=(err_txt or None),
                             )
+                            companion_mcp_ready = bool(mcp_ready)
                     except Exception as e:
                         print(f"[job {job_id}] analysis companion failed (continuing): {e}")
                         _job_update(
@@ -3877,6 +3972,7 @@ def _run_fuzz_job(
                             analysis_companion_active=False,
                             analysis_companion_ready=False,
                         )
+                        companion_mcp_ready = False
 
                 while current_stage:
                     stage = current_stage
@@ -3981,7 +4077,8 @@ def _run_fuzz_job(
                         "run_unlimited_round_budget_sec": int(
                             stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                         ),
-                        "analysis_companion_url": (companion_url or None),
+                        "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
+                        "analysis_companion_ready": bool(companion_mcp_ready),
                         "result_path": str(result_path),
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),

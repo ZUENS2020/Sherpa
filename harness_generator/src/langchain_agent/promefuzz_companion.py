@@ -355,6 +355,105 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
     return result
 
 
+def _run_rag_pipeline(repo_root: Path, companion_root: Path, api_functions: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "enabled": False,
+        "ok": False,
+        "error": "",
+        "embedding_provider": "openrouter",
+        "embedding_model": "",
+        "embedding_ok": False,
+        "rag_degraded": False,
+        "rag_degraded_reason": "",
+        "semantic_query_count": 0,
+        "semantic_hit_count": 0,
+        "semantic_hit_rate": 0.0,
+        "cache_hit_rate": 0.0,
+        "knowledge_base_path": "",
+        "document_count": 0,
+        "chunk_count": 0,
+        "queries": [],
+        "samples": [],
+    }
+    enable_rag = _env_int("SHERPA_PROMEFUZZ_ENABLE_RAG", 1, min_value=0, max_value=1) == 1
+    if not enable_rag:
+        out["error"] = "rag_disabled"
+        return out
+
+    root = Path(str(os.environ.get("SHERPA_PROMEFUZZ_MCP_ROOT") or "/app/promefuzz-mcp")).expanduser()
+    if not root.is_dir():
+        out["error"] = "promefuzz_mcp_root_missing"
+        return out
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    out["enabled"] = True
+
+    try:
+        from promefuzz_mcp.comprehender.knowledge import KnowledgeBase
+    except Exception as e:
+        out["error"] = f"rag_import_failed:{e}"
+        return out
+
+    document_paths: list[str] = []
+    for rel in ("README.md", "README", "CHANGELOG.md", "docs", "doc", "include", "src"):
+        p = repo_root / rel
+        if p.exists():
+            document_paths.append(str(p))
+    if not document_paths:
+        out["error"] = "rag_no_document_paths"
+        return out
+
+    kb_dir = companion_root / "work" / "knowledge"
+    kb = KnowledgeBase(document_paths=document_paths, output_path=str(kb_dir))
+    try:
+        kb.initialize()
+    except Exception as e:
+        out["error"] = f"rag_initialize_failed:{e}"
+        return out
+
+    queries: list[str] = []
+    for fn in api_functions[:8]:
+        fn_txt = str(fn or "").strip()
+        if fn_txt:
+            queries.append(f"usage of {fn_txt}")
+    if not queries:
+        queries = [f"{repo_root.name} parser", f"{repo_root.name} decoder", f"{repo_root.name} format"]
+
+    sample_rows: list[dict[str, Any]] = []
+    semantic_hit_count = 0
+    for query in queries[:8]:
+        rows = kb.retrieve(query=query, top_k=3)
+        if not rows:
+            continue
+        semantic_hit_count += 1
+        sample_rows.append({"query": query, "results": rows})
+
+    semantic_query_count = len(queries[:8])
+    semantic_hit_rate = (float(semantic_hit_count) / float(semantic_query_count)) if semantic_query_count > 0 else 0.0
+    cache_hit_rate = 1.0 if bool(getattr(kb, "cache_loaded", False)) else 0.0
+
+    out.update(
+        {
+            "ok": True,
+            "knowledge_base_path": str(kb_dir),
+            "document_count": len(kb.documents),
+            "chunk_count": len(kb.chunks),
+            "embedding_provider": str(getattr(kb, "embedding_provider", "openrouter") or "openrouter"),
+            "embedding_model": str(getattr(kb, "embedding_model_used", "") or ""),
+            "embedding_ok": bool(getattr(kb, "embedding_ok", False)),
+            "rag_degraded": bool(getattr(kb, "rag_degraded", False)),
+            "rag_degraded_reason": str(getattr(kb, "rag_degraded_reason", "") or ""),
+            "semantic_query_count": semantic_query_count,
+            "semantic_hit_count": semantic_hit_count,
+            "semantic_hit_rate": round(semantic_hit_rate, 6),
+            "cache_hit_rate": round(cache_hit_rate, 6),
+            "queries": queries[:8],
+            "samples": sample_rows[:8],
+        }
+    )
+    return out
+
+
 def _build_coverage_hints(
     repo_root: Path,
     inventory: RepoInventory,
@@ -427,6 +526,7 @@ def _run_once(job_id: str, output_root: Path, companion_root: Path) -> dict[str,
     inventory = _collect_repo_inventory(repo_root)
     fallback_candidates = _extract_symbol_candidates(repo_root)
     promefuzz_doc = _run_promefuzz_pipeline(repo_root, companion_root)
+    rag_doc = _run_rag_pipeline(repo_root, companion_root, list(promefuzz_doc.get("api_functions") or []))
 
     preprocess_doc = {
         "schema_version": 1,
@@ -442,6 +542,7 @@ def _run_once(job_id: str, output_root: Path, companion_root: Path) -> dict[str,
             "total_size_bytes": inventory.total_size_bytes,
         },
         "promefuzz": promefuzz_doc,
+        "rag": rag_doc,
         "fallback": {
             "candidate_count": len(fallback_candidates),
             "top_candidates": fallback_candidates[:40],
@@ -460,6 +561,19 @@ def _run_once(job_id: str, output_root: Path, companion_root: Path) -> dict[str,
         "preprocess_path": str(preprocess_path),
         "coverage_hints_path": str(coverage_hints_path),
         "promefuzz_ok": bool(promefuzz_doc.get("ok")),
+        "rag_ok": bool(rag_doc.get("ok")),
+        "rag_knowledge_base_path": str(rag_doc.get("knowledge_base_path") or ""),
+        "rag_document_count": int(rag_doc.get("document_count") or 0),
+        "rag_chunk_count": int(rag_doc.get("chunk_count") or 0),
+        "embedding_provider": str(rag_doc.get("embedding_provider") or "openrouter"),
+        "embedding_model": str(rag_doc.get("embedding_model") or ""),
+        "embedding_ok": bool(rag_doc.get("embedding_ok")),
+        "rag_degraded": bool(rag_doc.get("rag_degraded")),
+        "rag_degraded_reason": str(rag_doc.get("rag_degraded_reason") or ""),
+        "semantic_query_count": int(rag_doc.get("semantic_query_count") or 0),
+        "semantic_hit_count": int(rag_doc.get("semantic_hit_count") or 0),
+        "semantic_hit_rate": float(rag_doc.get("semantic_hit_rate") or 0.0),
+        "cache_hit_rate": float(rag_doc.get("cache_hit_rate") or 0.0),
     }
 
 
@@ -551,6 +665,19 @@ def main() -> int:
                         "analysis_backend": run_doc.get("analysis_backend"),
                         "candidate_count": run_doc.get("candidate_count"),
                         "promefuzz_ok": run_doc.get("promefuzz_ok"),
+                        "rag_ok": run_doc.get("rag_ok"),
+                        "rag_knowledge_base_path": run_doc.get("rag_knowledge_base_path"),
+                        "rag_document_count": run_doc.get("rag_document_count"),
+                        "rag_chunk_count": run_doc.get("rag_chunk_count"),
+                        "embedding_provider": run_doc.get("embedding_provider"),
+                        "embedding_model": run_doc.get("embedding_model"),
+                        "embedding_ok": run_doc.get("embedding_ok"),
+                        "rag_degraded": run_doc.get("rag_degraded"),
+                        "rag_degraded_reason": run_doc.get("rag_degraded_reason"),
+                        "semantic_query_count": run_doc.get("semantic_query_count"),
+                        "semantic_hit_count": run_doc.get("semantic_hit_count"),
+                        "semantic_hit_rate": run_doc.get("semantic_hit_rate"),
+                        "cache_hit_rate": run_doc.get("cache_hit_rate"),
                         "preprocess_path": run_doc.get("preprocess_path"),
                         "coverage_hints_path": run_doc.get("coverage_hints_path"),
                         "mcp_url": mcp_url,

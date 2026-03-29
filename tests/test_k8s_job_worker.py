@@ -194,6 +194,42 @@ def test_worker_applies_run_oom_retry_overrides_to_env(tmp_path: Path, monkeypat
     assert captured["docker_image"] is None
 
 
+def test_worker_skips_mcp_injection_when_companion_not_ready(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    runtime_dir = tmp_path / "runtime"
+    payload = {
+        "job_id": "job-companion-not-ready",
+        "repo_url": "https://github.com/fmtlib/fmt.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "analysis_companion_ready": False,
+        "analysis_companion_url": "http://sherpa-promefuzz-job.svc.cluster.local:18080/mcp",
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+    monkeypatch.setenv("SHERPA_RUNTIME_CONFIG_DIR", str(runtime_dir))
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.delenv("SHERPA_OPENCODE_MCP_URL", raising=False)
+    monkeypatch.delenv("SHERPA_OPENCODE_MCP_SERVERS_JSON", raising=False)
+
+    def _fake_fuzz_logic(**kwargs):
+        captured.update(kwargs)
+        cfg_path = Path(str(os.environ.get("OPENCODE_CONFIG") or ""))
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        assert "promefuzz" not in (data.get("mcp") or {})
+        assert os.environ.get("SHERPA_OPENCODE_MCP_URL") in {None, ""}
+        return {"ok": True}
+
+    monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
+    rc = k8s_job_worker.main()
+    assert rc == 0
+    assert captured["docker_image"] is None
+
+
 def test_worker_fails_fast_when_opencode_defunct_exceeds_threshold(tmp_path: Path, monkeypatch):
     result_path = tmp_path / "result.json"
     error_path = tmp_path / "error.txt"

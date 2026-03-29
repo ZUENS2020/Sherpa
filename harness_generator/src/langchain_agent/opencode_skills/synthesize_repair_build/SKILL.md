@@ -17,7 +17,7 @@ Use this skill in repair mode when the previous build failed.
 - `repair_*` diagnostics from coordinator context
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - harness source under `fuzz/`
@@ -29,7 +29,7 @@ Use this skill in repair mode when the previous build failed.
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Consume repair diagnostics.
 3. Apply a build-failure-driven strategy update (not cosmetic edits).
 4. Update scaffold/build glue and keep mappings consistent.

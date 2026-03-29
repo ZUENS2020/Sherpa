@@ -18,14 +18,14 @@ Use this skill when `coverage-analysis` selected replan and returned coverage di
 - `SeedFeedback` and `HarnessFeedback` blocks (if provided)
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` and `fuzz/harness_index.json` (if present)
-- MCP tools from task-scoped PromeFuzz companion (if available)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - updated harness/scaffold files under `fuzz/`
 - `fuzz/harness_index.json` aligned with `fuzz/execution_plan.json`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
 2. Consume `SeedFeedback` and `HarnessFeedback`.
 3. Identify coverage bottlenecks and propose concrete fixes.
 4. Apply at least one strategy change from previous failed coverage cycle.

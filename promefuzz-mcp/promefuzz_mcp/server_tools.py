@@ -3,6 +3,7 @@ Server tools - MCP tool definitions for PromeFuzz.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -11,6 +12,49 @@ from loguru import logger
 
 def register_tools(mcp):
     """Register all MCP tools."""
+
+    def _rag_enabled() -> bool:
+        raw = (os.environ.get("SHERPA_PROMEFUZZ_ENABLE_RAG") or "1").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _comprehender_enabled() -> bool:
+        raw = (os.environ.get("SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER") or "1").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    async def _yield_unavailable(tool_name: str) -> AsyncGenerator[dict, None]:
+        yield {
+            "status": "unavailable",
+            "tool": tool_name,
+            "message": "disabled_in_this_deployment: preprocessor-only mode",
+            "reason": "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+        }
+        yield {
+            "status": "success",
+            "tool": tool_name,
+            "enabled": False,
+            "results": [],
+        }
+
+    def _short_text(value: object, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    def _make_evidence(rows: list[dict[str, Any]], *, max_items: int = 5) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in rows[: max(1, int(max_items))]:
+            if not isinstance(row, dict):
+                continue
+            out.append(
+                {
+                    "chunk_id": str(row.get("chunk_id") or ""),
+                    "source_path": str(row.get("source_path") or ""),
+                    "score": float(row.get("score") or 0.0),
+                    "snippet": _short_text(row.get("snippet") or row.get("text") or "", 320),
+                }
+            )
+        return out
 
     # ===================== Preprocessor Tools =====================
 
@@ -170,7 +214,10 @@ def register_tools(mcp):
         Returns:
             Dictionary containing relevance scores and output file path
         """
-        from .preprocessor.relevance import TypeRelevance
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("calculate_type_relevance"):
+                yield item
+            return
 
         yield {"status": "running", "message": "Calculating type relevance..."}
 
@@ -212,7 +259,10 @@ def register_tools(mcp):
         Returns:
             Function information
         """
-        # TODO: Implement function info retrieval
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("get_function_info"):
+                yield item
+            return
 
         yield {
             "status": "success",
@@ -238,6 +288,11 @@ def register_tools(mcp):
         Returns:
             Dictionary containing knowledge base information and output path
         """
+        if not _rag_enabled():
+            async for item in _yield_unavailable("init_knowledge_base"):
+                yield item
+            return
+
         from .comprehender.knowledge import KnowledgeBase
 
         yield {"status": "starting", "message": "Initializing knowledge base..."}
@@ -253,8 +308,15 @@ def register_tools(mcp):
 
         yield {
             "status": "success",
+            "enabled": True,
             "output_path": str(kb_path),
             "document_count": len(kb.documents),
+            "chunk_count": len(kb.chunks),
+            "embedding_provider": str(getattr(kb, "embedding_provider", "openrouter") or "openrouter"),
+            "embedding_model": str(getattr(kb, "embedding_model_used", "") or ""),
+            "embedding_ok": bool(getattr(kb, "embedding_ok", False)),
+            "rag_degraded": bool(getattr(kb, "rag_degraded", False)),
+            "rag_degraded_reason": str(getattr(kb, "rag_degraded_reason", "") or ""),
         }
 
     @mcp.tool()
@@ -274,16 +336,30 @@ def register_tools(mcp):
         Returns:
             List of relevant excerpts
         """
+        if not _rag_enabled():
+            async for item in _yield_unavailable("retrieve_documents"):
+                yield item
+            return
+
         yield {"status": "running", "message": f"Retrieving documents for query: {query}"}
 
-        # TODO: Implement document retrieval
+        from .comprehender.knowledge import KnowledgeBase
+        kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
+        kb.initialize()
+        results = kb.retrieve(query=query, top_k=top_k)
 
         yield {"status": "completed", "message": "Documents retrieved"}
 
         yield {
             "status": "success",
+            "enabled": True,
             "query": query,
-            "results": [],
+            "results": results,
+            "embedding_provider": str(getattr(kb, "embedding_provider", "openrouter") or "openrouter"),
+            "embedding_model": str(getattr(kb, "embedding_model_used", "") or ""),
+            "embedding_ok": bool(getattr(kb, "embedding_ok", False)),
+            "rag_degraded": bool(getattr(kb, "rag_degraded", False)),
+            "rag_degraded_reason": str(getattr(kb, "rag_degraded_reason", "") or ""),
         }
 
     @mcp.tool()
@@ -299,13 +375,40 @@ def register_tools(mcp):
         Yields:
             Progress updates and final result
         """
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("comprehend_library_purpose"):
+                yield item
+            return
+
+        from .comprehender.knowledge import KnowledgeBase
+
         yield {"status": "retrieving", "message": "Retrieving library documentation..."}
+        kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
+        kb.initialize()
+        rows = kb.retrieve("library purpose architecture API usage", top_k=5)
+        evidence = _make_evidence(rows, max_items=5)
+        degraded = bool(getattr(kb, "rag_degraded", False)) or not evidence
+        reason = str(getattr(kb, "rag_degraded_reason", "") or "")
 
-        yield {"status": "analyzing", "message": "Analyzing with LLM..."}
+        claim = (
+            "Insufficient evidence to infer library purpose."
+            if not evidence
+            else f"Library purpose inferred from retrieved documentation across {len(evidence)} evidence chunk(s)."
+        )
+        confidence = max(0.1, min(0.95, 0.35 + 0.12 * len(evidence)))
+        limitations = []
+        if degraded:
+            limitations.append(reason or "rag_degraded_or_no_evidence")
 
+        yield {"status": "analyzing", "message": "Building evidence-based purpose summary..."}
         yield {
             "status": "completed",
-            "purpose": "A C++ library for parsing and writing JSON",
+            "claim": claim,
+            "evidence": evidence,
+            "confidence": round(confidence, 3),
+            "limitations": limitations,
+            "degraded": degraded,
+            "degraded_reason": (reason or "no_evidence"),
         }
 
     @mcp.tool()
@@ -323,14 +426,42 @@ def register_tools(mcp):
         Yields:
             Progress updates and final result
         """
-        yield {"status": "retrieving", "message": f"Retrieving docs for {function_name}..."}
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("comprehend_function_usage"):
+                yield item
+            return
 
-        yield {"status": "analyzing", "message": "Analyzing function usage..."}
+        from .comprehender.knowledge import KnowledgeBase
 
+        fname = str(function_name or "").strip()
+        yield {"status": "retrieving", "message": f"Retrieving docs for {fname}..."}
+        kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
+        kb.initialize()
+        rows = kb.retrieve(f"usage of {fname} parameters return errors", top_k=5)
+        evidence = _make_evidence(rows, max_items=5)
+        degraded = bool(getattr(kb, "rag_degraded", False)) or not evidence
+        reason = str(getattr(kb, "rag_degraded_reason", "") or "")
+
+        claim = (
+            f"No strong usage evidence found for `{fname}`."
+            if not evidence
+            else f"Usage pattern of `{fname}` inferred from retrieved docs."
+        )
+        confidence = max(0.1, min(0.95, 0.32 + 0.13 * len(evidence)))
+        limitations = []
+        if degraded:
+            limitations.append(reason or "rag_degraded_or_no_evidence")
+
+        yield {"status": "analyzing", "message": "Analyzing function usage with evidence..."}
         yield {
             "status": "completed",
-            "function": function_name,
-            "usage": "Parses JSON from string input",
+            "function": fname,
+            "claim": claim,
+            "evidence": evidence,
+            "confidence": round(confidence, 3),
+            "limitations": limitations,
+            "degraded": degraded,
+            "degraded_reason": (reason or "no_evidence"),
         }
 
     @mcp.tool()
@@ -348,20 +479,61 @@ def register_tools(mcp):
         Yields:
             Progress updates and final results
         """
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("comprehend_all_functions"):
+                yield item
+            return
+
+        from .comprehender.knowledge import KnowledgeBase
+
         functions = api_collection.get("functions", [])
         total = len(functions)
+        kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
+        kb.initialize()
+        degraded_global = bool(getattr(kb, "rag_degraded", False))
+        degraded_reason_global = str(getattr(kb, "rag_degraded_reason", "") or "")
 
         yield {"status": "starting", "message": f"Processing {total} functions..."}
-
+        results: dict[str, Any] = {}
         for i, func in enumerate(functions):
+            fname = ""
+            if isinstance(func, dict):
+                fname = str(func.get("name") or "").strip()
+            elif isinstance(func, str):
+                fname = str(func).strip()
+            if not fname:
+                continue
+            rows = kb.retrieve(f"usage of {fname} parameters errors", top_k=3)
+            evidence = _make_evidence(rows, max_items=3)
+            degraded = degraded_global or not evidence
+            reason = degraded_reason_global if degraded_global else ("no_evidence" if not evidence else "")
+            confidence = max(0.1, min(0.95, 0.3 + 0.18 * len(evidence)))
+            results[fname] = {
+                "claim": (
+                    f"No strong usage evidence found for `{fname}`."
+                    if not evidence
+                    else f"Usage pattern of `{fname}` inferred from retrieved docs."
+                ),
+                "evidence": evidence,
+                "confidence": round(confidence, 3),
+                "limitations": ([reason] if reason else []),
+                "degraded": bool(degraded),
+                "degraded_reason": reason,
+            }
             if i % 10 == 0:
                 yield {
                     "status": "progress",
-                    "message": f"Processed {i}/{total} functions",
-                    "progress": i / total,
+                    "message": f"Processed {i + 1}/{total} functions",
+                    "progress": round((i + 1) / max(1, total), 3),
                 }
 
-        yield {"status": "completed", "message": "All functions processed"}
+        yield {
+            "status": "completed",
+            "message": "All functions processed",
+            "results": results,
+            "degraded": bool(degraded_global),
+            "degraded_reason": degraded_reason_global,
+        }
 
     @mcp.tool()
     async def comprehend_function_relevance(
@@ -380,6 +552,56 @@ def register_tools(mcp):
         Yields:
             Progress updates and final results
         """
-        yield {"status": "running", "message": "Calculating semantic relevance..."}
+        if not _comprehender_enabled():
+            async for item in _yield_unavailable("comprehend_function_relevance"):
+                yield item
+            return
 
-        yield {"status": "completed", "message": "Relevance calculated"}
+        funcs: list[str] = []
+        for raw in (api_collection or {}).get("functions", []) if isinstance(api_collection, dict) else []:
+            if isinstance(raw, dict):
+                name = str(raw.get("name") or "").strip()
+            else:
+                name = str(raw or "").strip()
+            if name:
+                funcs.append(name)
+        uniq_funcs = funcs[:40]
+        usage_map = function_usages if isinstance(function_usages, dict) else {}
+
+        yield {"status": "running", "message": "Calculating semantic relevance..."}
+        edges: list[dict[str, Any]] = []
+        for i, left in enumerate(uniq_funcs):
+            left_usage = str((usage_map.get(left) or {}).get("claim") if isinstance(usage_map.get(left), dict) else usage_map.get(left) or "").lower()
+            left_tokens = {x for x in left_usage.split() if len(x) > 2}
+            for right in uniq_funcs[i + 1 : i + 8]:
+                right_usage = str((usage_map.get(right) or {}).get("claim") if isinstance(usage_map.get(right), dict) else usage_map.get(right) or "").lower()
+                right_tokens = {x for x in right_usage.split() if len(x) > 2}
+                if not left_tokens and not right_tokens:
+                    continue
+                overlap = len(left_tokens & right_tokens)
+                base = max(1, min(len(left_tokens), len(right_tokens)))
+                score = overlap / base
+                if score <= 0:
+                    continue
+                edges.append({"from": left, "to": right, "score": round(float(score), 4)})
+        edges = sorted(edges, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:80]
+        claim = (
+            "No strong semantic relation detected from available usage summaries."
+            if not edges
+            else f"Computed {len(edges)} relevance edge(s) from usage/purpose evidence."
+        )
+        evidence = [
+            {"source_path": "function_usages", "chunk_id": "", "score": float(e.get("score") or 0.0), "snippet": f"{e.get('from')} -> {e.get('to')}"}
+            for e in edges[:10]
+        ]
+        yield {
+            "status": "completed",
+            "claim": claim,
+            "edges": edges,
+            "evidence": evidence,
+            "confidence": round(0.2 + min(0.6, 0.02 * len(edges)), 3),
+            "limitations": ([] if edges else ["insufficient_usage_overlap"]),
+            "degraded": False,
+            "degraded_reason": "",
+            "library_purpose": _short_text(library_purpose, 360),
+        }

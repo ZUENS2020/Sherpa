@@ -3359,6 +3359,9 @@ def _collect_analysis_companion_context() -> tuple[dict[str, Any], str]:
         state_val = str(status_doc.get("state") or "").strip()
         backend_val = str(status_doc.get("analysis_backend") or "").strip()
         candidate_count = status_doc.get("candidate_count")
+        embedding_ok = status_doc.get("embedding_ok")
+        rag_degraded = status_doc.get("rag_degraded")
+        semantic_hit_rate = status_doc.get("semantic_hit_rate")
         if state_val:
             summary_parts.append(f"state={state_val}")
         if backend_val:
@@ -3366,6 +3369,15 @@ def _collect_analysis_companion_context() -> tuple[dict[str, Any], str]:
         if candidate_count is not None:
             try:
                 summary_parts.append(f"candidates={int(candidate_count)}")
+            except Exception:
+                pass
+        if embedding_ok is not None:
+            summary_parts.append(f"embedding_ok={int(bool(embedding_ok))}")
+        if rag_degraded is not None:
+            summary_parts.append(f"rag_degraded={int(bool(rag_degraded))}")
+        if semantic_hit_rate is not None:
+            try:
+                summary_parts.append(f"semantic_hit_rate={round(float(semantic_hit_rate), 3)}")
             except Exception:
                 pass
     hints_doc = ((artifacts.get("coverage_hints.json") or {}) if isinstance(artifacts, dict) else {}).get("json")
