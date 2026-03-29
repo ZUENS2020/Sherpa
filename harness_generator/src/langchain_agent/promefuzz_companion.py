@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
 import time
 import traceback
@@ -76,6 +77,14 @@ def _env_int(name: str, default: int, *, min_value: int = 0, max_value: int | No
     if max_value is not None and value > max_value:
         value = max_value
     return value
+
+
+def _is_mcp_server_ready(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3):
+            return True
+    except Exception:
+        return False
 
 
 def _dump_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -597,6 +606,7 @@ def main() -> int:
         mcp_path = f"/{mcp_path}"
 
     status_path = companion_root / "status.json"
+    mcp_ready = _is_mcp_server_ready(mcp_port)
     _write_status(
         status_path,
         {
@@ -608,7 +618,7 @@ def main() -> int:
             "mcp_url": mcp_url,
             "mcp_port": mcp_port,
             "mcp_path": mcp_path,
-            "mcp_ready": bool(mcp_url),
+            "mcp_ready": mcp_ready,
         },
     )
     print(
@@ -621,6 +631,7 @@ def main() -> int:
     while True:
         now = time.time()
         try:
+            mcp_ready = _is_mcp_server_ready(mcp_port)
             repo_root_now = _resolve_repo_root(job_id, output_root)
             have_outputs = (companion_root / "preprocess.json").is_file() and (companion_root / "coverage_hints.json").is_file()
             should_run = (
@@ -639,7 +650,7 @@ def main() -> int:
                         "job_id": job_id,
                         "companion_root": str(companion_root),
                         "mcp_url": mcp_url,
-                        "mcp_ready": bool(mcp_url),
+                        "mcp_ready": mcp_ready,
                     },
                 )
             elif should_run:
@@ -650,7 +661,7 @@ def main() -> int:
                         "job_id": job_id,
                         "repo_root": repo_root_now,
                         "mcp_url": mcp_url,
-                        "mcp_ready": bool(mcp_url),
+                        "mcp_ready": mcp_ready,
                     },
                 )
                 run_doc = _run_once(job_id, output_root, companion_root)
@@ -681,7 +692,7 @@ def main() -> int:
                         "preprocess_path": run_doc.get("preprocess_path"),
                         "coverage_hints_path": run_doc.get("coverage_hints_path"),
                         "mcp_url": mcp_url,
-                        "mcp_ready": bool(mcp_url),
+                        "mcp_ready": mcp_ready,
                     },
                 )
                 print(
@@ -701,7 +712,7 @@ def main() -> int:
                         "repo_root": repo_root_now,
                         "seconds_since_last_run": round(max(0.0, now - last_run_at), 2),
                         "mcp_url": mcp_url,
-                        "mcp_ready": bool(mcp_url),
+                        "mcp_ready": mcp_ready,
                     },
                 )
         except Exception as e:
@@ -714,7 +725,7 @@ def main() -> int:
                     "error": err,
                     "traceback": traceback.format_exc()[-4000:],
                     "mcp_url": mcp_url,
-                    "mcp_ready": bool(mcp_url),
+                    "mcp_ready": mcp_ready,
                 },
             )
             print(f"[promefuzz-companion] degraded: {err}", flush=True)

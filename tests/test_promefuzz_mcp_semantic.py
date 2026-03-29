@@ -38,13 +38,6 @@ class _DummyMCP:
         return _decorator
 
 
-async def _collect(gen):
-    out = []
-    async for item in gen:
-        out.append(item)
-    return out
-
-
 def test_init_knowledge_base_reports_embedding_degraded_without_key(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_EMBEDDING_API_KEY", raising=False)
     monkeypatch.setenv("OPENROUTER_EMBEDDING_MODEL", "text-embedding-3-small")
@@ -58,15 +51,12 @@ def test_init_knowledge_base_reports_embedding_degraded_without_key(tmp_path: Pa
 
     mcp = _DummyMCP()
     register_tools(mcp)
-    rows = asyncio.run(
-        _collect(
-            mcp.tools["init_knowledge_base"](
-                document_paths=[str(docs)],
-                output_path=str(kb_out),
-            )
+    final = asyncio.run(
+        mcp.tools["init_knowledge_base"](
+            document_paths=[str(docs)],
+            output_path=str(kb_out),
         )
     )
-    final = rows[-1]
     assert final.get("status") == "success"
     assert final.get("enabled") is True
     assert final.get("embedding_provider") == "openrouter"
@@ -89,16 +79,13 @@ def test_retrieve_documents_returns_rag_status_fields(tmp_path: Path, monkeypatc
 
     mcp = _DummyMCP()
     register_tools(mcp)
-    rows = asyncio.run(
-        _collect(
-            mcp.tools["retrieve_documents"](
-                query="inflate parser",
-                knowledge_base_id=str(kb_dir),
-                top_k=3,
-            )
+    final = asyncio.run(
+        mcp.tools["retrieve_documents"](
+            query="inflate parser",
+            knowledge_base_id=str(kb_dir),
+            top_k=3,
         )
     )
-    final = rows[-1]
     assert final.get("status") == "success"
     assert isinstance(final.get("results"), list)
     assert final.get("embedding_provider") == "openrouter"
@@ -125,15 +112,12 @@ def test_comprehend_function_usage_outputs_evidence_contract(tmp_path: Path, mon
 
     mcp = _DummyMCP()
     register_tools(mcp)
-    rows = asyncio.run(
-        _collect(
-            mcp.tools["comprehend_function_usage"](
-                function_name="inflate",
-                knowledge_base_id=str(kb_dir),
-            )
+    final = asyncio.run(
+        mcp.tools["comprehend_function_usage"](
+            function_name="inflate",
+            knowledge_base_id=str(kb_dir),
         )
     )
-    final = rows[-1]
     assert final.get("status") == "completed"
     assert isinstance(final.get("claim"), str) and final.get("claim")
     assert isinstance(final.get("evidence"), list)

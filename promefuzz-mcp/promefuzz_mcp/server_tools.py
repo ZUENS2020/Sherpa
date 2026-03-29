@@ -5,7 +5,7 @@ Server tools - MCP tool definitions for PromeFuzz.
 import json
 import os
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, Optional
 
 from loguru import logger
 
@@ -21,18 +21,14 @@ def register_tools(mcp):
         raw = (os.environ.get("SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER") or "1").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
-    async def _yield_unavailable(tool_name: str) -> AsyncGenerator[dict, None]:
-        yield {
-            "status": "unavailable",
-            "tool": tool_name,
-            "message": "disabled_in_this_deployment: preprocessor-only mode",
-            "reason": "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
-        }
-        yield {
+    def _unavailable_result(tool_name: str, reason: str) -> dict[str, Any]:
+        return {
             "status": "success",
             "tool": tool_name,
             "enabled": False,
             "results": [],
+            "degraded": True,
+            "degraded_reason": reason,
         }
 
     def _short_text(value: object, limit: int = 240) -> str:
@@ -63,7 +59,7 @@ def register_tools(mcp):
         source_paths: list[str],
         compile_commands_path: Optional[str] = None,
         output_dir: str = "./output/meta",
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Run AST preprocessing on source code to extract metadata.
 
@@ -77,20 +73,14 @@ def register_tools(mcp):
         """
         from .preprocessor.ast import ASTPreprocessor
 
-        yield {"status": "starting", "message": "Initializing AST preprocessor..."}
-
         preprocessor = ASTPreprocessor(
             source_paths=[Path(p) for p in source_paths],
             compile_commands_path=Path(compile_commands_path) if compile_commands_path else None,
         )
 
-        yield {"status": "running", "message": f"Processing {len(preprocessor.source_files)} source files..."}
-
         meta, output_file = preprocessor.run(output_dir=Path(output_dir))
 
-        yield {"status": "completed", "message": "AST preprocessing completed"}
-
-        yield {
+        return {
             "status": "success",
             "source_files": len(preprocessor.source_files),
             "classes": len(meta.meta.get("classes", {})),
@@ -103,7 +93,7 @@ def register_tools(mcp):
         header_paths: list[str],
         meta_path: str,
         output_path: Optional[str] = None,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Extract API functions from header files.
 
@@ -118,11 +108,7 @@ def register_tools(mcp):
         from .preprocessor.ast import Meta
         from .preprocessor.api_extractor import APIExtractor
 
-        yield {"status": "starting", "message": "Loading metadata..."}
-
         meta = Meta.load(Path(meta_path))
-
-        yield {"status": "running", "message": "Extracting API functions..."}
 
         extractor = APIExtractor(
             header_paths=[Path(p) for p in header_paths],
@@ -135,9 +121,7 @@ def register_tools(mcp):
 
         api_collection, saved_path = extractor.extract(output_path=Path(output_path))
 
-        yield {"status": "completed", "message": f"Extracted {api_collection.count} API functions"}
-
-        yield {
+        return {
             "status": "success",
             "count": api_collection.count,
             "functions": [f.to_dict() for f in api_collection.funcs],
@@ -150,7 +134,7 @@ def register_tools(mcp):
         compile_commands_path: Optional[str] = None,
         api_collection: dict = None,
         output_path: Optional[str] = None,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Build call graph from library source code.
 
@@ -164,8 +148,6 @@ def register_tools(mcp):
             Dictionary containing call graph data and output file path
         """
         from .preprocessor.callgraph import CallGraphBuilder
-
-        yield {"status": "running", "message": "Building library call graph..."}
 
         # Set default output path if not provided
         if output_path is None:
@@ -188,9 +170,7 @@ def register_tools(mcp):
 
         result, saved_path = builder.build(output_path=Path(output_path))
 
-        yield {"status": "completed", "message": "Call graph built"}
-
-        yield {
+        return {
             "status": "success",
             "nodes": result.get("nodes", []),
             "edges": result.get("edges", []),
@@ -202,7 +182,7 @@ def register_tools(mcp):
         api_collection: dict,
         meta_path: str,
         output_path: Optional[str] = None,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Calculate type-based relevance between API functions.
 
@@ -215,11 +195,10 @@ def register_tools(mcp):
             Dictionary containing relevance scores and output file path
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("calculate_type_relevance"):
-                yield item
-            return
-
-        yield {"status": "running", "message": "Calculating type relevance..."}
+            return _unavailable_result(
+                "calculate_type_relevance",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
         # Set default output path if not provided
         if output_path is None:
@@ -236,9 +215,7 @@ def register_tools(mcp):
             with open(output_file, "w") as f:
                 json.dump({"relevance": relevance}, f, indent=2)
 
-        yield {"status": "completed", "message": "Type relevance calculated"}
-
-        yield {
+        return {
             "status": "success",
             "relevance": relevance,
             "output_file": str(output_path),
@@ -248,7 +225,7 @@ def register_tools(mcp):
     async def get_function_info(
         function_location: str,
         info_repo_path: str,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Get detailed information about a function.
 
@@ -260,11 +237,12 @@ def register_tools(mcp):
             Function information
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("get_function_info"):
-                yield item
-            return
+            return _unavailable_result(
+                "get_function_info",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
-        yield {
+        return {
             "status": "success",
             "location": function_location,
             "name": "example_func",
@@ -277,7 +255,7 @@ def register_tools(mcp):
     async def init_knowledge_base(
         document_paths: list[str],
         output_path: str = "./output/knowledge",
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Initialize RAG knowledge base from documents.
 
@@ -289,13 +267,12 @@ def register_tools(mcp):
             Dictionary containing knowledge base information and output path
         """
         if not _rag_enabled():
-            async for item in _yield_unavailable("init_knowledge_base"):
-                yield item
-            return
+            return _unavailable_result(
+                "init_knowledge_base",
+                "set SHERPA_PROMEFUZZ_ENABLE_RAG=1 to enable this tool",
+            )
 
         from .comprehender.knowledge import KnowledgeBase
-
-        yield {"status": "starting", "message": "Initializing knowledge base..."}
 
         kb = KnowledgeBase(
             document_paths=document_paths,
@@ -304,9 +281,7 @@ def register_tools(mcp):
 
         success, kb_path = kb.initialize()
 
-        yield {"status": "completed", "message": "Knowledge base initialized"}
-
-        yield {
+        return {
             "status": "success",
             "enabled": True,
             "output_path": str(kb_path),
@@ -324,7 +299,7 @@ def register_tools(mcp):
         query: str,
         knowledge_base_id: str,
         top_k: int = 3,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Retrieve relevant document excerpts using RAG.
 
@@ -337,20 +312,17 @@ def register_tools(mcp):
             List of relevant excerpts
         """
         if not _rag_enabled():
-            async for item in _yield_unavailable("retrieve_documents"):
-                yield item
-            return
-
-        yield {"status": "running", "message": f"Retrieving documents for query: {query}"}
+            return _unavailable_result(
+                "retrieve_documents",
+                "set SHERPA_PROMEFUZZ_ENABLE_RAG=1 to enable this tool",
+            )
 
         from .comprehender.knowledge import KnowledgeBase
         kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
         kb.initialize()
         results = kb.retrieve(query=query, top_k=top_k)
 
-        yield {"status": "completed", "message": "Documents retrieved"}
-
-        yield {
+        return {
             "status": "success",
             "enabled": True,
             "query": query,
@@ -365,7 +337,7 @@ def register_tools(mcp):
     @mcp.tool()
     async def comprehend_library_purpose(
         knowledge_base_id: str,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Understand the overall purpose of the library.
 
@@ -376,13 +348,13 @@ def register_tools(mcp):
             Progress updates and final result
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("comprehend_library_purpose"):
-                yield item
-            return
+            return _unavailable_result(
+                "comprehend_library_purpose",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
         from .comprehender.knowledge import KnowledgeBase
 
-        yield {"status": "retrieving", "message": "Retrieving library documentation..."}
         kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
         kb.initialize()
         rows = kb.retrieve("library purpose architecture API usage", top_k=5)
@@ -400,8 +372,7 @@ def register_tools(mcp):
         if degraded:
             limitations.append(reason or "rag_degraded_or_no_evidence")
 
-        yield {"status": "analyzing", "message": "Building evidence-based purpose summary..."}
-        yield {
+        return {
             "status": "completed",
             "claim": claim,
             "evidence": evidence,
@@ -415,7 +386,7 @@ def register_tools(mcp):
     async def comprehend_function_usage(
         function_name: str,
         knowledge_base_id: str,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Understand the usage of a specific function.
 
@@ -427,14 +398,14 @@ def register_tools(mcp):
             Progress updates and final result
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("comprehend_function_usage"):
-                yield item
-            return
+            return _unavailable_result(
+                "comprehend_function_usage",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
         from .comprehender.knowledge import KnowledgeBase
 
         fname = str(function_name or "").strip()
-        yield {"status": "retrieving", "message": f"Retrieving docs for {fname}..."}
         kb = KnowledgeBase(document_paths=[], output_path=knowledge_base_id)
         kb.initialize()
         rows = kb.retrieve(f"usage of {fname} parameters return errors", top_k=5)
@@ -452,8 +423,7 @@ def register_tools(mcp):
         if degraded:
             limitations.append(reason or "rag_degraded_or_no_evidence")
 
-        yield {"status": "analyzing", "message": "Analyzing function usage with evidence..."}
-        yield {
+        return {
             "status": "completed",
             "function": fname,
             "claim": claim,
@@ -468,7 +438,7 @@ def register_tools(mcp):
     async def comprehend_all_functions(
         api_collection: dict,
         knowledge_base_id: str,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Understand usage of all functions in the API collection.
 
@@ -480,9 +450,10 @@ def register_tools(mcp):
             Progress updates and final results
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("comprehend_all_functions"):
-                yield item
-            return
+            return _unavailable_result(
+                "comprehend_all_functions",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
         from .comprehender.knowledge import KnowledgeBase
 
@@ -493,7 +464,6 @@ def register_tools(mcp):
         degraded_global = bool(getattr(kb, "rag_degraded", False))
         degraded_reason_global = str(getattr(kb, "rag_degraded_reason", "") or "")
 
-        yield {"status": "starting", "message": f"Processing {total} functions..."}
         results: dict[str, Any] = {}
         for i, func in enumerate(functions):
             fname = ""
@@ -520,14 +490,8 @@ def register_tools(mcp):
                 "degraded": bool(degraded),
                 "degraded_reason": reason,
             }
-            if i % 10 == 0:
-                yield {
-                    "status": "progress",
-                    "message": f"Processed {i + 1}/{total} functions",
-                    "progress": round((i + 1) / max(1, total), 3),
-                }
 
-        yield {
+        return {
             "status": "completed",
             "message": "All functions processed",
             "results": results,
@@ -540,7 +504,7 @@ def register_tools(mcp):
         api_collection: dict,
         library_purpose: str,
         function_usages: dict,
-    ) -> AsyncGenerator[dict, None]:
+    ) -> dict[str, Any]:
         """
         Calculate semantic relevance between functions.
 
@@ -553,9 +517,10 @@ def register_tools(mcp):
             Progress updates and final results
         """
         if not _comprehender_enabled():
-            async for item in _yield_unavailable("comprehend_function_relevance"):
-                yield item
-            return
+            return _unavailable_result(
+                "comprehend_function_relevance",
+                "set SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1 to enable this tool",
+            )
 
         funcs: list[str] = []
         for raw in (api_collection or {}).get("functions", []) if isinstance(api_collection, dict) else []:
@@ -568,7 +533,6 @@ def register_tools(mcp):
         uniq_funcs = funcs[:40]
         usage_map = function_usages if isinstance(function_usages, dict) else {}
 
-        yield {"status": "running", "message": "Calculating semantic relevance..."}
         edges: list[dict[str, Any]] = []
         for i, left in enumerate(uniq_funcs):
             left_usage = str((usage_map.get(left) or {}).get("claim") if isinstance(usage_map.get(left), dict) else usage_map.get(left) or "").lower()
@@ -594,7 +558,7 @@ def register_tools(mcp):
             {"source_path": "function_usages", "chunk_id": "", "score": float(e.get("score") or 0.0), "snippet": f"{e.get('from')} -> {e.get('to')}"}
             for e in edges[:10]
         ]
-        yield {
+        return {
             "status": "completed",
             "claim": claim,
             "edges": edges,

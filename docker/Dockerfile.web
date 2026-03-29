@@ -144,6 +144,7 @@ COPY docker/requirements.web.txt /app/docker/requirements.web.txt
 RUN python -m pip install -r /app/docker/requirements.web.txt
 
 COPY . /app
+RUN python -m pip install -e /app/promefuzz-mcp
 
 RUN set -e; \
     groupadd --system --gid 10001 sherpa; \
