@@ -4,7 +4,11 @@ Configuration management for PromeFuzz MCP.
 
 from pathlib import Path
 from typing import Any, Optional
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 from loguru import logger
 
 
