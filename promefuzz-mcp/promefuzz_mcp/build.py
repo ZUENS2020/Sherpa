@@ -93,7 +93,7 @@ class BinaryBuilder:
             return False
 
         import shutil
-        clang_install_dir = os.environ.get("CLANG_INSTALL_DIR") or "/usr/lib/llvm-18"
+        clang_install_dir = str(os.environ.get("CLANG_INSTALL_DIR") or "").strip()
         llvm_config_path = shutil.which("llvm-config")
         if llvm_config_path:
             result = subprocess.run(
@@ -103,11 +103,27 @@ class BinaryBuilder:
             )
             if result.returncode == 0:
                 clang_install_dir = result.stdout.strip()
+        if not clang_install_dir:
+            for candidate in (
+                "/usr/lib/llvm-18",
+                "/usr/lib/llvm-17",
+                "/usr/lib/llvm-16",
+                "/usr/lib/llvm-15",
+                "/usr/lib/llvm-14",
+                "/usr/lib/llvm",
+            ):
+                if Path(candidate).is_dir():
+                    clang_install_dir = candidate
+                    break
 
-        cmake_args = [
-            f"-DCMAKE_PREFIX_PATH={clang_install_dir}",
-            f"-DLLVM_DIR={clang_install_dir}/lib/cmake/llvm",
-        ]
+        cmake_args = []
+        if clang_install_dir:
+            cmake_args.extend(
+                [
+                    f"-DCMAKE_PREFIX_PATH={clang_install_dir}",
+                    f"-DLLVM_DIR={clang_install_dir}/lib/cmake/llvm",
+                ]
+            )
 
         cmake_cmd = [
             "cmake",
