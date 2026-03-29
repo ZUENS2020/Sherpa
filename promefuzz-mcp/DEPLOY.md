@@ -198,8 +198,6 @@ pip3 install --break-system-packages \
     click \
     fastmcp \
     tqdm \
-    chromadb \
-    sentence-transformers \
     openai \
     ollama \
     tiktoken \

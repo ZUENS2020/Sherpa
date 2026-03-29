@@ -122,6 +122,8 @@ RAG embedding 运行时依赖（K8s secret）：
 1. `OPENROUTER_EMBEDDING_API_KEY`
 2. `OPENROUTER_EMBEDDING_MODEL`
 
+默认安装不依赖本地 embedding 模型栈（不需要 `sentence-transformers/torch`，因此不会拉取 CUDA 相关依赖）。
+
 默认 secret 名：`sherpa-openrouter-embedding`（可通过 `SHERPA_K8S_OPENROUTER_EMBEDDING_SECRET_NAME` 覆盖）。
 
 ```bash
