@@ -96,6 +96,14 @@ python -m promefuzz_mcp.server start \
 
 ## 开发与调试
 
+系统依赖（C++ 处理器）：
+
+```bash
+sudo apt-get install -y clang llvm libclang-dev nlohmann-json3-dev
+```
+
+在 Sherpa 的 k8s 默认运行镜像中，这些依赖应在镜像构建阶段预装；`init` 仅做依赖检查，不在运行期安装。
+
 ```bash
 cd promefuzz-mcp
 pip install -e .
@@ -106,4 +114,3 @@ python -m promefuzz_mcp.server build
 # 检查二进制是否可用
 python -m promefuzz_mcp.server check
 ```
-

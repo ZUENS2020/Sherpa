@@ -7,10 +7,11 @@ A set of processors based on Clang AST, implemented with ASTMatchers, including:
 
 ## Build
 
-The processors rely on the clang and llvm libraries. You should have them installed on your system.
+The processors rely on clang/llvm libraries and nlohmann-json headers.
+Install them on your system first:
 
 ```bash
-sudo apt-get install clang llvm libclang-dev
+sudo apt-get install clang llvm libclang-dev nlohmann-json3-dev
 ```
 
 Or you can download a specific version from the [LLVM Download Page](https://github.com/llvm/llvm-project/releases).

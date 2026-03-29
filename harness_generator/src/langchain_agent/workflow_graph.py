@@ -3401,6 +3401,31 @@ class FuzzWorkflowInput:
     restart_to_plan_report_path: str = ""
 
 
+def _analysis_companion_enabled() -> bool:
+    raw = str(os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_ENABLED", "1") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _promefuzz_mcp_root_exists() -> bool:
+    root = Path(str(os.environ.get("SHERPA_PROMEFUZZ_MCP_ROOT") or "/app/promefuzz-mcp")).expanduser()
+    return root.exists() and root.is_dir()
+
+
+def _check_promefuzz_runtime_deps() -> tuple[bool, str]:
+    # PromeFuzz C++ processors now depend on system nlohmann-json3-dev.
+    candidates = [
+        Path("/usr/include/nlohmann/json.hpp"),
+        Path("/usr/local/include/nlohmann/json.hpp"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return True, ""
+    return (
+        False,
+        "missing system header nlohmann/json.hpp; install nlohmann-json3-dev in the runtime image",
+    )
+
+
 def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> init")
@@ -3426,6 +3451,11 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     max_len = int(max_len_raw) if max_len_raw is not None else 0
     docker_image = (state.get("docker_image") or "").strip() or None
     codex_cli = (os.environ.get("SHERPA_CODEX_CLI") or os.environ.get("CODEX_CLI") or "opencode").strip()
+
+    if _analysis_companion_enabled() and _promefuzz_mcp_root_exists():
+        dep_ok, dep_err = _check_promefuzz_runtime_deps()
+        if not dep_ok:
+            raise RuntimeError(f"init prerequisite failed: {dep_err}")
 
     raw_resume_repo_root = (state.get("resume_repo_root") or "").strip()
     workdir: Path | None = None

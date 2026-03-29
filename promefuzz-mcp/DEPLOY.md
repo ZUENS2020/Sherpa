@@ -724,7 +724,7 @@ Tools/promefuzz-mcp/
     │   ├── cgprocessor.hh        # 调用图头文件
     │   ├── processor.hh          # 共享类型定义
     │   ├── clang-common.hh       # Clang 公共头文件
-    │   ├── json.hpp              # JSON 库
+    │   ├── (system nlohmann-json3-dev) # JSON 头文件由系统包提供
     │   └── example/              # 示例代码
     └── build/
         ├── bin/                  # 编译输出
