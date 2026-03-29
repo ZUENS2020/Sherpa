@@ -146,6 +146,8 @@ def _build_fuzz_performance(run_details: list[dict[str, Any]], out: dict[str, An
         "coverage_plateau_streak": int(out.get("coverage_plateau_streak") or 0),
         "coverage_seed_profile": str(out.get("coverage_seed_profile") or ""),
         "coverage_quality_flags": list(out.get("coverage_quality_flags") or []),
+        "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "coverage_source_report": dict(out.get("coverage_source_report") or {}),
     }
 
@@ -258,6 +260,11 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "last_fuzzer": out.get("last_fuzzer"),
         "last_crash_artifact": out.get("last_crash_artifact"),
         "harness_error": harness_error,
+        "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),
+        "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
+        "constraint_memory_count": int(out.get("constraint_memory_count") or 0),
+        "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "fix_patch_path": out.get("fix_patch_path") or "",
         "fix_patch_files": out.get("fix_patch_files") or [],
         "fix_patch_bytes": out.get("fix_patch_bytes") or 0,

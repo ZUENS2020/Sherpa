@@ -1867,6 +1867,10 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_coverage_plateau_streak=int(payload.get("coverage_plateau_streak") or 0),
                 fuzz_coverage_seed_profile=str(payload.get("coverage_seed_profile") or ""),
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
+                fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
+                analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
+                target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
+                constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
             )
         except Exception:
             pass
@@ -3575,6 +3579,10 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_coverage_plateau_streak", 0)
     view.setdefault("fuzz_coverage_seed_profile", "")
     view.setdefault("fuzz_coverage_quality_flags", [])
+    view.setdefault("fuzz_coverage_bottleneck_kind", "")
+    view.setdefault("analysis_evidence_count", 0)
+    view.setdefault("target_scoring_enabled", False)
+    view.setdefault("constraint_memory_count", 0)
 
     companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
     if companion_status:
@@ -3802,6 +3810,10 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_plateau_streak": (active_child or job).get("fuzz_coverage_plateau_streak", 0),
                 "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
+                "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
+                "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
+                "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
+                "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)

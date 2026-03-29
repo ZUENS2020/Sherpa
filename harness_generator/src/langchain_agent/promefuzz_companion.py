@@ -628,6 +628,7 @@ def main() -> int:
 
     last_run_at = 0.0
     last_repo_root = ""
+    last_ready_fields: dict[str, Any] = {}
     while True:
         now = time.time()
         try:
@@ -667,30 +668,33 @@ def main() -> int:
                 run_doc = _run_once(job_id, output_root, companion_root)
                 last_run_at = now
                 last_repo_root = str(run_doc.get("repo_root") or repo_root_now)
+                last_ready_fields = {
+                    "analysis_backend": run_doc.get("analysis_backend"),
+                    "candidate_count": run_doc.get("candidate_count"),
+                    "promefuzz_ok": run_doc.get("promefuzz_ok"),
+                    "rag_ok": run_doc.get("rag_ok"),
+                    "rag_knowledge_base_path": run_doc.get("rag_knowledge_base_path"),
+                    "rag_document_count": run_doc.get("rag_document_count"),
+                    "rag_chunk_count": run_doc.get("rag_chunk_count"),
+                    "embedding_provider": run_doc.get("embedding_provider"),
+                    "embedding_model": run_doc.get("embedding_model"),
+                    "embedding_ok": run_doc.get("embedding_ok"),
+                    "rag_degraded": run_doc.get("rag_degraded"),
+                    "rag_degraded_reason": run_doc.get("rag_degraded_reason"),
+                    "semantic_query_count": run_doc.get("semantic_query_count"),
+                    "semantic_hit_count": run_doc.get("semantic_hit_count"),
+                    "semantic_hit_rate": run_doc.get("semantic_hit_rate"),
+                    "cache_hit_rate": run_doc.get("cache_hit_rate"),
+                    "preprocess_path": run_doc.get("preprocess_path"),
+                    "coverage_hints_path": run_doc.get("coverage_hints_path"),
+                }
                 _write_status(
                     status_path,
                     {
                         "state": "ready",
                         "job_id": job_id,
                         "repo_root": last_repo_root,
-                        "analysis_backend": run_doc.get("analysis_backend"),
-                        "candidate_count": run_doc.get("candidate_count"),
-                        "promefuzz_ok": run_doc.get("promefuzz_ok"),
-                        "rag_ok": run_doc.get("rag_ok"),
-                        "rag_knowledge_base_path": run_doc.get("rag_knowledge_base_path"),
-                        "rag_document_count": run_doc.get("rag_document_count"),
-                        "rag_chunk_count": run_doc.get("rag_chunk_count"),
-                        "embedding_provider": run_doc.get("embedding_provider"),
-                        "embedding_model": run_doc.get("embedding_model"),
-                        "embedding_ok": run_doc.get("embedding_ok"),
-                        "rag_degraded": run_doc.get("rag_degraded"),
-                        "rag_degraded_reason": run_doc.get("rag_degraded_reason"),
-                        "semantic_query_count": run_doc.get("semantic_query_count"),
-                        "semantic_hit_count": run_doc.get("semantic_hit_count"),
-                        "semantic_hit_rate": run_doc.get("semantic_hit_rate"),
-                        "cache_hit_rate": run_doc.get("cache_hit_rate"),
-                        "preprocess_path": run_doc.get("preprocess_path"),
-                        "coverage_hints_path": run_doc.get("coverage_hints_path"),
+                        **last_ready_fields,
                         "mcp_url": mcp_url,
                         "mcp_ready": mcp_ready,
                     },
@@ -711,6 +715,7 @@ def main() -> int:
                         "job_id": job_id,
                         "repo_root": repo_root_now,
                         "seconds_since_last_run": round(max(0.0, now - last_run_at), 2),
+                        **last_ready_fields,
                         "mcp_url": mcp_url,
                         "mcp_ready": mcp_ready,
                     },

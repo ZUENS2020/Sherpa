@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -104,7 +105,94 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert antlr_ctx.is_file()
     selected_targets = tmp_path / "fuzz" / "selected_targets.json"
     assert selected_targets.is_file()
+    selected_doc = json.loads(selected_targets.read_text(encoding="utf-8"))
+    assert selected_doc
+    assert isinstance(selected_doc[0].get("target_score_breakdown"), dict)
+    assert selected_doc[0].get("target_scoring_enabled") is True
+    assert out.get("target_scoring_enabled") is True
     assert "antlr_plan_context.json" in str(out.get("codex_hint") or "")
+
+
+def test_node_analysis_writes_analysis_evidence_index(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    antlr_ctx = fuzz_dir / "antlr_plan_context.json"
+    antlr_ctx.write_text(
+        json.dumps(
+            {
+                "candidate_functions": [
+                    {"name": "parse_zip", "file": "src/demo.c", "score": 9},
+                ],
+                "parser_rules": ["entry"],
+                "grammar_files": ["src/demo.g4"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    target_ctx = fuzz_dir / "target_analysis.json"
+    target_ctx.write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    {
+                        "name": "parse_zip",
+                        "api": "demo::parse_zip",
+                        "depth_score": 9,
+                        "runtime_viability": "high",
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        workflow_graph,
+        "_prepare_antlr_assist_context",
+        lambda _repo_root: (str(antlr_ctx), "antlr ok"),
+    )
+    monkeypatch.setattr(
+        workflow_graph,
+        "_prepare_target_analysis_context",
+        lambda _repo_root: (str(target_ctx), "target ok"),
+    )
+    monkeypatch.setattr(
+        workflow_graph,
+        "_collect_analysis_companion_context",
+        lambda: (
+            {
+                "status": {"state": "ready", "analysis_backend": "promefuzz", "rag_ok": True},
+                "preprocess": {
+                    "api_inventory": [{"api": "demo::parse_zip", "source_path": "src/demo.c", "summary": "entry api"}],
+                    "consumer_patterns": [{"pattern": "blob->parse_zip"}],
+                },
+                "coverage_hints": {
+                    "callgraph_summary": [{"summary": "entry -> parse_zip", "score": 0.8}],
+                    "semantic_evidence": [{"snippet": "parse_zip accepts raw bytes", "score": 0.91, "source_path": "README.md"}],
+                },
+            },
+            "companion ready",
+        ),
+    )
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: False)
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=SimpleNamespace())
+    out = workflow_graph._node_analysis({"generator": gen, "codex_hint": ""})
+
+    assert out["analysis_done"] is True
+    assert out["analysis_degraded"] is False
+    assert int(out.get("analysis_evidence_count") or 0) > 0
+    analysis_path = Path(str(out.get("analysis_context_path") or ""))
+    assert analysis_path.is_file()
+    analysis_doc = json.loads(analysis_path.read_text(encoding="utf-8"))
+    evidence_doc = dict(analysis_doc.get("analysis_evidence") or {})
+    summary = dict(evidence_doc.get("summary") or {})
+    assert int(summary.get("evidence_count") or 0) == int(out.get("analysis_evidence_count") or 0)
+    assert isinstance(evidence_doc.get("api_inventory"), list)
+    assert isinstance(evidence_doc.get("callgraph_summary"), list)
+    assert isinstance(evidence_doc.get("semantic_evidence"), list)
 
 
 def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path: Path, monkeypatch):

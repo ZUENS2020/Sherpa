@@ -211,15 +211,46 @@ class KnowledgeBase:
         data_rows = parsed.get("data")
         if not isinstance(data_rows, list):
             raise RuntimeError("openrouter_embedding_missing_data")
-        vectors: list[list[float]] = []
+        # Prefer index-aware mapping to stay compatible with providers that may
+        # return duplicated/expanded rows for a single input.
+        indexed_vectors: dict[int, list[float]] = {}
+        sequential_vectors: list[list[float]] = []
         for row in data_rows:
             if not isinstance(row, dict):
                 continue
             vec = self._normalize_vector(row.get("embedding"))
-            if vec:
-                vectors.append(vec)
-        if len(vectors) != len(texts):
+            if not vec:
+                continue
+            idx_raw = row.get("index")
+            try:
+                idx = int(idx_raw)
+            except Exception:
+                idx = -1
+            if 0 <= idx < len(texts):
+                indexed_vectors.setdefault(idx, vec)
+            else:
+                sequential_vectors.append(vec)
+        vectors: list[list[float]] = []
+        if indexed_vectors:
+            for i in range(len(texts)):
+                vec = indexed_vectors.get(i)
+                if vec:
+                    vectors.append(vec)
+            if len(vectors) < len(texts):
+                for vec in sequential_vectors:
+                    if len(vectors) >= len(texts):
+                        break
+                    vectors.append(vec)
+        else:
+            vectors = list(sequential_vectors)
+        if len(vectors) < len(texts):
             raise RuntimeError(f"openrouter_embedding_size_mismatch:{len(vectors)}!={len(texts)}")
+        if len(vectors) > len(texts):
+            logger.warning(
+                "openrouter returned extra embeddings; truncating extras "
+                f"({len(vectors)} -> {len(texts)})"
+            )
+            vectors = vectors[: len(texts)]
         return vectors
 
     def _build_chunk_embeddings(self) -> None:
