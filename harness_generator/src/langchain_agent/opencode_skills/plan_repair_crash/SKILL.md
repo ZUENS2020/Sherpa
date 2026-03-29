@@ -18,6 +18,7 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - `repair_error_digest` (if provided)
 - crash/repro summaries and report tails (if provided)
 - `fuzz/PLAN.md`, `fuzz/targets.json`, `fuzz/execution_plan.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available)
 
 ## Required outputs
 - updated `fuzz/PLAN.md`
@@ -27,10 +28,11 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - `Known Issues` section in `fuzz/PLAN.md`
 
 ## Workflow
-1. Read crash/repro diagnostics first.
-2. Explain selected target vs observed runtime/crash target relation.
-3. Propose a strategy change if signatures repeat.
-4. Update planning artifacts consistently.
+1. Query MCP evidence first when MCP is available.
+2. Read crash/repro diagnostics.
+3. Explain selected target vs observed runtime/crash target relation.
+4. Propose a strategy change if signatures repeat.
+5. Update planning artifacts consistently.
 
 ## Constraints
 - Avoid “repair” plans that only disable behavior.
@@ -43,6 +45,7 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - Default to public/stable APIs for harness logic.
 - If internal APIs are unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, prioritize replacing offending symbols first.
+- If MCP is unavailable, continue in degraded mode and explicitly record that in `fuzz/PLAN.md`.
 
 ## Command policy
 - Allowed: read-only commands only.

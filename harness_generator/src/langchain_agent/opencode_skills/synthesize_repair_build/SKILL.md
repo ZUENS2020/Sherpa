@@ -17,6 +17,7 @@ Use this skill in repair mode when the previous build failed.
 - `repair_*` diagnostics from coordinator context
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available)
 
 ## Required outputs
 - harness source under `fuzz/`
@@ -28,10 +29,11 @@ Use this skill in repair mode when the previous build failed.
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Workflow
-1. Consume repair diagnostics first.
-2. Apply a build-failure-driven strategy update (not cosmetic edits).
-3. Update scaffold/build glue and keep mappings consistent.
-4. Ensure this round differs from the previous failed strategy.
+1. Query MCP evidence first when MCP is available.
+2. Consume repair diagnostics.
+3. Apply a build-failure-driven strategy update (not cosmetic edits).
+4. Update scaffold/build glue and keep mappings consistent.
+5. Ensure this round differs from the previous failed strategy.
 
 ## Constraints
 - No doc-only no-op patches.
@@ -44,6 +46,7 @@ Use this skill in repair mode when the previous build failed.
 - Public/stable APIs are mandatory by default.
 - If non-public API is unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, replace offending symbols first.
+- If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 
 ## Command policy
 - Allowed: read-only commands only.

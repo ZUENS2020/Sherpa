@@ -731,7 +731,7 @@ def test_route_after_init_resumes_from_requested_step() -> None:
     assert route == "run"
 
 
-def test_route_after_init_defaults_to_plan_for_invalid_resume_step() -> None:
+def test_route_after_init_defaults_to_analysis_for_invalid_resume_step() -> None:
     route = workflow_graph._route_after_init_state(
         {
             "failed": False,
@@ -739,7 +739,16 @@ def test_route_after_init_defaults_to_plan_for_invalid_resume_step() -> None:
             "resume_from_step": "unknown-step",
         }
     )
-    assert route == "plan"
+    assert route == "analysis"
+
+
+def test_route_after_analysis_goes_to_plan_on_success_or_degraded() -> None:
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "", "analysis_degraded": False}
+    ) == "plan"
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "analysis failed", "analysis_degraded": True}
+    ) == "plan"
 
 
 def test_fix_build_hotfixes_libfuzzer_main_conflict(tmp_path: Path):
@@ -1649,3 +1658,32 @@ def test_fix_build_rule_c_compiler_for_cpp_source_mismatch(tmp_path: Path, monke
     assert "c_compiler_for_cpp_source_mismatch" in (out.get("fix_build_rule_hits") or [])
     txt = build_py.read_text(encoding="utf-8")
     assert "clang++" in txt
+
+
+def test_collect_analysis_companion_context_includes_status_summary(tmp_path: Path, monkeypatch):
+    job_id = "job-analysis-1"
+    companion_root = tmp_path / "_k8s_jobs" / job_id / "promefuzz"
+    companion_root.mkdir(parents=True, exist_ok=True)
+    (companion_root / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "ready",
+                "analysis_backend": "promefuzz-mcp",
+                "candidate_count": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (companion_root / "coverage_hints.json").write_text(
+        json.dumps({"recommended_targets": [{"name": "inflate"}, {"name": "deflate"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHERPA_JOB_ID", job_id)
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(tmp_path))
+
+    doc, summary = workflow_graph._collect_analysis_companion_context()
+
+    assert doc.get("companion_root")
+    assert "state=ready" in summary
+    assert "backend=promefuzz-mcp" in summary
+    assert "hint_targets=2" in summary

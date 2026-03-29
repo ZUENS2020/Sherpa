@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +154,7 @@ def test_k8s_stage_wait_timeout_run_applies_seed_retry_multiplier(monkeypatch: p
 def test_normalize_resume_step_preserves_stop_signal():
     assert web_main._normalize_resume_step("stop") == "stop"
     assert web_main._normalize_resume_step("STOP") == "stop"
-    assert web_main._normalize_resume_step(None) == "plan"
+    assert web_main._normalize_resume_step(None) == "analysis"
 
 
 def test_estimate_run_fuzzer_count_prefers_fuzz_out_executables(tmp_path: Path):
@@ -180,3 +181,149 @@ def test_estimate_run_fuzzer_count_falls_back_to_execution_plan(tmp_path: Path):
     )
 
     assert web_main._estimate_run_fuzzer_count(str(repo_root)) == 3
+
+
+def test_analysis_companion_manifest_uses_promefuzz_runner(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("SHERPA_K8S_ANALYSIS_COMPANION_COMMAND", raising=False)
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", "/shared/output")
+    manifest = web_main._k8s_analysis_companion_manifest(
+        pod_name="sherpa-promefuzz-job1",
+        job_id="job-123",
+    )
+    doc = yaml.safe_load(manifest)
+    assert isinstance(doc, dict)
+    assert doc["spec"]["restartPolicy"] == "Never"
+    cmd = doc["spec"]["containers"][0]["command"][-1]
+    assert "promefuzz_companion.py" in cmd
+    env = doc["spec"]["containers"][0]["env"]
+    env_names = {str(item.get("name")) for item in env}
+    assert "SHERPA_JOB_ID" in env_names
+    assert "SHERPA_OUTPUT_DIR" in env_names
+    assert "SHERPA_PROMEFUZZ_RUN_ONCE" in env_names
+
+
+def test_enrich_job_view_reads_analysis_companion_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    job_id = "job-analysis-status-1"
+    status_path = tmp_path / "_k8s_jobs" / job_id / "promefuzz" / "status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        '{"state":"ready","analysis_backend":"promefuzz-mcp","candidate_count":7,"updated_at":"2026-03-29T00:00:00Z"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(tmp_path))
+    view = {"id": job_id}
+    web_main._enrich_job_view(view)
+
+    assert view["analysis_companion_state"] == "ready"
+    assert view["analysis_companion_backend"] == "promefuzz-mcp"
+    assert view["analysis_companion_candidate_count"] == 7
+
+
+def test_wait_analysis_companion_result_returns_first_available_state(monkeypatch: pytest.MonkeyPatch):
+    calls = {"n": 0}
+
+    def _fake_status(_job_id: str):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return {"state": "running"}
+        return {"state": "ready", "analysis_backend": "fallback-heuristic"}
+
+    monkeypatch.setattr(web_main, "_analysis_companion_status_for_job", _fake_status)
+    monkeypatch.setattr(web_main, "_kubectl", lambda *a, **k: (0, '{"status":{"phase":"Running"}}', ""))
+    monkeypatch.setattr(web_main.time, "sleep", lambda _s: None)
+
+    out = web_main._k8s_wait_analysis_companion_result("job-1", "pod-1", timeout_sec=10)
+    assert out["state"] in {"running", "ready"}
+
+
+def test_wait_analysis_companion_result_times_out(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(web_main, "_analysis_companion_status_for_job", lambda _job_id: {})
+    monkeypatch.setattr(web_main, "_kubectl", lambda *a, **k: (0, '{"status":{"phase":"Running"}}', ""))
+    now = {"t": 0.0}
+
+    def _fake_time():
+        now["t"] += 1.5
+        return now["t"]
+
+    monkeypatch.setattr(web_main.time, "time", _fake_time)
+    monkeypatch.setattr(web_main.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TimeoutError):
+        web_main._k8s_wait_analysis_companion_result("job-1", "pod-1", timeout_sec=2)
+
+
+def test_run_fuzz_job_reuses_analysis_context_on_reentry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    repo_root = tmp_path / "repo"
+    (repo_root / "fuzz").mkdir(parents=True, exist_ok=True)
+    analysis_context = repo_root / "fuzz" / "analysis_context.json"
+
+    request = web_main.fuzz_model(
+        code_url="https://github.com/example/repo.git",
+        max_tokens=0,
+        total_duration=-1,
+        single_duration=-1,
+    )
+    cfg = web_main.WebPersistentConfig()
+
+    latest_job: dict[str, object] = {}
+
+    def _fake_job_update(_job_id: str, **kwargs):
+        latest_job.update(kwargs)
+
+    monkeypatch.setattr(web_main, "_job_update", _fake_job_update)
+    monkeypatch.setattr(web_main, "_job_log_path", lambda _job_id: tmp_path / "job.log")
+    monkeypatch.setattr(web_main, "_is_cancel_requested", lambda _job_id: False)
+    monkeypatch.setattr(web_main, "_resolve_job_docker_policy", lambda _request, _cfg: (False, ""))
+    monkeypatch.setattr(web_main, "_executor_mode", lambda: "k8s_job")
+    monkeypatch.setattr(web_main, "_k8s_stage_wait_timeout_sec", lambda **_kwargs: 30)
+    monkeypatch.setattr(web_main, "_k8s_node_can_run_job", lambda _node: (True, "node_ready"))
+    monkeypatch.setattr(web_main, "_k8s_analysis_companion_enabled", lambda: False)
+
+    dispatched_stages: list[str] = []
+    plan_count = {"n": 0}
+
+    def _fake_execute_k8s_job(*, payload, **_kwargs):
+        stage = str(payload.get("stop_after_step") or "")
+        dispatched_stages.append(stage)
+        if stage == "analysis":
+            analysis_context.write_text('{"generated_at": 1}\n', encoding="utf-8")
+            return (
+                {
+                    "repo_root": str(repo_root),
+                    "workflow_recommended_next": "plan",
+                    "analysis_done": True,
+                },
+                "node-a",
+            )
+        if stage == "plan":
+            plan_count["n"] += 1
+            next_step = "analysis" if plan_count["n"] == 1 else "stop"
+            return (
+                {
+                    "repo_root": str(repo_root),
+                    "workflow_recommended_next": next_step,
+                },
+                "node-a",
+            )
+        raise AssertionError(f"unexpected stage dispatched: {stage}")
+
+    monkeypatch.setattr(web_main, "_execute_k8s_job", _fake_execute_k8s_job)
+
+    web_main._run_fuzz_job("job-analysis-reuse-1", request, cfg, resumed=False, trigger="new")
+
+    assert dispatched_stages == ["analysis", "plan", "plan"]
+    result = latest_job.get("result")
+    assert isinstance(result, dict)
+    stage_results = result.get("stage_results")
+    assert isinstance(stage_results, list)
+    reused_entries = [
+        row
+        for row in stage_results
+        if isinstance(row, dict)
+        and str(row.get("stage") or "") == "analysis"
+        and bool((row.get("result") or {}).get("analysis_reused"))
+    ]
+    assert len(reused_entries) == 1
+    assert str(latest_job.get("status") or "") == "success"

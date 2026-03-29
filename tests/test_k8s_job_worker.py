@@ -129,6 +129,7 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         "max_len": 1000,
         "time_budget": 900,
         "run_time_budget": 900,
+        "analysis_companion_url": "http://sherpa-promefuzz-job-bootstrap.sherpa-dev.svc.cluster.local:18080/mcp",
         "model": "MiniMax-M2.7-highspeed",
         "result_path": str(result_path),
         "error_path": str(error_path),
@@ -150,6 +151,8 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         provider = data["provider"]["minimax"]
         assert provider["options"]["baseURL"] == "https://api.minimaxi.com/anthropic/v1"
         assert provider["options"]["apiKey"] == "test-minimax-key"
+        assert data.get("mcp", {}).get("promefuzz", {}).get("url") == payload["analysis_companion_url"]
+        assert os.environ.get("SHERPA_OPENCODE_MCP_URL") == payload["analysis_companion_url"]
         return {"ok": True}
 
     monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)

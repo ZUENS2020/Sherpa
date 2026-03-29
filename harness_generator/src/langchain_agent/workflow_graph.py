@@ -105,6 +105,11 @@ class FuzzWorkflowState(TypedDict, total=False):
     antlr_context_summary: str
     target_analysis_path: str
     target_analysis_summary: str
+    analysis_context_path: str
+    analysis_done: bool
+    analysis_degraded: bool
+    analysis_error: str
+    analysis_report_path: str
     selected_targets_path: str
     execution_plan_path: str
     harness_index_path: str
@@ -3308,6 +3313,69 @@ def _prepare_target_analysis_context(repo_root: Path) -> tuple[str, str]:
         return "", ""
 
 
+def _collect_analysis_companion_context() -> tuple[dict[str, Any], str]:
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    base_output = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+    companion_root = (
+        (base_output / "_k8s_jobs" / job_id / "promefuzz").resolve()
+        if job_id
+        else None
+    )
+    out: dict[str, Any] = {
+        "job_id": job_id,
+        "companion_root": str(companion_root) if companion_root else "",
+        "artifacts": {},
+    }
+    if not companion_root or not companion_root.is_dir():
+        return out, "companion_artifacts=0"
+
+    artifacts: dict[str, Any] = {}
+    found = 0
+    for name in ("status.json", "preprocess.json", "coverage_hints.json"):
+        p = companion_root / name
+        doc: dict[str, Any] = {
+            "path": str(p),
+            "exists": p.is_file(),
+        }
+        if p.is_file():
+            found += 1
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+                parsed = json.loads(raw)
+                if isinstance(parsed, (dict, list)):
+                    doc["json"] = parsed
+                else:
+                    doc["text"] = str(parsed)[:4000]
+            except Exception:
+                try:
+                    doc["text"] = p.read_text(encoding="utf-8", errors="replace")[-4000:]
+                except Exception:
+                    doc["text"] = ""
+        artifacts[name] = doc
+    out["artifacts"] = artifacts
+    summary_parts = [f"companion_artifacts={found}", f"companion_root={companion_root}"]
+    status_doc = ((artifacts.get("status.json") or {}) if isinstance(artifacts, dict) else {}).get("json")
+    if isinstance(status_doc, dict):
+        state_val = str(status_doc.get("state") or "").strip()
+        backend_val = str(status_doc.get("analysis_backend") or "").strip()
+        candidate_count = status_doc.get("candidate_count")
+        if state_val:
+            summary_parts.append(f"state={state_val}")
+        if backend_val:
+            summary_parts.append(f"backend={backend_val}")
+        if candidate_count is not None:
+            try:
+                summary_parts.append(f"candidates={int(candidate_count)}")
+            except Exception:
+                pass
+    hints_doc = ((artifacts.get("coverage_hints.json") or {}) if isinstance(artifacts, dict) else {}).get("json")
+    if isinstance(hints_doc, dict):
+        targets = hints_doc.get("recommended_targets")
+        if isinstance(targets, list):
+            summary_parts.append(f"hint_targets={len(targets)}")
+    return out, "; ".join(summary_parts)
+
+
 @dataclass(frozen=True)
 class FuzzWorkflowInput:
     repo_url: str
@@ -3503,6 +3571,11 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_stop_reason": str(state.get("coverage_stop_reason") or ""),
             "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
             "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
+            "analysis_done": bool(state.get("analysis_done") or False),
+            "analysis_degraded": bool(state.get("analysis_degraded") or False),
+            "analysis_error": str(state.get("analysis_error") or ""),
+            "analysis_report_path": str(state.get("analysis_report_path") or ""),
+            "analysis_context_path": str(state.get("analysis_context_path") or ""),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
             "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
             "target_analysis_path": str(state.get("target_analysis_path") or ""),
@@ -3514,6 +3587,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     # as a separate k8s stage job. Without this, init resets crash state and
     # repro_crash would be incorrectly skipped.
     if resume_step in {
+        "analysis",
         "plan",
         "synthesize",
         "build",
@@ -3656,6 +3730,121 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
     return out
 
 
+def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "analysis")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> analysis")
+    hint = (state.get("codex_hint") or "").strip()
+    attempts = 2
+    last_err = ""
+    antlr_context_path = str(state.get("antlr_context_path") or "")
+    antlr_context_summary = str(state.get("antlr_context_summary") or "")
+    target_analysis_path = str(state.get("target_analysis_path") or "")
+    target_analysis_summary = str(state.get("target_analysis_summary") or "")
+    analysis_context_path = str(state.get("analysis_context_path") or "")
+    analysis_report_path = ""
+    companion_doc: dict[str, Any] = {}
+    companion_summary = ""
+
+    for attempt in range(1, attempts + 1):
+        try:
+            antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+            target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+            companion_doc, companion_summary = _collect_analysis_companion_context()
+            fuzz_dir = gen.repo_root / "fuzz"
+            fuzz_dir.mkdir(parents=True, exist_ok=True)
+            analysis_doc = {
+                "mode": "pre-plan-analysis",
+                "generated_at": int(time.time()),
+                "repo_root": str(gen.repo_root),
+                "antlr_context_path": antlr_context_path,
+                "antlr_context_summary": antlr_context_summary,
+                "target_analysis_path": target_analysis_path,
+                "target_analysis_summary": target_analysis_summary,
+                "companion": companion_doc,
+            }
+            analysis_path = fuzz_dir / "analysis_context.json"
+            analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            analysis_context_path = str(analysis_path)
+            analysis_report_path = str(analysis_path)
+
+            if _has_codex_key():
+                analysis_lines: list[str] = [
+                    "Generate analysis artifacts for downstream planning.",
+                    "Write/update `fuzz/analysis_context.json` with concise actionable signals.",
+                ]
+                if antlr_context_summary:
+                    analysis_lines.append(f"ANTLR context: {antlr_context_summary}")
+                if target_analysis_summary:
+                    analysis_lines.append(f"Target analysis: {target_analysis_summary}")
+                if companion_summary:
+                    analysis_lines.append(f"Companion signals: {companion_summary}")
+                analysis_hint = "\n".join(analysis_lines)
+                if hint:
+                    analysis_hint = f"{analysis_hint}\n\nCoordinator hint:\n{hint}"
+                prompt = _render_opencode_prompt("analysis_with_hint", hint=analysis_hint)
+                gen.patcher.run_codex_command(
+                    prompt,
+                    stage_skill="analysis",
+                    timeout=_remaining_time_budget_sec(state),
+                    max_attempts=1,
+                    max_cli_retries=_opencode_cli_retries(),
+                )
+                if not analysis_path.is_file():
+                    analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            out = {
+                **state,
+                "last_step": "analysis",
+                "last_error": "",
+                "failed": False,
+                "analysis_done": True,
+                "analysis_degraded": False,
+                "analysis_error": "",
+                "analysis_report_path": analysis_report_path,
+                "analysis_context_path": analysis_context_path,
+                "antlr_context_path": antlr_context_path,
+                "antlr_context_summary": antlr_context_summary,
+                "target_analysis_path": target_analysis_path,
+                "target_analysis_summary": target_analysis_summary,
+                "message": "analysis completed",
+            }
+            out = _clear_error_markers_on_success(out)
+            _wf_log(cast(dict[str, Any], out), f"<- analysis ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+        except Exception as e:
+            last_err = str(e)
+            if attempt < attempts:
+                _wf_log(cast(dict[str, Any], state), f"analysis attempt {attempt} failed; retrying once: {last_err}")
+                continue
+            break
+
+    fallback_error = last_err or "analysis_failed"
+    out = {
+        **state,
+        "last_step": "analysis",
+        "last_error": "",
+        "failed": False,
+        "analysis_done": False,
+        "analysis_degraded": True,
+        "analysis_error": fallback_error[:4096],
+        "analysis_report_path": analysis_report_path,
+        "analysis_context_path": analysis_context_path,
+        "antlr_context_path": antlr_context_path,
+        "antlr_context_summary": antlr_context_summary,
+        "target_analysis_path": target_analysis_path,
+        "target_analysis_summary": target_analysis_summary,
+        "message": "analysis degraded",
+    }
+    out = _clear_error_markers_on_success(out)
+    _wf_log(cast(dict[str, Any], out), f"<- analysis degraded err={fallback_error} dt={_fmt_dt(time.perf_counter()-t0)}")
+    return out
+
+
 def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -3678,8 +3867,14 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
     repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
     repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
-    antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
-    target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+    antlr_context_path = str(state.get("antlr_context_path") or "").strip()
+    antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
+    target_analysis_path = str(state.get("target_analysis_path") or "").strip()
+    target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    if not antlr_context_path and not antlr_context_summary:
+        antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
+    if not target_analysis_path and not target_analysis_summary:
+        target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
     if antlr_context_summary:
         antlr_note = (
             "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
@@ -9919,6 +10114,16 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     return "stop"
 
 
+def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
+        return "stop"
+    if str(state.get("last_error") or err.get("message") or "").strip() and not bool(state.get("analysis_degraded")):
+        return "stop"
+    return "plan"
+
+
 def _route_after_plan_state(state: FuzzWorkflowRuntimeState) -> str:
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
@@ -10039,6 +10244,8 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     if last_step == "init":
         return _route_after_init_state(state)
+    if last_step == "analysis":
+        return _route_after_analysis_state(state)
     if last_step == "plan":
         return _route_after_plan_state(state)
     if last_step == "synthesize":
@@ -10073,6 +10280,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
     allowed = {
+        "analysis",
         "plan",
         "synthesize",
         "build",
@@ -10092,7 +10300,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         raw = "re-build"
     if raw in allowed:
         return raw
-    return "plan"
+    return "analysis"
 
 
 def _should_stage_stop(state: FuzzWorkflowRuntimeState, step_name: str) -> bool:
@@ -10110,6 +10318,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph: StateGraph = StateGraph(FuzzWorkflowRuntimeState)
 
     graph.add_node("init", _node_init)
+    graph.add_node("analysis", _node_analysis)
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
@@ -10133,6 +10342,10 @@ def build_fuzz_workflow() -> StateGraph:
         if _should_stage_stop(state, "plan"):
             return "stop"
         return "synthesize"
+
+    def _route_after_analysis(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_analysis_state(state)
+        return _apply_stage_stop_guard(state, "analysis", nxt)
 
     def _route_after_synthesize(state: FuzzWorkflowRuntimeState) -> str:
         if (state.get("last_error") or "").strip():
@@ -10191,6 +10404,7 @@ def build_fuzz_workflow() -> StateGraph:
         "init",
         _route_after_init_state,
         {
+            "analysis": "analysis",
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
@@ -10208,6 +10422,7 @@ def build_fuzz_workflow() -> StateGraph:
             "stop": END,
         },
     )
+    graph.add_conditional_edges("analysis", _route_after_analysis, {"plan": "plan", "stop": END})
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
     graph.add_conditional_edges(

@@ -16,6 +16,7 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     workflow_common.load_opencode_prompt_templates.cache_clear()
     templates = workflow_common.load_opencode_prompt_templates()
 
+    assert "analysis_with_hint" in templates
     assert "plan_with_hint" in templates
     assert "plan_repair_build_with_hint" in templates
     assert "plan_repair_crash_with_hint" in templates
@@ -41,6 +42,8 @@ def test_render_opencode_prompt_replaces_placeholders():
     out = workflow_common.render_opencode_prompt("plan_with_hint", hint="hello-hint")
     assert "hello-hint" in out
     assert "{{hint}}" not in out
+    analysis_out = workflow_common.render_opencode_prompt("analysis_with_hint", hint="analysis-hint")
+    assert "analysis-hint" in analysis_out
 
 
 def test_plan_prompt_references_stage_skill_and_schema_contract():
@@ -51,6 +54,18 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "strict-schema `fuzz/targets.json`" in out
     assert "`name`, `api`, `lang`, `target_type`, `seed_profile`" in out
     assert "Keep runtime-viable/public entrypoints first." in out
+
+
+def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    out = workflow_common.render_opencode_prompt("analysis_with_hint", hint="analysis-context")
+
+    assert "pre-plan analysis stage" in out
+    assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in out
+    assert "`fuzz/analysis_context.json`" in out
+    assert "analysis-only" in out
+    assert "MCP tools are available" in out
+    assert "analysis-context" in out
 
 
 def test_repair_plan_prompts_are_split_by_origin() -> None:
@@ -69,6 +84,8 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "non_public_api_usage" in crash_repair
     assert "coverage plateau / replan trigger" in coverage_repair
     assert "strategy changes versus the latest failed cycle" in coverage_repair
+    assert "MCP is unavailable, continue in degraded mode" in build_repair
+    assert "Query MCP evidence first" in coverage_repair
     assert "coverage-diag" in coverage_repair
 
 
@@ -88,6 +105,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "read-only exploration commands are allowed" in synth.lower()
     assert "Do NOT run build/execute commands." in synth
     assert "Prefer public/stable repository APIs for harness logic." in synth
+    assert "Query MCP evidence first" in synth
 
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
@@ -105,6 +123,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "crash-fail" in synth_crash_repair
     assert "api_surface_exception" in synth_build_repair
     assert "non_public_api_usage" in synth_build_repair
+    assert "MCP is unavailable, continue in degraded mode" in synth_build_repair
     assert "api_surface_exception" in synth_crash_repair
     assert "non_public_api_usage" in synth_crash_repair
     assert "coverage plateau / replan trigger" in synth_coverage_repair

@@ -98,6 +98,47 @@ def _reap_any_dead_children(max_rounds: int = 16) -> int:
     return reaped
 
 
+def _merge_opencode_mcp_servers(companion_url: str) -> None:
+    url = str(companion_url or "").strip()
+    if not url:
+        return
+    current_raw = (os.environ.get("SHERPA_OPENCODE_MCP_SERVERS_JSON") or "").strip()
+    payload: dict[str, object] = {}
+    if current_raw:
+        try:
+            parsed = json.loads(current_raw)
+            if isinstance(parsed, dict):
+                payload = dict(parsed)
+        except Exception:
+            payload = {}
+    payload["promefuzz"] = {
+        "type": "remote",
+        "url": url,
+        "enabled": True,
+    }
+    os.environ["SHERPA_OPENCODE_MCP_SERVERS_JSON"] = json.dumps(payload, ensure_ascii=False)
+    os.environ["SHERPA_OPENCODE_MCP_URL"] = url
+
+
+def _resolve_analysis_companion_url(payload: dict, job_id: str) -> str:
+    explicit = str(payload.get("analysis_companion_url") or "").strip()
+    if explicit:
+        return explicit
+    jid = str(job_id or "").strip()
+    if not jid:
+        return ""
+    ns = (os.environ.get("SHERPA_K8S_NAMESPACE") or "sherpa-dev").strip() or "sherpa-dev"
+    port_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_PORT") or "18080").strip()
+    path_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_MCP_PATH") or "/mcp").strip()
+    try:
+        port = max(1, min(int(port_raw), 65535))
+    except Exception:
+        port = 18080
+    path = path_raw if path_raw.startswith("/") else f"/{path_raw}"
+    svc = f"sherpa-promefuzz-{jid[:10]}"
+    return f"http://{svc}.{ns}.svc.cluster.local:{port}{path}"
+
+
 def main() -> int:
     payload = _decode_payload()
     job_id = str(payload.get("job_id") or "")
@@ -128,6 +169,7 @@ def main() -> int:
         # Rebuild runtime OpenCode config inside the worker container.
         # The path is injected via OPENCODE_CONFIG, but the file itself is
         # container-local and must be generated after secrets/env are loaded.
+        _merge_opencode_mcp_servers(_resolve_analysis_companion_url(payload, job_id))
         apply_config_to_env(load_config())
 
         # Native runtime baseline: never execute inner Docker in k8s worker.

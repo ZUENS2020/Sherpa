@@ -56,8 +56,13 @@ def test_synthesize_complete_scaffold_requires_missing_item_repair() -> None:
 
 
 def test_plan_and_schema_fix_contracts_keep_target_semantics() -> None:
+    analysis = _load("analysis")
     plan = _load("plan")
     plan_fix = _load("plan_fix_targets_schema")
+    assert "`analysis` stage" in analysis or "dedicated `analysis` stage" in analysis
+    assert "fuzz/analysis_context.json" in analysis
+    assert "MCP tools from task-scoped PromeFuzz companion" in analysis
+    assert "/shared/output/_k8s_jobs/<job-id>/promefuzz/" in analysis
     assert "LLVMFuzzerTestOneInput" in plan
     assert "`api` must describe an API identifier" in plan
     assert "fuzz/execution_plan.json" in plan
@@ -120,6 +125,8 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "api_surface_exception" in plan_repair_crash
     assert "api_surface_exception" in synth_repair_build
     assert "api_surface_exception" in synth_repair_crash
+    assert "MCP tools from task-scoped PromeFuzz companion" in plan_repair_build
+    assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
     assert "no target switching" in improve_in_place.lower() or "without switching targets" in improve_in_place.lower()

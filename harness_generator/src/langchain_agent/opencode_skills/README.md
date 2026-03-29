@@ -8,6 +8,7 @@
 
 当前阶段包括：
 
+- `analysis`
 - `plan`
 - `plan_fix_targets_schema`
 - `synthesize`
