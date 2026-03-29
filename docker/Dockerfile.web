@@ -55,6 +55,7 @@ RUN apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
         unzip \
         zip \
         xz-utils \
+        nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
     # Seed a local vcpkg template for repo-local bootstrap (repo/vcpkg at runtime).

@@ -160,6 +160,7 @@
 增强字段（父子任务都可能出现）：
 - 工作流与恢复：`k8s_phase`、`cancel_requested`、`workflow_active_step`、`workflow_last_step`、`recoverable`、`resume_attempts`、`resume_error_code`、`last_resume_reason` 等
 - fuzz 指标：`fuzz_fuzzers`、`fuzz_max_cov`、`fuzz_max_ft`、`fuzz_total_execs_per_sec`、`fuzz_crash_found`、`fuzz_coverage_*`
+- analysis companion：`analysis_companion_pod`、`analysis_companion_service`、`analysis_companion_url`、`analysis_companion_ready`、`analysis_companion_error`、`analysis_companion_last_error`、`analysis_companion_state`、`analysis_companion_backend`、`analysis_companion_rag_ok`、`analysis_companion_rag_knowledge_base_path`、`analysis_companion_rag_document_count`、`analysis_companion_rag_chunk_count`、`analysis_companion_embedding_provider`、`analysis_companion_embedding_model`、`analysis_companion_embedding_ok`、`analysis_companion_rag_degraded`、`analysis_companion_rag_degraded_reason`、`analysis_companion_semantic_query_count`、`analysis_companion_semantic_hit_count`、`analysis_companion_semantic_hit_rate`、`analysis_companion_cache_hit_rate`
 - 错误字段：`error` 为统一错误对象；`error_code/error_kind/error_signature` 为兼容字段（deprecated）
 
 ### POST `/api/task/{job_id}/resume`

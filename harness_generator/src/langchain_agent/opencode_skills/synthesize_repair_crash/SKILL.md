@@ -18,22 +18,25 @@ Use this skill in repair mode for crash/repro failures.
 - crash/repro report tail and related error text (if provided)
 - current scaffold files under `fuzz/`
 - `fuzz/execution_plan.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - updated harness/scaffold files under `fuzz/`
 - `fuzz/harness_index.json` aligned to execution plan
 
 ## Workflow
-1. Consume crash/repro evidence first.
-2. Apply focused scaffold/harness repair for crash-path stability.
-3. Keep selected vs final runtime target relation explicit.
-4. Ensure strategy change when repeated signatures occur.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+2. Consume crash/repro evidence.
+3. Apply focused scaffold/harness repair for crash-path stability.
+4. Keep selected vs final runtime target relation explicit.
+5. Ensure strategy change when repeated signatures occur.
 
 ## Constraints
 - Do not “fix” by disabling harness behavior or deleting crash-relevant paths.
 - Public/stable APIs are mandatory by default.
 - If non-public API is unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, replace offending symbols first.
+- If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 
 ## Command policy
 - Allowed: read-only commands only.

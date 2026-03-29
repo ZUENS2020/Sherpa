@@ -19,6 +19,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/execution_plan.json` (if present)
 - `fuzz/selected_targets.json` (if present)
 - `fuzz/observed_target.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 
 ## Required outputs
 - at least one harness source file under `fuzz/` (`*.c`, `*.cc`, `*.cpp`, `*.cxx`, or `*.java`) before docs/json completion
@@ -30,11 +31,12 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Workflow
-1. Read planning artifacts and lock target alignment first.
-2. Create harness source(s) before scaffold documentation (`harness-first contract`).
-3. Create build glue with runtime artifact discovery and compiler-by-suffix behavior.
-4. Create README/JSON strategy files with consistent selected/final target semantics.
-5. Validate execution plan and harness index mappings.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+2. Read planning artifacts and lock target alignment first.
+3. Create harness source(s) before scaffold documentation (`harness-first contract`).
+4. Create build glue with runtime artifact discovery and compiler-by-suffix behavior.
+5. Create README/JSON strategy files with consistent selected/final target semantics.
+6. Validate execution plan and harness index mappings.
 
 ## Key template contracts
 ### `fuzz/repo_understanding.json`
@@ -101,6 +103,7 @@ Compiler-by-suffix rule:
 - Multi-target buildability is required when execution plan has multiple targets.
 - Do not leave stale or missing execution target mappings in `fuzz/harness_index.json`.
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]` before broader edits.
+- If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 
 ## Command policy
 - Allowed: read-only commands only.

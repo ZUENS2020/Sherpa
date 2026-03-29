@@ -16,6 +16,8 @@ Goal:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- When MCP tools are available, query PromeFuzz evidence first and cite concrete signals in planning output.
+- If MCP is unavailable, continue in degraded mode and explicitly note the missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - `fuzz/targets.json` must be plain JSON array with at least one item.
 - Each item must include non-empty strings: `name`, `api`, `lang`, `target_type`, `seed_profile`.
@@ -30,6 +32,37 @@ Constraints:
 MANDATORY:
 - create `./done`
 - write `fuzz/PLAN.md` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: analysis_with_hint -->
+You are coordinating a pre-plan analysis stage for fuzz workflow.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- produce or refresh analysis artifacts before planning
+- keep outputs under `fuzz/` for downstream `plan` and `synthesize`
+
+Required outputs:
+- `fuzz/analysis_context.json`
+- preserve/refresh `fuzz/antlr_plan_context.json` when available
+- preserve/refresh `fuzz/target_analysis.json` when available
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- This stage is analysis-only: do not modify repository business source files.
+- Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
+- When MCP tools are available, use preprocessor MCP tools first (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`) and then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
+- If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
+- Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
+
+MANDATORY:
+- create `./done`
+- write `fuzz/analysis_context.json` into `./done` (single line)
 
 Additional instruction from coordinator:
 {{hint}}
@@ -56,6 +89,9 @@ Build-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Query MCP evidence first when available (crash/build hints, candidate APIs, coverage hints) before proposing strategy changes.
+- Prefer preprocessor outputs and companion artifacts first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 
@@ -87,6 +123,9 @@ Crash-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Query MCP evidence first when available, especially crash-path and API-candidate context.
+- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 
@@ -118,6 +157,9 @@ Coverage-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Query MCP evidence first when available (coverage hints + target candidates) before deciding replan strategy.
+- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - do not produce doc-only adjustments disconnected from next build/run outcomes
 
@@ -149,6 +191,9 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Query MCP evidence first when available and reflect cited findings in scaffold choices.
+- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- If MCP is unavailable, continue in degraded mode and note the missing MCP evidence in `fuzz/README.md` or `fuzz/repo_understanding.json`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
@@ -194,6 +239,7 @@ Required outputs:
 
 Build-repair constraints:
 - consume `repair_*` diagnostics first
+- query MCP evidence first when available before applying repair strategy changes
 - change strategy if previous attempt signatures repeat
 - avoid no-op doc-only edits
 - keep target/build fields consistent across README + JSONs + build script
@@ -202,6 +248,7 @@ Build-repair constraints:
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
+- if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 MANDATORY:
@@ -230,6 +277,7 @@ Required outputs:
 
 Crash-repair constraints:
 - consume `repair_*` diagnostics and crash evidence first
+- query MCP evidence first when available before applying crash-path strategy updates
 - explicitly map selected vs observed runtime target relation in README
 - preserve crash-path semantics; do not “fix” by disabling harness behavior
 - avoid no-op doc-only edits
@@ -237,6 +285,7 @@ Crash-repair constraints:
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
+- if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 MANDATORY:
@@ -266,12 +315,14 @@ Required outputs:
 
 Coverage-repair constraints:
 - consume coverage diagnostics first (`seed families`, quality gaps, plateau reason)
+- query MCP evidence first when available (coverage hints + candidate APIs) before deciding scaffold edits
 - consume `SeedFeedback` and `HarnessFeedback` first; apply at least one change linked to these signals
 - include and apply at least one material strategy change from previous cycle
 - avoid no-op doc-only edits
 - keep selected/final target, execution plan, and harness index consistent
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
+- if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
 
 MANDATORY:
 - create `./done`

@@ -16,6 +16,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 ## Required inputs
 - `fuzz/target_analysis.json` (if present)
 - `fuzz/antlr_plan_context.json` (if present)
+- MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
 - repository source/build metadata
 
 ## Required outputs
@@ -24,10 +25,11 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - `fuzz/execution_plan.json`
 
 ## Workflow
-1. Read target analysis and identify runtime-viable public entrypoints.
-2. Produce `fuzz/targets.json` as a strict non-empty array.
-3. Produce `fuzz/execution_plan.json` with prioritized execution targets.
-4. Write concise implementation guidance into `fuzz/PLAN.md`.
+1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+2. Read target analysis and identify runtime-viable public entrypoints.
+3. Produce `fuzz/targets.json` as a strict non-empty array.
+4. Produce `fuzz/execution_plan.json` with prioritized execution targets.
+5. Write concise implementation guidance into `fuzz/PLAN.md`.
 
 ## Constraints
 - In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
@@ -42,6 +44,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
   - Keep `expected_fuzzer_name` consistent with `fuzz/harness_index.json` and harness filename stem.
 - Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]`.
+- If MCP is unavailable, continue in degraded mode and explicitly note missing MCP evidence in `fuzz/PLAN.md`.
 
 ## Command policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `head`, `tail`, read-only `sed`).
