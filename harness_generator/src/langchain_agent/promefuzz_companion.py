@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -305,6 +306,9 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
     result["enabled"] = True
     source_limit = _env_int("SHERPA_PROMEFUZZ_MAX_SOURCE_FILES", 1200, min_value=50, max_value=20000)
     allow_build = _env_int("SHERPA_PROMEFUZZ_BUILD_BINARIES", 1, min_value=0, max_value=1) == 1
+    if shutil.which("llvm-config") is None:
+        result["error"] = "promefuzz_llvm_config_missing"
+        return result
 
     try:
         from promefuzz_mcp.build import BinaryBuilder
