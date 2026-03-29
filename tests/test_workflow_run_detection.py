@@ -1239,6 +1239,52 @@ def test_route_after_re_run_routes_to_plan_on_failure():
     assert route == "plan"
 
 
+def test_node_crash_triage_defaults_to_inconclusive_when_model_output_invalid(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            # Intentionally do not write crash_triage.json.
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-1",
+        }
+    )
+    assert out["crash_triage_label"] == "inconclusive"
+    assert out["crash_triage_reason"].startswith("model output invalid/incomplete")
+    assert out["crash_triage_signal_lines"] == ["model output invalid/incomplete"]
+
+
+def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            # Intentionally do not write crash_analysis.json.
+            return None
+
+    triage_doc = {
+        "label": "harness_bug",
+        "confidence": 0.9,
+        "reason": "example",
+        "evidence": ["line"],
+    }
+    (tmp_path / "crash_triage.json").write_text(json.dumps(triage_doc), encoding="utf-8")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-1",
+        }
+    )
+    assert out["crash_analysis_verdict"] == "unknown"
+    assert out["crash_analysis_reason"].startswith("model output invalid/incomplete")
+
+
 def test_route_after_crash_analysis_routes_to_plan_on_false_positive():
     route = workflow_graph._route_after_crash_analysis_state(
         {
