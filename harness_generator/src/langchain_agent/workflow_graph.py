@@ -8964,48 +8964,6 @@ def _normalize_crash_analysis_verdict(raw: str) -> str:
         return "real_bug"
     return "unknown"
 
-
-def _heuristic_crash_triage(*, info_text: str, analysis_text: str, stderr_tail: str) -> tuple[str, float, str, list[str]]:
-    blob = "\n".join([info_text or "", analysis_text or "", stderr_tail or ""]).lower()
-    signals: list[str] = []
-    if "harness error" in blob:
-        signals.append("crash_analysis indicates HARNESS ERROR")
-    if "terminate called after throwing" in blob or "format_error" in blob:
-        signals.append("uncaught C++ exception found in reproducer output")
-    if "addresssanitizer" in blob or "heap-buffer-overflow" in blob or "use-after-free" in blob:
-        signals.append("sanitizer memory-safety signal observed")
-    if signals and any("sanitizer memory-safety signal observed" in s for s in signals):
-        return "upstream_bug", 0.72, "memory-safety sanitizer signature suggests upstream defect", signals
-    if signals and any("harness" in s.lower() or "uncaught" in s.lower() for s in signals):
-        return "harness_bug", 0.78, "uncaught exception / harness misuse signal found", signals
-    return "inconclusive", 0.35, "no high-confidence harness/upstream signal", signals
-
-
-def _heuristic_crash_analysis_verdict(*, info_text: str, re_run_text: str, triage_doc: dict[str, Any]) -> tuple[str, str, list[str]]:
-    signals: list[str] = []
-    label = _normalize_crash_triage_label(str(triage_doc.get("label") or ""))
-    reason = str(triage_doc.get("reason") or "").strip()
-    confidence = float(triage_doc.get("confidence") or 0.0)
-    if label == "harness_bug":
-        signals.append("crash_triage label is harness_bug")
-        if reason:
-            signals.append(f"crash_triage reason: {reason}")
-        return "false_positive", "triage indicates harness-side root cause", signals
-    if label == "upstream_bug":
-        signals.append("crash_triage label is upstream_bug")
-        if reason:
-            signals.append(f"crash_triage reason: {reason}")
-        return "real_bug", "triage indicates upstream bug with memory-safety signal", signals
-    if confidence >= 0.8 and label == "inconclusive":
-        signals.append("triage confidence is high but label remains inconclusive")
-    blob = "\n".join([info_text or "", re_run_text or ""]).lower()
-    if "addresssanitizer" in blob and "segv on unknown address 0x000000000000" in blob:
-        signals.append("asan null dereference signal observed in reproducible crash")
-    if "terminate called after throwing" in blob or "format_error" in blob:
-        signals.append("uncaught exception signal observed")
-    return "unknown", "insufficient confidence to classify false positive vs real bug", signals
-
-
 def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -9051,8 +9009,9 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
 
     label = "inconclusive"
     confidence = 0.35
-    reason = "triage output missing; fallback heuristic applied"
+    reason = "model output invalid/incomplete"
     signal_lines: list[str] = []
+    model_output_valid = False
     try:
         gen.patcher.run_codex_command(
             prompt,
@@ -9068,24 +9027,29 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
                 parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 parsed = {}
-        label = _normalize_crash_triage_label(parsed.get("label") if isinstance(parsed, dict) else "")
-        raw_conf = parsed.get("confidence") if isinstance(parsed, dict) else None
-        try:
-            confidence = max(0.0, min(float(raw_conf), 1.0))
-        except Exception:
-            confidence = 0.35
-        reason = str(parsed.get("reason") or "").strip() if isinstance(parsed, dict) else ""
-        signal_lines = [str(x).strip() for x in (parsed.get("evidence") or []) if str(x).strip()] if isinstance(parsed, dict) else []
-        if not reason:
-            reason = "triage JSON missing reason; fallback heuristic applied"
+        if isinstance(parsed, dict) and parsed:
+            label = _normalize_crash_triage_label(parsed.get("label"))
+            raw_conf = parsed.get("confidence")
+            try:
+                confidence = max(0.0, min(float(raw_conf), 1.0))
+            except Exception:
+                confidence = 0.35
+            reason = str(parsed.get("reason") or "").strip()
+            evidence = parsed.get("evidence")
+            if not evidence:
+                evidence = parsed.get("signals")
+            signal_lines = [str(x).strip() for x in (evidence or []) if str(x).strip()]
+            model_output_valid = bool(reason and signal_lines)
     except Exception as e:
-        reason = f"triage execution failed: {e}"
+        reason = f"model output invalid/incomplete: {e}"
+        model_output_valid = False
 
-    if label == "inconclusive" and not signal_lines:
-        h_label, h_conf, h_reason, h_signals = _heuristic_crash_triage(
-            info_text=info_text, analysis_text=analysis_text, stderr_tail=stderr_tail
-        )
-        label, confidence, reason, signal_lines = h_label, h_conf, h_reason, h_signals
+    if not model_output_valid:
+        label = "inconclusive"
+        confidence = min(confidence, 0.35)
+        if not reason.startswith("model output invalid/incomplete"):
+            reason = "model output invalid/incomplete"
+        signal_lines = ["model output invalid/incomplete"]
 
     triage_doc = {
         "label": label,
@@ -9173,9 +9137,10 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
     context = "\n\n".join(context_parts)
 
     verdict = "unknown"
-    reason = "analysis output missing; fallback heuristic applied"
+    reason = "model output invalid/incomplete"
     evidence: list[str] = []
     recommended_action = "stop_report"
+    model_output_valid = False
     try:
         gen.patcher.run_codex_command(
             prompt,
@@ -9193,27 +9158,27 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
                     parsed_doc = loaded
             except Exception:
                 parsed_doc = {}
-        verdict = _normalize_crash_analysis_verdict(str(parsed_doc.get("verdict") or ""))
-        reason = str(parsed_doc.get("reason") or "").strip() or reason
-        evidence = [str(x).strip() for x in list(parsed_doc.get("evidence") or []) if str(x).strip()]
-        recommended_action = str(parsed_doc.get("recommended_action") or "").strip().lower() or (
-            "repair_harness" if verdict == "false_positive" else "stop_report"
-        )
+        if parsed_doc:
+            verdict = _normalize_crash_analysis_verdict(str(parsed_doc.get("verdict") or ""))
+            reason = str(parsed_doc.get("reason") or "").strip()
+            ev = parsed_doc.get("evidence")
+            if not ev:
+                ev = parsed_doc.get("signals")
+            evidence = [str(x).strip() for x in list(ev or []) if str(x).strip()]
+            recommended_action = str(parsed_doc.get("recommended_action") or "").strip().lower() or (
+                "repair_harness" if verdict == "false_positive" else "stop_report"
+            )
+            model_output_valid = bool(reason and evidence)
     except Exception as e:
-        reason = f"crash-analysis agent error: {e}"
+        reason = f"model output invalid/incomplete: {e}"
+        model_output_valid = False
 
-    if verdict == "unknown" or not evidence:
-        h_verdict, h_reason, h_signals = _heuristic_crash_analysis_verdict(
-            info_text=info_text,
-            re_run_text=re_run_text,
-            triage_doc=triage_doc,
-        )
-        if verdict == "unknown":
-            verdict = h_verdict
-        if not reason.strip() or "fallback heuristic" in reason.lower() or "agent error" in reason.lower():
-            reason = h_reason
-        if not evidence:
-            evidence = h_signals
+    if not model_output_valid:
+        verdict = "unknown"
+        recommended_action = "stop_report"
+        if not reason.startswith("model output invalid/incomplete"):
+            reason = "model output invalid/incomplete"
+        evidence = ["model output invalid/incomplete"]
 
     if not evidence:
         evidence = ["no concrete crash-analysis evidence captured"]

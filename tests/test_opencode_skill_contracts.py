@@ -91,8 +91,12 @@ def test_crash_skills_contracts_are_classification_and_analysis_driven() -> None
     fix_u = _load("fix_crash_upstream_bug")
     assert "classification-only" in triage
     assert "harness_bug|upstream_bug|inconclusive" in triage
+    assert "Do not classify `upstream_bug` from sanitizer keywords alone." in triage
+    assert "output `inconclusive`" in triage
     assert "analysis-only" in analysis
     assert "false_positive|real_bug|unknown" in analysis
+    assert "Do not classify `real_bug` from sanitizer keywords alone." in analysis
+    assert "output `unknown`" in analysis
     assert "pure no-op is invalid" in fix_h
     assert "pure no-op is invalid" in fix_u
     assert "Read and fix <path>[:line]" in fix_h

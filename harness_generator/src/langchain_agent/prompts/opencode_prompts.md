@@ -461,6 +461,8 @@ Constraints:
 - do not run build/execute commands
 - produce `crash_triage.json` with fields: `label`, `confidence`, `reason`, `evidence`
 - `evidence` must be a non-empty array of concrete signal lines from logs/reports
+- do not classify `upstream_bug` from sanitizer keywords alone; cite concrete call path/context evidence
+- if evidence is insufficient, output `label=inconclusive` with explicit missing-evidence reason
 - keep all instructions and outputs in English
 
 Hint:
@@ -486,6 +488,8 @@ Constraints:
 - read-only exploration commands are allowed
 - do not run build/execute commands
 - do not modify source code in this stage
+- do not classify `real_bug` from sanitizer keywords alone; cite concrete stack/call-site evidence
+- if evidence is insufficient, output `verdict=unknown` with explicit missing-evidence reason
 - keep all instructions and outputs in English
 
 Hint:
