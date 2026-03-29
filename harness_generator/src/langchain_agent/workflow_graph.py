@@ -92,6 +92,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_feedback: dict[str, Any]
     coverage_harness_feedback: dict[str, Any]
     coverage_quality_oracle: str
+    coverage_bottleneck_kind: str
+    coverage_bottleneck_reason: str
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
     coverage_exhausted_targets: list[str]
@@ -110,6 +112,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     analysis_degraded: bool
     analysis_error: str
     analysis_report_path: str
+    analysis_evidence_count: int
     selected_targets_path: str
     execution_plan_path: str
     harness_index_path: str
@@ -238,6 +241,9 @@ class FuzzWorkflowState(TypedDict, total=False):
     repair_error_digest: dict[str, Any]
     repair_attempt_index: int
     repair_strategy_force_change: bool
+    target_scoring_enabled: bool
+    constraint_memory_count: int
+    constraint_memory_path: str
     error: dict[str, Any]
 
 
@@ -461,6 +467,11 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
         "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
         "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
         "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
+        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
+        "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
+        "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+        "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
     }
     try:
         line = json.dumps(payload, separators=(",", ":"), default=str)
@@ -841,6 +852,127 @@ def _repair_mode_active(state: dict[str, Any]) -> bool:
     return _has_error_payload(err) or bool(str(state.get("last_error") or "").strip())
 
 
+def _constraint_memory_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "constraint_memory.json"
+
+
+def _constraint_repeat_threshold() -> int:
+    raw = (os.environ.get("SHERPA_CONSTRAINT_MEMORY_REPEAT_THRESHOLD") or "2").strip()
+    try:
+        return max(2, min(int(raw), 10))
+    except Exception:
+        return 2
+
+
+def _load_constraint_memory(repo_root: Path) -> dict[str, Any]:
+    path = _constraint_memory_path(repo_root)
+    if not path.is_file():
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "updated_at": 0, "entries": {}}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    return {
+        "schema_version": 1,
+        "updated_at": int(raw.get("updated_at") or 0),
+        "entries": entries,
+    }
+
+
+def _write_constraint_memory(repo_root: Path, doc: dict[str, Any]) -> str:
+    path = _constraint_memory_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "entries": dict(doc.get("entries") or {}),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _constraint_fix_hint(label_or_verdict: str) -> str:
+    key = str(label_or_verdict or "").strip().lower()
+    if key in {"harness_bug", "false_positive"}:
+        return "Validate harness preconditions and replace brittle behavior with stable public API usage."
+    if key in {"upstream_bug", "real_bug"}:
+        return "Keep reproducer stable and preserve upstream crash evidence for triage/reporting."
+    return "Collect stronger evidence before committing a narrow fix."
+
+
+def _record_constraint_memory_observation(
+    *,
+    repo_root: Path,
+    signature: str,
+    stage: str,
+    classification: str,
+    reason: str,
+    evidence: list[str],
+    confidence: float,
+    repeats: int,
+) -> tuple[int, str, dict[str, Any]]:
+    signature_key = str(signature or "").strip()
+    doc = _load_constraint_memory(repo_root)
+    entries = dict(doc.get("entries") or {})
+    if not signature_key or repeats < _constraint_repeat_threshold():
+        return len(entries), str(_constraint_memory_path(repo_root)), {}
+    now = int(time.time())
+    prev = dict(entries.get(signature_key) or {})
+    entry = {
+        "signature": signature_key,
+        "source_stage": str(stage or "").strip() or "unknown",
+        "classification": str(classification or "").strip() or "unknown",
+        "reason": str(reason or "").strip()[:1024],
+        "evidence": [str(x).strip()[:512] for x in list(evidence or []) if str(x).strip()][:12],
+        "confidence": max(0.0, min(float(confidence), 1.0)),
+        "suspected_precondition": str(reason or "").strip()[:512],
+        "fix_hint": _constraint_fix_hint(classification),
+        "first_seen": int(prev.get("first_seen") or now),
+        "latest_seen": now,
+        "occurrence_count": int(prev.get("occurrence_count") or 0) + 1,
+    }
+    entries[signature_key] = entry
+    _write_constraint_memory(repo_root, {"entries": entries})
+    return len(entries), str(_constraint_memory_path(repo_root)), entry
+
+
+def _constraint_memory_snapshot_from_state(state: dict[str, Any]) -> tuple[dict[str, Any], int, str]:
+    repo_root_text = str(state.get("repo_root") or "").strip()
+    if not repo_root_text:
+        return {}, 0, ""
+    try:
+        repo_root = Path(repo_root_text)
+    except Exception:
+        return {}, 0, ""
+    doc = _load_constraint_memory(repo_root)
+    entries = dict(doc.get("entries") or {})
+    if not entries:
+        return {}, 0, str(_constraint_memory_path(repo_root))
+    candidates = [
+        str(state.get("repair_signature") or "").strip(),
+        str(state.get("crash_signature") or "").strip(),
+        str(state.get("timeout_signature") or "").strip(),
+    ]
+    for sig in candidates:
+        if sig and sig in entries and isinstance(entries[sig], dict):
+            return dict(entries[sig]), len(entries), str(_constraint_memory_path(repo_root))
+    latest_entry: dict[str, Any] = {}
+    latest_ts = 0
+    for raw in entries.values():
+        if not isinstance(raw, dict):
+            continue
+        ts = int(raw.get("latest_seen") or 0)
+        if ts >= latest_ts:
+            latest_ts = ts
+            latest_entry = dict(raw)
+    return latest_entry, len(entries), str(_constraint_memory_path(repo_root))
+
+
 def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     state = _normalize_error_state(state)
     err = dict(state.get("error") or {})
@@ -882,6 +1014,10 @@ def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "repair_strategy_force_change": bool(state.get("repair_strategy_force_change") or False),
         "repair_error_digest": dict(state.get("repair_error_digest") or {}),
     }
+    constraint_entry, constraint_count, constraint_path = _constraint_memory_snapshot_from_state(state)
+    snapshot["constraint_memory_entry"] = constraint_entry
+    snapshot["constraint_memory_count"] = int(constraint_count)
+    snapshot["constraint_memory_path"] = constraint_path
     return snapshot
 
 
@@ -1095,6 +1231,98 @@ def _runtime_viability_rank(value: str) -> int:
     return 0
 
 
+def _target_scoring_weights() -> dict[str, float]:
+    return {
+        "coverage_gap": 0.35,
+        "complexity": 0.25,
+        "api_relevance": 0.25,
+        "consumer_order_support": 0.15,
+    }
+
+
+def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _target_component_coverage_gap(item: dict[str, Any]) -> float:
+    explicit = item.get("coverage_gap")
+    if explicit is not None:
+        try:
+            return _clamp_score(float(explicit))
+        except Exception:
+            pass
+    depth_score = max(0, int(item.get("depth_score") or 0))
+    depth_class = str(item.get("depth_class") or "").strip().lower()
+    target_type = str(item.get("target_type") or "").strip().lower()
+    base = min(7.0, float(depth_score) / 2.0)
+    if depth_class == "deep":
+        base += 2.0
+    elif depth_class == "medium":
+        base += 1.0
+    if target_type in {"parser", "decoder", "archive"}:
+        base += 1.0
+    return _clamp_score(base)
+
+
+def _target_component_complexity(item: dict[str, Any]) -> float:
+    depth_score = max(0, int(item.get("depth_score") or 0))
+    risk_signals = list(item.get("risk_signals") or [])
+    base = min(8.0, float(depth_score) / 3.0)
+    base += min(2.0, 0.4 * float(len(risk_signals)))
+    return _clamp_score(base)
+
+
+def _target_component_api_relevance(item: dict[str, Any]) -> float:
+    runtime_rank = _runtime_viability_rank(str(item.get("runtime_viability") or ""))
+    target_type = str(item.get("target_type") or "").strip().lower()
+    api = str(item.get("api") or "")
+    score = 2.0 + float(runtime_rank) * 2.5
+    if target_type in {"parser", "decoder", "archive"}:
+        score += 1.5
+    if "::" in api or re.search(r"[A-Za-z_][A-Za-z0-9_]*", api):
+        score += 1.0
+    return _clamp_score(score)
+
+
+def _target_component_consumer_order_support(item: dict[str, Any]) -> float:
+    target_type = str(item.get("target_type") or "").strip().lower()
+    rationale = str(item.get("selection_rationale") or "").lower()
+    bias = str(item.get("selection_bias_reason") or "").lower()
+    signals = " ".join(str(x).lower() for x in (item.get("risk_signals") or []))
+    score = 2.0
+    if target_type in {"parser", "archive", "decoder"}:
+        score += 2.0
+    if any(tok in rationale for tok in ("runtime", "entrypoint", "stream", "state")):
+        score += 2.0
+    if any(tok in bias for tok in ("state", "parse", "decode", "deep")):
+        score += 1.5
+    if "state-machine" in signals or "parser-like" in signals:
+        score += 1.5
+    return _clamp_score(score)
+
+
+def _target_score_breakdown(item: dict[str, Any]) -> dict[str, Any]:
+    weights = _target_scoring_weights()
+    coverage_gap = _target_component_coverage_gap(item)
+    complexity = _target_component_complexity(item)
+    api_relevance = _target_component_api_relevance(item)
+    consumer_order_support = _target_component_consumer_order_support(item)
+    weighted_total = (
+        coverage_gap * float(weights["coverage_gap"])
+        + complexity * float(weights["complexity"])
+        + api_relevance * float(weights["api_relevance"])
+        + consumer_order_support * float(weights["consumer_order_support"])
+    )
+    return {
+        "coverage_gap": round(coverage_gap, 4),
+        "complexity": round(complexity, 4),
+        "api_relevance": round(api_relevance, 4),
+        "consumer_order_support": round(consumer_order_support, 4),
+        "weights": {k: round(float(v), 4) for k, v in weights.items()},
+        "weighted_total": round(weighted_total, 6),
+    }
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
@@ -1114,6 +1342,18 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             )
             selection_rationale = selection_rationale or auto_rationale
             runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
+        scoring_source = {
+            "api": api,
+            "target_type": target_type,
+            "depth_score": int(item.get("depth_score") or 0),
+            "depth_class": str(item.get("depth_class") or ""),
+            "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+            "runtime_viability": runtime_viability,
+            "selection_rationale": selection_rationale,
+            "risk_signals": list(item.get("risk_signals") or []),
+            "coverage_gap": item.get("coverage_gap"),
+        }
+        score_breakdown = _target_score_breakdown(scoring_source)
         ranked_items.append(
             {
                 "target_name": target_name,
@@ -1131,10 +1371,14 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "seed_families_required": required,
                 "seed_families_optional": optional,
                 "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
+                "target_score_breakdown": score_breakdown,
+                "target_score": float(score_breakdown.get("weighted_total") or 0.0),
+                "target_scoring_enabled": True,
             }
         )
     ranked_items.sort(
         key=lambda row: (
+            -float(row.get("target_score") or 0.0),
             -int(row.get("depth_score") or 0),
             -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
             str(row.get("target_name") or ""),
@@ -3388,6 +3632,220 @@ def _collect_analysis_companion_context() -> tuple[dict[str, Any], str]:
     return out, "; ".join(summary_parts)
 
 
+def _read_json_doc(path_text: str) -> dict[str, Any]:
+    path = Path(str(path_text or "").strip())
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _build_analysis_evidence_index(
+    *,
+    repo_root: Path,
+    antlr_doc: dict[str, Any],
+    target_doc: dict[str, Any],
+    companion_doc: dict[str, Any],
+) -> dict[str, Any]:
+    evidence_counter = 0
+    evidence_index: dict[str, dict[str, Any]] = {}
+
+    def _new_evidence_id() -> str:
+        nonlocal evidence_counter
+        evidence_counter += 1
+        return f"EV{evidence_counter:04d}"
+
+    def _add_evidence(
+        *,
+        kind: str,
+        source_path: str,
+        summary: str,
+        score: float | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        ev_id = _new_evidence_id()
+        evidence_index[ev_id] = {
+            "id": ev_id,
+            "kind": str(kind or "").strip() or "unknown",
+            "source_path": str(source_path or "").strip(),
+            "summary": str(summary or "").strip()[:800],
+            "score": float(score) if score is not None else None,
+            "payload": dict(payload or {}),
+        }
+        return ev_id
+
+    api_inventory: list[dict[str, Any]] = []
+    seen_api_keys: set[tuple[str, str, str]] = set()
+    for item in list(target_doc.get("recommended_targets") or [])[:80]:
+        if not isinstance(item, dict):
+            continue
+        api = str(item.get("api") or item.get("name") or "").strip()
+        file_hint = str(item.get("file") or "").strip()
+        target_type = str(item.get("target_type") or "").strip().lower()
+        if not api:
+            continue
+        key = (api, file_hint, target_type)
+        if key in seen_api_keys:
+            continue
+        seen_api_keys.add(key)
+        ev_id = _add_evidence(
+            kind="target_analysis",
+            source_path="fuzz/target_analysis.json",
+            summary=f"recommended target `{api}` ({target_type or 'generic'})",
+            score=float(item.get("depth_score") or 0.0),
+            payload={
+                "target_type": target_type,
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+                "file": file_hint,
+            },
+        )
+        api_inventory.append(
+            {
+                "evidence_id": ev_id,
+                "api": api,
+                "file": file_hint,
+                "target_type": target_type or "generic",
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+            }
+        )
+
+    for item in list(antlr_doc.get("entrypoint_candidates") or [])[:80]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        file_hint = str(item.get("file") or "").strip()
+        if not name:
+            continue
+        key = (name, file_hint, "entrypoint")
+        if key in seen_api_keys:
+            continue
+        seen_api_keys.add(key)
+        ev_id = _add_evidence(
+            kind="antlr_entrypoint",
+            source_path="fuzz/antlr_plan_context.json",
+            summary=f"antlr/static entrypoint candidate `{name}`",
+            payload={
+                "file": file_hint,
+                "signature": str(item.get("signature") or ""),
+                "line": int(item.get("line") or 0),
+            },
+        )
+        api_inventory.append(
+            {
+                "evidence_id": ev_id,
+                "api": name,
+                "file": file_hint,
+                "target_type": str(item.get("target_type") or "generic"),
+                "seed_profile": str(item.get("seed_profile") or ""),
+                "runtime_viability": str(item.get("runtime_viability") or ""),
+            }
+        )
+
+    callgraph_summary: list[dict[str, Any]] = []
+    artifacts = dict(companion_doc.get("artifacts") or {})
+    coverage_hints = dict(((artifacts.get("coverage_hints.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+    preprocess_doc = dict(((artifacts.get("preprocess.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+    status_doc = dict(((artifacts.get("status.json") or {}) if isinstance(artifacts, dict) else {}).get("json") or {})
+
+    for item in list(coverage_hints.get("callgraph_summary") or [])[:40]:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("edge") or "").strip()
+        if not summary:
+            continue
+        ev_id = _add_evidence(
+            kind="callgraph_summary",
+            source_path="promefuzz/coverage_hints.json",
+            summary=summary,
+            score=float(item.get("score") or 0.0) if item.get("score") is not None else None,
+            payload=item,
+        )
+        callgraph_summary.append({"evidence_id": ev_id, **item})
+
+    consumer_patterns: list[dict[str, Any]] = []
+    for item in list(preprocess_doc.get("consumer_patterns") or preprocess_doc.get("api_usage_patterns") or [])[:40]:
+        if not isinstance(item, dict):
+            continue
+        pattern = str(item.get("pattern") or item.get("summary") or item.get("api") or "").strip()
+        if not pattern:
+            continue
+        ev_id = _add_evidence(
+            kind="consumer_pattern",
+            source_path="promefuzz/preprocess.json",
+            summary=pattern,
+            payload=item,
+        )
+        consumer_patterns.append({"evidence_id": ev_id, **item})
+
+    semantic_evidence: list[dict[str, Any]] = []
+    semantic_sources: list[Any] = []
+    for key in ("semantic_evidence", "semantic_findings", "retrieved_documents"):
+        value = coverage_hints.get(key)
+        if isinstance(value, list):
+            semantic_sources.extend(value[:50])
+    for item in semantic_sources[:80]:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("snippet") or item.get("summary") or item.get("claim") or "").strip()
+        if not summary:
+            continue
+        score_raw = item.get("score")
+        score: float | None = None
+        if score_raw is not None:
+            try:
+                score = float(score_raw)
+            except Exception:
+                score = None
+        ev_id = _add_evidence(
+            kind="semantic_evidence",
+            source_path=str(item.get("source_path") or item.get("source") or "promefuzz/coverage_hints.json"),
+            summary=summary,
+            score=score,
+            payload=item,
+        )
+        semantic_evidence.append({"evidence_id": ev_id, **item})
+
+    if status_doc:
+        _add_evidence(
+            kind="companion_status",
+            source_path="promefuzz/status.json",
+            summary=(
+                f"companion state={status_doc.get('state') or 'unknown'}, "
+                f"backend={status_doc.get('analysis_backend') or 'unknown'}, "
+                f"rag_ok={int(bool(status_doc.get('rag_ok')))}"
+            ),
+            payload={
+                "state": str(status_doc.get("state") or ""),
+                "analysis_backend": str(status_doc.get("analysis_backend") or ""),
+                "semantic_hit_rate": status_doc.get("semantic_hit_rate"),
+                "cache_hit_rate": status_doc.get("cache_hit_rate"),
+            },
+        )
+
+    return {
+        "analysis_version": 2,
+        "generated_at": int(time.time()),
+        "repo_root": str(repo_root),
+        "api_inventory": api_inventory,
+        "callgraph_summary": callgraph_summary,
+        "consumer_patterns": consumer_patterns,
+        "semantic_evidence": semantic_evidence,
+        "evidence_index": evidence_index,
+        "summary": {
+            "evidence_count": len(evidence_index),
+            "api_inventory_count": len(api_inventory),
+            "callgraph_summary_count": len(callgraph_summary),
+            "consumer_pattern_count": len(consumer_patterns),
+            "semantic_evidence_count": len(semantic_evidence),
+        },
+    }
+
+
 @dataclass(frozen=True)
 class FuzzWorkflowInput:
     repo_url: str
@@ -3601,6 +4059,8 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
             "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
             "coverage_improve_reason": str(state.get("coverage_improve_reason") or ""),
+            "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
+            "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
             "coverage_history": list(state.get("coverage_history") or []),
             "coverage_target_name": str(state.get("coverage_target_name") or ""),
             "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
@@ -3618,10 +4078,14 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "analysis_error": str(state.get("analysis_error") or ""),
             "analysis_report_path": str(state.get("analysis_report_path") or ""),
             "analysis_context_path": str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
             "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
             "target_analysis_path": str(state.get("target_analysis_path") or ""),
             "target_analysis_summary": str(state.get("target_analysis_summary") or ""),
+            "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+            "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
+            "constraint_memory_path": str(state.get("constraint_memory_path") or ""),
         },
     )
 
@@ -3792,12 +4256,22 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     analysis_report_path = ""
     companion_doc: dict[str, Any] = {}
     companion_summary = ""
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
 
     for attempt in range(1, attempts + 1):
         try:
             antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
             target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
             companion_doc, companion_summary = _collect_analysis_companion_context()
+            antlr_doc = _read_json_doc(antlr_context_path)
+            target_doc = _read_json_doc(target_analysis_path)
+            evidence_doc = _build_analysis_evidence_index(
+                repo_root=gen.repo_root,
+                antlr_doc=antlr_doc,
+                target_doc=target_doc,
+                companion_doc=companion_doc,
+            )
+            analysis_evidence_count = int((evidence_doc.get("summary") or {}).get("evidence_count") or 0)
             fuzz_dir = gen.repo_root / "fuzz"
             fuzz_dir.mkdir(parents=True, exist_ok=True)
             analysis_doc = {
@@ -3809,6 +4283,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "target_analysis_path": target_analysis_path,
                 "target_analysis_summary": target_analysis_summary,
                 "companion": companion_doc,
+                "analysis_evidence": evidence_doc,
             }
             analysis_path = fuzz_dir / "analysis_context.json"
             analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -3826,6 +4301,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     analysis_lines.append(f"Target analysis: {target_analysis_summary}")
                 if companion_summary:
                     analysis_lines.append(f"Companion signals: {companion_summary}")
+                analysis_lines.append(f"Evidence index count: {analysis_evidence_count}")
                 analysis_hint = "\n".join(analysis_lines)
                 if hint:
                     analysis_hint = f"{analysis_hint}\n\nCoordinator hint:\n{hint}"
@@ -3849,6 +4325,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "analysis_error": "",
                 "analysis_report_path": analysis_report_path,
                 "analysis_context_path": analysis_context_path,
+                "analysis_evidence_count": analysis_evidence_count,
                 "antlr_context_path": antlr_context_path,
                 "antlr_context_summary": antlr_context_summary,
                 "target_analysis_path": target_analysis_path,
@@ -3876,6 +4353,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "analysis_error": fallback_error[:4096],
         "analysis_report_path": analysis_report_path,
         "analysis_context_path": analysis_context_path,
+        "analysis_evidence_count": analysis_evidence_count,
         "antlr_context_path": antlr_context_path,
         "antlr_context_summary": antlr_context_summary,
         "target_analysis_path": target_analysis_path,
@@ -3909,10 +4387,15 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
     repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
     repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
+    constraint_memory_entry = dict(repair_snapshot.get("constraint_memory_entry") or {})
+    constraint_memory_count = int(repair_snapshot.get("constraint_memory_count") or 0)
+    constraint_memory_path = str(repair_snapshot.get("constraint_memory_path") or "")
     antlr_context_path = str(state.get("antlr_context_path") or "").strip()
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
     target_analysis_path = str(state.get("target_analysis_path") or "").strip()
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    analysis_context_path = str(state.get("analysis_context_path") or "").strip()
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
     if not antlr_context_path and not antlr_context_summary:
         antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
     if not target_analysis_path and not target_analysis_summary:
@@ -3929,6 +4412,13 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             f"{target_analysis_summary}"
         )
         hint = (hint + "\n\n" + target_note).strip() if hint else target_note
+    if analysis_context_path:
+        analysis_note = (
+            "Unified analysis context is available at `fuzz/analysis_context.json`; "
+            f"evidence_count={analysis_evidence_count}. "
+            "Prefer evidence-backed target choices and cite evidence ids in PLAN rationale."
+        )
+        hint = (hint + "\n\n" + analysis_note).strip() if hint else analysis_note
     injected_ctx = ""
     prev_plan_text = ""
     prev_targets_text = ""
@@ -4003,6 +4493,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             repair_blocks.append(
                 "=== recent repair attempts ===\n"
                 + json.dumps(repair_recent_attempts[-5:], ensure_ascii=False, indent=2)
+            )
+        if constraint_memory_entry:
+            repair_blocks.append(
+                "=== constraint memory (repeated crash guidance) ===\n"
+                + json.dumps(
+                    {
+                        "path": constraint_memory_path,
+                        "entry_count": constraint_memory_count,
+                        "active_entry": constraint_memory_entry,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             )
         repair_hint = "\n\n".join(part for part in repair_blocks if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
@@ -4134,6 +4637,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_families_required = list(selected_primary.get("seed_families_required") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
+        target_scoring_enabled = bool(
+            selected_primary.get("target_scoring_enabled")
+            or any(bool(item.get("target_score_breakdown")) for item in selected_targets_doc)
+        )
         replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
         replan_effective = bool(state.get("coverage_replan_effective") or False)
         replan_stop_reason = ""
@@ -4197,6 +4704,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "antlr_context_summary": antlr_context_summary,
             "target_analysis_path": target_analysis_path,
             "target_analysis_summary": target_analysis_summary,
+            "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": analysis_evidence_count,
             "selected_targets_path": selected_targets_path,
             "execution_plan_path": execution_plan_path,
             "coverage_target_name": new_target_name or prev_target_name,
@@ -4244,6 +4753,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if repair_mode
                 else []
             ),
+            "constraint_memory_count": constraint_memory_count,
+            "constraint_memory_path": constraint_memory_path,
+            "target_scoring_enabled": target_scoring_enabled,
             "message": "planned",
         }
         out = _clear_error_markers_on_success(out)
@@ -4279,6 +4791,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
     target_analysis_path = str(state.get("target_analysis_path") or "").strip()
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
+    analysis_context_path = str(state.get("analysis_context_path") or "").strip()
+    analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
     selected_targets_path = str(state.get("selected_targets_path") or "").strip()
     selected_target_api = str(state.get("selected_target_api") or "").strip()
     selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
@@ -4300,6 +4814,13 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         ) + (
             "Use `fuzz/target_analysis.json` to preserve the selected target's seed_profile and risk signals while generating harness/build glue.\n"
             f"{target_analysis_summary}"
+        )
+    if analysis_context_path and "analysis_context.json" not in hint:
+        hint = (
+            (hint.strip() + "\n\n") if hint.strip() else ""
+        ) + (
+            "Use `fuzz/analysis_context.json` as the canonical evidence index for API/callgraph/consumer pattern decisions.\n"
+            f"Available evidence_count={analysis_evidence_count}."
         )
     if selected_targets_path:
         selected_target_soft_hint = (
@@ -4335,6 +4856,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         repair_attempt_index = int(repair_snapshot.get("repair_attempt_index") or 0)
         repair_force_strategy_change = bool(repair_snapshot.get("repair_strategy_force_change") or False)
         repair_error_digest = dict(repair_snapshot.get("repair_error_digest") or {})
+        constraint_memory_entry = dict(repair_snapshot.get("constraint_memory_entry") or {})
+        constraint_memory_count = int(repair_snapshot.get("constraint_memory_count") or 0)
+        constraint_memory_path = str(repair_snapshot.get("constraint_memory_path") or "")
         repair_lines: list[str] = [
             "Repair mode context (consume this before editing):",
             f"- repair_origin_stage: {repair_origin_stage}",
@@ -4369,6 +4893,19 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             repair_lines.append(
                 "=== repair recent attempts ===\n"
                 + json.dumps(repair_recent_attempts[-5:], ensure_ascii=False, indent=2)
+            )
+        if constraint_memory_entry:
+            repair_lines.append(
+                "=== constraint memory (repeated crash guidance) ===\n"
+                + json.dumps(
+                    {
+                        "path": constraint_memory_path,
+                        "entry_count": constraint_memory_count,
+                        "active_entry": constraint_memory_entry,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
             )
         repair_hint = "\n\n".join(part for part in repair_lines if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
@@ -4780,6 +5317,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                         ctx += "\n=== fuzz/target_analysis.json ===\n" + analysis_path_obj.read_text(
                             encoding="utf-8", errors="replace"
                         )
+                if analysis_context_path:
+                    analysis_ctx_obj = Path(analysis_context_path)
+                    if not analysis_ctx_obj.is_absolute():
+                        analysis_ctx_obj = gen.repo_root / analysis_ctx_obj
+                    if analysis_ctx_obj.is_file():
+                        ctx += "\n=== fuzz/analysis_context.json ===\n" + analysis_ctx_obj.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
                 if selected_targets_path:
                     selected_path_obj = Path(selected_targets_path)
                     if not selected_path_obj.is_absolute():
@@ -4991,6 +5536,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
             "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
+            "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
+            "analysis_evidence_count": analysis_evidence_count,
+            "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
+            "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
             "message": "synthesized",
         }
         out = _clear_error_markers_on_success(out)
@@ -8382,6 +8931,25 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             or (requested_replan and plateau_no_gain)
         )
         quality_oracle = "quality_degraded" if quality_degraded else "ok"
+        if seed_quality_issue:
+            coverage_bottleneck_kind = "seed_limited"
+            if cold_start_failure:
+                coverage_bottleneck_reason = "cold_start_failure"
+            elif merge_retained_low:
+                coverage_bottleneck_reason = "merge_retained_low"
+            elif seed_families_missing:
+                coverage_bottleneck_reason = "missing_seed_families"
+            else:
+                coverage_bottleneck_reason = "seed_quality_flags"
+        elif requested_replan or (plateau_no_gain and str(current_depth_class or "").lower() == "shallow"):
+            coverage_bottleneck_kind = "target_limited"
+            coverage_bottleneck_reason = "target_plateau_or_shallow_depth"
+        elif plateau_no_gain:
+            coverage_bottleneck_kind = "harness_limited"
+            coverage_bottleneck_reason = "plateau_without_seed_or_target_signal"
+        else:
+            coverage_bottleneck_kind = "none"
+            coverage_bottleneck_reason = ""
         auto_stop_policy = _auto_stop_policy()
         base_should_improve = (
             (not bool(state.get("crash_found")))
@@ -8443,6 +9011,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
             if parallel_diagnosis_code != "balanced":
                 reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
+            if coverage_bottleneck_kind != "none":
+                reason += f"; bottleneck={coverage_bottleneck_kind}:{coverage_bottleneck_reason}"
         elif round_budget_exhausted:
             if requested_replan:
                 reason = (
@@ -8487,6 +9057,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_missing": seed_families_missing,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
+                "coverage_bottleneck_kind": coverage_bottleneck_kind,
+                "coverage_bottleneck_reason": coverage_bottleneck_reason,
                 "parallel_diagnosis_code": parallel_diagnosis_code,
                 "parallel_diagnosis": parallel_diagnosis,
                 "parallel_engine": parallel_engine,
@@ -8523,6 +9095,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_seed_families_missing": seed_families_missing,
             "coverage_quality_flags": quality_flags,
             "coverage_quality_oracle": quality_oracle,
+            "coverage_bottleneck_kind": coverage_bottleneck_kind,
+            "coverage_bottleneck_reason": coverage_bottleneck_reason,
             "coverage_parallel_diagnosis_code": parallel_diagnosis_code,
             "coverage_parallel_diagnosis": parallel_diagnosis,
             "coverage_parallel_engine": parallel_engine,
@@ -8646,10 +9220,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         harness_feedback = dict(state.get("coverage_harness_feedback") or _build_harness_feedback(cast(dict[str, Any], state)))
         quality_oracle = str(state.get("coverage_quality_oracle") or "ok")
+        coverage_bottleneck_kind = str(state.get("coverage_bottleneck_kind") or "").strip() or "none"
+        coverage_bottleneck_reason = str(state.get("coverage_bottleneck_reason") or "").strip()
         seed_first_repair = bool(
+            coverage_bottleneck_kind == "seed_limited"
+            or (
             seed_feedback.get("cold_start_failure")
             or float(seed_feedback.get("merge_retained_ratio_files") or 1.0) < 0.35
             or bool(seed_families_missing)
+            )
         )
         improve_mode = str(state.get("coverage_improve_mode") or "").strip() or ("replan" if replan_required else "in_place")
         if replan_required:
@@ -8665,6 +9244,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current selection reason: {selection_bias_reason or 'n/a'}\n"
                 f"- Replan reason: {replan_reason or cov_reason or 'coverage plateau'}\n"
                 f"- Quality oracle: {quality_oracle}\n"
+                f"- Coverage bottleneck: {coverage_bottleneck_kind} ({coverage_bottleneck_reason or 'n/a'})\n"
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
                 "- If the current target is shallow, prioritize medium/deep candidates and avoid helper/checksum/copy-style shallow sinks.\n"
@@ -8696,6 +9276,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Seed noise rejected: {seed_noise_rejected_count}\n"
                 f"- Seed quality summary: {json.dumps(seed_quality, ensure_ascii=False) if seed_quality else '{}'}\n"
                 f"- Quality oracle: {quality_oracle}\n"
+                f"- Coverage bottleneck: {coverage_bottleneck_kind} ({coverage_bottleneck_reason or 'n/a'})\n"
                 f"- Repair focus decision: {'seed-first' if seed_first_repair else 'harness-first'}\n"
                 f"- SeedFeedback: {json.dumps(seed_feedback, ensure_ascii=False)}\n"
                 f"- HarnessFeedback: {json.dumps(harness_feedback, ensure_ascii=False)}\n"
@@ -8797,6 +9378,8 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                     "seed_noise_rejected_count": seed_noise_rejected_count,
                     "seed_quality": seed_quality,
                     "quality_oracle": quality_oracle,
+                    "coverage_bottleneck_kind": coverage_bottleneck_kind,
+                    "coverage_bottleneck_reason": coverage_bottleneck_reason,
                     "seed_feedback": seed_feedback,
                     "harness_feedback": harness_feedback,
                 }
@@ -9076,6 +9659,23 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         triage_md.append("- (none)")
     triage_md_path.write_text("\n".join(triage_md) + "\n", encoding="utf-8")
 
+    constraint_count = int(state.get("constraint_memory_count") or 0)
+    constraint_path = str(_constraint_memory_path(repo_root))
+    if str(state.get("crash_signature") or "").strip():
+        try:
+            constraint_count, constraint_path, _ = _record_constraint_memory_observation(
+                repo_root=repo_root,
+                signature=str(state.get("crash_signature") or ""),
+                stage="crash-triage",
+                classification=label,
+                reason=reason,
+                evidence=signal_lines,
+                confidence=float(confidence),
+                repeats=int(state.get("same_crash_repeats") or 0) + 1,
+            )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"crash-triage: constraint memory update skipped: {exc}")
+
     out = {
         **state,
         "last_step": "crash-triage",
@@ -9087,6 +9687,8 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "crash_triage_signal_lines": signal_lines,
         "crash_triage_report_path": str(triage_md_path),
         "crash_triage_json_path": str(triage_json_path),
+        "constraint_memory_count": constraint_count,
+        "constraint_memory_path": constraint_path,
         "message": f"crash triage classified as {label}",
     }
     _wf_log(cast(dict[str, Any], out), f"<- crash-triage label={label} conf={confidence:.2f} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -9211,6 +9813,24 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         md_lines.append(f"- {line}")
     analysis_md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
+    constraint_count = int(state.get("constraint_memory_count") or 0)
+    constraint_path = str(_constraint_memory_path(repo_root))
+    if str(state.get("crash_signature") or "").strip():
+        try:
+            analysis_confidence = 0.8 if verdict in {"false_positive", "real_bug"} else 0.45
+            constraint_count, constraint_path, _ = _record_constraint_memory_observation(
+                repo_root=repo_root,
+                signature=str(state.get("crash_signature") or ""),
+                stage="crash-analysis",
+                classification=verdict,
+                reason=reason,
+                evidence=evidence,
+                confidence=analysis_confidence,
+                repeats=int(state.get("same_crash_repeats") or 0) + 1,
+            )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"crash-analysis: constraint memory update skipped: {exc}")
+
     false_positive = verdict == "false_positive"
     restart_reason = "crash_false_positive" if false_positive else ""
     restart_error = reason[:4096] if false_positive else ""
@@ -9265,6 +9885,8 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
             if false_positive
             else []
         ),
+        "constraint_memory_count": constraint_count,
+        "constraint_memory_path": constraint_path,
         "message": "crash-analysis false_positive" if false_positive else "crash-analysis stop",
     }
     _wf_log(
@@ -10643,7 +11265,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_loop_round": int(out.get("coverage_loop_round") or 0),
         "coverage_should_improve": bool(out.get("coverage_should_improve") or False),
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
+        "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
+        "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "coverage_history": list(out.get("coverage_history") or []),
+        "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),
+        "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
+        "constraint_memory_count": int(out.get("constraint_memory_count") or 0),
+        "constraint_memory_path": str(out.get("constraint_memory_path") or ""),
         "plan_retry_reason": str(out.get("plan_retry_reason") or ""),
         "plan_targets_schema_valid_before_retry": bool(out.get("plan_targets_schema_valid_before_retry") or False),
         "plan_targets_schema_valid_after_retry": bool(out.get("plan_targets_schema_valid_after_retry") or False),

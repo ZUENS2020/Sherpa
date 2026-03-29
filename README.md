@@ -97,6 +97,8 @@ flowchart TD
 - `fuzz/selected_targets.json`
 - `fuzz/execution_plan.json`
 - `fuzz/harness_index.json`
+- `fuzz/analysis_context.json`
+- `fuzz/constraint_memory.json`
 - `fuzz/repo_understanding.json`
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`

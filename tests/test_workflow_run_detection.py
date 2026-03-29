@@ -1185,6 +1185,38 @@ def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
     assert "reduce parallelism" in out["coverage_parallel_diagnosis"]
 
 
+def test_node_coverage_analysis_sets_seed_limited_bottleneck_on_cold_start():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "blast_fuzz",
+            "coverage_seed_profile": "archive-container",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "merge_retained_ratio_files": 0.2,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "blast_fuzz",
+                    "final_cov": 1,
+                    "final_ft": 2,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "seed_limited"
+    assert out["coverage_bottleneck_reason"] == "cold_start_failure"
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {
@@ -1259,6 +1291,30 @@ def test_node_crash_triage_defaults_to_inconclusive_when_model_output_invalid(tm
     assert out["crash_triage_signal_lines"] == ["model output invalid/incomplete"]
 
 
+def test_node_crash_triage_records_constraint_memory_after_repeat_threshold(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-constraint-1",
+            "same_crash_repeats": 1,
+        }
+    )
+    assert int(out.get("constraint_memory_count") or 0) >= 1
+    path = Path(str(out.get("constraint_memory_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entry = dict((doc.get("entries") or {}).get("sig-constraint-1") or {})
+    assert entry.get("classification") == "inconclusive"
+    assert entry.get("source_stage") == "crash-triage"
+
+
 def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_path: Path):
     class _Patcher:
         def run_codex_command(self, *_args, **_kwargs):
@@ -1283,6 +1339,44 @@ def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_p
     )
     assert out["crash_analysis_verdict"] == "unknown"
     assert out["crash_analysis_reason"].startswith("model output invalid/incomplete")
+
+
+def test_node_crash_analysis_records_constraint_memory_when_model_returns_false_positive(tmp_path: Path):
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "verdict": "false_positive",
+                        "reason": "harness violated parser precondition",
+                        "evidence": ["stack frame points to harness parser wrapper"],
+                        "recommended_action": "repair_harness",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-constraint-2",
+            "same_crash_repeats": 1,
+        }
+    )
+    assert out["crash_analysis_verdict"] == "false_positive"
+    assert out["repair_mode"] is True
+    assert int(out.get("constraint_memory_count") or 0) >= 1
+    path = Path(str(out.get("constraint_memory_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    entry = dict((doc.get("entries") or {}).get("sig-constraint-2") or {})
+    assert entry.get("classification") == "false_positive"
+    assert entry.get("source_stage") == "crash-analysis"
 
 
 def test_route_after_crash_analysis_routes_to_plan_on_false_positive():

@@ -68,8 +68,9 @@ flowchart LR
 
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
-- `fuzz/selected_targets.json`
+- `fuzz/selected_targets.json`（含 `target_score_breakdown`）
 - `fuzz/execution_plan.json`
+- `fuzz/analysis_context.json`
 
 核心问题：
 
@@ -99,6 +100,7 @@ flowchart LR
 - `crash_triage.json`
 - `crash_analysis.md`
 - `repro_context.json`
+- `fuzz/constraint_memory.json`
 
 核心问题：
 
