@@ -17,6 +17,7 @@ from fuzz_unharnessed_repo import (
     RepoSpec,
     _classify_seed_family,
     _host_git_proxy_env,
+    _infer_target_type,
     _seed_families_for_target,
     _seed_quality_from_run,
 )
@@ -229,6 +230,14 @@ def test_fmt_seed_families_replace_generic_parser_format():
     assert "width_precision" in required
     assert "malformed_replacement_fields" in required
     assert optional == []
+
+
+def test_infer_target_type_keeps_inflate_on_archive_side():
+    assert _infer_target_type("inflateBack9", "stream inflate decoder") == "archive"
+
+
+def test_infer_target_type_classifies_read_string_as_parser():
+    assert _infer_target_type("read_string", "token scanner") == "parser"
 
 
 def test_filter_seed_corpus_rejects_noisy_fmt_binary_variants(tmp_path: Path):

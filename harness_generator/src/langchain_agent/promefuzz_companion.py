@@ -191,12 +191,14 @@ def _collect_repo_inventory(repo_root: Path) -> RepoInventory:
 
 def _seed_profile_for_symbol(symbol: str) -> str:
     low = symbol.lower()
-    if any(k in low for k in ("parse", "token", "format", "scan", "yaml", "json", "xml")):
-        return "parser-format"
-    if any(k in low for k in ("read", "load", "line", "lex")):
-        return "parser-token"
     if any(k in low for k in ("inflate", "deflate", "zip", "gzip", "archive", "tar", "lz", "zstd")):
         return "archive-container"
+    if any(k in low for k in ("parse", "token", "format", "scan", "yaml", "json", "xml")):
+        return "parser-format"
+    if any(k in low for k in ("read_string", "read_line", "readline", "read_token", "read field", "lex", "load")):
+        return "parser-token"
+    if re.search(r"\bread_(string|line|token|field|record|key|value)\b", low):
+        return "parser-token"
     if any(k in low for k in ("decode", "decoder", "decompress", "unpack", "deserialize")):
         return "decoder-binary"
     return "unknown"

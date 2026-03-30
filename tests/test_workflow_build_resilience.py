@@ -548,6 +548,44 @@ def test_build_repair_contract_allows_entrypoint_when_present(tmp_path: Path):
     assert reason == ""
 
 
+def test_validate_harness_source_contract_rejects_custom_main(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.cc"
+    src.write_text(
+        'extern "C" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n'
+        "int main(int argc, char** argv) { return argc + (argv ? 0 : 1); }\n",
+        encoding="utf-8",
+    )
+    ok, reason = workflow_graph._validate_harness_source_contract(
+        tmp_path,
+        {"mappings": [{"target_name": "demo", "source_path": "fuzz/demo_fuzz.cc"}]},
+    )
+    assert ok is False
+    assert "custom main() is forbidden" in reason
+
+
+def test_validate_harness_source_contract_rejects_argv_file_entry(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.c"
+    src.write_text(
+        '#include <stdio.h>\n'
+        'extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size){\n'
+        "  FILE* fp = fopen(argv[1], \"rb\");\n"
+        "  if (fp) fclose(fp);\n"
+        "  return (int)size + (data ? 0 : 1);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    ok, reason = workflow_graph._validate_harness_source_contract(
+        tmp_path,
+        {"mappings": [{"target_name": "demo", "source_path": "fuzz/demo_fuzz.c"}]},
+    )
+    assert ok is False
+    assert "fopen(argv[1], ...)" in reason
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

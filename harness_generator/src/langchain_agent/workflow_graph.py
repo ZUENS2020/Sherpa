@@ -624,12 +624,16 @@ def _validate_targets_json(repo_root: Path) -> tuple[bool, str]:
 
 def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
-    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex")):
         return "parser"
-    if any(tok in text for tok in ("decode", "decoder", "decompress", "unpack")):
-        return "decoder"
     if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "inflate", "deflate", "gzip", "zlib", "lz", "zstd")):
         return "archive"
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "unpack")):
+        return "decoder"
+    if re.search(r"\bread_(?:string|line|token|field|record|key|value)\b", text):
+        return "parser"
+    if any(tok in text for tok in ("read string", "read_line", "readline", "reader")):
+        return "parser"
     if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
         return "image"
     if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
@@ -1046,7 +1050,7 @@ def _infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
             return "parser-numeric"
         if any(tok in text for tok in ("format", "replacement field", "specifier", "brace", "printf", "fmt")):
             return "parser-format"
-        if any(tok in text for tok in ("token", "lexer", "lex", "scan", "scanner")):
+        if any(tok in text for tok in ("token", "lexer", "lex", "scan", "scanner", "read_", "readline", "read line")):
             return "parser-token"
         return "parser-structure"
     mapping = {
@@ -2233,6 +2237,40 @@ def _validate_build_repair_contract(
     return True, ""
 
 
+def _validate_harness_source_contract(
+    repo_root: Path,
+    harness_index_doc: dict[str, Any],
+) -> tuple[bool, str]:
+    mappings = [m for m in list(harness_index_doc.get("mappings") or []) if isinstance(m, dict)]
+    source_paths = [str(m.get("source_path") or "").strip() for m in mappings]
+    source_paths = [p for p in source_paths if p]
+    if not source_paths:
+        return True, ""
+
+    violations: list[str] = []
+    for rel in source_paths:
+        p = (repo_root / rel).resolve()
+        if not p.is_file():
+            continue
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        lowered = txt.lower()
+        if re.search(r"\b(?:int|auto|void)\s+main\s*\(", txt):
+            violations.append(f"{rel}: custom main() is forbidden")
+        if re.search(r"\bfopen\s*\(\s*argv\s*\[\s*1\s*\]", lowered):
+            violations.append(f"{rel}: forbidden corpus-file entry pattern fopen(argv[1], ...)")
+        if re.search(r"\b(?:open|read)\s*\(\s*argv\s*\[\s*1\s*\]", lowered):
+            violations.append(f"{rel}: forbidden argv[1]-driven read/open entry pattern")
+        if "reinterpret_cast<file*>" in lowered or "(file*)data" in lowered:
+            violations.append(f"{rel}: FILE* cast from fuzz input is forbidden")
+
+    if violations:
+        limited = "; ".join(violations[:6])
+        if len(violations) > 6:
+            limited += f"; ...(+{len(violations) - 6} more)"
+        return False, f"harness contract failed: {limited}"
+    return True, ""
+
+
 def _classify_build_failure(
     last_error: str,
     stdout_tail: str,
@@ -2288,6 +2326,9 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "seed_counts_raw": dict(state.get("coverage_seed_counts_raw") or {}),
         "seed_counts_filtered": dict(state.get("coverage_seed_counts_filtered") or {}),
         "seed_noise_rejected_count": int(state.get("coverage_seed_noise_rejected_count") or 0),
+        "seed_generation_failed_count": int(state.get("coverage_seed_generation_failed_count") or 0),
+        "seed_generation_failed_fuzzers": list(state.get("coverage_seed_generation_failed_fuzzers") or []),
+        "seed_generation_degraded": bool(state.get("coverage_seed_generation_degraded") or False),
         "corpus_sources": list(state.get("coverage_corpus_sources") or []),
     }
 
@@ -5456,6 +5497,12 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             )
             if not repair_ok:
                 raise HarnessGeneratorError(f"synthesize incomplete: {repair_reason}")
+            harness_contract_ok, harness_contract_reason = _validate_harness_source_contract(
+                gen.repo_root,
+                harness_index_doc,
+            )
+            if not harness_contract_ok:
+                raise HarnessGeneratorError(f"synthesize incomplete: {harness_contract_reason}")
         except HarnessGeneratorError:
             raise
         except Exception as e:
@@ -8000,6 +8047,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+        seed_generation_failed_fuzzers: list[str] = []
+        seed_generation_error_by_fuzzer: dict[str, str] = {}
 
         def _accumulate_seed_counts(dst: dict[str, int], src: Any) -> None:
             if not isinstance(src, dict):
@@ -8072,6 +8121,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                             seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
                 except Exception as e:
                     # Seed generation is best-effort; do not block fuzzing.
+                    seed_generation_failed_fuzzers.append(fuzzer_name)
+                    seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
                     print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
         finally:
             setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
@@ -8594,6 +8645,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_counts_raw": seed_count_raw_total,
             "coverage_seed_counts_filtered": seed_count_filtered_total,
             "coverage_seed_noise_rejected_count": seed_noise_rejected_count,
+            "coverage_seed_generation_failed_fuzzers": list(seed_generation_failed_fuzzers),
+            "coverage_seed_generation_error_by_fuzzer": dict(seed_generation_error_by_fuzzer),
+            "coverage_seed_generation_failed_count": int(len(seed_generation_failed_fuzzers)),
+            "coverage_seed_generation_degraded": bool(
+                seed_generation_failed_fuzzers
+                or int(seed_count_filtered_total.get("total") or 0) <= 1
+            ),
             "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
             "coverage_repo_examples_filtered": repo_examples_filtered,
@@ -8699,11 +8757,24 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
                     "updated_at": int(time.time()),
                 }
+            failed_seed_gen = set(out.get("coverage_seed_generation_failed_fuzzers") or [])
+            if failed_seed_gen:
+                for fuzzer_name in sorted(failed_seed_gen):
+                    item = dict(by_fuzzer.get(fuzzer_name) or {})
+                    item["seed_generation_failed"] = True
+                    item["seed_generation_error"] = str(
+                        (out.get("coverage_seed_generation_error_by_fuzzer") or {}).get(fuzzer_name) or ""
+                    )
+                    item["updated_at"] = int(time.time())
+                    by_fuzzer[fuzzer_name] = item
             seed_feedback_doc = {
                 "version": 1,
                 "updated_at": int(time.time()),
                 "job_id": str(state.get("job_id") or ""),
                 "repo_url": str(state.get("repo_url") or ""),
+                "seed_generation_degraded": bool(out.get("coverage_seed_generation_degraded") or False),
+                "seed_generation_failed_count": int(out.get("coverage_seed_generation_failed_count") or 0),
+                "seed_generation_failed_fuzzers": list(out.get("coverage_seed_generation_failed_fuzzers") or []),
                 "by_fuzzer": by_fuzzer,
             }
             seed_feedback_path.write_text(
