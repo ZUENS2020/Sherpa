@@ -43,6 +43,9 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
     assert "api_surface_exception" in synth
+    assert "do not define custom `main()` in harness source" in synth
+    assert "LLVMFuzzerTestOneInput" in synth
+    assert "fopen(argv[1], ...)" in synth
 
 
 def test_synthesize_complete_scaffold_requires_missing_item_repair() -> None:
@@ -133,5 +136,15 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
+    assert "do not define custom `main()` in harness source" in synth_repair_build
+    assert "LLVMFuzzerTestOneInput" in synth_repair_build
+    assert "fopen(argv[1], ...)" in synth_repair_build
+    assert "do not define custom `main()` in harness source" in synth_repair_crash
+    assert "LLVMFuzzerTestOneInput" in synth_repair_crash
+    assert "fopen(argv[1], ...)" in synth_repair_crash
+    assert "do not define custom `main()` in harness source" in synth_repair_coverage
+    assert "LLVMFuzzerTestOneInput" in synth_repair_coverage
     assert "no target switching" in improve_in_place.lower() or "without switching targets" in improve_in_place.lower()
+    assert "do not define custom `main()` in harness source" in improve_in_place
+    assert "LLVMFuzzerTestOneInput" in improve_in_place
     assert "coverage" in synth_repair_coverage.lower()
