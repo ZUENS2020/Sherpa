@@ -50,8 +50,56 @@ endif()
 
 link_directories(${LLVM_LIB_DIR})
 
-find_library(CLANG_CPP_LIB NAMES clang-cpp libclang-cpp HINTS ${LLVM_LIB_DIR} REQUIRED)
-find_library(LLVM_CORE_LIB NAMES LLVM libLLVM HINTS ${LLVM_LIB_DIR} REQUIRED)
+find_library(
+    CLANG_CPP_LIB
+    NAMES
+        clang-cpp
+        libclang-cpp
+        clang-cpp-${LLVM_VERSION_MAJOR}
+        libclang-cpp-${LLVM_VERSION_MAJOR}
+    HINTS
+        ${LLVM_LIB_DIR}
+)
+if(NOT CLANG_CPP_LIB)
+    file(
+        GLOB CLANG_CPP_CANDIDATES
+        "${LLVM_LIB_DIR}/libclang-cpp.so*"
+        "${LLVM_LIB_DIR}/clang-cpp.so*"
+    )
+    list(SORT CLANG_CPP_CANDIDATES)
+    if(CLANG_CPP_CANDIDATES)
+        list(GET CLANG_CPP_CANDIDATES 0 CLANG_CPP_LIB)
+    endif()
+endif()
+if(NOT CLANG_CPP_LIB)
+    message(FATAL_ERROR "Could not resolve clang-cpp library under ${LLVM_LIB_DIR}")
+endif()
+
+find_library(
+    LLVM_CORE_LIB
+    NAMES
+        LLVM
+        libLLVM
+        LLVM-${LLVM_VERSION_MAJOR}
+        libLLVM-${LLVM_VERSION_MAJOR}
+    HINTS
+        ${LLVM_LIB_DIR}
+)
+if(NOT LLVM_CORE_LIB)
+    file(
+        GLOB LLVM_CORE_CANDIDATES
+        "${LLVM_LIB_DIR}/libLLVM-${LLVM_VERSION_MAJOR}*.so*"
+        "${LLVM_LIB_DIR}/libLLVM.so*"
+        "${LLVM_LIB_DIR}/libLLVM-*.so*"
+    )
+    list(SORT LLVM_CORE_CANDIDATES)
+    if(LLVM_CORE_CANDIDATES)
+        list(GET LLVM_CORE_CANDIDATES 0 LLVM_CORE_LIB)
+    endif()
+endif()
+if(NOT LLVM_CORE_LIB)
+    message(FATAL_ERROR "Could not resolve LLVM core library under ${LLVM_LIB_DIR}")
+endif()
 
 add_executable(preprocessor
     preprocessor.cc
