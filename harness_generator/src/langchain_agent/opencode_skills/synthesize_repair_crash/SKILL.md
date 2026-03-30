@@ -36,6 +36,10 @@ Use this skill in repair mode for crash/repro failures.
 - Public/stable APIs are mandatory by default.
 - If non-public API is unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, replace offending symbols first.
+- LibFuzzer harness contract is mandatory:
+  - do not define custom `main()` in harness source;
+  - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
+- Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 
 ## Command policy

@@ -106,6 +106,9 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "Do NOT run build/execute commands." in synth
     assert "Prefer public/stable repository APIs for harness logic." in synth
     assert "Query MCP evidence first" in synth
+    assert "do not define custom `main()` in harness source" in synth
+    assert "LLVMFuzzerTestOneInput" in synth
+    assert "fopen(argv[1], ...)" in synth
 
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
@@ -124,14 +127,24 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "api_surface_exception" in synth_build_repair
     assert "non_public_api_usage" in synth_build_repair
     assert "MCP is unavailable, continue in degraded mode" in synth_build_repair
+    assert "no custom `main()` in harness source" in synth_build_repair
+    assert "LLVMFuzzerTestOneInput" in synth_build_repair
+    assert "fopen(argv[1], ...)" in synth_build_repair
     assert "api_surface_exception" in synth_crash_repair
     assert "non_public_api_usage" in synth_crash_repair
+    assert "no custom `main()` in harness source" in synth_crash_repair
+    assert "LLVMFuzzerTestOneInput" in synth_crash_repair
+    assert "fopen(argv[1], ...)" in synth_crash_repair
     assert "coverage plateau / replan trigger" in synth_coverage_repair
     assert "material strategy change" in synth_coverage_repair
     assert "coverage-fail" in synth_coverage_repair
+    assert "no custom `main()` in harness source" in synth_coverage_repair
+    assert "LLVMFuzzerTestOneInput" in synth_coverage_repair
     assert "in-place coverage improvement pass" in in_place_repair
     assert "pure doc-only edits are invalid" in in_place_repair
     assert "in-place-fail" in in_place_repair
+    assert "no custom `main()` in harness source" in in_place_repair
+    assert "LLVMFuzzerTestOneInput" in in_place_repair
 
     triage = workflow_common.render_opencode_prompt("crash_triage_with_hint", hint="triage-this")
     assert "classify crash into exactly one label" in triage

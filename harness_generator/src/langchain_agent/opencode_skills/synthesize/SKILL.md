@@ -102,6 +102,10 @@ Compiler-by-suffix rule:
 ## Constraints
 - Multi-target buildability is required when execution plan has multiple targets.
 - Do not leave stale or missing execution target mappings in `fuzz/harness_index.json`.
+- LibFuzzer harness contract is mandatory:
+  - do not define custom `main()` in harness source;
+  - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
+- Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]` before broader edits.
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 

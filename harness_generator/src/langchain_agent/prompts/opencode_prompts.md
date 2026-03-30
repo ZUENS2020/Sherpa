@@ -198,6 +198,8 @@ Stage requirements:
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
 - Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
+- LibFuzzer harness contract is mandatory: do not define custom `main()` in harness source; expose fuzz entry via `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)` (or language-equivalent entrypoint only).
+- Do not use argv/file-driven harness entry logic in libFuzzer mode (forbidden patterns include `fopen(argv[1], ...)`, `read(argv[1], ...)`, and manual corpus file loops).
 - `fuzz/README.md` must include:
   - `Selected target: ...`
   - `Final target: ...`
@@ -246,6 +248,8 @@ Build-repair constraints:
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
@@ -283,6 +287,8 @@ Crash-repair constraints:
 - avoid no-op doc-only edits
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
@@ -320,6 +326,8 @@ Coverage-repair constraints:
 - include and apply at least one material strategy change from previous cycle
 - avoid no-op doc-only edits
 - keep selected/final target, execution plan, and harness index consistent
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
@@ -353,6 +361,8 @@ Constraints:
 - consume `SeedFeedback` and `HarnessFeedback` before editing; include one concrete change tied to these signals.
 - pure doc-only edits are invalid in this stage.
 - include at least one material strategy change vs the previous failed cycle.
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry.
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 
 MANDATORY:
 - create `./done`
