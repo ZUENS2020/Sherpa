@@ -1205,12 +1205,16 @@ def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
     if any(tok in text for tok in ("format", "printf", "replacement field", "specifier", "brace", "template")):
         return "parser"
-    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex")):
         return "parser"
-    if any(tok in text for tok in ("decode", "decoder", "decompress", "unpack")):
-        return "decoder"
     if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "inflate", "deflate", "gzip", "zlib", "lz", "zstd")):
         return "archive"
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "unpack")):
+        return "decoder"
+    if re.search(r"\bread_(?:string|line|token|field|record|key|value)\b", text):
+        return "parser"
+    if any(tok in text for tok in ("read string", "read_line", "readline", "reader")):
+        return "parser"
     if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
         return "image"
     if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
@@ -3156,7 +3160,7 @@ EOF
                 return "parser-numeric"
             if any(tok in lowered for tok in ("format", "replacement field", "specifier", "fmt::", "brace", "printf")):
                 return "parser-format"
-            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner")):
+            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner", "read_", "readline", "read line")):
                 return "parser-token"
             return "parser-structure"
         mapping = {

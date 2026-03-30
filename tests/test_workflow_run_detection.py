@@ -61,6 +61,12 @@ class _SlowSeedGenerator(_FakeRunGenerator):
         time.sleep(self._seed_sleep_sec)
 
 
+class _FailingSeedGenerator(_FakeRunGenerator):
+    def _pass_generate_seeds(self, fuzzer_name: str) -> None:
+        self.seed_calls += 1
+        raise RuntimeError(f"seed generation failed for {fuzzer_name}")
+
+
 class _MultiRunGenerator(_FakeRunGenerator):
     def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, run_sleep_sec: float = 0.0) -> None:
         super().__init__(tmp_path, run_results)
@@ -279,6 +285,36 @@ def test_node_run_writes_seed_feedback_json(tmp_path: Path):
     by_fuzzer = payload.get("by_fuzzer") or {}
     assert "demo_fuzz" in by_fuzzer
     assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
+
+
+def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path):
+    gen = _FailingSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            )
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out["coverage_seed_generation_degraded"] is True
+    assert out["coverage_seed_generation_failed_count"] == 1
+    assert out["coverage_seed_generation_failed_fuzzers"] == ["demo_fuzz"]
+
+    feedback_path = tmp_path / "fuzz" / "seed_feedback.json"
+    payload = json.loads(feedback_path.read_text(encoding="utf-8"))
+    assert payload["seed_generation_degraded"] is True
+    assert payload["seed_generation_failed_count"] == 1
+    assert payload["seed_generation_failed_fuzzers"] == ["demo_fuzz"]
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
