@@ -1207,9 +1207,9 @@ def _infer_target_type(*parts: str) -> str:
         return "parser"
     if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
         return "parser"
-    if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
+    if any(tok in text for tok in ("decode", "decoder", "decompress", "unpack")):
         return "decoder"
-    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z")):
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "inflate", "deflate", "gzip", "zlib", "lz", "zstd")):
         return "archive"
     if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
         return "image"
