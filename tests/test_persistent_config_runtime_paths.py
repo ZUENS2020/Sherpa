@@ -125,9 +125,9 @@ def test_write_opencode_env_uses_runtime_parent_and_cross_device_fallback(
 def test_normalize_model_for_opencode_prefixes_single_configured_provider():
     cfg = pc.WebPersistentConfig()
 
-    out = pc.normalize_model_for_opencode("MiniMax-M2.7-highspeed", cfg=cfg)
+    out = pc.normalize_model_for_opencode("deepseek-reasoner", cfg=cfg)
 
-    assert out == "minimax/MiniMax-M2.7-highspeed"
+    assert out == "deepseek/deepseek-reasoner"
 
 
 def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: pytest.MonkeyPatch):

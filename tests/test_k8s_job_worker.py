@@ -130,15 +130,15 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         "time_budget": 900,
         "run_time_budget": 900,
         "analysis_companion_url": "http://sherpa-promefuzz-job-bootstrap.sherpa-dev.svc.cluster.local:18080/mcp",
-        "model": "MiniMax-M2.7-highspeed",
+        "model": "deepseek-reasoner",
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
 
     monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
     monkeypatch.setenv("SHERPA_RUNTIME_CONFIG_DIR", str(runtime_dir))
-    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
-    monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
+    monkeypatch.setenv("LLM_key", "test-deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
 
@@ -148,9 +148,9 @@ def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: P
         assert cfg_path == runtime_dir / "opencode.generated.json"
         assert cfg_path.is_file()
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        provider = data["provider"]["minimax"]
-        assert provider["options"]["baseURL"] == "https://api.minimaxi.com/anthropic/v1"
-        assert provider["options"]["apiKey"] == "test-minimax-key"
+        provider = data["provider"]["deepseek"]
+        assert provider["options"]["baseURL"] == "https://api.deepseek.com/v1"
+        assert provider["options"]["apiKey"] == "test-deepseek-key"
         assert data.get("mcp", {}).get("promefuzz", {}).get("url") == payload["analysis_companion_url"]
         assert os.environ.get("SHERPA_OPENCODE_MCP_URL") == payload["analysis_companion_url"]
         return {"ok": True}
