@@ -4385,6 +4385,58 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
                 if not analysis_path.is_file():
                     analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+                # ── Verify OpenCode set analysis_source on target_analysis; retry once if not ──
+                _ta_path = gen.repo_root / "fuzz" / "target_analysis.json"
+                _opencode_verified = False
+                if _ta_path.is_file():
+                    try:
+                        _ta_doc = json.loads(_ta_path.read_text(encoding="utf-8", errors="replace"))
+                        if isinstance(_ta_doc, dict):
+                            _all_entries = list(_ta_doc.get("recommended_targets") or []) + list(_ta_doc.get("candidate_functions") or [])
+                            _opencode_verified = any(
+                                str(e.get("analysis_source") or "") == "opencode-verified"
+                                for e in _all_entries if isinstance(e, dict)
+                            )
+                    except Exception:
+                        pass
+                if not _opencode_verified:
+                    _wf_log(cast(dict[str, Any], state), "target_type not verified by OpenCode; retrying analysis")
+                    try:
+                        retry_hint = (
+                            analysis_hint
+                            + "\n\nIMPORTANT: You MUST verify target_type for each entry in fuzz/target_analysis.json "
+                            "and set analysis_source to 'opencode-verified'. This was not done in the previous attempt."
+                        )
+                        retry_prompt = _render_opencode_prompt("analysis_with_hint", hint=retry_hint)
+                        gen.patcher.run_codex_command(
+                            retry_prompt,
+                            stage_skill="analysis",
+                            timeout=_remaining_time_budget_sec(state),
+                            max_attempts=1,
+                            max_cli_retries=_opencode_cli_retries(),
+                        )
+                    except Exception as retry_err:
+                        _wf_log(cast(dict[str, Any], state), f"target_type verification retry failed: {retry_err}")
+
+                # ── Refresh target_analysis_summary from potentially updated file ──
+                if _ta_path.is_file():
+                    try:
+                        _refreshed_doc = json.loads(_ta_path.read_text(encoding="utf-8", errors="replace"))
+                        if isinstance(_refreshed_doc, dict):
+                            _rec = _refreshed_doc.get("recommended_targets") or []
+                            target_analysis_summary = (
+                                f"target_analysis_file=fuzz/target_analysis.json; "
+                                f"candidates={len(_refreshed_doc.get('candidate_functions') or [])}; "
+                                + "recommended="
+                                + ", ".join(
+                                    f"{r.get('name', '?')}:{r.get('seed_profile', '?')}"
+                                    for r in _rec[:5]
+                                )
+                            )
+                    except Exception:
+                        pass
+
             out = {
                 **state,
                 "last_step": "analysis",

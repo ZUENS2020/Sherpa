@@ -60,6 +60,11 @@ Constraints:
 - If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
 
+Target-type verification:
+- You MUST verify and correct `target_type` for each entry in `fuzz/target_analysis.json`.
+- Follow the target-type classification rules in the analysis SKILL.
+- Set `analysis_source` to `opencode-verified` on every verified entry.
+
 MANDATORY:
 - create `./done`
 - write `fuzz/analysis_context.json` into `./done` (single line)
