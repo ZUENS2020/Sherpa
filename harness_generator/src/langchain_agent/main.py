@@ -100,6 +100,7 @@ _JOB_MEMORY_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_JOB_LOG_MAX_CHARS", "
 _JOB_RESTORE_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_RESTORE_LOG_MAX_CHARS", "200000"))
 
 _SENSITIVE_ENV_KEYS = (
+    "LLM_key",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -800,7 +801,11 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     keep_finished = _k8s_keep_finished_jobs()
 
     config_name = (os.environ.get("SHERPA_K8S_CONFIGMAP_NAME", "sherpa-config") or "").strip()
-    minimax_secret = (os.environ.get("SHERPA_K8S_MINIMAX_SECRET_NAME", "sherpa-minimax") or "").strip()
+    llm_secret = (
+        os.environ.get("SHERPA_K8S_LLM_SECRET_NAME", "").strip()
+        or os.environ.get("SHERPA_K8S_DEEPSEEK_SECRET_NAME", "").strip()
+        or os.environ.get("SHERPA_K8S_MINIMAX_SECRET_NAME", "sherpa-deepseek").strip()
+    )
     pg_secret = (os.environ.get("SHERPA_K8S_POSTGRES_SECRET_NAME", "sherpa-postgres") or "").strip()
 
     pvc_tmp = (os.environ.get("SHERPA_K8S_PVC_TMP", "sherpa-shared-tmp") or "").strip()
@@ -921,8 +926,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     env_from = [*_k8s_proxy_env_from_items()]
     if config_name:
         env_from.append({"configMapRef": {"name": config_name}})
-    if minimax_secret:
-        env_from.append({"secretRef": {"name": minimax_secret}})
+    if llm_secret:
+        env_from.append({"secretRef": {"name": llm_secret}})
     if pg_secret:
         env_from.append({"secretRef": {"name": pg_secret}})
     manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from

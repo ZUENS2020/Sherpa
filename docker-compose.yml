@@ -111,15 +111,16 @@ services:
       # Optional Git mirrors for clone operations.
       SHERPA_GIT_MIRRORS: ${SHERPA_GIT_MIRRORS:-https://github.com}
 
-      # MiniMax-only provider source (recommended in .env).
-      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
-      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
-      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
+      # DeepSeek provider source (recommended in .env).
+      LLM_key: ${LLM_key:-${DEEPSEEK_API_KEY:-}}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
       # Compatibility vars consumed by existing tooling.
-      OPENAI_API_KEY: ${MINIMAX_API_KEY:-}
-      OPENAI_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimaxi.com/anthropic/v1}
-      OPENAI_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
-      OPENCODE_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
+      OPENAI_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      OPENAI_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
+      OPENCODE_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
       OPENCODE_CONFIG: "/tmp/sherpa-runtime/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       DATABASE_URL: ${DATABASE_URL:-postgresql://sherpa:sherpa@postgres:5432/sherpa}

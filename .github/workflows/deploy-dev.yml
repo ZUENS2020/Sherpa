@@ -382,8 +382,8 @@ jobs:
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         env:
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY_DEV }}
-          MINIMAX_MODEL: ${{ secrets.MINIMAX_MODEL_DEV || vars.MINIMAX_MODEL_DEV || 'MiniMax-M2.7-highspeed' }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY_DEV }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL_DEV || vars.DEEPSEEK_MODEL_DEV || 'deepseek-reasoner' }}
           OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_DEV }}
           OPENROUTER_EMBEDDING_MODEL: ${{ secrets.OPENROUTER_EMBEDDING_MODEL_DEV || vars.OPENROUTER_EMBEDDING_MODEL_DEV || 'text-embedding-3-small' }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_DEV }}
@@ -459,7 +459,7 @@ jobs:
               --dry-run=client -o yaml | kubectl apply -f -
           }
 
-          require_non_empty MINIMAX_API_KEY sherpa-minimax MINIMAX_API_KEY
+          require_non_empty DEEPSEEK_API_KEY sherpa-deepseek LLM_key
           require_non_empty OPENROUTER_EMBEDDING_API_KEY sherpa-openrouter-embedding OPENROUTER_EMBEDDING_API_KEY
           require_non_empty OPENROUTER_EMBEDDING_MODEL sherpa-openrouter-embedding OPENROUTER_EMBEDDING_MODEL
           require_non_empty POSTGRES_PASSWORD sherpa-postgres POSTGRES_PASSWORD
@@ -468,14 +468,15 @@ jobs:
 
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-          kubectl -n "${NAMESPACE}" create secret generic sherpa-minimax \
-            --from-literal=MINIMAX_API_KEY="${MINIMAX_API_KEY}" \
-            --from-literal=MINIMAX_BASE_URL="https://api.minimaxi.com/anthropic/v1" \
-            --from-literal=MINIMAX_MODEL="${MINIMAX_MODEL}" \
-            --from-literal=OPENAI_API_KEY="${MINIMAX_API_KEY}" \
-            --from-literal=OPENAI_BASE_URL="https://api.minimaxi.com/anthropic/v1" \
-            --from-literal=OPENAI_MODEL="${MINIMAX_MODEL}" \
-            --from-literal=OPENCODE_MODEL="${MINIMAX_MODEL}" \
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-deepseek \
+            --from-literal=LLM_key="${DEEPSEEK_API_KEY}" \
+            --from-literal=DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY}" \
+            --from-literal=DEEPSEEK_BASE_URL="https://api.deepseek.com/v1" \
+            --from-literal=DEEPSEEK_MODEL="${DEEPSEEK_MODEL}" \
+            --from-literal=OPENAI_API_KEY="${DEEPSEEK_API_KEY}" \
+            --from-literal=OPENAI_BASE_URL="https://api.deepseek.com/v1" \
+            --from-literal=OPENAI_MODEL="${DEEPSEEK_MODEL}" \
+            --from-literal=OPENCODE_MODEL="${DEEPSEEK_MODEL}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl -n "${NAMESPACE}" create secret generic sherpa-openrouter-embedding \

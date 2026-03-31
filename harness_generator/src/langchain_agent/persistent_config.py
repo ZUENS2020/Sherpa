@@ -18,20 +18,31 @@ _OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
 _MINIMAX_PROVIDER = "minimax"
 _MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic/v1"
 _MINIMAX_DEFAULT_MODEL = "MiniMax-M2.7-highspeed"
+_DEEPSEEK_PROVIDER = "deepseek"
+_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+_DEEPSEEK_DEFAULT_MODEL = "deepseek-reasoner"
 _OPENCODE_PROVIDER_MODEL_CANDIDATES: dict[str, list[str]] = {
     _MINIMAX_PROVIDER: [
         "MiniMax-M2.7-highspeed",
         "MiniMax-Text-01",
+    ],
+    _DEEPSEEK_PROVIDER: [
+        "deepseek-reasoner",
+        "deepseek-chat",
+        "reasoner",
     ],
 }
 _OPENCODE_PROVIDER_ALIASES: dict[str, str] = {
     _MINIMAX_PROVIDER: _MINIMAX_PROVIDER,
     "mini-max": _MINIMAX_PROVIDER,
     "minimaxi": _MINIMAX_PROVIDER,
+    _DEEPSEEK_PROVIDER: _DEEPSEEK_PROVIDER,
+    "deep-seek": _DEEPSEEK_PROVIDER,
 }
 _OPENCODE_PROVIDER_NPM: dict[str, str] = {
     # MiniMax follows Anthropic-compatible SDK wiring in OpenCode provider config.
     _MINIMAX_PROVIDER: "@ai-sdk/anthropic",
+    _DEEPSEEK_PROVIDER: "@ai-sdk/openai-compatible",
 }
 
 
@@ -49,10 +60,10 @@ class OpencodeProviderConfig(BaseModel):
 def _default_opencode_providers() -> list[OpencodeProviderConfig]:
     return [
         OpencodeProviderConfig(
-            name=_MINIMAX_PROVIDER,
+            name=_DEEPSEEK_PROVIDER,
             enabled=True,
-            base_url=_MINIMAX_BASE_URL,
-            models=[_MINIMAX_DEFAULT_MODEL],
+            base_url=_DEEPSEEK_BASE_URL,
+            models=[_DEEPSEEK_DEFAULT_MODEL],
         ),
     ]
 
@@ -69,8 +80,8 @@ class WebPersistentConfig(BaseModel):
     # Optional: point OpenCode's OpenAI provider at an OpenAI-compatible proxy/router.
     # OPENAI_BASE_URL overrides the default endpoint.
     openai_base_url: str = ""
-    openai_model: str = ""
-    opencode_model: str = ""
+    openai_model: str = _DEEPSEEK_DEFAULT_MODEL
+    opencode_model: str = _DEEPSEEK_DEFAULT_MODEL
     opencode_providers: list[OpencodeProviderConfig] = Field(default_factory=_default_opencode_providers)
 
     # Fuzz defaults
@@ -213,6 +224,8 @@ def _provider_from_base_url(raw_url: str) -> str:
         return ""
     if "minimax.io" in url or "minimaxi.com" in url:
         return _MINIMAX_PROVIDER
+    if "api.deepseek.com" in url:
+        return _DEEPSEEK_PROVIDER
     return ""
 
 
@@ -223,12 +236,7 @@ def _best_provider_api_key(cfg: "WebPersistentConfig", provider: str) -> str:
         return item.api_key.strip()
     # Legacy fallback for OPENAI_* fields: only when base_url clearly maps to the same provider.
     openai_provider = _provider_from_base_url(cfg.openai_base_url)
-    if (
-        normalized == _MINIMAX_PROVIDER
-        and normalized == openai_provider
-        and cfg.openai_api_key
-        and cfg.openai_api_key.strip()
-    ):
+    if normalized == openai_provider and cfg.openai_api_key and cfg.openai_api_key.strip():
         return cfg.openai_api_key.strip()
     return ""
 
@@ -373,7 +381,7 @@ def list_opencode_provider_models_resolved(
     api_key = (api_key_override or "").strip() or _best_provider_api_key(cfg, normalized)
     if not base_url:
         return normalized, fallback, "builtin", "provider base_url not configured"
-    if normalized == _MINIMAX_PROVIDER and not api_key:
+    if normalized in {_MINIMAX_PROVIDER, _DEEPSEEK_PROVIDER} and not api_key:
         return normalized, fallback, "builtin", "provider api_key not configured"
 
     try:
@@ -394,9 +402,10 @@ def _normalize_provider_entry(entry: OpencodeProviderConfig) -> OpencodeProvider
     name = _normalize_provider_name(entry.name)
     if not name:
         return None
-    if name != _MINIMAX_PROVIDER:
+    if name not in {_MINIMAX_PROVIDER, _DEEPSEEK_PROVIDER}:
         return None
-    base_url = (entry.base_url or "").strip() or _MINIMAX_BASE_URL
+    default_base_url = _DEEPSEEK_BASE_URL if name == _DEEPSEEK_PROVIDER else _MINIMAX_BASE_URL
+    base_url = (entry.base_url or "").strip() or default_base_url
 
     models: list[str] = []
     seen_models: set[str] = set()
@@ -578,32 +587,65 @@ def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
 
 def _resolve_minimax_env_values() -> tuple[str, str, str]:
     key = (
-        os.environ.get("MINIMAX_API_KEY", "").strip()
+        os.environ.get("LLM_key", "").strip()
+        or os.environ.get("DEEPSEEK_API_KEY", "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
+        or os.environ.get("MINIMAX_API_KEY", "").strip()
     )
     base_url = (
-        os.environ.get("MINIMAX_BASE_URL", "").strip()
+        os.environ.get("DEEPSEEK_BASE_URL", "").strip()
         or os.environ.get("OPENAI_BASE_URL", "").strip()
-        or _MINIMAX_BASE_URL
+        or os.environ.get("MINIMAX_BASE_URL", "").strip()
+        or _DEEPSEEK_BASE_URL
     )
     model = (
         os.environ.get("OPENCODE_MODEL", "").strip()
         or os.environ.get("OPENAI_MODEL", "").strip()
+        or os.environ.get("DEEPSEEK_MODEL", "").strip()
         or os.environ.get("MINIMAX_MODEL", "").strip()
-        or _MINIMAX_DEFAULT_MODEL
+        or _DEEPSEEK_DEFAULT_MODEL
     )
     return key, base_url, model
 
 
-def apply_minimax_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
-    key, base_url, model = _resolve_minimax_env_values()
+def _provider_from_model_or_url(model: str, base_url: str) -> str:
+    provider_by_url = _provider_from_base_url(base_url)
+    if provider_by_url:
+        return provider_by_url
+    low = str(model or "").strip().lower()
+    if "deepseek" in low or low in {"reasoner", "deepseek-reasoner", "deepseek-chat"}:
+        return _DEEPSEEK_PROVIDER
+    return _MINIMAX_PROVIDER
+
+
+def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
+    key = (
+        os.environ.get("LLM_key", "").strip()
+        or os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+        or os.environ.get("MINIMAX_API_KEY", "").strip()
+    )
+    base_url = (
+        os.environ.get("DEEPSEEK_BASE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("MINIMAX_BASE_URL", "").strip()
+        or _DEEPSEEK_BASE_URL
+    )
+    model = (
+        os.environ.get("OPENCODE_MODEL", "").strip()
+        or os.environ.get("OPENAI_MODEL", "").strip()
+        or os.environ.get("DEEPSEEK_MODEL", "").strip()
+        or os.environ.get("MINIMAX_MODEL", "").strip()
+        or _DEEPSEEK_DEFAULT_MODEL
+    )
+    provider_name = _provider_from_model_or_url(model, base_url)
     cfg.openai_api_key = key or None
     cfg.openai_base_url = base_url
     cfg.openai_model = model
     cfg.opencode_model = model
     cfg.opencode_providers = [
         OpencodeProviderConfig(
-            name=_MINIMAX_PROVIDER,
+            name=provider_name,
             enabled=True,
             base_url=base_url,
             api_key=(key or None),
@@ -614,6 +656,11 @@ def apply_minimax_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
         )
     ]
     return cfg
+
+
+def apply_minimax_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
+    # Backward-compatible alias; now resolves generic LLM env with DeepSeek-first defaults.
+    return apply_llm_env_source(cfg)
 
 
 def load_config() -> WebPersistentConfig:
@@ -668,7 +715,7 @@ def _set_env_if_value(name: str, value: str | None) -> None:
 
 
 def apply_config_to_env(cfg: WebPersistentConfig) -> None:
-    apply_minimax_env_source(cfg)
+    apply_llm_env_source(cfg)
     # Chat / OpenRouter
     _set_env_if_value("OPENROUTER_API_KEY", cfg.openrouter_api_key)
     _set_env_if_value("OPENROUTER_BASE_URL", cfg.openrouter_base_url)
@@ -683,6 +730,7 @@ def apply_config_to_env(cfg: WebPersistentConfig) -> None:
     # DeepSeek provider compatibility for OpenCode (when using DeepSeek base URL)
     if (cfg.openai_base_url or "").strip().startswith("https://api.deepseek.com"):
         _set_env_if_value("DEEPSEEK_API_KEY", cfg.openai_api_key)
+        _set_env_if_value("LLM_key", cfg.openai_api_key)
 
     # Git mirror / proxy
     _set_env_if_value("SHERPA_GIT_MIRRORS", cfg.sherpa_git_mirrors)
