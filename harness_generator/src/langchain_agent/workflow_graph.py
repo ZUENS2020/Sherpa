@@ -1905,7 +1905,9 @@ def _build_fallback_targets_doc(
         if key in seen:
             continue
         seen.add(key)
-        target_type = str(item.get("target_type") or _infer_target_type(name, file_hint))
+        _raw_type = str(item.get("target_type") or "").strip().lower()
+        target_type = _raw_type if _raw_type and _raw_type != "pending" else _infer_target_type(name, file_hint)
+        _raw_sp = str(item.get("seed_profile") or "").strip().lower()
         depth_score = int(item.get("depth_score") or 0)
         depth_class = str(item.get("depth_class") or "shallow")
         selection_bias_reason = str(item.get("selection_bias_reason") or "")
@@ -1933,7 +1935,7 @@ def _build_fallback_targets_doc(
                 "api": name,
                 "lang": lang,
                 "target_type": target_type,
-                "seed_profile": str(item.get("seed_profile") or _infer_seed_profile(name, file_hint, target_type=target_type)),
+                "seed_profile": _raw_sp if _raw_sp and _raw_sp != "pending" else _infer_seed_profile(name, file_hint, target_type=target_type),
                 "depth_score": depth_score,
                 "depth_class": depth_class,
                 "selection_bias_reason": selection_bias_reason,
@@ -3339,15 +3341,14 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     m = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", snippet)
                     name = str(m.group(1) or "").strip() if m else ""
                     if name and name not in {"if", "for", "while", "switch", "catch"}:
-                        target_type = _infer_target_type(name, rel)
                         out.append(
                             {
                                 "name": name,
                                 "signature": " ".join(snippet.split())[:240],
                                 "file": rel,
                                 "line": int(getattr(node, "start_point", (0, 0))[0]) + 1,
-                                "target_type": target_type,
-                                "seed_profile": _infer_seed_profile(name, snippet, target_type=target_type),
+                                "target_type": "pending",
+                                "seed_profile": "pending",
                                 "risk_signals": [],
                                 "analysis_source": "tree-sitter",
                             }
@@ -3506,7 +3507,6 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 continue
             signature = f"{name}({' '.join(str(m.group(2) or '').split())})"[:240]
             line_no = text[: m.start()].count("\n") + 1
-            target_type = _infer_target_type(name, rel)
             risk_signals = [rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)]
             for rule_id in semgrep_hits.get(rel, []):
                 if rule_id not in risk_signals:
@@ -3517,8 +3517,8 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     "signature": signature,
                     "file": rel,
                     "line": line_no,
-                    "target_type": target_type,
-                    "seed_profile": _infer_seed_profile(name, signature, target_type=target_type),
+                    "target_type": "pending",
+                    "seed_profile": "pending",
                     "risk_signals": risk_signals,
                     "analysis_source": "regex",
                 }
@@ -4386,27 +4386,28 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not analysis_path.is_file():
                     analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-                # ── Verify OpenCode set analysis_source on target_analysis; retry once if not ──
+                # ── Check OpenCode classified target_type; retry once if still pending ──
                 _ta_path = gen.repo_root / "fuzz" / "target_analysis.json"
-                _opencode_verified = False
+                _opencode_classified = False
                 if _ta_path.is_file():
                     try:
                         _ta_doc = json.loads(_ta_path.read_text(encoding="utf-8", errors="replace"))
                         if isinstance(_ta_doc, dict):
                             _all_entries = list(_ta_doc.get("recommended_targets") or []) + list(_ta_doc.get("candidate_functions") or [])
-                            _opencode_verified = any(
-                                str(e.get("analysis_source") or "") == "opencode-verified"
+                            _opencode_classified = any(
+                                str(e.get("analysis_source") or "") == "opencode-classified"
                                 for e in _all_entries if isinstance(e, dict)
                             )
                     except Exception:
                         pass
-                if not _opencode_verified:
-                    _wf_log(cast(dict[str, Any], state), "target_type not verified by OpenCode; retrying analysis")
+                if not _opencode_classified:
+                    _wf_log(cast(dict[str, Any], state), "target_type not classified by OpenCode; retrying analysis")
                     try:
                         retry_hint = (
                             analysis_hint
-                            + "\n\nIMPORTANT: You MUST verify target_type for each entry in fuzz/target_analysis.json "
-                            "and set analysis_source to 'opencode-verified'. This was not done in the previous attempt."
+                            + "\n\nIMPORTANT: Entries in fuzz/target_analysis.json still have target_type 'pending'. "
+                            "You MUST classify each entry's target_type and seed_profile, then set analysis_source "
+                            "to 'opencode-classified'. Read the full JSON, modify in memory, write the entire file back."
                         )
                         retry_prompt = _render_opencode_prompt("analysis_with_hint", hint=retry_hint)
                         gen.patcher.run_codex_command(
@@ -4417,7 +4418,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                             max_cli_retries=_opencode_cli_retries(),
                         )
                     except Exception as retry_err:
-                        _wf_log(cast(dict[str, Any], state), f"target_type verification retry failed: {retry_err}")
+                        _wf_log(cast(dict[str, Any], state), f"target_type classification retry failed: {retry_err}")
 
                 # ── Refresh target_analysis_summary from potentially updated file ──
                 if _ta_path.is_file():

@@ -28,27 +28,27 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 ## Required outputs
 - `fuzz/analysis_context.json`
 - `fuzz/antlr_plan_context.json` (if grammar/static context is available)
-- `fuzz/target_analysis.json` (verified/corrected — must contain `analysis_source: "opencode-verified"` entries)
+- `fuzz/target_analysis.json` (with `target_type` and `seed_profile` classified by you — must contain `analysis_source: "opencode-classified"` entries)
 
 ## Workflow
 1. Query MCP evidence first when MCP is available.
    Use preprocessor tools first, then semantic tools for evidence-backed summaries.
 2. Read existing analysis artifacts (if any) and companion file outputs as fallback.
 3. Refresh static analysis summaries for grammar/target context.
-4. Verify and correct `target_type` for each entry in `fuzz/target_analysis.json` (`recommended_targets` and `candidate_functions`):
-   - Read the function's source code, signature, file context, and MCP evidence.
-   - Cross-check the preliminary `target_type` (from regex/keyword rules) against actual semantics.
+4. Classify `target_type` and `seed_profile` for each entry in `fuzz/target_analysis.json` (`recommended_targets` and `candidate_functions`):
+   - Entries arrive with `target_type: "pending"` and `seed_profile: "pending"` — you must fill them in.
+   - Read the function's source code, signature, file context, and MCP evidence to determine the correct type.
    - Apply the target-type classification rules below.
-   - When correcting `target_type`, also update `seed_profile` to match.
-   - Set `"analysis_source": "opencode-verified"` on every verified/corrected entry.
-   - Write the updated `fuzz/target_analysis.json` back to disk.
+   - Set both `target_type` and `seed_profile` to valid values from the allowed lists.
+   - Set `"analysis_source": "opencode-classified"` on every entry you classify.
+   - Write the entire updated JSON back to `fuzz/target_analysis.json` using a single write (do NOT use line-level edits on JSON — read the full file, modify in memory, write back as a whole).
 5. Merge findings into `fuzz/analysis_context.json` with concise evidence.
 6. Ensure downstream plan can consume paths and summaries directly.
 
 ## Target-type classification
 
-Preliminary `target_type` values in `fuzz/target_analysis.json` come from keyword heuristics and may be wrong.
-You MUST verify each entry and correct misclassifications using semantic evidence.
+Entries in `fuzz/target_analysis.json` arrive with `target_type: "pending"`.
+You are the primary classifier — determine the correct type using semantic analysis of the function's code, signature, and context.
 
 ### Type definitions and disambiguation
 
