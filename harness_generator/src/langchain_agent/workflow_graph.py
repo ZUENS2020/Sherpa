@@ -4386,41 +4386,8 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not analysis_path.is_file():
                     analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-                # ── Check OpenCode classified target_type; retry once if still pending ──
-                _ta_path = gen.repo_root / "fuzz" / "target_analysis.json"
-                _opencode_classified = False
-                if _ta_path.is_file():
-                    try:
-                        _ta_doc = json.loads(_ta_path.read_text(encoding="utf-8", errors="replace"))
-                        if isinstance(_ta_doc, dict):
-                            _all_entries = list(_ta_doc.get("recommended_targets") or []) + list(_ta_doc.get("candidate_functions") or [])
-                            _opencode_classified = any(
-                                str(e.get("analysis_source") or "") == "opencode-classified"
-                                for e in _all_entries if isinstance(e, dict)
-                            )
-                    except Exception:
-                        pass
-                if not _opencode_classified:
-                    _wf_log(cast(dict[str, Any], state), "target_type not classified by OpenCode; retrying analysis")
-                    try:
-                        retry_hint = (
-                            analysis_hint
-                            + "\n\nIMPORTANT: Entries in fuzz/target_analysis.json still have target_type 'pending'. "
-                            "You MUST classify each entry's target_type and seed_profile, then set analysis_source "
-                            "to 'opencode-classified'. Read the full JSON, modify in memory, write the entire file back."
-                        )
-                        retry_prompt = _render_opencode_prompt("analysis_with_hint", hint=retry_hint)
-                        gen.patcher.run_codex_command(
-                            retry_prompt,
-                            stage_skill="analysis",
-                            timeout=_remaining_time_budget_sec(state),
-                            max_attempts=1,
-                            max_cli_retries=_opencode_cli_retries(),
-                        )
-                    except Exception as retry_err:
-                        _wf_log(cast(dict[str, Any], state), f"target_type classification retry failed: {retry_err}")
-
                 # ── Refresh target_analysis_summary from potentially updated file ──
+                _ta_path = gen.repo_root / "fuzz" / "target_analysis.json"
                 if _ta_path.is_file():
                     try:
                         _refreshed_doc = json.loads(_ta_path.read_text(encoding="utf-8", errors="replace"))
