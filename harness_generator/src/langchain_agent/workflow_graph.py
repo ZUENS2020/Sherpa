@@ -3363,8 +3363,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
     def _run_semgrep_rules(root: Path) -> tuple[bool, dict[str, list[str]]]:
         semgrep_bin = shutil.which("semgrep")
         if not semgrep_bin:
+            print("[semgrep] not found on PATH, skipping")
             return False, {}
         tmp_path = ""
+        _SEMGREP_TIMEOUT = 60  # seconds — hard cap to avoid blocking analysis
         rules_doc = {
             "rules": [
                 {
@@ -3394,15 +3396,40 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             with tempfile.NamedTemporaryFile("w", suffix=".yml", encoding="utf-8", delete=False) as fh:
                 json.dump(rules_doc, fh)
                 tmp_path = fh.name
-            proc = subprocess.run(
-                [semgrep_bin, "scan", "--json", "--config", tmp_path, str(root)],
-                capture_output=True,
+            print(f"[semgrep] scanning {root} (timeout={_SEMGREP_TIMEOUT}s)")
+            cmd = [
+                semgrep_bin, "scan", "--json",
+                "--metrics=off",             # prevent telemetry network call (blocks in containers)
+                "--disable-version-check",   # prevent update check network call
+                "--config", tmp_path,
+                str(root),
+            ]
+            # Use Popen + process group so timeout kills the entire process tree
+            # (semgrep forks workers that subprocess.run timeout may not reach)
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=90,
+                start_new_session=True,       # creates a new process group
             )
-            if proc.returncode not in {0, 1}:
+            try:
+                stdout, stderr = proc.communicate(timeout=_SEMGREP_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # Kill the entire process group (semgrep + its workers)
+                import signal
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                proc.wait(timeout=5)
+                print(f"[semgrep] TIMEOUT after {_SEMGREP_TIMEOUT}s, skipping")
                 return True, {}
-            doc = json.loads(proc.stdout or "{}")
+            if proc.returncode not in {0, 1}:
+                print(f"[semgrep] exited with code {proc.returncode}, stderr: {(stderr or '')[:200]}")
+                return True, {}
+            print(f"[semgrep] scan completed (rc={proc.returncode})")
+            doc = json.loads(stdout or "{}")
             result_map: dict[str, list[str]] = {}
             for item in doc.get("results") or []:
                 path = str(((item.get("path") or "") if isinstance(item, dict) else "")).strip()
@@ -3413,8 +3440,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 result_map.setdefault(rel, [])
                 if rule_id not in result_map[rel]:
                     result_map[rel].append(rule_id)
+            print(f"[semgrep] found hits in {len(result_map)} files")
             return True, result_map
-        except Exception:
+        except Exception as exc:
+            print(f"[semgrep] unexpected error: {exc}")
             return True, {}
         finally:
             try:
