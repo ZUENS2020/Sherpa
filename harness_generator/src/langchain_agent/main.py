@@ -32,7 +32,7 @@ from fuzz_relative_functions import fuzz_logic
 from job_store import JobStore, PostgresJobStore
 from persistent_config import (
     WebPersistentConfig,
-    apply_minimax_env_source,
+    apply_llm_env_source,
     apply_config_to_env,
     as_public_dict,
     list_opencode_provider_models_resolved,
@@ -803,11 +803,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     keep_finished = _k8s_keep_finished_jobs()
 
     config_name = (os.environ.get("SHERPA_K8S_CONFIGMAP_NAME", "sherpa-config") or "").strip()
-    llm_secret = (
-        os.environ.get("SHERPA_K8S_LLM_SECRET_NAME", "").strip()
-        or os.environ.get("SHERPA_K8S_DEEPSEEK_SECRET_NAME", "").strip()
-        or os.environ.get("SHERPA_K8S_MINIMAX_SECRET_NAME", "sherpa-deepseek").strip()
-    )
+    llm_secret = (os.environ.get("SHERPA_K8S_LLM_SECRET_NAME", "sherpa-llm") or "").strip()
     pg_secret = (os.environ.get("SHERPA_K8S_POSTGRES_SECRET_NAME", "sherpa-postgres") or "").strip()
 
     pvc_tmp = (os.environ.get("SHERPA_K8S_PVC_TMP", "sherpa-shared-tmp") or "").strip()
@@ -3241,7 +3237,7 @@ def put_config(request: dict = Body(...)):
     # Native runtime baseline in k8s mode; keep fields for compatibility only.
     payload["fuzz_use_docker"] = False
     payload["fuzz_docker_image"] = ""
-    runtime_cfg = apply_minimax_env_source(WebPersistentConfig(**payload))
+    runtime_cfg = apply_llm_env_source(WebPersistentConfig(**payload))
 
     # Keep persisted config free of API secrets; runtime values come from environment.
     persisted_cfg = WebPersistentConfig(**runtime_cfg.model_dump())
