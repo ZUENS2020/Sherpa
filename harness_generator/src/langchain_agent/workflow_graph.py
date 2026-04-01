@@ -1,4 +1,5 @@
 from __future__ import annotations
+from loguru import logger
 
 import hashlib
 import importlib
@@ -477,7 +478,7 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
         line = json.dumps(payload, separators=(",", ":"), default=str)
     except Exception:
         return
-    print(f"[wf-metrics] {line}", flush=True)
+    logger.info(f"[wf-metrics] {line}", flush=True)
 
 
 def _fmt_dt(seconds: float) -> str:
@@ -1142,7 +1143,7 @@ def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") 
     if any(tok in text for tok in ("test/fuzzing", "/fuzz", "fuzzing", "oss-fuzz")):
         score += 4
         reasons.append("existing-fuzz-infra")
-    if any(tok in text for tok in ("println", "print(", "format_to", "vformat", "fmt::format", "fmt::print", "fmt::println")):
+    if any(tok in text for tok in ("println", "logger.info(", "format_to", "vformat", "fmt::format", "fmt::print", "fmt::println")):
         score += 5
         reasons.append("public-runtime-api")
     if any(tok in text for tok in ("fmt/compile.h", "fmt::compile::", " constexpr", "consteval")):
@@ -2955,7 +2956,7 @@ def _run_inner_workers_target() -> int:
     if not raw:
         raw = legacy_fork_raw or "1"
         if legacy_fork_raw:
-            print(
+            logger.info(
                 "[warn] SHERPA_FUZZ_FORK is deprecated for run parallel config. "
                 "Prefer SHERPA_RUN_INNER_WORKERS + SHERPA_RUN_PARALLEL_ENGINE."
             )
@@ -3380,7 +3381,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
     def _run_semgrep_rules(root: Path) -> tuple[bool, dict[str, list[str]]]:
         semgrep_bin = shutil.which("semgrep")
         if not semgrep_bin:
-            print("[semgrep] not found on PATH, skipping")
+            logger.info("[semgrep] not found on PATH, skipping")
             return False, {}
         tmp_path = ""
         _SEMGREP_TIMEOUT = 60  # seconds — hard cap to avoid blocking analysis
@@ -3413,7 +3414,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             with tempfile.NamedTemporaryFile("w", suffix=".yml", encoding="utf-8", delete=False) as fh:
                 json.dump(rules_doc, fh)
                 tmp_path = fh.name
-            print(f"[semgrep] scanning {root} (timeout={_SEMGREP_TIMEOUT}s)")
+            logger.info(f"[semgrep] scanning {root} (timeout={_SEMGREP_TIMEOUT}s)")
             cmd = [
                 semgrep_bin, "scan", "--json",
                 "--metrics=off",             # prevent telemetry network call (blocks in containers)
@@ -3440,12 +3441,12 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 except Exception:
                     proc.kill()
                 proc.wait(timeout=5)
-                print(f"[semgrep] TIMEOUT after {_SEMGREP_TIMEOUT}s, skipping")
+                logger.info(f"[semgrep] TIMEOUT after {_SEMGREP_TIMEOUT}s, skipping")
                 return True, {}
             if proc.returncode not in {0, 1}:
-                print(f"[semgrep] exited with code {proc.returncode}, stderr: {(stderr or '')[:200]}")
+                logger.info(f"[semgrep] exited with code {proc.returncode}, stderr: {(stderr or '')[:200]}")
                 return True, {}
-            print(f"[semgrep] scan completed (rc={proc.returncode})")
+            logger.info(f"[semgrep] scan completed (rc={proc.returncode})")
             doc = json.loads(stdout or "{}")
             result_map: dict[str, list[str]] = {}
             for item in doc.get("results") or []:
@@ -3457,10 +3458,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 result_map.setdefault(rel, [])
                 if rule_id not in result_map[rel]:
                     result_map[rel].append(rule_id)
-            print(f"[semgrep] found hits in {len(result_map)} files")
+            logger.info(f"[semgrep] found hits in {len(result_map)} files")
             return True, result_map
         except Exception as exc:
-            print(f"[semgrep] unexpected error: {exc}")
+            logger.info(f"[semgrep] unexpected error: {exc}")
             return True, {}
         finally:
             try:
@@ -8188,7 +8189,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     # Seed generation is best-effort; do not block fuzzing.
                     seed_generation_failed_fuzzers.append(fuzzer_name)
                     seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
-                    print(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+                    logger.info(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
         finally:
             setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
 

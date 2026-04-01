@@ -1,7 +1,5 @@
 # main.py
 from __future__ import annotations
-import logging as _stdlib_logging
-
 from loguru import logger
 
 from fastapi import FastAPI, Body, HTTPException, Response, Request
@@ -1505,12 +1503,12 @@ def _execute_k8s_job(
         elif str(failure_result.get("error_code") or "").strip():
             msg += f": {failure_result.get('error_code')}"
         if logs.strip():
-            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+            logger.info(f"[job {job_id}] k8s logs tail:\n{logs}")
         raise _K8sJobFailure(msg, result=failure_result)
     if not result_path.is_file():
         logs = _k8s_collect_job_logs(job_name)
         if logs.strip():
-            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+            logger.info(f"[job {job_id}] k8s logs tail:\n{logs}")
         raise RuntimeError("k8s_job_missing_result")
     raw = result_path.read_text(encoding="utf-8", errors="replace")
     try:
@@ -3307,7 +3305,7 @@ def _create_job(kind: str, repo: str | None = None) -> str:
 
 def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -> None:
     if target_dir.is_dir() and (target_dir / "infra" / "helper.py").is_file():
-        print("[init] oss-fuzz already present")
+        logger.info("[init] oss-fuzz already present")
         return
 
     auto_repair = (os.environ.get("SHERPA_OSS_FUZZ_AUTO_REPAIR", "1") or "").strip().lower() not in {
@@ -3323,7 +3321,7 @@ def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -
             raise RuntimeError(
                 f"oss-fuzz dir exists but invalid (missing infra/helper.py): {target_dir}"
             )
-        print(
+        logger.info(
             "[init] oss-fuzz directory exists but invalid; "
             f"auto-repair enabled, resetting: {target_dir}"
         )
@@ -3337,7 +3335,7 @@ def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -
                 pass
     target_dir.mkdir(parents=True, exist_ok=True)
     cmd = ["git", "clone", "--depth", "1", repo_url, str(target_dir)]
-    print("[init] " + " ".join(cmd))
+    logger.info("[init] " + " ".join(cmd))
     subprocess.check_call(cmd)
     if not (target_dir / "infra" / "helper.py").is_file():
         raise RuntimeError("oss-fuzz clone completed but infra/helper.py not found")
@@ -3400,7 +3398,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
         return any(n in output for n in needles)
 
     def _run_build(cmd: list[str], *, buildkit: str | None = None) -> tuple[int, str]:
-        print("[init] " + " ".join(cmd))
+        logger.info("[init] " + " ".join(cmd))
         env = os.environ.copy()
         if buildkit is not None:
             env["DOCKER_BUILDKIT"] = buildkit
@@ -3441,11 +3439,11 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
 
             if item:
                 output_chunks.append(item)
-                print(item, end="")
+                logger.info(item.rstrip())
 
             now = time.monotonic()
             if now - last_heartbeat >= 10:
-                print("[init] docker build still running...")
+                logger.info("[init] docker build still running...")
                 last_heartbeat = now
 
             if proc.poll() is not None and line_q.empty():
@@ -3486,7 +3484,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 # Try without --progress on older Docker.
                 continue
             if _buildkit_unavailable(output):
-                print("[init] buildx unavailable; retrying docker build with classic builder (DOCKER_BUILDKIT=0)")
+                logger.info("[init] buildx unavailable; retrying docker build with classic builder (DOCKER_BUILDKIT=0)")
                 legacy_cmd = [arg for arg in cmd if not arg.startswith("--progress=")]
                 rc2, output2 = _run_build(legacy_cmd, buildkit="0")
                 last_rc = rc2
@@ -3494,7 +3492,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 if rc2 == 0:
                     return
                 if _docker_daemon_unreachable(output2) and attempt < max_attempts:
-                    print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                    logger.info(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                     time.sleep(backoff)
                     backoff *= 2
                     retry_outer = True
@@ -3502,7 +3500,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 # Keep trying other build command variants before failing.
                 continue
             if _docker_daemon_unreachable(output) and attempt < max_attempts:
-                print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                logger.info(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                 time.sleep(backoff)
                 backoff *= 2
                 retry_outer = True
@@ -3884,10 +3882,10 @@ def _run_fuzz_job(
     companion_service = ""
     companion_url = ""
     try:
-        print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
+        logger.info(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
         if _is_cancel_requested(job_id):
             raise RuntimeError(cancel_error)
-        print(f"[job {job_id}] about to dispatch k8s worker...")
+        logger.info(f"[job {job_id}] about to dispatch k8s worker...")
         docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
         total_budget_src = (
             request.total_time_budget
@@ -3934,7 +3932,7 @@ def _run_fuzz_job(
         else:
             model_value = request.model or cfg.openrouter_model
         runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
-        print(
+        logger.info(
             f"[job {job_id}] params runtime={runtime_mode} "
             f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
             f"unlimited_round_limit={unlimited_round_limit_value if unlimited_round_limit_value > 0 else 'unlimited'} "
@@ -3943,10 +3941,10 @@ def _run_fuzz_job(
             f"max_fix_rounds={max_fix_rounds} "
             f"same_error_max_retries={same_error_max_retries}"
         )
-        print(f"[job {job_id}] log_file={log_file}")
+        logger.info(f"[job {job_id}] log_file={log_file}")
         mode = _executor_mode()
         docker_image = None if mode == "k8s_job" else docker_image_value
-        print(
+        logger.info(
             f"[job {job_id}] executor_mode={mode} "
             f"docker_image={docker_image if docker_image else '(native)'}"
         )
@@ -3986,7 +3984,7 @@ def _run_fuzz_job(
                     try:
                         companion_pod, companion_service, companion_url = _k8s_start_analysis_companion(job_id)
                         if companion_pod:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion started pod={companion_pod} "
                                 f"service={companion_service or '-'}"
                             )
@@ -4009,7 +4007,7 @@ def _run_fuzz_job(
                             err_txt = str(status_doc.get("error") or "").strip()
                             mcp_url_txt = str(status_doc.get("mcp_url") or companion_url).strip()
                             mcp_ready = _analysis_companion_is_ready(status_doc, require_rag=False)
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion ready "
                                 f"state={state_txt or '-'} backend={backend_txt or '-'} "
                                 f"mcp_ready={int(mcp_ready)}"
@@ -4022,7 +4020,7 @@ def _run_fuzz_job(
                             )
                             companion_mcp_ready = bool(mcp_ready)
                     except Exception as e:
-                        print(f"[job {job_id}] analysis companion failed (continuing): {e}")
+                        logger.info(f"[job {job_id}] analysis companion failed (continuing): {e}")
                         _job_update(
                             job_id,
                             analysis_companion_error=str(e),
@@ -4062,7 +4060,7 @@ def _run_fuzz_job(
                                 analysis_companion_error=(None if rag_ready else (err_txt or "rag_not_ready")),
                             )
                             if not rag_ready:
-                                print(
+                                logger.info(
                                     f"[job {job_id}] analysis companion not rag-ready before plan "
                                     f"(state={str(rag_status.get('state') or '-')} rag_ok={int(bool(rag_status.get('rag_ok')))}); "
                                     "degraded continue without MCP injection"
@@ -4074,7 +4072,7 @@ def _run_fuzz_job(
                                 analysis_companion_ready=False,
                                 analysis_companion_error=f"rag_wait_timeout:{e}",
                             )
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion rag wait failed (continuing): {e}"
                             )
                     if stage == "analysis" and _has_reusable_analysis_context(current_repo_root):
@@ -4108,7 +4106,7 @@ def _run_fuzz_job(
                             workflow_active_step="",
                             k8s_phase="analysis:Reused",
                         )
-                        print(
+                        logger.info(
                             f"[job {job_id}] stage {stage} reused existing analysis context: "
                             f"{reusable_path or '(unknown path)'}"
                         )
@@ -4131,14 +4129,14 @@ def _run_fuzz_job(
                     if current_node_name:
                         can_pin_node, node_check_reason = _k8s_node_can_run_job(current_node_name)
                         if not can_pin_node:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] stage {stage} skip node pinning ({current_node_name}): {node_check_reason}"
                             )
                         else:
                             if node_check_reason in {"node_ready", "node_ready_no_metrics"}:
-                                print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
+                                logger.info(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
                             else:
-                                print(
+                                logger.info(
                                     f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}"
                                 )
 
@@ -4285,7 +4283,7 @@ def _run_fuzz_job(
                                         * 1.5
                                     )
                                 )
-                            print(
+                            logger.info(
                                 f"[job {job_id}] {stage} stage k8s_job_timeout; "
                                 f"retrying with extended timeout "
                                 f"(retry {timeout_retry_count + 1}, "
@@ -4316,7 +4314,7 @@ def _run_fuzz_job(
                             stage_fail_error = _redact_sensitive_text(str(e))
                             if is_k8s_timeout:
                                 stage_fail_reason = "k8s_job_timeout"
-                                print(
+                                logger.info(
                                     f"[job {job_id}] {stage} stage k8s_job_timeout; "
                                     f"max retries exhausted ({timeout_retry_count}/{max_timeout_retries}) "
                                     f"-> fallback to plan"
@@ -4337,14 +4335,14 @@ def _run_fuzz_job(
                             }
                     if stage_node_name:
                         if current_node_name and stage_node_name != current_node_name:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] stage {stage} node drift {current_node_name} -> {stage_node_name}, updating pin"
                             )
                         elif not current_node_name:
-                            print(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
+                            logger.info(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
                         current_node_name = stage_node_name
                     else:
-                        print(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
+                        logger.info(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
@@ -4399,18 +4397,18 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     if stage_failed:
-                        print(
+                        logger.info(
                             f"[job {job_id}] stage {stage} failed ({stage_fail_reason}): "
                             f"{stage_fail_error} -> fallback to plan"
                         )
                     else:
-                        print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                        logger.info(f"[job {job_id}] stage {stage} completed via job {job_name}")
                     next_stage = ""
                     if isinstance(stage_result, dict):
                         terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
                         if stage == "build" and terminal_reason == "requires_env_rebuild":
                             next_stage = "build"
-                            print(
+                            logger.info(
                                 f"[job {job_id}] stage {stage} requested env rebuild; dispatching fresh build job"
                             )
                         else:
@@ -4422,9 +4420,9 @@ def _run_fuzz_job(
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results
                 res["stage_job_names"] = stage_job_names
-                print(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
+                logger.info(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
         except Exception as fuzz_err:
-            print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
+            logger.info(f"[job {job_id}] k8s worker failed: {fuzz_err}")
             import traceback
             traceback.print_exc()
             raise
@@ -4490,12 +4488,12 @@ def _run_fuzz_job(
         try:
             if companion_pod or companion_service:
                 _k8s_stop_analysis_companion(companion_pod, companion_service)
-                print(
+                logger.info(
                     f"[job {job_id}] analysis companion stopped pod={companion_pod or '-'} "
                     f"service={companion_service or '-'}"
                 )
         except Exception as e:
-            print(f"[job {job_id}] analysis companion stop failed: {e}")
+            logger.info(f"[job {job_id}] analysis companion stop failed: {e}")
             _job_update(job_id, analysis_companion_error=str(e))
         finally:
             _job_update(
@@ -4814,7 +4812,7 @@ async def task_api(request: task_model = Body(...)):
         had_error = False
         child_ids: list[str] = []
         try:
-            print(f"[task {job_id}] start (jobs={len(request.jobs)})")
+            logger.info(f"[task {job_id}] start (jobs={len(request.jobs)})")
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
             if request.auto_init:
@@ -4831,7 +4829,7 @@ async def task_api(request: task_model = Body(...)):
                     # Force-disable auto-init here to avoid unrelated git clone failures.
                     if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
                         auto_init_oss_fuzz = False
-                        print("[task] skip oss-fuzz auto-init in k8s native runtime")
+                        logger.info("[task] skip oss-fuzz auto-init in k8s native runtime")
                     if auto_init_oss_fuzz:
                         repo_url = (
                             (request.oss_fuzz_repo_url or "").strip()
@@ -4843,19 +4841,19 @@ async def task_api(request: task_model = Body(...)):
                             or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
                             or str(_REPO_ROOT / "oss-fuzz")
                         ).expanduser().resolve()
-                        print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
+                        logger.info(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
                         _ensure_oss_fuzz_checkout(
                             repo_url=repo_url,
                             target_dir=target_dir,
                             force=request.force_clone,
                         )
                     else:
-                        print("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
+                        logger.info("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
 
                     should_build_images = request.build_images
                     if should_build_images:
                         if _executor_mode() == "k8s_job":
-                            print("[task] skip prebuild images in k8s native runtime mode")
+                            logger.info("[task] skip prebuild images in k8s native runtime mode")
                             should_build_images = False
                     if should_build_images:
                         # Only build if any job uses Docker (explicit or default config).
@@ -4878,19 +4876,19 @@ async def task_api(request: task_model = Body(...)):
                                         inferred.add("java")
                                 images = sorted(inferred)
                             if not images:
-                                print("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
+                                logger.info("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
                             for img in images:
                                 name = (img or "").strip().lower()
                                 if name in {"cpp", "c", "cxx"}:
                                     tag = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
-                                    print(f"[task] ensure image {tag}")
+                                    logger.info(f"[task] ensure image {tag}")
                                     _ensure_docker_image(tag, DOCKERFILE_FUZZ_CPP, force=request.force_build)
                                 elif name in {"java", "jazzer"}:
                                     tag = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
-                                    print(f"[task] ensure image {tag}")
+                                    logger.info(f"[task] ensure image {tag}")
                                     _ensure_docker_image(tag, DOCKERFILE_FUZZ_JAVA, force=request.force_build)
                                 else:
-                                    print(f"[task] skip unknown image hint: {img}")
+                                    logger.info(f"[task] skip unknown image hint: {img}")
             # Submit child jobs after parent setup logs are written.
             # Each job now uses ContextVar-based log routing, so concurrent jobs
             # remain isolated without process-global stdout/stderr switching.

@@ -42,6 +42,7 @@ Key implementation goals:
 The CLI used is the OpenCode binary `opencode` in non-interactive mode (`opencode run`).
 """
 
+from loguru import logger
 from __future__ import annotations
 
 import logging
@@ -474,7 +475,7 @@ def _run_streaming_combined(
     Returns: (returncode, output_for_scan, output_tail)
     """
     cmd_list = list(cmd)
-    print(f"[*] ➜  {_redact_cmd_for_log(cmd_list, env=env)}")
+    logger.info(f"[*] ➜  {_redact_cmd_for_log(cmd_list, env=env)}")
     proc = subprocess.Popen(
         cmd_list,
         cwd=str(cwd) if cwd is not None else None,
@@ -492,7 +493,7 @@ def _run_streaming_combined(
     try:
         for line in proc.stdout:
             safe_line = _redact_text(line, env=env)
-            print(safe_line, end="")
+            logger.info(safe_line, end="")
             tail_buf.append(safe_line.rstrip("\n"))
             scan_buf.append(safe_line)
     finally:
@@ -681,7 +682,7 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
     last_tail = ""
     attempts: list[str] = []
     for base_image in _opencode_base_image_candidates():
-        print(f"[OpenCodeHelper] building opencode image with base={base_image}")
+        logger.info(f"[OpenCodeHelper] building opencode image with base={base_image}")
         for attempt in range(1, max_retries + 1):
             build_cmd = [
                 "docker",
@@ -704,7 +705,7 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
                 return
             if attempt < max_retries and _is_opencode_build_transient_error(out_scan):
                 backoff_s = min(2 ** (attempt - 1), 10)
-                print(
+                logger.info(
                     f"[OpenCodeHelper] opencode image build transient error; "
                     f"retrying in {backoff_s}s (base={base_image}, attempt {attempt}/{max_retries})"
                 )
@@ -1599,7 +1600,7 @@ class CodexHelper:
                             reason,
                             cleanup_error or "unknown",
                         )
-                        print(
+                        logger.info(
                             "[OpenCodeHelper] process cleanup failed "
                             f"(reason={reason}): {cleanup_error or 'unknown'}"
                         )
@@ -1635,7 +1636,7 @@ class CodexHelper:
                         if elapsed > timeout:
                             LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
                             saw_retry_error = True
-                            print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
+                            logger.info(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
                             _kill_proc("hard_timeout")
                             break
 
@@ -1668,7 +1669,7 @@ class CodexHelper:
                                     idle_for,
                                 )
                                 saw_retry_error = True
-                                print(
+                                logger.info(
                                     "[OpenCodeHelper] idle timeout after "
                                     f"{idle_for:.0f}s without activity; terminating agent"
                                 )
@@ -1678,7 +1679,7 @@ class CodexHelper:
                         # Heartbeat so job logs keep moving even if the agent is quiet.
                         if (now - last_heartbeat) > 10.0:
                             last_heartbeat = now
-                            print(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
+                            logger.info(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         if done_path.exists():
                             stale_done = False
@@ -1694,7 +1695,7 @@ class CodexHelper:
                                     done_mtime,
                                     attempt_started_at,
                                 )
-                                print("[OpenCodeHelper] stale done flag detected; removing and continuing")
+                                logger.info("[OpenCodeHelper] stale done flag detected; removing and continuing")
                                 try:
                                     done_path.unlink(missing_ok=True)
                                 except Exception as e:
@@ -1703,7 +1704,7 @@ class CodexHelper:
                                     ) from e
                             else:
                                 LOGGER.info("[OpenCodeHelper] done flag detected")
-                                print("[OpenCodeHelper] done flag detected; terminating")
+                                logger.info("[OpenCodeHelper] done flag detected; terminating")
                                 _kill_proc("done_flag")
                                 break
 
@@ -1716,7 +1717,7 @@ class CodexHelper:
                         if item is EOF:
                             break
                         if isinstance(item, str) and item:
-                            print(item, end="")
+                            logger.info(item, end="")
                             captured_chunks.append(item)
                             last_activity_ts = now
                             if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
@@ -1736,7 +1737,7 @@ class CodexHelper:
                             if item2 is EOF:
                                 break
                             if isinstance(item2, str) and item2:
-                                print(item2, end="")
+                                logger.info(item2, end="")
                                 captured_chunks.append(item2)
                     except Exception:
                         pass
@@ -1769,7 +1770,7 @@ class CodexHelper:
 
             if not done_path.exists():
                 LOGGER.warning("[OpenCodeHelper] sentinel not created; next attempt")
-                print("[OpenCodeHelper] sentinel not created; next attempt")
+                logger.info("[OpenCodeHelper] sentinel not created; next attempt")
                 run_meta["status"] = "retry_no_sentinel"
                 run_meta["cli_retries_used"] = cli_try
                 _append_opencode_metadata(self.working_dir, run_meta)
@@ -1794,7 +1795,7 @@ class CodexHelper:
                 return "".join(captured_chunks)
 
             LOGGER.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
-            print("[OpenCodeHelper] sentinel present but no diff; next attempt")
+            logger.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
             run_meta["status"] = "retry_no_diff"
             run_meta["cli_retries_used"] = cli_try
             _append_opencode_metadata(self.working_dir, run_meta)
