@@ -1,6 +1,8 @@
 name: Deploy Dev
 
 on:
+  push:
+    branches: [dev]
   workflow_dispatch:
     inputs:
       force_rebuild_all:
