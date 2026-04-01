@@ -1,5 +1,9 @@
 # main.py
 from __future__ import annotations
+import logging as _stdlib_logging
+
+from loguru import logger
+
 from fastapi import FastAPI, Body, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
