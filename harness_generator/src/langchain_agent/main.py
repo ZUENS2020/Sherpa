@@ -3299,43 +3299,6 @@ def _create_job(kind: str, repo: str | None = None) -> str:
     return job_id
 
 
-def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -> None:
-    if target_dir.is_dir() and (target_dir / "infra" / "helper.py").is_file():
-        logger.info("[init] oss-fuzz already present")
-        return
-
-    auto_repair = (os.environ.get("SHERPA_OSS_FUZZ_AUTO_REPAIR", "1") or "").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    should_repair = bool(force or auto_repair)
-
-    if target_dir.exists():
-        if not should_repair:
-            raise RuntimeError(
-                f"oss-fuzz dir exists but invalid (missing infra/helper.py): {target_dir}"
-            )
-        logger.info(
-            "[init] oss-fuzz directory exists but invalid; "
-            f"auto-repair enabled, resetting: {target_dir}"
-        )
-        for child in target_dir.iterdir():
-            try:
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink(missing_ok=True)
-            except Exception:
-                pass
-    target_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["git", "clone", "--depth", "1", repo_url, str(target_dir)]
-    logger.info("[init] " + " ".join(cmd))
-    subprocess.check_call(cmd)
-    if not (target_dir / "infra" / "helper.py").is_file():
-        raise RuntimeError("oss-fuzz clone completed but infra/helper.py not found")
-
 
 def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
     if not force:
@@ -4815,37 +4778,6 @@ async def task_api(request: task_model = Body(...)):
                 with _INIT_LOCK:
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
-                    auto_init_oss_fuzz = (
-                        (os.environ.get("SHERPA_AUTO_INIT_OSS_FUZZ", "0") or "")
-                        .strip()
-                        .lower()
-                        in {"1", "true", "yes", "on"}
-                    )
-                    # Native k8s staged runtime does not require oss-fuzz checkout.
-                    # Force-disable auto-init here to avoid unrelated git clone failures.
-                    if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
-                        auto_init_oss_fuzz = False
-                        logger.info("[task] skip oss-fuzz auto-init in k8s native runtime")
-                    if auto_init_oss_fuzz:
-                        repo_url = (
-                            (request.oss_fuzz_repo_url or "").strip()
-                            or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://github.com/google/oss-fuzz.git"
-                        )
-                        target_dir = Path(
-                            (cfg.oss_fuzz_dir or "").strip()
-                            or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
-                            or str(_REPO_ROOT / "oss-fuzz")
-                        ).expanduser().resolve()
-                        logger.info(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
-                        _ensure_oss_fuzz_checkout(
-                            repo_url=repo_url,
-                            target_dir=target_dir,
-                            force=request.force_clone,
-                        )
-                    else:
-                        logger.info("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
-
                     should_build_images = request.build_images
                     if should_build_images:
                         if _executor_mode() == "k8s_job":

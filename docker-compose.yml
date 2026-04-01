@@ -6,50 +6,19 @@ services:
       - sherpa-config:/app/config
       - sherpa-job-logs:/app/job-logs
       - sherpa-tmp:/shared/tmp
-      - sherpa-oss-fuzz:/shared/oss-fuzz
       - ./output:/shared/output
     entrypoint:
       - sh
       - -lc
       - |
         set -eu
-        for d in /app/config /app/job-logs /shared/tmp /shared/oss-fuzz /shared/output; do
+        for d in /app/config /app/job-logs /shared/tmp /shared/output; do
           mkdir -p "$$d"
           chown 10001:10001 "$$d" || true
           chmod 0777 "$$d" || true
           find "$$d" -mindepth 1 -exec chown 10001:10001 {} + || true
           find "$$d" -mindepth 1 -exec chmod a+rwX {} + || true
         done
-
-  # Bootstrap container: ensure shared oss-fuzz checkout exists before web starts.
-  sherpa-oss-fuzz-init:
-    image: m.daocloud.io/docker.io/alpine/git:latest
-    restart: "no"
-    environment:
-      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://github.com/google/oss-fuzz.git}"
-    volumes:
-      - sherpa-oss-fuzz:/shared/oss-fuzz
-    entrypoint:
-      - sh
-      - -lc
-      - |
-        set -e
-        REPO="$$SHERPA_OSS_FUZZ_REPO_URL"
-        if [ -z "$$REPO" ]; then
-          REPO="https://github.com/google/oss-fuzz.git"
-        fi
-        echo "[*] Ensuring oss-fuzz checkout in /shared/oss-fuzz from $$REPO"
-        if [ -f /shared/oss-fuzz/infra/helper.py ]; then
-          echo "[*] oss-fuzz already present"
-          exit 0
-        fi
-        if [ -d /shared/oss-fuzz ] && [ "$(ls -A /shared/oss-fuzz 2>/dev/null || true)" != "" ]; then
-          echo "[warn] /shared/oss-fuzz exists but is not a valid oss-fuzz checkout (missing infra/helper.py)" >&2
-          echo "[warn] Cleaning stale contents and re-cloning..." >&2
-        fi
-        rm -rf /shared/oss-fuzz/* /shared/oss-fuzz/.[!.]* /shared/oss-fuzz/..?* || true
-        git clone --depth 1 "$$REPO" /shared/oss-fuzz
-        test -f /shared/oss-fuzz/infra/helper.py
 
   # API backend only: workflow orchestration + task/log/config endpoints.
   sherpa-web:
@@ -68,8 +37,6 @@ services:
       # Shared temp volume (must be mounted into the Docker daemon container too).
       - sherpa-tmp:/shared/tmp
 
-      # OSS-Fuzz checkout (must be mounted into the Docker daemon container too).
-      - sherpa-oss-fuzz:/shared/oss-fuzz
       # Artifacts output directory (host-mounted).
       - ./output:/shared/output
       # Dev override: load latest local source without rebuilding the image.
@@ -89,9 +56,6 @@ services:
       DOCKER_HOST: "tcp://sherpa-docker:2375"
       DOCKER_BUILDKIT: "1"
 
-      # Default OSS-Fuzz checkout path inside containers.
-      # Must be the SAME path in both sherpa-web and sherpa-docker so dind mounts work.
-      SHERPA_DEFAULT_OSS_FUZZ_DIR: "/shared/oss-fuzz"
       # Default output directory for artifacts (host-mounted).
       SHERPA_OUTPUT_DIR: "/shared/output"
       # CLI backend for code edits (opencode).
@@ -105,22 +69,15 @@ services:
       SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC: ${SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC:-120}
       SHERPA_K8S_RUN_TIMEOUT_MAX_SEC: ${SHERPA_K8S_RUN_TIMEOUT_MAX_SEC:-0}
 
-      # Optional override for oss-fuzz upstream (mirrors / forks).
-      SHERPA_OSS_FUZZ_REPO_URL: "${SHERPA_OSS_FUZZ_REPO_URL:-https://github.com/google/oss-fuzz.git}"
-
       # Optional Git mirrors for clone operations.
       SHERPA_GIT_MIRRORS: ${SHERPA_GIT_MIRRORS:-https://github.com}
 
-      # DeepSeek provider source (recommended in .env).
-      LLM_key: ${LLM_key:-${DEEPSEEK_API_KEY:-}}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
-      # Compatibility vars consumed by existing tooling.
-      OPENAI_API_KEY: ${DEEPSEEK_API_KEY:-}
-      OPENAI_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
-      OPENAI_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
-      OPENCODE_MODEL: ${DEEPSEEK_MODEL:-deepseek-reasoner}
+      # LLM provider credentials (provider-neutral).
+      LLM_key: ${LLM_key:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-${LLM_key:-}}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.deepseek.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-reasoner}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-deepseek-reasoner}
       OPENCODE_CONFIG: "/tmp/sherpa-runtime/opencode.generated.json"
       SHERPA_WEB_JOB_LOG_DIR: "/app/job-logs/jobs"
       DATABASE_URL: ${DATABASE_URL:-postgresql://sherpa:sherpa@postgres:5432/sherpa}
@@ -129,8 +86,6 @@ services:
       # AI_KEY_PATH: "/app/.env"
     depends_on:
       sherpa-runtime-init:
-        condition: service_completed_successfully
-      sherpa-oss-fuzz-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
@@ -198,7 +153,6 @@ services:
       - sherpa-docker-data:/var/lib/docker
       - sherpa-config:/app/config
       - sherpa-tmp:/shared/tmp
-      - sherpa-oss-fuzz:/shared/oss-fuzz
       - ./output:/shared/output
 
   # Optional helper image for OpenCode CLI.
@@ -266,4 +220,3 @@ volumes:
   sherpa-config:
   sherpa-job-logs:
   sherpa-postgres-data:
-  sherpa-oss-fuzz:
