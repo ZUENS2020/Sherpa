@@ -51,6 +51,33 @@ _FATAL_RUN_ERROR_KINDS = {
 }
 
 
+def _effective_run_error_kind(state: dict[str, Any]) -> str:
+    """Normalize run error kind for routing/repair decisions.
+
+    nonzero_exit_without_crash is usually fatal, but if one fuzzer timed out
+    (timeout artifact) while at least one sibling fuzzer completed normally,
+    treat it as recoverable timeout-like signal for the repair loop.
+    """
+    kind = str(state.get("run_error_kind") or "").strip().lower()
+    if kind != "nonzero_exit_without_crash":
+        return kind
+    run_details = list(state.get("run_details") or [])
+    if not run_details:
+        return kind
+
+    has_timeout_artifact = False
+    has_clean_success = False
+    for detail in run_details:
+        if str(detail.get("crash_evidence") or "").strip().lower() == "timeout_artifact":
+            has_timeout_artifact = True
+        if int(detail.get("rc") or 0) == 0 and not bool(detail.get("crash_found")):
+            has_clean_success = True
+
+    if has_timeout_artifact and has_clean_success:
+        return "run_timeout"
+    return kind
+
+
 class FuzzWorkflowState(TypedDict, total=False):
     repo_url: str
     email: Optional[str]
@@ -9172,7 +9199,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         can_replan = unlimited_rounds or ((current_round + 1) < max_rounds)
         round_budget_exhausted = False
         stop_reason = ""
-        run_error_kind = str(state.get("run_error_kind") or "").strip().lower()
+        run_error_kind_raw = str(state.get("run_error_kind") or "").strip().lower()
+        run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or run_error_kind_raw
         cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
         merge_retained_ratio = float(seed_feedback.get("merge_retained_ratio_files") or 1.0)
         merge_retained_low = bool(merge_retained_ratio > 0.0 and merge_retained_ratio < 0.35)
@@ -9341,6 +9369,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
                 "crash_found": bool(state.get("crash_found")),
                 "run_error_kind": str(state.get("run_error_kind") or ""),
+                "run_error_kind_effective": run_error_kind,
                 "should_improve": should_improve,
                 "ts": int(time.time()),
             }
@@ -9388,6 +9417,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
+            "coverage_run_error_kind_effective": run_error_kind,
             "message": "coverage analysis done",
             "auto_stop_policy": auto_stop_policy,
             "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
@@ -11002,7 +11032,9 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     # Let coverage-analysis decide in_place vs replan.
     if terminal_reason == "coverage_plateau":
         return "coverage-analysis"
-    run_error_kind = str(state.get("run_error_kind") or err.get("code") or "").strip().lower()
+    run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or str(
+        state.get("run_error_kind") or err.get("code") or ""
+    ).strip().lower()
     if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
         return "coverage-analysis"
     if run_error_kind in _FATAL_RUN_ERROR_KINDS:
