@@ -63,6 +63,25 @@ def test_k8s_manifest_normalizes_opencode_model_value():
     assert env_map["OPENAI_MODEL"] == "MiniMax-M2.7-highspeed"
 
 
+def test_k8s_manifest_placeholder_model_falls_back_to_cfg_default(monkeypatch: pytest.MonkeyPatch):
+    cfg = web_main.WebPersistentConfig(openai_model="GLM-5")
+    web_main._cfg_set(cfg)
+    manifest_yaml = web_main._k8s_build_manifest(
+        "job-test",
+        {
+            "job_id": "job-test",
+            "repo_url": "https://github.com/madler/zlib.git",
+            "model": "-",
+        },
+    )
+    manifest = yaml.safe_load(manifest_yaml)
+    env_items = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+    env_map = {item["name"]: item["value"] for item in env_items if "value" in item}
+
+    assert env_map["OPENAI_MODEL"] == "GLM-5"
+    assert env_map["OPENCODE_MODEL"] == "jdcloud/GLM-5"
+
+
 def test_k8s_manifest_injects_worker_memory_limit_env():
     manifest_yaml = web_main._k8s_build_manifest(
         "job-test",

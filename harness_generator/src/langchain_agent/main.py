@@ -172,6 +172,16 @@ def _normalized_plain_model_value(raw_model: object) -> str:
     return value
 
 
+def _openai_model_env_value(raw_model: str, normalized_model: str) -> str:
+    plain = _normalized_plain_model_value(raw_model)
+    if plain:
+        return plain
+    normalized = str(normalized_model or "").strip()
+    if "/" in normalized:
+        return normalized.split("/", 1)[1]
+    return normalized
+
+
 def _track_job_future(job_id: str, future: Future) -> None:
     with _JOB_FUTURES_LOCK:
         _JOB_FUTURES[job_id] = future
@@ -812,6 +822,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     normalized_model = _normalized_opencode_model_value(raw_model)
     if not normalized_model:
         normalized_model = _normalized_opencode_model_value(cfg_model)
+    openai_model_env = _openai_model_env_value(raw_model, normalized_model)
     ttl = _k8s_job_ttl_seconds()
     keep_finished = _k8s_keep_finished_jobs()
 
@@ -905,7 +916,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
                                 {"name": "OPENCODE_MODEL", "value": normalized_model},
-                                {"name": "OPENAI_MODEL", "value": raw_model},
+                                {"name": "OPENAI_MODEL", "value": openai_model_env},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
                                 {"name": "SHERPA_K8S_JOB_MEMORY_LIMIT", "value": _k8s_worker_memory_limit()},
                                 *_k8s_git_env_items(),
