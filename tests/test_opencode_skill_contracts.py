@@ -127,6 +127,8 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "strategy change" in plan_repair_crash.lower()
     assert "strategy-diff" in plan_repair_coverage.lower()
     assert "Known Issues" in plan_repair_build
+    assert "Strategy Delta" in plan_repair_build
+    assert "Output Path Contract" in plan_repair_build
     assert "Known Issues" in plan_repair_crash
     assert "Known Issues" in plan_repair_coverage
     assert "Known Issues" in plan_repair_fix_harness
@@ -137,6 +139,8 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "api_surface_exception" in synth_repair_crash
     assert "MCP tools from task-scoped PromeFuzz companion" in plan_repair_build
     assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
+    assert "Strategy Delta" in synth_repair_build
+    assert "Output Path Contract" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
     assert "crash_triage.json" in plan_repair_fix_harness

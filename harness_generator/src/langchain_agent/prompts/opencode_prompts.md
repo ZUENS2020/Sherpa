@@ -101,6 +101,11 @@ Constraints:
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 
+Required planning sections in `fuzz/PLAN.md`:
+- `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
+- `Strategy Delta`: what changed versus the previous failed attempt
+- `Output Path Contract`: explicit statement that build artifacts must be emitted under `fuzz/out/`
+
 MANDATORY:
 - create `./done`
 - write `fuzz/PLAN.md` into `./done` (single line)
@@ -293,6 +298,11 @@ Build-repair constraints:
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
+
+Required notes in generated scaffold artifacts:
+- `Known Issues`: unresolved blockers and any missing diagnostics fields
+- `Strategy Delta`: concrete differences from previous failed attempt
+- `Output Path Contract`: explicit declaration that executable fuzzers must be produced under `fuzz/out/` (include expected binary stems)
 
 MANDATORY:
 - create `./done`

@@ -83,6 +83,9 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "crash-diag" in crash_repair
     assert "api_surface_exception" in build_repair
     assert "non_public_api_usage" in build_repair
+    assert "Known Issues" in build_repair
+    assert "Strategy Delta" in build_repair
+    assert "Output Path Contract" in build_repair
     assert "api_surface_exception" in crash_repair
     assert "non_public_api_usage" in crash_repair
     assert "coverage plateau / replan trigger" in coverage_repair
@@ -135,6 +138,9 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "crash-fail" in synth_crash_repair
     assert "api_surface_exception" in synth_build_repair
     assert "non_public_api_usage" in synth_build_repair
+    assert "Known Issues" in synth_build_repair
+    assert "Strategy Delta" in synth_build_repair
+    assert "Output Path Contract" in synth_build_repair
     assert "MCP is unavailable, continue in degraded mode" in synth_build_repair
     assert "no custom `main()` in harness source" in synth_build_repair
     assert "LLVMFuzzerTestOneInput" in synth_build_repair

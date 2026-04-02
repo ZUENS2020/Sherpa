@@ -25,6 +25,8 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - updated `fuzz/execution_plan.json`
 - strategy note that keeps `fuzz/harness_index.json` mappable
 - `Known Issues` section in `fuzz/PLAN.md`
+- `Strategy Delta` section in `fuzz/PLAN.md`
+- `Output Path Contract` section in `fuzz/PLAN.md` that explicitly requires binaries under `fuzz/out/`
 
 ## Workflow
 1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
@@ -36,6 +38,8 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 ## Constraints
 - Do not produce doc-only updates disconnected from build recovery.
 - `fuzz/PLAN.md` must include `Known Issues` with current build blockers, suspected root cause, and next corrective action.
+- `fuzz/PLAN.md` must include `Strategy Delta` with explicit changes versus the previous failed build-repair attempt.
+- `fuzz/PLAN.md` must include `Output Path Contract` and state expected executable stems in `fuzz/out/`.
 - Include compiler-selection strategy in plan notes: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`.
 - Explicitly reject universal `clang++` for mixed C/C++ harness builds unless evidence proves it is required.
 - Naming contract to reduce undercoverage false negatives:

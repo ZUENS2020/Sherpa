@@ -3108,6 +3108,46 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
+def _render_opencode_prompt_safe(
+    name: str,
+    *,
+    fallback_name: str = "",
+    fallback_hint: str = "",
+    known_issues: list[str] | None = None,
+    **kwargs: object,
+) -> tuple[str, str]:
+    """
+    Render prompt templates with a non-throwing fallback path.
+
+    Returns:
+      (rendered_prompt, render_issue)
+      render_issue is empty when primary render succeeds.
+    """
+    try:
+        return _render_opencode_prompt(name, **kwargs), ""
+    except Exception as e:
+        issue = f"prompt-render:{name} failed: {e}"
+        merged_issues = [str(x).strip() for x in (known_issues or []) if str(x).strip()]
+        merged_issues.append(issue)
+        fallback_issue_block = "Known Issues:\n" + "\n".join(f"- {x}" for x in merged_issues)
+        hint_txt = str(fallback_hint or kwargs.get("hint") or "").strip()
+        degraded_hint = (hint_txt + "\n\n" + fallback_issue_block).strip() if hint_txt else fallback_issue_block
+        if fallback_name:
+            try:
+                return _render_opencode_prompt(fallback_name, hint=degraded_hint), issue
+            except Exception as e2:
+                issue = f"{issue}; fallback={fallback_name} failed: {e2}"
+        # Final fallback: plain prompt text to avoid hard crash in plan/synthesize nodes.
+        return (
+            (
+                "Template render degraded. Continue with repair planning using current diagnostics.\n\n"
+                f"{fallback_issue_block}\n\n"
+                "Do not run commands. Read diagnostics first and output concrete file-level changes."
+            ),
+            issue,
+        )
+
+
 def _default_run_rss_limit_mb() -> int:
     raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
     try:
@@ -4665,8 +4705,26 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             else:
                 plan_template_name = "plan_repair_build_with_hint"
                 plan_stage_skill = "plan_repair_build"
+        render_known_issues: list[str] = []
+        if repair_mode:
+            digest = dict(repair_error_digest or {})
+            if not str(digest.get("error_code") or "").strip():
+                render_known_issues.append("missing repair_error_digest.error_code")
+            if not str(digest.get("signature") or "").strip():
+                render_known_issues.append("missing repair_error_digest.signature")
+            if not str(digest.get("error_kind") or "").strip():
+                render_known_issues.append("missing repair_error_digest.error_kind")
         if hint:
-            prompt = _render_opencode_prompt(plan_template_name, hint=hint)
+            prompt, render_issue = _render_opencode_prompt_safe(
+                plan_template_name,
+                fallback_name="plan_repair_build_with_hint" if repair_mode else "plan_with_hint",
+                hint=hint,
+                fallback_hint=hint,
+                known_issues=render_known_issues,
+            )
+            if render_issue:
+                hint = (hint + "\n\nKnown Issues:\n- " + render_issue).strip()
+                _wf_log(cast(dict[str, Any], state), f"plan: prompt render degraded -> {render_issue}")
             gen.patcher.run_codex_command(
                 prompt,
                 stage_skill=plan_stage_skill,
@@ -4690,7 +4748,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             cleared_done = _clear_opencode_done_sentinel(gen.repo_root)
             if cleared_done:
                 _wf_log(cast(dict[str, Any], state), "plan: cleared stale done sentinel before schema-fix retry")
-            prompt = _render_opencode_prompt("plan_fix_targets_schema", schema_error=targets_err)
+            prompt, _ = _render_opencode_prompt_safe(
+                "plan_fix_targets_schema",
+                fallback_name="plan_with_hint",
+                schema_error=targets_err,
+                fallback_hint=f"Known Issues:\n- targets schema invalid: {targets_err}",
+            )
             gen.patcher.run_codex_command(
                 prompt,
                 stage_skill="plan_fix_targets_schema",
@@ -5881,6 +5944,34 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         final_out = ""
         final_err = ""
         final_bins: list[Path] = []
+        out_dir_mismatch_count = int(state.get("build_output_path_mismatch_count") or 0)
+        root_level_bins: list[Path] = []
+        soft_gate_threshold_raw = (os.environ.get("SHERPA_BUILD_OUT_PATH_MISMATCH_SOFT_RETRY_LIMIT") or "2").strip()
+        try:
+            out_path_soft_retry_limit = max(0, min(int(soft_gate_threshold_raw), 10))
+        except Exception:
+            out_path_soft_retry_limit = 2
+
+        def _discover_root_level_fuzzer_bins() -> list[Path]:
+            fuzz_dir = gen.repo_root / "fuzz"
+            out_dir = fuzz_dir / "out"
+            if not fuzz_dir.is_dir():
+                return []
+            out: list[Path] = []
+            name_re = re.compile(r".*(?:_fuzz(?:er)?|fuzz(?:er)?|Fuzzer)$")
+            for p in fuzz_dir.iterdir():
+                if p == out_dir:
+                    continue
+                if not p.is_file():
+                    continue
+                is_exe = os.access(p, os.X_OK) or p.suffix.lower() == ".exe"
+                if not is_exe:
+                    continue
+                stem = p.stem
+                if name_re.match(p.name) or name_re.match(stem) or "fuzz" in p.name.lower():
+                    out.append(p)
+            return sorted(out)
+
         def _is_repo_root_cwd_issue(out: str, err: str) -> bool:
             combined = ((out or "") + "\n" + (err or "")).lower()
             return (
@@ -5939,6 +6030,19 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 time.sleep(retry_delay_s)
 
         if final_rc == 0 and not final_bins:
+            root_level_bins = _discover_root_level_fuzzer_bins()
+            if root_level_bins:
+                out_dir_mismatch_count += 1
+                mismatch_lines = "\n".join(
+                    f"- {p.relative_to(gen.repo_root).as_posix()}" for p in root_level_bins[:20]
+                )
+                final_out = (
+                    (final_out or "")
+                    + "\n\n=== build output path mismatch detected ===\n"
+                    + "build produced executable fuzzers outside fuzz/out:\n"
+                    + mismatch_lines
+                    + "\nExpected output directory: fuzz/out/\n"
+                )
             libs_diag = _list_static_libs_for_diagnostics()
             if libs_diag:
                 final_out = (final_out or "") + "\n\n=== build dir artifacts (static libs) ===\n" + libs_diag + "\n"
@@ -5955,6 +6059,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_step": "build",
             "build_mode": str(state.get("build_mode") or ""),
             "build_target_source": str(state.get("build_target_source") or "external_scaffold"),
+            "build_output_path_mismatch_count": out_dir_mismatch_count,
         }
         def _mark_build_repair_state(*, kind: str, code: str, sig: str = "") -> None:
             signature_short = sig[:12] if sig else str(next_state.get("build_error_signature_short") or "")
@@ -6065,7 +6170,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             next_state["restart_to_plan_reason"] = "build_failed" if build_error_kind == "infra" else ""
             next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
             next_state["restart_to_plan_error_text"] = str(next_state["last_error"]) if build_error_kind == "infra" else ""
-            _mark_build_repair_state(kind=build_error_kind or "build_failure_generic", code=build_error_code, sig=sig)
+            _mark_build_repair_state(
+                kind=str(next_state.get("build_error_kind") or build_error_kind or "build_failure_generic"),
+                code=str(next_state.get("build_error_code") or build_error_code or ""),
+                sig=sig,
+            )
             _wf_log(
                 cast(dict[str, Any], next_state),
                 "<- build fail "
@@ -6109,7 +6218,16 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     f"same_error_max_retries={max_same_repeats}",
                 )
                 return next_state
-            next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
+            if root_level_bins and out_dir_mismatch_count <= out_path_soft_retry_limit:
+                root_listing = ", ".join(p.name for p in root_level_bins[:8])
+                next_state["last_error"] = (
+                    "Build output path mismatch: executable fuzzers exist under fuzz/ root "
+                    f"({root_listing}) but none under fuzz/out/ after {attempts_used} command run(s)."
+                )
+                next_state["build_error_kind"] = "source"
+                next_state["build_error_code"] = "build_output_path_mismatch"
+            else:
+                next_state["last_error"] = f"No fuzzer binaries found under fuzz/out/ after {attempts_used} command run(s)"
             next_state["message"] = "build produced no fuzzers"
             next_state["restart_to_plan"] = build_error_kind == "infra"
             next_state["restart_to_plan_reason"] = "build_no_fuzzers" if build_error_kind == "infra" else ""

@@ -27,6 +27,9 @@ Use this skill in repair mode when the previous build failed.
 - `fuzz/build_strategy.json`
 - `fuzz/build_runtime_facts.json`
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
+- `Known Issues` note in repair artifacts (README or repo_understanding) for unresolved blockers
+- `Strategy Delta` note in repair artifacts that states what changed versus the previous failed attempt
+- `Output Path Contract` note declaring executable fuzzer outputs must be written to `fuzz/out/`
 
 ## Workflow
 1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
@@ -51,6 +54,7 @@ Use this skill in repair mode when the previous build failed.
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
+- Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
 
 ## Command policy
 - Allowed: read-only commands only.
