@@ -348,7 +348,6 @@ jobs:
             pv-sherpa-dev-postgres \
             pv-sherpa-dev-config \
             pv-sherpa-dev-job-logs \
-            pv-sherpa-dev-oss-fuzz \
             pv-sherpa-dev-shared-output \
             pv-sherpa-dev-shared-tmp \
             --ignore-not-found=true || true
@@ -360,7 +359,6 @@ jobs:
             "${DEV_SHARED_ROOT}/postgres" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"; do
             sudo mkdir -p "$d"
@@ -370,13 +368,11 @@ jobs:
           sudo chown -R 10001:10001 \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
           sudo chmod -R a+rwX \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
 
@@ -384,7 +380,7 @@ jobs:
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY_DEV || secrets.DEEPSEEK_API_KEY_DEV }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY_DEV }}
           LLM_MODEL: ${{ secrets.LLM_MODEL_DEV || vars.LLM_MODEL_DEV || 'deepseek-reasoner' }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL_DEV || 'https://api.deepseek.com/v1' }}
           OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_DEV }}
@@ -510,20 +506,17 @@ jobs:
             "${DEV_SHARED_ROOT}/postgres" \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
           sudo chown -R 999:999 "${DEV_SHARED_ROOT}/postgres"
           sudo chown -R 10001:10001 \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
           sudo chmod -R a+rwX \
             "${DEV_SHARED_ROOT}/config" \
             "${DEV_SHARED_ROOT}/job-logs" \
-            "${DEV_SHARED_ROOT}/oss-fuzz" \
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
 

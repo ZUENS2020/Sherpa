@@ -15,5 +15,4 @@ class ComplexityCalculator:
 
     def calculate(self) -> dict:
         """Calculate complexity."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("ComplexityCalculator.calculate() not yet implemented")

@@ -42,8 +42,9 @@ Key implementation goals:
 The CLI used is the OpenCode binary `opencode` in non-interactive mode (`opencode run`).
 """
 
-from loguru import logger
 from __future__ import annotations
+
+from loguru import logger
 
 import logging
 import json
@@ -1730,6 +1731,5 @@ class CodexHelper:
             },
         )
         return None
-
 
 

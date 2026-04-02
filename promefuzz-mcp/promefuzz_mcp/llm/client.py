@@ -98,8 +98,7 @@ class LLMClient:
 
     def embed(self, text: str) -> list[float]:
         """Get embeddings for text."""
-        # Placeholder implementation
-        return []
+        raise NotImplementedError("LLMClient.embed() not yet implemented")
 
 
 def create_llm_client(config: dict) -> LLMClient:

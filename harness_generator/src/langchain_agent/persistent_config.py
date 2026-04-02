@@ -414,7 +414,8 @@ def list_opencode_provider_models_resolved(
     if not normalized:
         return "", [], "none", "provider is required"
 
-    fallback = list(_OPENCODE_PROVIDER_MODEL_CANDIDATES.get(normalized, []))
+    pdef = KNOWN_PROVIDERS.get(normalized)
+    fallback = list(pdef.models) if pdef else []
     if not fallback:
         return normalized, [], "none", f"unsupported provider: {provider}"
 
@@ -423,7 +424,7 @@ def list_opencode_provider_models_resolved(
     if not base_url:
         return normalized, fallback, "builtin", "provider base_url not configured"
     if normalized in {_MINIMAX_PROVIDER, _DEEPSEEK_PROVIDER} and not api_key:
-        return normalized, fallback, "builtin", "provider api_key not configured"
+        return normalized, [], "none", f"unsupported provider credentials: {normalized} api_key not configured"
 
     try:
         remote = _fetch_models_openai_compatible(base_url, api_key=api_key)

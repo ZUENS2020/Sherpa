@@ -1,6 +1,6 @@
 # Sherpa 系统改进计划（5 天）
 
-> **状态: ✅ 全部完成** — 2026-04-02
+> **状态: 🟡 主要项已收口，剩余回归阻塞待清理** — 2026-04-02
 >
 > | Day | 任务 | 状态 |
 > |-----|------|------|
@@ -8,7 +8,7 @@
 > | 2 | CI 测试 workflow + 自动部署 | ✅ |
 > | 3 | 统一日志 (loguru) — 71 print→logger | ✅ |
 > | 4 | Provider 配置重构 + secrets 解耦 | ✅ |
-> | 5 | 死代码清理 + OSS-Fuzz 基础设施移除 | ✅ |
+> | 5 | 死代码清理 + OSS-Fuzz 基础设施移除 | 🟡 |
 
 ## 背景
 
@@ -728,30 +728,34 @@ grep -i "minimax only" .env.example docs/ promefuzz-mcp/  # 目标: 0
 
 ## 验证清单
 
+> 说明：以下勾选为“按当前代码库本地核对”的结果；未勾选表示未完成或尚未完成可复现验证。
+>
+> 当前回归阻塞：`pytest tests/ -v` 在本地受 `test_api_stability.py` 的 Postgres 依赖（`127.0.0.1:55432`）影响，同时存在独立用例失败（如 `test_dockerize_path_translation.py::test_dockerize_autoinstall_triggers_for_build_py_from_fuzz_cwd`），需单独处理。
+
 ### 依赖 & CI（Day 1-2）
-- [ ] `pip install -r docker/requirements.web.txt` 在干净环境中成功安装
-- [ ] CI workflow 在 PR 上自动触发并执行测试
-- [ ] OpenCode 新 provider（如 openrouter）不再被 `normalize_opencode_providers()` 过滤掉
-- [ ] `grep -r "sherpa-deepseek" k8s/ .github/` 返回 0 结果（secret 名称已解耦）
-- [ ] `grep -r "DEEPSEEK_API_KEY_DEV" .github/` 返回 0 结果（GHA secret 已统一）
-- [ ] 无 Django 依赖残留
+- [ ] `pip install -r docker/requirements.web.txt` 在干净环境中成功安装（未在干净环境复验）
+- [x] CI workflow 在 PR/push 上自动触发并执行测试（`test.yml` 已配置 `pull_request` + `push(dev/main)`）
+- [x] OpenCode 新 provider（如 openrouter）不再被白名单过滤（`persistent_config.py` 已为 registry 驱动）
+- [x] `grep -r "sherpa-deepseek" k8s/ .github/` 返回 0（当前代码范围内未检出）
+- [x] `grep -r "DEEPSEEK_API_KEY_DEV\\|DEEPSEEK_API_KEY_PROD" .github/` 返回 0（deploy workflow 已移除 fallback）
+- [x] 无 Django 依赖残留（当前代码范围内未检出 `django` 依赖引用）
 
 ### 日志 & 异常（Day 3-4）
-- [ ] `grep -c "print(" main.py` 降至接近 0
-- [ ] `grep -c "except Exception" main.py` 从 87 降至 < 50
-- [ ] `errors.py` 中定义了 `SherpaError` 异常层次
+- [x] `grep -c "print(" main.py` 接近 0（当前为 0）
+- [x] `grep -c "except Exception" main.py` < 50（当前为 39）
+- [x] `errors.py` 中定义了 `SherpaError` 异常层次（已存在）
 
 ### 清理（Day 5）
-- [ ] `ossfuzz_auto.py` 和 `main_brain.py` 已删除
-- [ ] `grep -rn "apply_minimax_env_source\|CodexPatcher\|_resolve_minimax" harness_generator/` 返回 0
-- [ ] `ls RUN_FULL_TEST_FLOW.ps1 false/` 不存在
-- [ ] `grep -i "minimax only" .env.example` 返回 0
-- [ ] `grep "GITNEXUS\|OSS_FUZZ_REPO_URL" .env.example docker-compose.yml` 返回 0
-- [ ] OSS-Fuzz bootstrap 容器从 docker-compose 移除
-- [ ] K8s PVC `sherpa-oss-fuzz` 从 manifest 移除
-- [ ] fix_build 节点从 workflow graph 移除
-- [ ] crash 路由不再指向 fix_crash / fix-harness ,新链路可以成功修复 harness 错误
-- [ ] `.env.example` 包含 `SHERPA_OPENCODE_*`、`SHERPA_K8S_ANALYSIS_COMPANION_*` 等关键变量文档
-- [ ] 前端 `getOpencodeProviderModels()` 死代码已清除
-- [ ] `/healthz` 端点返回 200 + DB 连接状态
-- [ ] `pytest tests/ -v` 全量通过
+- [x] `ossfuzz_auto.py` 和 `main_brain.py` 已删除（当前文件已不存在）
+- [x] `grep -rn "apply_minimax_env_source\|CodexPatcher\|_resolve_minimax\|_node_repro_crash" harness_generator/` 返回 0
+- [x] `ls RUN_FULL_TEST_FLOW.ps1 false/` 不存在（当前均不存在）
+- [x] `grep -i "minimax only" .env.example` 返回 0（当前未检出）
+- [x] `grep "GITNEXUS\|SHERPA_OSS_FUZZ_REPO_URL\|SHERPA_AUTO_INIT_OSS_FUZZ" .env.example docker-compose.yml k8s` 返回 0
+- [x] OSS-Fuzz bootstrap 容器从 docker-compose 移除（当前未检出 `sherpa-oss-fuzz-init`）
+- [x] K8s PVC `sherpa-oss-fuzz` 从 manifest 移除（base/overlay 与 deploy workflow 均已清理）
+- [x] fix_build / fix_crash 节点从 workflow graph 移除（图中不再注册，也无可达边）
+- [x] crash 路由完全切离 fix_crash/fix-harness（`harness_bug -> plan(repair_fix_harness)`）
+- [x] `.env.example` 覆盖 `SHERPA_OPENCODE_*`、`SHERPA_K8S_ANALYSIS_COMPANION_*`、embedding 关键变量
+- [x] 前端 `getOpencodeProviderModels()` 死代码已清除（当前未检出）
+- [x] `/healthz` 端点已提供 200 响应与 DB 状态字段（`/api/health` 继续保留）
+- [ ] `pytest tests/ -v` 全量通过（未达成：本地 Postgres 依赖与独立失败用例待清理）

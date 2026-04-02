@@ -21,10 +21,12 @@ def test_load_opencode_prompt_templates_parses_markdown_templates():
     assert "plan_repair_build_with_hint" in templates
     assert "plan_repair_crash_with_hint" in templates
     assert "plan_repair_coverage_with_hint" in templates
+    assert "plan_repair_fix_harness_with_hint" in templates
     assert "synthesize_with_hint" in templates
     assert "synthesize_repair_build_with_hint" in templates
     assert "synthesize_repair_crash_with_hint" in templates
     assert "synthesize_repair_coverage_with_hint" in templates
+    assert "synthesize_repair_fix_harness_with_hint" in templates
     assert "improve_harness_in_place_with_hint" in templates
     assert "synthesize_complete_scaffold" in templates
     assert "plan_fix_targets_schema" in templates
@@ -73,6 +75,7 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     build_repair = workflow_common.render_opencode_prompt("plan_repair_build_with_hint", hint="build-diag")
     crash_repair = workflow_common.render_opencode_prompt("plan_repair_crash_with_hint", hint="crash-diag")
     coverage_repair = workflow_common.render_opencode_prompt("plan_repair_coverage_with_hint", hint="coverage-diag")
+    fix_harness_repair = workflow_common.render_opencode_prompt("plan_repair_fix_harness_with_hint", hint="fix-harness-diag")
 
     assert "build-stage failure" in build_repair
     assert "crash/repro stage failure" in crash_repair
@@ -84,6 +87,11 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "non_public_api_usage" in crash_repair
     assert "coverage plateau / replan trigger" in coverage_repair
     assert "strategy changes versus the latest failed cycle" in coverage_repair
+    assert "crash triaged as a harness bug" in fix_harness_repair
+    assert "crash_info.md" in fix_harness_repair
+    assert "crash_analysis.md" in fix_harness_repair
+    assert "crash_triage.json" in fix_harness_repair
+    assert "fix-harness-diag" in fix_harness_repair
     assert "MCP is unavailable, continue in degraded mode" in build_repair
     assert "Query MCP evidence first" in coverage_repair
     assert "coverage-diag" in coverage_repair
@@ -119,6 +127,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     synth_build_repair = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")
     synth_crash_repair = workflow_common.render_opencode_prompt("synthesize_repair_crash_with_hint", hint="crash-fail")
     synth_coverage_repair = workflow_common.render_opencode_prompt("synthesize_repair_coverage_with_hint", hint="coverage-fail")
+    synth_fix_harness_repair = workflow_common.render_opencode_prompt("synthesize_repair_fix_harness_with_hint", hint="fix-harness-fail")
     in_place_repair = workflow_common.render_opencode_prompt("improve_harness_in_place_with_hint", hint="in-place-fail")
     assert "after a build-stage failure" in synth_build_repair
     assert "after a crash/repro-stage failure" in synth_crash_repair
@@ -140,6 +149,13 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "coverage-fail" in synth_coverage_repair
     assert "no custom `main()` in harness source" in synth_coverage_repair
     assert "LLVMFuzzerTestOneInput" in synth_coverage_repair
+    assert "crash triaged as a harness bug" in synth_fix_harness_repair
+    assert "crash_info.md" in synth_fix_harness_repair
+    assert "crash_analysis.md" in synth_fix_harness_repair
+    assert "crash_triage.json" in synth_fix_harness_repair
+    assert "fix-harness-fail" in synth_fix_harness_repair
+    assert "doc-only/no-op is invalid" in synth_fix_harness_repair
+    assert "LLVMFuzzerTestOneInput" in synth_fix_harness_repair
     assert "in-place coverage improvement pass" in in_place_repair
     assert "pure doc-only edits are invalid" in in_place_repair
     assert "in-place-fail" in in_place_repair

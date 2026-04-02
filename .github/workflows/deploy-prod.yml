@@ -343,7 +343,7 @@ jobs:
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY_PROD || secrets.DEEPSEEK_API_KEY_PROD }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY_PROD }}
           LLM_MODEL: ${{ secrets.LLM_MODEL_PROD || vars.LLM_MODEL_PROD || 'deepseek-reasoner' }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL_PROD || 'https://api.deepseek.com/v1' }}
           OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_PROD }}
@@ -469,20 +469,17 @@ jobs:
             "${PROD_SHARED_ROOT}/postgres" \
             "${PROD_SHARED_ROOT}/config" \
             "${PROD_SHARED_ROOT}/job-logs" \
-            "${PROD_SHARED_ROOT}/oss-fuzz" \
             "${PROD_SHARED_ROOT}/tmp" \
             "${PROD_OUTPUT_DIR}"
           sudo chown -R 999:999 "${PROD_SHARED_ROOT}/postgres"
           sudo chown -R 10001:10001 \
             "${PROD_SHARED_ROOT}/config" \
             "${PROD_SHARED_ROOT}/job-logs" \
-            "${PROD_SHARED_ROOT}/oss-fuzz" \
             "${PROD_SHARED_ROOT}/tmp" \
             "${PROD_OUTPUT_DIR}"
           sudo chmod -R a+rwX \
             "${PROD_SHARED_ROOT}/config" \
             "${PROD_SHARED_ROOT}/job-logs" \
-            "${PROD_SHARED_ROOT}/oss-fuzz" \
             "${PROD_SHARED_ROOT}/tmp" \
             "${PROD_OUTPUT_DIR}"
 

@@ -14,5 +14,4 @@ class FunctionRelevanceComprehender:
 
     def comprehend(self, library_purpose: str, function_usages: dict) -> dict:
         """Comprehend function relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("func_relevance.comprehend() not yet implemented")

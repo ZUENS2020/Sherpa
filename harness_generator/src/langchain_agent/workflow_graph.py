@@ -478,7 +478,7 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
         line = json.dumps(payload, separators=(",", ":"), default=str)
     except Exception:
         return
-    logger.info(f"[wf-metrics] {line}", flush=True)
+    logger.info("[wf-metrics] {}", line)
 
 
 def _fmt_dt(seconds: float) -> str:
@@ -669,6 +669,8 @@ def _feedback_group_for_stage(stage: str) -> str:
         "synthesize_repair_build",
         "plan_repair_crash",
         "synthesize_repair_crash",
+        "plan_repair_fix_harness",
+        "synthesize_repair_fix_harness",
     }:
         return "planning_synth"
     if s == "fix_build":
@@ -786,6 +788,8 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
         "synthesize_repair_build": _feedback_group_for_stage("synthesize_repair_build"),
         "plan_repair_crash": _feedback_group_for_stage("plan_repair_crash"),
         "synthesize_repair_crash": _feedback_group_for_stage("synthesize_repair_crash"),
+        "plan_repair_fix_harness": _feedback_group_for_stage("plan_repair_fix_harness"),
+        "synthesize_repair_fix_harness": _feedback_group_for_stage("synthesize_repair_fix_harness"),
         "fix_build": _feedback_group_for_stage("fix_build"),
         "crash_triage": _feedback_group_for_stage("crash_triage"),
         "fix_harness_after_run": _feedback_group_for_stage("fix_harness_after_run"),
@@ -826,19 +830,23 @@ def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
 
 def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
     explicit = str(state.get("repair_origin_stage") or "").strip().lower()
-    if explicit in {"build", "crash", "coverage"}:
+    if explicit in {"build", "crash", "coverage", "fix-harness"}:
         return explicit
     restart_stage = str(state.get("restart_to_plan_stage") or "").strip().lower()
     if restart_stage == "build":
         return "build"
-    if restart_stage in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
+    if restart_stage == "fix-harness":
+        return "fix-harness"
+    if restart_stage in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
     if restart_stage in {"coverage-analysis", "improve-harness"}:
         return "coverage"
     last_step = str(state.get("last_step") or "").strip().lower()
     if last_step == "build":
         return "build"
-    if last_step in {"run", "crash-triage", "fix-harness", "re-build", "re-run", "fix_crash"}:
+    if last_step == "fix-harness":
+        return "fix-harness"
+    if last_step in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
     if last_step in {"coverage-analysis", "improve-harness"}:
         return "coverage"
@@ -4176,9 +4184,9 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         },
     )
 
-    # Restore crash context from previous run stage when repro/fix is resumed
+    # Restore crash context from previous run stage when crash recovery is resumed
     # as a separate k8s stage job. Without this, init resets crash state and
-    # repro_crash would be incorrectly skipped.
+    # re-build/re-run would be incorrectly skipped.
     if resume_step in {
         "analysis",
         "plan",
@@ -4189,7 +4197,6 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         "fix-harness",
         "coverage-analysis",
         "improve-harness",
-        "repro_crash",
         "re-build",
         "re-run",
     }:
@@ -4649,6 +4656,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if repair_origin_stage == "crash":
                 plan_template_name = "plan_repair_crash_with_hint"
                 plan_stage_skill = "plan_repair_crash"
+            elif repair_origin_stage == "fix-harness":
+                plan_template_name = "plan_repair_fix_harness_with_hint"
+                plan_stage_skill = "plan_repair_fix_harness"
             elif repair_origin_stage == "coverage":
                 plan_template_name = "plan_repair_coverage_with_hint"
                 plan_stage_skill = "plan_repair_coverage"
@@ -4892,7 +4902,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     hint = (state.get("codex_hint") or "").strip()
     repair_mode = bool(state.get("repair_mode") or False)
     repair_origin_stage = str(state.get("repair_origin_stage") or "").strip().lower()
-    if repair_origin_stage not in {"build", "crash", "coverage"}:
+    if repair_origin_stage not in {"build", "crash", "coverage", "fix-harness"}:
         repair_origin_stage = _infer_repair_origin_stage(cast(dict[str, Any], state))
     antlr_context_path = str(state.get("antlr_context_path") or "").strip()
     antlr_context_summary = str(state.get("antlr_context_summary") or "").strip()
@@ -5391,6 +5401,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             if repair_origin_stage == "crash":
                 synth_template_name = "synthesize_repair_crash_with_hint"
                 synth_stage_skill = "synthesize_repair_crash"
+            elif repair_origin_stage == "fix-harness":
+                synth_template_name = "synthesize_repair_fix_harness_with_hint"
+                synth_stage_skill = "synthesize_repair_fix_harness"
             elif repair_origin_stage == "coverage":
                 synth_template_name = "synthesize_repair_coverage_with_hint"
                 synth_stage_skill = "synthesize_repair_coverage"
@@ -9824,6 +9837,50 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "crash_triage_signal_lines": signal_lines,
         "crash_triage_report_path": str(triage_md_path),
         "crash_triage_json_path": str(triage_json_path),
+        "repair_mode": label == "harness_bug",
+        "repair_origin_stage": "fix-harness" if label == "harness_bug" else str(state.get("repair_origin_stage") or ""),
+        "repair_error_kind": "harness_bug" if label == "harness_bug" else str(state.get("repair_error_kind") or ""),
+        "repair_error_code": "crash_triage_harness_bug" if label == "harness_bug" else str(state.get("repair_error_code") or ""),
+        "repair_signature": (
+            str(state.get("crash_signature") or "")[:12]
+            if label == "harness_bug"
+            else str(state.get("repair_signature") or "")
+        ),
+        "repair_stdout_tail": str(state.get("repair_stdout_tail") or ""),
+        "repair_stderr_tail": str(state.get("repair_stderr_tail") or ""),
+        "repair_attempt_index": (
+            int(state.get("repair_attempt_index") or 0) + 1
+            if label == "harness_bug"
+            else int(state.get("repair_attempt_index") or 0)
+        ),
+        "repair_strategy_force_change": bool(label == "harness_bug"),
+        "repair_error_digest": (
+            {
+                "error_code": "crash_triage_harness_bug",
+                "error_kind": "harness_bug",
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "failing_files": [],
+                "symbols": [],
+                "first_seen": int(time.time()),
+                "latest_seen": int(time.time()),
+                "top_trace": signal_lines[0] if signal_lines else reason[:256],
+            }
+            if label == "harness_bug"
+            else dict(state.get("repair_error_digest") or {})
+        ),
+        "repair_recent_attempts": (
+            (list(state.get("repair_recent_attempts") or []) + [{
+                "step": "crash-triage",
+                "origin": "fix-harness",
+                "error_kind": "harness_bug",
+                "error_code": "crash_triage_harness_bug",
+                "signature": str(state.get("crash_signature") or "")[:12],
+                "attempt_index": int(state.get("repair_attempt_index") or 0) + 1,
+                "message": reason[:512],
+            }])[-5:]
+            if label == "harness_bug"
+            else list(state.get("repair_recent_attempts") or [])
+        ),
         "constraint_memory_count": constraint_count,
         "constraint_memory_path": constraint_path,
         "message": f"crash triage classified as {label}",
@@ -10070,7 +10127,7 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
         gen.patcher.run_codex_command(
             prompt,
             additional_context=context or None,
-            stage_skill="fix_crash_harness_error",
+            stage_skill="fix_harness_after_run",
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
@@ -10805,11 +10862,6 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     return out
 
 
-# Backward-compatible alias for legacy step name.
-def _node_repro_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
-    return _node_re_build(state)
-
-
 def _route_after_build_state(state: FuzzWorkflowRuntimeState) -> str:
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     if bool(state.get("restart_to_plan")):
@@ -10936,7 +10988,7 @@ def _route_after_crash_triage_state(state: FuzzWorkflowRuntimeState) -> str:
         return "plan"
     label = _normalize_crash_triage_label(str(state.get("crash_triage_label") or ""))
     if label == "harness_bug":
-        return "fix-harness"
+        return "plan"
     if label == "upstream_bug":
         return "re-build"
     return "plan"
@@ -11032,7 +11084,7 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_coverage_analysis_state(state)
     if last_step == "improve-harness":
         return _route_after_improve_harness_state(state)
-    if last_step in {"repro_crash", "re-build"}:
+    if last_step == "re-build":
         return _route_after_re_build_state(state)
     if last_step == "re-run":
         return _route_after_re_run_state(state)
@@ -11045,21 +11097,21 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("failed")) or (state.get("last_error") or "").strip():
         return "stop"
     raw = (state.get("resume_from_step") or "").strip().lower()
+    if raw in {"fix-harness", "fix_harness"}:
+        raw = "plan"
+    if raw in {"fix_build", "fix_crash"}:
+        raw = "build"
     allowed = {
         "analysis",
         "plan",
         "synthesize",
         "build",
-        "fix_build",
         "run",
-        "fix_crash",
         "crash-triage",
-        "fix-harness",
         "coverage-analysis",
         "improve-harness",
         "re-build",
         "re-run",
-        "repro_crash",
         "crash-analysis",
     }
     if raw == "repro_crash":
@@ -11088,17 +11140,13 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
-    graph.add_node("fix_build", _node_fix_build)
     graph.add_node("coverage-analysis", _node_coverage_analysis)
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
     graph.add_node("re-run", _node_re_run)
     graph.add_node("crash-analysis", _node_crash_analysis)
-    graph.add_node("repro_crash", _node_repro_crash)
     graph.add_node("run", _node_run)
-    graph.add_node("fix_crash", _node_fix_crash)
     graph.add_node("crash-triage", _node_crash_triage)
-    graph.add_node("fix-harness", _node_fix_harness_after_run)
 
     graph.set_entry_point("init")
 
@@ -11130,21 +11178,9 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
 
-    def _route_after_fix_build(state: FuzzWorkflowRuntimeState) -> str:
-        nxt = _route_after_fix_build_state(state)
-        return _apply_stage_stop_guard(state, "fix_build", nxt)
-
-    def _route_after_fix_crash(state: FuzzWorkflowRuntimeState) -> str:
-        nxt = _route_after_fix_crash_state(state)
-        return _apply_stage_stop_guard(state, "fix_crash", nxt)
-
     def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_crash_triage_state(state)
         return _apply_stage_stop_guard(state, "crash-triage", nxt)
-
-    def _route_after_fix_harness(state: FuzzWorkflowRuntimeState) -> str:
-        nxt = _route_after_fix_harness_state(state)
-        return _apply_stage_stop_guard(state, "fix-harness", nxt)
 
     def _route_after_coverage_analysis(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_coverage_analysis_state(state)
@@ -11174,17 +11210,13 @@ def build_fuzz_workflow() -> StateGraph:
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
-            "fix_build": "fix_build",
             "run": "run",
-            "fix_crash": "fix_crash",
             "crash-triage": "crash-triage",
-            "fix-harness": "fix-harness",
             "coverage-analysis": "coverage-analysis",
             "improve-harness": "improve-harness",
             "re-build": "re-build",
             "re-run": "re-run",
             "crash-analysis": "crash-analysis",
-            "repro_crash": "re-build",
             "stop": END,
         },
     )
@@ -11194,12 +11226,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "build",
         _route_after_build,
-        {"run": "run", "plan": "plan", "fix_build": "fix_build", "stop": END},
-    )
-    graph.add_conditional_edges(
-        "fix_build",
-        _route_after_fix_build,
-        {"build": "build", "fix_build": "fix_build", "plan": "plan", "stop": END},
+        {"run": "run", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "run",
@@ -11207,25 +11234,14 @@ def build_fuzz_workflow() -> StateGraph:
         {
             "coverage-analysis": "coverage-analysis",
             "crash-triage": "crash-triage",
-            "fix_crash": "fix_crash",
             "plan": "plan",
             "stop": END,
         },
     )
     graph.add_conditional_edges(
-        "fix_crash",
-        _route_after_fix_crash,
-        {"build": "build", "fix_crash": "fix_crash", "stop": END},
-    )
-    graph.add_conditional_edges(
         "crash-triage",
         _route_after_crash_triage,
-        {"fix-harness": "fix-harness", "re-build": "re-build", "plan": "plan", "stop": END},
-    )
-    graph.add_conditional_edges(
-        "fix-harness",
-        _route_after_fix_harness,
-        {"build": "build", "plan": "plan", "stop": END},
+        {"re-build": "re-build", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "coverage-analysis",
@@ -11240,24 +11256,18 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "re-build",
         _route_after_re_build,
-        {"re-run": "re-run", "fix_crash": "fix_crash", "plan": "plan", "stop": END},
+        {"re-run": "re-run", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "re-run",
         _route_after_re_run,
-        {"crash-analysis": "crash-analysis", "plan": "plan", "fix_crash": "fix_crash", "stop": END},
+        {"crash-analysis": "crash-analysis", "plan": "plan", "stop": END},
     )
     graph.add_conditional_edges(
         "crash-analysis",
         _route_after_crash_analysis,
         {"plan": "plan", "stop": END},
     )
-    graph.add_conditional_edges(
-        "repro_crash",
-        _route_after_re_build,
-        {"re-run": "re-run", "fix_crash": "fix_crash", "plan": "plan", "stop": END},
-    )
-
     return graph
 
 

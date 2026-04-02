@@ -21,11 +21,15 @@ def test_workflow_graph_binds_stage_skills_for_all_opencode_calls() -> None:
         'plan_stage_skill = "plan_repair_build"',
         'plan_stage_skill = "plan_repair_crash"',
         'plan_stage_skill = "plan_repair_coverage"',
+        'plan_stage_skill = "plan_repair_fix_harness"',
         'synth_stage_skill = "synthesize_repair_build"',
         'synth_stage_skill = "synthesize_repair_crash"',
         'synth_stage_skill = "synthesize_repair_coverage"',
+        'synth_stage_skill = "synthesize_repair_fix_harness"',
         'plan_template_name = "plan_repair_coverage_with_hint"',
+        'plan_template_name = "plan_repair_fix_harness_with_hint"',
         'synth_template_name = "synthesize_repair_coverage_with_hint"',
+        'synth_template_name = "synthesize_repair_fix_harness_with_hint"',
         'stage_skill="improve_harness_in_place"',
     ]
     for token in expected:
@@ -43,9 +47,11 @@ def test_main_workflow_stage_skills_exist() -> None:
         "plan_repair_build",
         "plan_repair_crash",
         "plan_repair_coverage",
+        "plan_repair_fix_harness",
         "synthesize_repair_build",
         "synthesize_repair_crash",
         "synthesize_repair_coverage",
+        "synthesize_repair_fix_harness",
         "improve_harness_in_place",
         "seed_generation",
         "crash_triage",
@@ -82,12 +88,19 @@ def test_workflow_plan_and_synthesize_use_group_feedback_context() -> None:
     assert 'stage="synthesize"' in text
 
 
-def test_workflow_build_failures_route_to_fix_nodes() -> None:
+def test_workflow_build_and_crash_failures_route_to_plan_repair_loop() -> None:
     text = WF.read_text(encoding="utf-8")
-    assert 'return "fix_build"' in text
-    assert '"fix_build": "fix_build"' in text
-    assert 'graph.add_node("fix_build", _node_fix_build)' in text
-    assert 'graph.add_node("fix_crash", _node_fix_crash)' in text
+    assert 'graph.add_node("fix_build", _node_fix_build)' not in text
+    assert 'graph.add_node("fix_crash", _node_fix_crash)' not in text
+    assert '{"run": "run", "plan": "plan", "stop": END}' in text
+    assert '{"re-run": "re-run", "plan": "plan", "stop": END}' in text
+    assert '{"crash-analysis": "crash-analysis", "plan": "plan", "stop": END}' in text
+
+
+def test_workflow_fix_harness_node_is_legacy_only() -> None:
+    text = WF.read_text(encoding="utf-8")
+    assert 'graph.add_node("fix-harness", _node_fix_harness_after_run)' not in text
+    assert '{"fix-harness": "fix-harness"' not in text
 
 
 def test_workflow_synthesize_uses_configurable_opencode_attempts() -> None:

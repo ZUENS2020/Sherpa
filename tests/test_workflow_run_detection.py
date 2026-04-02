@@ -1441,14 +1441,49 @@ def test_route_after_crash_analysis_routes_to_stop_on_real_bug():
 def test_apply_stage_stop_guard_always_stops_when_targeted():
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "run", "re-build") == "stop"
     assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "re-build"}, "re-build", "plan") == "stop"
-    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "crash-triage"}, "crash-triage", "fix-harness") == "stop"
-    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "crash-triage", "fix-harness") == "fix-harness"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "crash-triage"}, "crash-triage", "plan") == "stop"
+    assert workflow_graph._apply_stage_stop_guard({"stop_after_step": "run"}, "crash-triage", "plan") == "plan"
 
 
 def test_route_after_crash_triage_routes_by_label():
-    assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "harness_bug"}) == "fix-harness"
+    assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "harness_bug"}) == "plan"
     assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "upstream_bug"}) == "re-build"
     assert workflow_graph._route_after_crash_triage_state({"crash_triage_label": "inconclusive"}) == "plan"
+
+
+def test_node_crash_triage_sets_fix_harness_repair_context(tmp_path: Path):
+    gen = _FakeRunGenerator(tmp_path, run_results=[])
+    triage_json = tmp_path / "crash_triage.json"
+    triage_json.write_text(
+        json.dumps(
+            {
+                "label": "harness_bug",
+                "confidence": 0.88,
+                "reason": "harness misuses input contract",
+                "evidence": ["stack points to harness layer"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run_codex_command(*_args, **_kwargs):
+        return None
+
+    gen.patcher = SimpleNamespace(run_codex_command=_fake_run_codex_command)
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "demo_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "abcdef123456",
+        }
+    )
+    assert out["crash_triage_label"] == "harness_bug"
+    assert out["repair_mode"] is True
+    assert out["repair_origin_stage"] == "fix-harness"
+    assert out["repair_error_kind"] == "harness_bug"
+    assert out["repair_error_code"] == "crash_triage_harness_bug"
 
 
 def test_node_run_marks_finalize_timeout(tmp_path: Path, monkeypatch):

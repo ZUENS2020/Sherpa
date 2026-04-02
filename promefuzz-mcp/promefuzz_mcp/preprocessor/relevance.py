@@ -14,8 +14,7 @@ class TypeRelevance:
 
     def calculate(self) -> dict:
         """Calculate type relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("TypeRelevance.calculate() not yet implemented")
 
 
 class ClassRelevance:
@@ -27,8 +26,7 @@ class ClassRelevance:
 
     def calculate(self) -> dict:
         """Calculate class relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("ClassRelevance.calculate() not yet implemented")
 
 
 class CallRelevance:
@@ -40,5 +38,4 @@ class CallRelevance:
 
     def calculate(self) -> dict:
         """Calculate call relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("CallRelevance.calculate() not yet implemented")
