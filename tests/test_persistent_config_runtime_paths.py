@@ -146,6 +146,9 @@ def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: 
 
 
 def test_apply_llm_env_source_ignores_placeholder_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
     monkeypatch.setenv("LLM_key", "-")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://modelservice.jdcloud.com/coding/openai/v1")
     monkeypatch.setenv("OPENAI_MODEL", "GLM-5")
