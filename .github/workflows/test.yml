@@ -18,6 +18,20 @@ jobs:
     name: Backend Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sherpa
+          POSTGRES_USER: sherpa
+          POSTGRES_PASSWORD: sherpa
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U sherpa -d sherpa"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4

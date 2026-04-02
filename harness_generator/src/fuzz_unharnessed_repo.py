@@ -1207,12 +1207,11 @@ def _infer_target_type(*parts: str) -> str:
         return "parser"
     if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex")):
         return "parser"
-    # archive: container-format wrappers only
-    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "gzip", "gunzip")):
+    # archive: container-format wrappers and zlib/gzip-style stream containers
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "gzip", "gunzip", "inflate", "deflate", "zlib")):
         return "archive"
     # decoder: raw codec / compression primitives + explicit decode keywords
-    if any(tok in text for tok in ("inflate", "deflate", "zlib", "lz", "zstd", "lzma", "brotli",
-                                    "decode", "decoder", "decompress", "unpack")):
+    if any(tok in text for tok in ("lz", "zstd", "lzma", "brotli", "decode", "decoder", "decompress", "unpack")):
         return "decoder"
     if re.search(r"\bread_(?:string|line|token|field|record|key|value)\b", text):
         return "parser"
