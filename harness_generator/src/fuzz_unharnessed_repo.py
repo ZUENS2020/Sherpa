@@ -2963,10 +2963,11 @@ EOF
 
             errors_accum = (errors_accum + "\n\n" + diag)[-20000:]  # keep last 20k
 
+            problem_text = "Build finished with rc=0 but no binaries found" if rc == 0 else f"Non-zero exit code {rc}"
             fix_prompt = textwrap.dedent(
-                """
+                f"""
                 The *fuzz* build is still incorrect:
-                {problem}
+                {problem_text}
 
                 Read the diagnostics below and apply the **minimal** edits necessary so that running
                 `(cd fuzz && python build.py)` completes successfully **and** leaves at least one executable
@@ -2983,7 +2984,7 @@ EOF
 
                 When done, write `fuzz/build.py` into `./done`.
                 """
-            ).strip().format(problem=("Build finished with rc=0 but no binaries found" if rc == 0 else f"Non-zero exit code {rc}"))
+            ).strip()
 
             stdout = self.patcher.run_codex_command(fix_prompt, additional_context=errors_accum)
 
