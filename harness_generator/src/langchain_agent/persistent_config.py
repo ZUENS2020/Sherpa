@@ -60,6 +60,14 @@ _register(
         aliases=["mini-max", "minimaxi"],
     ),
     _ProviderDef(
+        name="jdcloud",
+        base_url="https://modelservice.jdcloud.com/coding/openai/v1",
+        default_model="GLM-5",
+        models=["GLM-5", "glm-5"],
+        npm="@ai-sdk/openai-compatible",
+        aliases=["jdaip", "jd-openai", "jdcloud-opencode"],
+    ),
+    _ProviderDef(
         name="deepseek",
         base_url="https://api.deepseek.com/v1",
         default_model="deepseek-reasoner",
@@ -315,6 +323,23 @@ def normalize_model_for_opencode(
             matched.append(provider)
     if len(matched) == 1:
         return f"{matched[0]}/{raw}"
+
+    # If configured providers are ambiguous/incomplete, fall back to global known
+    # provider model catalogs so plain model names still normalize consistently.
+    known_matched: list[str] = []
+    for provider, pdef in KNOWN_PROVIDERS.items():
+        known_names: set[str] = set()
+        for candidate in pdef.models:
+            value = str(candidate or "").strip()
+            if not value:
+                continue
+            known_names.add(value)
+            if "/" in value:
+                known_names.add(value.split("/", 1)[1])
+        if raw in known_names:
+            known_matched.append(provider)
+    if len(known_matched) == 1:
+        return f"{known_matched[0]}/{raw}"
 
     if len(provider_models) == 1:
         only = next(iter(provider_models.keys()))

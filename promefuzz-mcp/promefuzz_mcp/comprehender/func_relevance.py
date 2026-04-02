@@ -8,7 +8,7 @@ from loguru import logger
 class FunctionRelevanceComprehender:
     """Comprehend semantic relevance between functions using LLM."""
 
-    def __init__(self, llm_client, knowledge_base):
+    def __init__(self, llm_client=None, knowledge_base=None):
         self.llm_client = llm_client
         self.knowledge_base = knowledge_base
 

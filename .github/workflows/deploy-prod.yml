@@ -344,8 +344,8 @@ jobs:
         shell: bash
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY_PROD }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL_PROD || vars.LLM_MODEL_PROD || 'deepseek-reasoner' }}
-          LLM_BASE_URL: ${{ vars.LLM_BASE_URL_PROD || 'https://api.deepseek.com/v1' }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL_PROD || vars.LLM_MODEL_PROD || 'GLM-5' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL_PROD || 'https://modelservice.jdcloud.com/coding/openai/v1' }}
           OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_PROD }}
           OPENROUTER_EMBEDDING_MODEL: ${{ secrets.OPENROUTER_EMBEDDING_MODEL_PROD || vars.OPENROUTER_EMBEDDING_MODEL_PROD || 'text-embedding-3-small' }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_PROD }}
