@@ -706,7 +706,15 @@ def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
             model = KNOWN_PROVIDERS[provider_by_url].default_model
         else:
             model = _DEEPSEEK_DEFAULT_MODEL
-    provider_name = _provider_from_model_or_url(model, base_url)
+    provider_hint = ""
+    if "/" in model:
+        maybe_provider, maybe_model = model.split("/", 1)
+        normalized_hint = _normalize_provider_name(maybe_provider)
+        stripped_model = str(maybe_model or "").strip()
+        if normalized_hint and stripped_model:
+            provider_hint = normalized_hint
+            model = stripped_model
+    provider_name = provider_hint or _provider_from_model_or_url(model, base_url)
     cfg.openai_api_key = key or None
     cfg.openai_base_url = base_url
     cfg.openai_model = model
