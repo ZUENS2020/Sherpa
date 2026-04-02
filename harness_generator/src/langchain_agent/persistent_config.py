@@ -664,6 +664,13 @@ def _provider_from_model_or_url(model: str, base_url: str) -> str:
     return _DEEPSEEK_PROVIDER
 
 
+def _sanitize_model_literal(raw: str | None) -> str:
+    value = str(raw or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL"}:
+        return ""
+    return value
+
+
 def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
     key = (
         os.environ.get("LLM_key", "").strip()
@@ -678,12 +685,17 @@ def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
         or _DEEPSEEK_BASE_URL
     )
     model = (
-        os.environ.get("OPENCODE_MODEL", "").strip()
-        or os.environ.get("OPENAI_MODEL", "").strip()
-        or os.environ.get("DEEPSEEK_MODEL", "").strip()
-        or os.environ.get("MINIMAX_MODEL", "").strip()
-        or _DEEPSEEK_DEFAULT_MODEL
+        _sanitize_model_literal(os.environ.get("OPENCODE_MODEL", ""))
+        or _sanitize_model_literal(os.environ.get("OPENAI_MODEL", ""))
+        or _sanitize_model_literal(os.environ.get("DEEPSEEK_MODEL", ""))
+        or _sanitize_model_literal(os.environ.get("MINIMAX_MODEL", ""))
     )
+    if not model:
+        provider_by_url = _provider_from_base_url(base_url)
+        if provider_by_url and provider_by_url in KNOWN_PROVIDERS:
+            model = KNOWN_PROVIDERS[provider_by_url].default_model
+        else:
+            model = _DEEPSEEK_DEFAULT_MODEL
     provider_name = _provider_from_model_or_url(model, base_url)
     cfg.openai_api_key = key or None
     cfg.openai_base_url = base_url

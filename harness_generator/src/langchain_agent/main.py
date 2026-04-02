@@ -158,9 +158,18 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
 
 def _normalized_opencode_model_value(raw_model: object) -> str:
     value = str(raw_model or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL"}:
+        return ""
     if not value:
         return ""
     return normalize_model_for_opencode(value, cfg=_cfg_get())
+
+
+def _normalized_plain_model_value(raw_model: object) -> str:
+    value = str(raw_model or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL"}:
+        return ""
+    return value
 
 
 def _track_job_future(job_id: str, future: Future) -> None:
@@ -798,8 +807,11 @@ def _k8s_git_env_items() -> list[dict[str, object]]:
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
-    raw_model = str(payload.get("model") or "").strip()
+    cfg_model = _normalized_plain_model_value(_cfg_get().openai_model)
+    raw_model = _normalized_plain_model_value(payload.get("model")) or cfg_model
     normalized_model = _normalized_opencode_model_value(raw_model)
+    if not normalized_model:
+        normalized_model = _normalized_opencode_model_value(cfg_model)
     ttl = _k8s_job_ttl_seconds()
     keep_finished = _k8s_keep_finished_jobs()
 
@@ -3190,6 +3202,12 @@ def put_config(request: dict = Body(...)):
             raise HTTPException(status_code=400, detail=f"invalid config payload: {exc}") from exc
         payload = validated.model_dump()
 
+    for model_key in ("openai_model", "opencode_model", "openrouter_model"):
+        if model_key in request:
+            model_val = _normalized_plain_model_value(request.get(model_key))
+            if not model_val:
+                raise HTTPException(status_code=400, detail=f"{model_key} is invalid")
+
     candidate = WebPersistentConfig(**payload)
     if int(candidate.fuzz_time_budget) < 0:
         raise HTTPException(
@@ -3851,10 +3869,20 @@ def _run_fuzz_job(
     tee = _Tee(job_id, log_file=log_file)
     out_token = _ACTIVE_JOB_STDOUT_TEE.set(tee)
     err_token = _ACTIVE_JOB_STDERR_TEE.set(tee)
+    log_sink_id: int | None = None
     companion_pod = ""
     companion_service = ""
     companion_url = ""
     try:
+        # Ensure per-job logs are persisted even when loguru writes directly to
+        # process stderr/stdout instead of the job-aware stream wrappers.
+        current_thread_id = threading.get_ident()
+        log_sink_id = logger.add(
+            tee,
+            level="DEBUG",
+            format="{message}",
+            filter=lambda record, tid=current_thread_id: record["thread"].id == tid,
+        )
         logger.info(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
         if _is_cancel_requested(job_id):
             raise RuntimeError(cancel_error)
@@ -3894,16 +3922,18 @@ def _run_fuzz_job(
             or cfg.openai_api_key
             or ""
         ).strip()
-        opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
-        openai_model = (
+        opencode_model_env = _normalized_plain_model_value(os.environ.get("OPENCODE_MODEL") or "")
+        openai_model = _normalized_plain_model_value(
             os.environ.get("OPENAI_MODEL")
             or opencode_model_env
+            or cfg.openai_model
             or "deepseek-reasoner"
-        ).strip()
+        )
+        requested_model = _normalized_plain_model_value(request.model or "")
         if openai_key:
-            model_value = request.model or opencode_model_env or openai_model
+            model_value = requested_model or opencode_model_env or openai_model
         else:
-            model_value = request.model or cfg.openrouter_model
+            model_value = requested_model or _normalized_plain_model_value(cfg.openrouter_model)
         runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
         logger.info(
             f"[job {job_id}] params runtime={runtime_mode} "
@@ -4464,6 +4494,11 @@ def _run_fuzz_job(
             last_resume_finished_at=time.time() if resumed else None,
         )
     finally:
+        if log_sink_id is not None:
+            try:
+                logger.remove(log_sink_id)
+            except Exception:
+                pass
         try:
             if companion_pod or companion_service:
                 _k8s_stop_analysis_companion(companion_pod, companion_service)
