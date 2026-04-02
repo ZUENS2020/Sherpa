@@ -489,7 +489,7 @@ def _run_streaming_combined(
     try:
         for line in proc.stdout:
             safe_line = _redact_text(line, env=env)
-            logger.info(safe_line, end="")
+            logger.info("{}", safe_line.rstrip("\n"))
             tail_buf.append(safe_line.rstrip("\n"))
             scan_buf.append(safe_line)
     finally:
@@ -1641,7 +1641,7 @@ class CodexHelper:
                         if item is EOF:
                             break
                         if isinstance(item, str) and item:
-                            logger.info(item, end="")
+                            logger.info("{}", item.rstrip("\n"))
                             captured_chunks.append(item)
                             last_activity_ts = now
                             if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
@@ -1671,7 +1671,7 @@ class CodexHelper:
                             if item2 is EOF:
                                 break
                             if isinstance(item2, str) and item2:
-                                logger.info(item2, end="")
+                                logger.info("{}", item2.rstrip("\n"))
                                 captured_chunks.append(item2)
                     except Exception:
                         pass
@@ -1751,5 +1751,4 @@ class CodexHelper:
             },
         )
         return None
-
 
