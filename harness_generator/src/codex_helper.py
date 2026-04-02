@@ -617,9 +617,9 @@ def _normalize_model_for_opencode(model: str, *, config_path: str) -> str:
         only = next(iter(providers.keys()))
         return f"{only}/{raw}"
 
-    # Heuristic for common GLM short model ids.
-    if raw.lower().startswith("glm-"):
-        return f"zai/{raw}"
+    # Heuristic for common GLM short model ids (hosted on jdcloud).
+    if raw.lower().startswith("glm"):
+        return f"jdcloud/{raw}"
 
     return raw
 
@@ -988,6 +988,16 @@ class CodexHelper:
             "请求太频繁",
             "访问频繁",
             "请稍后再试",
+        )
+
+        # Fatal errors that should not be retried – raise immediately with a
+        # clear message so the caller gets an actionable diagnostic instead of
+        # an obscure downstream JSON-parsing failure.
+        FATAL_ERRORS = (
+            "ProviderModelNotFoundError",
+            "AuthenticationError",
+            "InvalidAPIKeyError",
+            "PermissionDeniedError",
         )
 
         done_path = self.working_dir / SENTINEL
@@ -1639,6 +1649,16 @@ class CodexHelper:
                                 saw_retry_error = True
                                 _kill_proc("retryable_error")
                                 break
+                            # Detect fatal (non-retryable) errors and surface them
+                            # immediately so the caller gets a clear diagnostic.
+                            for fatal_err in FATAL_ERRORS:
+                                if fatal_err in item:
+                                    detail = item.strip()[:500]
+                                    LOGGER.error("[OpenCodeHelper] fatal CLI error: %s", detail)
+                                    _kill_proc("fatal_error")
+                                    raise RuntimeError(
+                                        f"OpenCode CLI fatal error: {fatal_err} — {detail}"
+                                    )
 
                         # If process exited and queue is drained, we can stop.
                         if proc.poll() is not None and out_q.empty():
