@@ -204,22 +204,7 @@ def register_tools(mcp):
         if output_path is None:
             output_path = "./output/relevance/type_relevance.json"
 
-        # TODO: Implement type relevance calculation
-        relevance = {}
-
-        # Persist to file if output_path is provided
-        if output_path:
-            output_file = Path(output_path)
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            import json
-            with open(output_file, "w") as f:
-                json.dump({"relevance": relevance}, f, indent=2)
-
-        return {
-            "status": "success",
-            "relevance": relevance,
-            "output_file": str(output_path),
-        }
+        raise NotImplementedError("calculate_type_relevance() not yet implemented")
 
     @mcp.tool()
     async def get_function_info(

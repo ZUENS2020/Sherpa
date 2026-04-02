@@ -14,5 +14,4 @@ class PurposeComprehender:
 
     def comprehend(self) -> str:
         """Comprehend library purpose."""
-        # Placeholder implementation
-        return "Library purpose description"
+        raise NotImplementedError("purpose.comprehend() not yet implemented")

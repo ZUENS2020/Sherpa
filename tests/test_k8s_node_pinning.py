@@ -154,6 +154,7 @@ def test_k8s_stage_wait_timeout_run_applies_seed_retry_multiplier(monkeypatch: p
 def test_normalize_resume_step_preserves_stop_signal():
     assert web_main._normalize_resume_step("stop") == "stop"
     assert web_main._normalize_resume_step("STOP") == "stop"
+    assert web_main._normalize_resume_step("repro_crash") == "re-build"
     assert web_main._normalize_resume_step(None) == "analysis"
 
 

@@ -177,6 +177,39 @@ Additional instruction from coordinator:
 {{hint}}
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: plan_repair_fix_harness_with_hint -->
+You are coordinating a repair planning workflow for a crash triaged as a harness bug.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- produce a harness-focused repair plan for the next synthesize/build loop
+- update `fuzz/PLAN.md` and strict-schema `fuzz/targets.json`
+- keep `fuzz/execution_plan.json` aligned with reproducible harness-fix strategy
+
+Fix-harness planning focus:
+- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- output explicit strategy changes versus the latest failed cycle (must be material)
+- prioritize fixes under `fuzz/` harness/build glue, not documentation
+- prefer public/stable APIs and avoid internal/private symbols by default
+- if no public alternative exists, require `api_surface_exception` with concrete evidence
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- Query MCP evidence first when available (preprocessor first, semantic evidence second).
+- If MCP is unavailable, continue in degraded mode and explicitly state it in `fuzz/PLAN.md`.
+- when diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
+- doc-only or no-op repair plans are invalid
+
+MANDATORY:
+- create `./done`
+- write `fuzz/PLAN.md` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: synthesize_with_hint -->
 You are coordinating a fuzz harness generation workflow.
 Follow the STAGE SKILL loaded by the runner as primary instructions.
@@ -337,6 +370,44 @@ Coverage-repair constraints:
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
+
+MANDATORY:
+- create `./done`
+- write `fuzz/out/` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: synthesize_repair_fix_harness_with_hint -->
+You are coordinating scaffold repair for a crash triaged as a harness bug.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- repair harness/build glue under `fuzz/` so harness misuse crashes are eliminated
+- keep reproducibility and target mapping intact for the next build/run cycle
+
+Required outputs:
+- harness source under `fuzz/`
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+- `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
+
+Fix-harness constraints:
+- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- include at least one material strategy change relative to previous failed attempt
+- apply concrete edits in offending `fuzz/` harness/build glue files (doc-only/no-op is invalid)
+- preserve libFuzzer entry contract: no custom `main()`, use `LLVMFuzzerTestOneInput` (or language-equivalent only)
+- forbid argv/file-driven harness entry logic (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
+- prefer public/stable APIs; internal/private APIs require `api_surface_exception` with non-empty evidence
+- if diagnostics include `non_public_api_usage`, replace offending symbols first
+- Do NOT run build/execute commands
+- Read-only exploration commands are allowed
+- query MCP evidence first when available; if unavailable, continue in degraded mode and document it
 
 MANDATORY:
 - create `./done`

@@ -93,9 +93,6 @@ def test_worker_preserves_zero_budgets_for_unlimited_mode(tmp_path: Path, monkey
         "max_len": 1000,
         "time_budget": 0,
         "run_time_budget": 0,
-        "coverage_loop_max_rounds": 5,
-        "max_fix_rounds": 4,
-        "same_error_max_retries": 2,
         "result_path": str(result_path),
         "error_path": str(error_path),
     }
@@ -111,10 +108,6 @@ def test_worker_preserves_zero_budgets_for_unlimited_mode(tmp_path: Path, monkey
     assert rc == 0
     assert captured["time_budget"] == 0
     assert captured["run_time_budget"] == 0
-    # Round/retry knobs are intentionally hard-disabled in worker runtime.
-    assert captured["coverage_loop_max_rounds"] == 0
-    assert captured["max_fix_rounds"] == 0
-    assert captured["same_error_max_retries"] == 0
 
 
 def test_worker_bootstraps_runtime_opencode_config_before_fuzz_logic(tmp_path: Path, monkeypatch):

@@ -27,7 +27,7 @@ spec:
             - -lc
             - |
               set -eu
-              for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do
+              for d in /app/config /app/job-logs /shared/tmp /shared/output; do
                 mkdir -p "$d"
                 chown 10001:10001 "$d" || true
                 chmod 0777 "$d" || true
@@ -49,8 +49,6 @@ spec:
               mountPath: /shared/tmp
             - name: shared-output
               mountPath: /shared/output
-            - name: oss-fuzz
-              mountPath: /shared/oss-fuzz
       containers:
         - name: web
           image: sherpa-web:latest
@@ -69,7 +67,7 @@ spec:
             - configMapRef:
                 name: sherpa-config
             - secretRef:
-                name: sherpa-deepseek
+                name: sherpa-llm
             - secretRef:
                 name: sherpa-postgres
             - secretRef:
@@ -77,13 +75,13 @@ spec:
                 optional: true
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /healthz
               port: 8001
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /api/health
+              path: /healthz
               port: 8001
             initialDelaySeconds: 20
             periodSeconds: 10
@@ -103,8 +101,6 @@ spec:
               mountPath: /shared/tmp
             - name: shared-output
               mountPath: /shared/output
-            - name: oss-fuzz
-              mountPath: /shared/oss-fuzz
       volumes:
         - name: config
           persistentVolumeClaim:
@@ -118,6 +114,3 @@ spec:
         - name: shared-output
           persistentVolumeClaim:
             claimName: sherpa-shared-output
-        - name: oss-fuzz
-          persistentVolumeClaim:
-            claimName: sherpa-oss-fuzz

@@ -40,19 +40,6 @@ spec:
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: pv-sherpa-dev-oss-fuzz
-spec:
-  capacity:
-    storage: 20Gi
-  accessModes: ["ReadWriteOnce"]
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: manual
-  hostPath:
-    path: /shared/dev/oss-fuzz
----
-apiVersion: v1
-kind: PersistentVolume
-metadata:
   name: pv-sherpa-dev-shared-output
 spec:
   capacity:

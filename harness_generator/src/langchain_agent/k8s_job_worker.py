@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fuzz_relative_functions import fuzz_logic
 from persistent_config import apply_config_to_env, load_config
+from errors import SherpaError
 
 
 def _decode_payload() -> dict:
@@ -47,7 +48,7 @@ def _opencode_defunct_threshold() -> int:
     raw = (os.environ.get("SHERPA_OPENCODE_DEFUNCT_THRESHOLD") or "3").strip()
     try:
         return max(0, min(int(raw), 200))
-    except Exception:
+    except (ValueError, TypeError):
         return 3
 
 
@@ -60,7 +61,7 @@ def _count_opencode_defunct_processes() -> int:
             timeout=5,
             check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return 0
     if int(proc.returncode or 0) != 0:
         return 0
@@ -90,7 +91,7 @@ def _reap_any_dead_children(max_rounds: int = 16) -> int:
             pid, _ = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
             break
-        except Exception:
+        except OSError:
             break
         if pid == 0:
             break
@@ -109,7 +110,7 @@ def _merge_opencode_mcp_servers(companion_url: str) -> None:
             parsed = json.loads(current_raw)
             if isinstance(parsed, dict):
                 payload = dict(parsed)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             payload = {}
     payload["promefuzz"] = {
         "type": "remote",
@@ -138,7 +139,7 @@ def _resolve_analysis_companion_url(payload: dict, job_id: str) -> str:
     path_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_MCP_PATH") or "/mcp").strip()
     try:
         port = max(1, min(int(port_raw), 65535))
-    except Exception:
+    except (ValueError, TypeError):
         port = 18080
     path = path_raw if path_raw.startswith("/") else f"/{path_raw}"
     svc = f"sherpa-promefuzz-{jid[:10]}"
@@ -206,9 +207,6 @@ def main() -> int:
             last_fuzzer=(str(payload.get("last_fuzzer") or "").strip() or None),
             last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
             re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
-            coverage_loop_max_rounds=0,
-            max_fix_rounds=0,
-            same_error_max_retries=0,
             restart_to_plan_reason=(str(payload.get("restart_to_plan_reason") or "").strip() or None),
             restart_to_plan_stage=(str(payload.get("restart_to_plan_stage") or "").strip() or None),
             restart_to_plan_error_text=(str(payload.get("restart_to_plan_error_text") or "").strip() or None),
@@ -222,7 +220,7 @@ def main() -> int:
         _write_json(result_path, out)
         print(f"[k8s-worker] done job_id={job_id} result_path={result_path}")
         return 0
-    except Exception as e:
+    except (SherpaError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         tb = traceback.format_exc()
         msg = f"{e}\n{tb}"
         _write_error(error_path, msg)

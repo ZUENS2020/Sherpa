@@ -15,35 +15,73 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 _OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
+
+# ---------------------------------------------------------------------------
+# Data-driven provider registry — add new providers here, no code changes needed.
+# ---------------------------------------------------------------------------
+
+class _ProviderDef:
+    __slots__ = ("name", "base_url", "default_model", "models", "npm", "aliases")
+
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        default_model: str,
+        models: list[str],
+        npm: str,
+        aliases: list[str] | None = None,
+    ):
+        self.name = name
+        self.base_url = base_url
+        self.default_model = default_model
+        self.models = models
+        self.npm = npm
+        self.aliases = aliases or []
+
+
+KNOWN_PROVIDERS: dict[str, _ProviderDef] = {}
+_PROVIDER_ALIASES: dict[str, str] = {}
+
+def _register(*defs: _ProviderDef) -> None:
+    for d in defs:
+        KNOWN_PROVIDERS[d.name] = d
+        _PROVIDER_ALIASES[d.name] = d.name
+        for alias in d.aliases:
+            _PROVIDER_ALIASES[alias] = d.name
+
+_register(
+    _ProviderDef(
+        name="minimax",
+        base_url="https://api.minimaxi.com/anthropic/v1",
+        default_model="MiniMax-M2.7-highspeed",
+        models=["MiniMax-M2.7-highspeed", "MiniMax-Text-01"],
+        npm="@ai-sdk/anthropic",
+        aliases=["mini-max", "minimaxi"],
+    ),
+    _ProviderDef(
+        name="deepseek",
+        base_url="https://api.deepseek.com/v1",
+        default_model="deepseek-reasoner",
+        models=["deepseek-reasoner", "deepseek-chat", "reasoner"],
+        npm="@ai-sdk/openai-compatible",
+        aliases=["deep-seek"],
+    ),
+    _ProviderDef(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        default_model="anthropic/claude-3.5-sonnet",
+        models=["anthropic/claude-3.5-sonnet"],
+        npm="@ai-sdk/openai-compatible",
+    ),
+)
+
+# Backward-compatible constants (used elsewhere in the codebase)
 _MINIMAX_PROVIDER = "minimax"
-_MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic/v1"
-_MINIMAX_DEFAULT_MODEL = "MiniMax-M2.7-highspeed"
 _DEEPSEEK_PROVIDER = "deepseek"
-_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-_DEEPSEEK_DEFAULT_MODEL = "deepseek-reasoner"
-_OPENCODE_PROVIDER_MODEL_CANDIDATES: dict[str, list[str]] = {
-    _MINIMAX_PROVIDER: [
-        "MiniMax-M2.7-highspeed",
-        "MiniMax-Text-01",
-    ],
-    _DEEPSEEK_PROVIDER: [
-        "deepseek-reasoner",
-        "deepseek-chat",
-        "reasoner",
-    ],
-}
-_OPENCODE_PROVIDER_ALIASES: dict[str, str] = {
-    _MINIMAX_PROVIDER: _MINIMAX_PROVIDER,
-    "mini-max": _MINIMAX_PROVIDER,
-    "minimaxi": _MINIMAX_PROVIDER,
-    _DEEPSEEK_PROVIDER: _DEEPSEEK_PROVIDER,
-    "deep-seek": _DEEPSEEK_PROVIDER,
-}
-_OPENCODE_PROVIDER_NPM: dict[str, str] = {
-    # MiniMax follows Anthropic-compatible SDK wiring in OpenCode provider config.
-    _MINIMAX_PROVIDER: "@ai-sdk/anthropic",
-    _DEEPSEEK_PROVIDER: "@ai-sdk/openai-compatible",
-}
+_DEEPSEEK_BASE_URL = KNOWN_PROVIDERS["deepseek"].base_url
+_MINIMAX_BASE_URL = KNOWN_PROVIDERS["minimax"].base_url
+_DEEPSEEK_DEFAULT_MODEL = KNOWN_PROVIDERS["deepseek"].default_model
 
 
 class OpencodeProviderConfig(BaseModel):
@@ -177,14 +215,15 @@ def _normalize_provider_name(raw: str) -> str:
     name = (raw or "").strip().lower()
     if not name:
         return ""
-    return _OPENCODE_PROVIDER_ALIASES.get(name, name)
+    return _PROVIDER_ALIASES.get(name, name)
 
 
 def list_opencode_provider_models(provider: str) -> tuple[str, list[str]]:
     normalized = _normalize_provider_name(provider)
     if not normalized:
         return "", []
-    items = list(_OPENCODE_PROVIDER_MODEL_CANDIDATES.get(normalized, []))
+    pdef = KNOWN_PROVIDERS.get(normalized)
+    items = list(pdef.models) if pdef else []
     return normalized, items
 
 
@@ -222,10 +261,12 @@ def _provider_from_base_url(raw_url: str) -> str:
     url = (raw_url or "").strip().lower()
     if not url:
         return ""
-    if "minimax.io" in url or "minimaxi.com" in url:
-        return _MINIMAX_PROVIDER
-    if "api.deepseek.com" in url:
-        return _DEEPSEEK_PROVIDER
+    for name, pdef in KNOWN_PROVIDERS.items():
+        # Match when the known base_url domain appears in the given URL.
+        from urllib.parse import urlparse as _up
+        known_host = _up(pdef.base_url).hostname or ""
+        if known_host and known_host in url:
+            return name
     return ""
 
 
@@ -373,7 +414,8 @@ def list_opencode_provider_models_resolved(
     if not normalized:
         return "", [], "none", "provider is required"
 
-    fallback = list(_OPENCODE_PROVIDER_MODEL_CANDIDATES.get(normalized, []))
+    pdef = KNOWN_PROVIDERS.get(normalized)
+    fallback = list(pdef.models) if pdef else []
     if not fallback:
         return normalized, [], "none", f"unsupported provider: {provider}"
 
@@ -382,7 +424,7 @@ def list_opencode_provider_models_resolved(
     if not base_url:
         return normalized, fallback, "builtin", "provider base_url not configured"
     if normalized in {_MINIMAX_PROVIDER, _DEEPSEEK_PROVIDER} and not api_key:
-        return normalized, fallback, "builtin", "provider api_key not configured"
+        return normalized, [], "none", f"unsupported provider credentials: {normalized} api_key not configured"
 
     try:
         remote = _fetch_models_openai_compatible(base_url, api_key=api_key)
@@ -402,9 +444,9 @@ def _normalize_provider_entry(entry: OpencodeProviderConfig) -> OpencodeProvider
     name = _normalize_provider_name(entry.name)
     if not name:
         return None
-    if name not in {_MINIMAX_PROVIDER, _DEEPSEEK_PROVIDER}:
-        return None
-    default_base_url = _DEEPSEEK_BASE_URL if name == _DEEPSEEK_PROVIDER else _MINIMAX_BASE_URL
+    # Look up known defaults; unknown providers pass through with user-supplied values.
+    pdef = KNOWN_PROVIDERS.get(name)
+    default_base_url = pdef.base_url if pdef else ""
     base_url = (entry.base_url or "").strip() or default_base_url
 
     models: list[str] = []
@@ -461,7 +503,8 @@ def normalize_opencode_providers(entries: list[OpencodeProviderConfig] | None) -
 def _build_provider_node(entry: OpencodeProviderConfig) -> dict[str, Any]:
     node: dict[str, Any] = {}
     options: dict[str, Any] = {}
-    npm_pkg = _OPENCODE_PROVIDER_NPM.get(entry.name)
+    pdef = KNOWN_PROVIDERS.get(entry.name)
+    npm_pkg = pdef.npm if pdef else None
     if npm_pkg:
         node["npm"] = npm_pkg
 
@@ -585,37 +628,15 @@ def write_opencode_runtime_config_file(cfg: WebPersistentConfig) -> Path:
     return p
 
 
-def _resolve_minimax_env_values() -> tuple[str, str, str]:
-    key = (
-        os.environ.get("LLM_key", "").strip()
-        or os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        or os.environ.get("OPENAI_API_KEY", "").strip()
-        or os.environ.get("MINIMAX_API_KEY", "").strip()
-    )
-    base_url = (
-        os.environ.get("DEEPSEEK_BASE_URL", "").strip()
-        or os.environ.get("OPENAI_BASE_URL", "").strip()
-        or os.environ.get("MINIMAX_BASE_URL", "").strip()
-        or _DEEPSEEK_BASE_URL
-    )
-    model = (
-        os.environ.get("OPENCODE_MODEL", "").strip()
-        or os.environ.get("OPENAI_MODEL", "").strip()
-        or os.environ.get("DEEPSEEK_MODEL", "").strip()
-        or os.environ.get("MINIMAX_MODEL", "").strip()
-        or _DEEPSEEK_DEFAULT_MODEL
-    )
-    return key, base_url, model
-
-
 def _provider_from_model_or_url(model: str, base_url: str) -> str:
     provider_by_url = _provider_from_base_url(base_url)
     if provider_by_url:
         return provider_by_url
     low = str(model or "").strip().lower()
-    if "deepseek" in low or low in {"reasoner", "deepseek-reasoner", "deepseek-chat"}:
-        return _DEEPSEEK_PROVIDER
-    return _MINIMAX_PROVIDER
+    for name, pdef in KNOWN_PROVIDERS.items():
+        if any(low == m.lower() or name in low for m in pdef.models):
+            return name
+    return _DEEPSEEK_PROVIDER
 
 
 def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
@@ -658,10 +679,6 @@ def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
     return cfg
 
 
-def apply_minimax_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
-    # Backward-compatible alias; now resolves generic LLM env with DeepSeek-first defaults.
-    return apply_llm_env_source(cfg)
-
 
 def load_config() -> WebPersistentConfig:
     path = config_path()
@@ -673,7 +690,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return apply_minimax_env_source(cfg)
+        return apply_llm_env_source(cfg)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
@@ -687,7 +704,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return apply_minimax_env_source(cfg)
+        return apply_llm_env_source(cfg)
     except Exception:
         cfg = WebPersistentConfig()
         cfg.fuzz_use_docker = False
@@ -696,7 +713,7 @@ def load_config() -> WebPersistentConfig:
         default_oss_fuzz_dir = os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
         if not cfg.oss_fuzz_dir.strip() and default_oss_fuzz_dir:
             cfg.oss_fuzz_dir = default_oss_fuzz_dir
-        return apply_minimax_env_source(cfg)
+        return apply_llm_env_source(cfg)
 
 
 def save_config(cfg: WebPersistentConfig) -> None:
