@@ -143,3 +143,17 @@ def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: 
     assert payload.get("mcp", {}).get("promefuzz", {}).get("type") == "remote"
     assert payload.get("mcp", {}).get("promefuzz", {}).get("url") == "http://promefuzz.svc:18080/mcp"
     assert payload.get("mcp", {}).get("promefuzz", {}).get("enabled") is True
+
+
+def test_apply_llm_env_source_ignores_placeholder_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LLM_key", "-")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://modelservice.jdcloud.com/coding/openai/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "GLM-5")
+
+    cfg = pc.apply_llm_env_source(pc.WebPersistentConfig())
+    assert cfg.openai_api_key is None
+
+    runtime = pc.build_opencode_runtime_config(cfg)
+    provider = runtime.get("provider", {}).get("jdcloud", {})
+    options = provider.get("options", {})
+    assert "apiKey" not in options

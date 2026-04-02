@@ -281,12 +281,14 @@ def _provider_from_base_url(raw_url: str) -> str:
 def _best_provider_api_key(cfg: "WebPersistentConfig", provider: str) -> str:
     normalized = _normalize_provider_name(provider)
     item = _provider_config_by_name(cfg, normalized)
-    if item and item.api_key and item.api_key.strip():
-        return item.api_key.strip()
+    item_key = _sanitize_api_key_literal(item.api_key if item else "")
+    if item_key:
+        return item_key
     # Legacy fallback for OPENAI_* fields: only when base_url clearly maps to the same provider.
     openai_provider = _provider_from_base_url(cfg.openai_base_url)
-    if normalized == openai_provider and cfg.openai_api_key and cfg.openai_api_key.strip():
-        return cfg.openai_api_key.strip()
+    openai_key = _sanitize_api_key_literal(cfg.openai_api_key)
+    if normalized == openai_provider and openai_key:
+        return openai_key
     return ""
 
 
@@ -498,7 +500,7 @@ def _normalize_provider_entry(entry: OpencodeProviderConfig) -> OpencodeProvider
                 continue
             options[kk] = v
 
-    api_key = (entry.api_key or "").strip()
+    api_key = _sanitize_api_key_literal(entry.api_key)
     return OpencodeProviderConfig(
         name=name,
         enabled=bool(entry.enabled),
@@ -539,8 +541,9 @@ def _build_provider_node(entry: OpencodeProviderConfig) -> dict[str, Any]:
     if entry.base_url:
         options["baseURL"] = entry.base_url
 
-    if entry.api_key and entry.api_key.strip():
-        options["apiKey"] = entry.api_key.strip()
+    api_key = _sanitize_api_key_literal(entry.api_key)
+    if api_key:
+        options["apiKey"] = api_key
 
     if entry.headers:
         existing_headers = options.get("headers")
@@ -671,12 +674,19 @@ def _sanitize_model_literal(raw: str | None) -> str:
     return value
 
 
+def _sanitize_api_key_literal(raw: str | None) -> str:
+    value = str(raw or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL", "***", "REPLACE_ME", "replace_me"}:
+        return ""
+    return value
+
+
 def apply_llm_env_source(cfg: WebPersistentConfig) -> WebPersistentConfig:
     key = (
-        os.environ.get("LLM_key", "").strip()
-        or os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        or os.environ.get("OPENAI_API_KEY", "").strip()
-        or os.environ.get("MINIMAX_API_KEY", "").strip()
+        _sanitize_api_key_literal(os.environ.get("LLM_key", ""))
+        or _sanitize_api_key_literal(os.environ.get("DEEPSEEK_API_KEY", ""))
+        or _sanitize_api_key_literal(os.environ.get("OPENAI_API_KEY", ""))
+        or _sanitize_api_key_literal(os.environ.get("MINIMAX_API_KEY", ""))
     )
     base_url = (
         os.environ.get("DEEPSEEK_BASE_URL", "").strip()
@@ -816,8 +826,8 @@ def write_opencode_env_file(cfg: WebPersistentConfig) -> None:
     # Minimal env file used by CodexHelper(ai_key_path=...).
     # Prefer OPENAI_API_KEY (common, OpenAI-compatible).
     lines: list[str] = []
-    if cfg.openai_api_key and cfg.openai_api_key.strip():
-        key = cfg.openai_api_key.strip()
+    key = _sanitize_api_key_literal(cfg.openai_api_key)
+    if key:
         lines.append(f"OPENAI_API_KEY={key}")
 
     if cfg.openai_base_url and cfg.openai_base_url.strip():
