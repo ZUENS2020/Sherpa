@@ -805,6 +805,21 @@ def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
     assert route == "coverage-analysis"
 
 
+def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_coverage_analysis():
+    route = workflow_graph._route_after_run_state(
+        {
+            "run_error_kind": "nonzero_exit_without_crash",
+            "failed": False,
+            "crash_found": False,
+            "run_details": [
+                {"fuzzer": "a", "rc": 0, "crash_found": False, "crash_evidence": "none"},
+                {"fuzzer": "b", "rc": 70, "crash_found": False, "crash_evidence": "timeout_artifact"},
+            ],
+        }
+    )
+    assert route == "coverage-analysis"
+
+
 def test_route_after_run_routes_fatal_error_to_plan():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_exception", "failed": False, "crash_found": False}
@@ -1082,6 +1097,46 @@ def test_node_coverage_analysis_blocks_fatal_run_error():
 
     assert out["coverage_should_improve"] is False
     assert out["coverage_improve_mode"] == ""
+
+
+def test_node_coverage_analysis_demotes_nonzero_exit_timeout_artifact_for_repair():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "inflate_fuzz",
+            "coverage_seed_profile": "decoder-binary",
+            "run_details": [
+                {
+                    "fuzzer": "blast_fuzz",
+                    "rc": 0,
+                    "crash_found": False,
+                    "crash_evidence": "none",
+                    "final_cov": 7,
+                    "final_ft": 8,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 600,
+                },
+                {
+                    "fuzzer": "inflate_fuzz",
+                    "rc": 70,
+                    "crash_found": False,
+                    "crash_evidence": "timeout_artifact",
+                    "final_cov": 4,
+                    "final_ft": 4,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                },
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "nonzero_exit_without_crash",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert out["coverage_run_error_kind_effective"] == "run_timeout"
 
 
 def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
