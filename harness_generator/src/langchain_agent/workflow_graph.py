@@ -12,7 +12,7 @@ import textwrap
 import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, TypedDict, cast
 
@@ -4031,6 +4031,17 @@ class FuzzWorkflowInput:
     restart_to_plan_stage: str = ""
     restart_to_plan_error_text: str = ""
     restart_to_plan_report_path: str = ""
+    crash_triage_label: str = ""
+    crash_triage_confidence: float = 0.0
+    crash_triage_reason: str = ""
+    crash_triage_done: bool = False
+    repair_mode: bool = False
+    repair_origin_stage: str = ""
+    repair_error_kind: str = ""
+    repair_error_code: str = ""
+    repair_signature: str = ""
+    repair_recent_attempts: list[dict[str, Any]] = field(default_factory=list)
+    repair_error_digest: dict[str, Any] = field(default_factory=dict)
 
 
 def _analysis_companion_enabled() -> bool:
@@ -11502,6 +11513,17 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             "last_fuzzer": str(inp.last_fuzzer or ""),
             "last_crash_artifact": str(inp.last_crash_artifact or ""),
             "re_workspace_root": str(inp.re_workspace_root or ""),
+            "crash_triage_label": str(inp.crash_triage_label or ""),
+            "crash_triage_confidence": float(inp.crash_triage_confidence or 0.0),
+            "crash_triage_reason": str(inp.crash_triage_reason or ""),
+            "crash_triage_done": bool(inp.crash_triage_done),
+            "repair_mode": bool(inp.repair_mode),
+            "repair_origin_stage": str(inp.repair_origin_stage or ""),
+            "repair_error_kind": str(inp.repair_error_kind or ""),
+            "repair_error_code": str(inp.repair_error_code or ""),
+            "repair_signature": str(inp.repair_signature or ""),
+            "repair_recent_attempts": list(inp.repair_recent_attempts or []),
+            "repair_error_digest": dict(inp.repair_error_digest or {}),
             "max_steps": max_steps,
         }
     )

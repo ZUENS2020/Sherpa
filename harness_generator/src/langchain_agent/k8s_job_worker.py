@@ -211,6 +211,17 @@ def main() -> int:
             restart_to_plan_stage=(str(payload.get("restart_to_plan_stage") or "").strip() or None),
             restart_to_plan_error_text=(str(payload.get("restart_to_plan_error_text") or "").strip() or None),
             restart_to_plan_report_path=(str(payload.get("restart_to_plan_report_path") or "").strip() or None),
+            crash_triage_label=str(payload.get("crash_triage_label") or ""),
+            crash_triage_confidence=float(payload.get("crash_triage_confidence") or 0.0),
+            crash_triage_reason=str(payload.get("crash_triage_reason") or ""),
+            crash_triage_done=bool(payload.get("crash_triage_done") or False),
+            repair_mode=bool(payload.get("repair_mode") or False),
+            repair_origin_stage=str(payload.get("repair_origin_stage") or ""),
+            repair_error_kind=str(payload.get("repair_error_kind") or ""),
+            repair_error_code=str(payload.get("repair_error_code") or ""),
+            repair_signature=str(payload.get("repair_signature") or ""),
+            repair_recent_attempts=list(payload.get("repair_recent_attempts") or []),
+            repair_error_digest=dict(payload.get("repair_error_digest") or {}),
         )
         out = {
             "ok": True,

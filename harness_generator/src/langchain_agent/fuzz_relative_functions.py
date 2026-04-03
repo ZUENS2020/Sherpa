@@ -62,6 +62,17 @@ def fuzz_logic(
     restart_to_plan_stage: str | None = None,
     restart_to_plan_error_text: str | None = None,
     restart_to_plan_report_path: str | None = None,
+    crash_triage_label: str = "",
+    crash_triage_confidence: float = 0.0,
+    crash_triage_reason: str = "",
+    crash_triage_done: bool = False,
+    repair_mode: bool = False,
+    repair_origin_stage: str = "",
+    repair_error_kind: str = "",
+    repair_error_code: str = "",
+    repair_signature: str = "",
+    repair_recent_attempts: list[dict] | None = None,
+    repair_error_digest: dict | None = None,
 ) -> dict:
     resolved_time_budget = 900 if time_budget is None else int(time_budget)
     resolved_run_time_budget = resolved_time_budget if run_time_budget is None else int(run_time_budget)
@@ -100,6 +111,17 @@ def fuzz_logic(
                 restart_to_plan_stage=(str(restart_to_plan_stage or "").strip()),
                 restart_to_plan_error_text=(str(restart_to_plan_error_text or "").strip()),
                 restart_to_plan_report_path=(str(restart_to_plan_report_path or "").strip()),
+                crash_triage_label=(str(crash_triage_label or "").strip()),
+                crash_triage_confidence=float(crash_triage_confidence or 0.0),
+                crash_triage_reason=(str(crash_triage_reason or "").strip()),
+                crash_triage_done=bool(crash_triage_done),
+                repair_mode=bool(repair_mode),
+                repair_origin_stage=(str(repair_origin_stage or "").strip()),
+                repair_error_kind=(str(repair_error_kind or "").strip()),
+                repair_error_code=(str(repair_error_code or "").strip()),
+                repair_signature=(str(repair_signature or "").strip()),
+                repair_recent_attempts=list(repair_recent_attempts or []),
+                repair_error_digest=dict(repair_error_digest or {}),
             )
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")

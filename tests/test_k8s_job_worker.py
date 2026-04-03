@@ -223,6 +223,52 @@ def test_worker_skips_mcp_injection_when_companion_not_ready(tmp_path: Path, mon
     assert captured["docker_image"] is None
 
 
+def test_worker_forwards_repair_context_fields(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+    result_path = tmp_path / "result.json"
+    error_path = tmp_path / "error.txt"
+    payload = {
+        "job_id": "job-repair-forward",
+        "repo_url": "https://github.com/madler/zlib.git",
+        "max_len": 1000,
+        "time_budget": 900,
+        "run_time_budget": 900,
+        "crash_triage_label": "harness_bug",
+        "crash_triage_confidence": 1.0,
+        "crash_triage_reason": "bad harness contract",
+        "crash_triage_done": True,
+        "repair_mode": True,
+        "repair_origin_stage": "fix-harness",
+        "repair_error_kind": "harness_bug",
+        "repair_error_code": "crash_triage_harness_bug",
+        "repair_signature": "sig-123",
+        "repair_recent_attempts": [{"origin": "fix-harness", "error_kind": "harness_bug"}],
+        "repair_error_digest": {"error_code": "crash_triage_harness_bug"},
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+    }
+
+    monkeypatch.setenv("SHERPA_K8S_WORKER_PAYLOAD_B64", _payload_b64(payload))
+
+    def _fake_fuzz_logic(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(k8s_job_worker, "fuzz_logic", _fake_fuzz_logic)
+    rc = k8s_job_worker.main()
+    assert rc == 0
+    assert captured["crash_triage_label"] == "harness_bug"
+    assert captured["crash_triage_confidence"] == 1.0
+    assert captured["crash_triage_done"] is True
+    assert captured["repair_mode"] is True
+    assert captured["repair_origin_stage"] == "fix-harness"
+    assert captured["repair_error_kind"] == "harness_bug"
+    assert captured["repair_error_code"] == "crash_triage_harness_bug"
+    assert captured["repair_signature"] == "sig-123"
+    assert isinstance(captured["repair_recent_attempts"], list)
+    assert isinstance(captured["repair_error_digest"], dict)
+
+
 def test_worker_fails_fast_when_opencode_defunct_exceeds_threshold(tmp_path: Path, monkeypatch):
     result_path = tmp_path / "result.json"
     error_path = tmp_path / "error.txt"

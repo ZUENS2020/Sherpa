@@ -4175,6 +4175,17 @@ def _run_fuzz_job(
                         "restart_to_plan_stage": (stage_ctx.get("restart_to_plan_stage") or None),
                         "restart_to_plan_error_text": (stage_ctx.get("restart_to_plan_error_text") or None),
                         "restart_to_plan_report_path": (stage_ctx.get("restart_to_plan_report_path") or None),
+                        "crash_triage_label": str(stage_ctx.get("crash_triage_label") or ""),
+                        "crash_triage_confidence": float(stage_ctx.get("crash_triage_confidence") or 0.0),
+                        "crash_triage_reason": str(stage_ctx.get("crash_triage_reason") or ""),
+                        "crash_triage_done": bool(stage_ctx.get("crash_triage_done") or False),
+                        "repair_mode": bool(stage_ctx.get("repair_mode") or False),
+                        "repair_origin_stage": str(stage_ctx.get("repair_origin_stage") or ""),
+                        "repair_error_kind": str(stage_ctx.get("repair_error_kind") or ""),
+                        "repair_error_code": str(stage_ctx.get("repair_error_code") or ""),
+                        "repair_signature": str(stage_ctx.get("repair_signature") or ""),
+                        "repair_recent_attempts": list(stage_ctx.get("repair_recent_attempts") or []),
+                        "repair_error_digest": dict(stage_ctx.get("repair_error_digest") or {}),
                         "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
                         "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
                         "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
@@ -4374,6 +4385,30 @@ def _run_fuzz_job(
                             v = str(stage_result.get(key) or "").strip()
                             if v:
                                 stage_ctx[key] = v
+                        for key in (
+                            "crash_triage_label",
+                            "crash_triage_reason",
+                            "repair_origin_stage",
+                            "repair_error_kind",
+                            "repair_error_code",
+                            "repair_signature",
+                        ):
+                            v = str(stage_result.get(key) or "").strip()
+                            if v:
+                                stage_ctx[key] = v
+                        if stage_result.get("crash_triage_confidence") is not None:
+                            try:
+                                stage_ctx["crash_triage_confidence"] = float(stage_result.get("crash_triage_confidence") or 0.0)
+                            except Exception:
+                                pass
+                        if stage_result.get("crash_triage_done") is not None:
+                            stage_ctx["crash_triage_done"] = bool(stage_result.get("crash_triage_done") or False)
+                        if stage_result.get("repair_mode") is not None:
+                            stage_ctx["repair_mode"] = bool(stage_result.get("repair_mode") or False)
+                        if isinstance(stage_result.get("repair_recent_attempts"), list):
+                            stage_ctx["repair_recent_attempts"] = list(stage_result.get("repair_recent_attempts") or [])
+                        if isinstance(stage_result.get("repair_error_digest"), dict):
+                            stage_ctx["repair_error_digest"] = dict(stage_result.get("repair_error_digest") or {})
                         if not bool(stage_result.get("restart_to_plan")):
                             stage_ctx["restart_to_plan_reason"] = ""
                             stage_ctx["restart_to_plan_stage"] = ""
