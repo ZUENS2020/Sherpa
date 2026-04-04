@@ -1308,6 +1308,132 @@ def test_node_coverage_analysis_sets_seed_limited_bottleneck_on_cold_start():
     assert out["coverage_bottleneck_reason"] == "cold_start_failure"
 
 
+def test_node_coverage_analysis_cold_start_triggers_seed_replan(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 6,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "inflate_fuzz",
+            "coverage_seed_profile": "archive-container",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "seed_score": 0.31,
+                "early_new_units_30s": 0,
+                "merge_retained_ratio_files": 0.2,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "inflate_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 15,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "seed_replan"
+    assert out["coverage_replan_required"] is True
+    assert out["cold_start_seed_replan_triggered"] is True
+    snap = dict(out.get("cold_start_trigger_snapshot") or {})
+    assert snap.get("quality_threshold") == 0.55
+    assert snap.get("early_units_30s_threshold") == 0
+
+
+def test_node_coverage_analysis_cold_start_stays_in_place_when_threshold_not_met(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.40")
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 6,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "inflate_fuzz",
+            "coverage_seed_profile": "archive-container",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "seed_score": 0.65,
+                "early_new_units_30s": 0,
+                "merge_retained_ratio_files": 0.4,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "inflate_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 15,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "in_place"
+    assert out["cold_start_seed_replan_triggered"] is False
+
+
+def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "blast",
+                    "api": "blast",
+                    "target_type": "archive",
+                    "seed_profile": "archive-container",
+                    "depth_score": 18,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "wrapper_fuzzer_name": "blast_fuzz",
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "seed_feedback.json").write_text(
+        json.dumps(
+            {
+                "by_fuzzer": {
+                    "blast_fuzz": {
+                        "cold_start_failure": True,
+                        "seed_score": 0.2,
+                        "early_new_units_30s": 0,
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    assert selected
+    top = selected[0]
+    assert float(top.get("target_score_penalty") or 0.0) > 0.0
+    assert str(top.get("target_score_penalty_reason") or "") == "cold_start_low_yield"
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {

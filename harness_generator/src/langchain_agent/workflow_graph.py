@@ -1273,8 +1273,8 @@ def _runtime_viability_rank(value: str) -> int:
 
 def _target_scoring_weights() -> dict[str, float]:
     return {
-        "coverage_gap": 0.35,
-        "complexity": 0.25,
+        "coverage_gap": 0.30,
+        "complexity": 0.30,
         "api_relevance": 0.25,
         "consumer_order_support": 0.15,
     }
@@ -1363,6 +1363,45 @@ def _target_score_breakdown(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _load_seed_feedback_by_fuzzer(repo_root: Path) -> dict[str, dict[str, Any]]:
+    path = repo_root / "fuzz" / "seed_feedback.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+    by_fuzzer = raw.get("by_fuzzer") if isinstance(raw, dict) else {}
+    if not isinstance(by_fuzzer, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in by_fuzzer.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        out[key] = dict(value)
+    return out
+
+
+def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[str, Any]:
+    if not wrapper_fuzzer_name:
+        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
+    feedback = _load_seed_feedback_by_fuzzer(repo_root).get(wrapper_fuzzer_name) or {}
+    if not feedback:
+        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
+    cold_start = bool(feedback.get("cold_start_failure") or False)
+    seed_score = float(feedback.get("seed_score") or 0.0)
+    early_units_30s = int(feedback.get("early_new_units_30s") or 0)
+    penalty = 0.0
+    reason = ""
+    if cold_start and seed_score < 0.55 and early_units_30s <= 0:
+        penalty = 1.5
+        reason = "cold_start_low_yield"
+    elif seed_score < 0.30:
+        penalty = 0.8
+        reason = "very_low_seed_score"
+    return {"score_penalty": float(penalty), "reason": reason, "seed_feedback": feedback}
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
@@ -1394,6 +1433,10 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             "coverage_gap": item.get("coverage_gap"),
         }
         score_breakdown = _target_score_breakdown(scoring_source)
+        wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
+        runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
+        score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
+        adjusted_target_score = max(0.0, float(score_breakdown.get("weighted_total") or 0.0) - score_penalty)
         ranked_items.append(
             {
                 "target_name": target_name,
@@ -1410,9 +1453,11 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "runtime_replacement_candidates": runtime_replacement_candidates,
                 "seed_families_required": required,
                 "seed_families_optional": optional,
-                "wrapper_fuzzer_name": str(item.get("wrapper_fuzzer_name") or ""),
+                "wrapper_fuzzer_name": wrapper_fuzzer_name,
                 "target_score_breakdown": score_breakdown,
-                "target_score": float(score_breakdown.get("weighted_total") or 0.0),
+                "target_score": float(adjusted_target_score),
+                "target_score_penalty": float(score_penalty),
+                "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
                 "target_scoring_enabled": True,
             }
         )
@@ -3028,6 +3073,22 @@ def _coverage_underutilized_execs_threshold() -> int:
         return max(0, min(int(raw), 10_000_000))
     except Exception:
         return 100
+
+
+def _cold_start_seed_replan_quality_threshold() -> float:
+    raw = (os.environ.get("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD") or "0.55").strip()
+    try:
+        return max(0.0, min(float(raw), 1.0))
+    except Exception:
+        return 0.55
+
+
+def _cold_start_seed_replan_early_units_30s_threshold() -> int:
+    raw = (os.environ.get("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD") or "0").strip()
+    try:
+        return max(0, min(int(raw), 1_000_000))
+    except Exception:
+        return 0
 
 
 def _solve_parallelism(
@@ -9175,28 +9236,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         if parallel_utilization_ratio > 1.0:
             parallel_utilization_ratio = 1.0
         underutilized_execs_threshold = _coverage_underutilized_execs_threshold()
-        resource_underutilized = bool(
-            configured_parallel_units < int(parallel_cpu_budget * 0.7)
-            and total_execs_per_sec < underutilized_execs_threshold
-        )
-        strategy_mismatch = bool(
-            plateau_detected and total_execs_per_sec > 0 and current_cov <= prev_cov and current_ft <= prev_ft
-        )
-        if resource_underutilized:
-            parallel_diagnosis_code = "resource_underutilized"
-            parallel_diagnosis = (
-                "exec/s is low while configured parallel units are below cpu budget; "
-                "increase outer or inner workers"
-            )
-        elif strategy_mismatch:
-            parallel_diagnosis_code = "strategy_mismatch"
-            parallel_diagnosis = (
-                "exec/s is healthy but coverage/features are stalled; "
-                "reduce parallelism and prioritize target/seed strategy changes"
-            )
-        else:
-            parallel_diagnosis_code = "balanced"
-            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
+        cold_start_quality_threshold = _cold_start_seed_replan_quality_threshold()
+        cold_start_early_units_threshold = _cold_start_seed_replan_early_units_30s_threshold()
         plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
         plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
         requested_replan = bool(
@@ -9213,8 +9254,19 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         run_error_kind_raw = str(state.get("run_error_kind") or "").strip().lower()
         run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or run_error_kind_raw
         cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
+        quality_score = float(seed_feedback.get("seed_score") or seed_quality.get("seed_score") or 0.0)
+        early_new_units_30s = int(
+            seed_feedback.get("early_new_units_30s")
+            if seed_feedback.get("early_new_units_30s") is not None
+            else seed_quality.get("early_new_units_30s") or 0
+        )
         merge_retained_ratio = float(seed_feedback.get("merge_retained_ratio_files") or 1.0)
         merge_retained_low = bool(merge_retained_ratio > 0.0 and merge_retained_ratio < 0.35)
+        cold_start_seed_replan_triggered = bool(
+            cold_start_failure
+            and quality_score < cold_start_quality_threshold
+            and early_new_units_30s <= cold_start_early_units_threshold
+        )
         seed_quality_issue = bool(
             any(
                 flag in quality_flags
@@ -9232,6 +9284,38 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             or cold_start_failure
             or merge_retained_low
         )
+        resource_underutilized = bool(
+            not seed_quality_issue
+            and configured_parallel_units < int(parallel_cpu_budget * 0.7)
+            and total_execs_per_sec < underutilized_execs_threshold
+        )
+        strategy_mismatch = bool(
+            (not seed_quality_issue)
+            and plateau_detected
+            and total_execs_per_sec > 0
+            and current_cov <= prev_cov
+            and current_ft <= prev_ft
+        )
+        if seed_quality_issue:
+            parallel_diagnosis_code = "seed_limited_priority"
+            parallel_diagnosis = (
+                "seed quality is the primary bottleneck; prioritize seed replan before parallelism changes"
+            )
+        elif resource_underutilized:
+            parallel_diagnosis_code = "resource_underutilized"
+            parallel_diagnosis = (
+                "exec/s is low while configured parallel units are below cpu budget; "
+                "increase outer or inner workers"
+            )
+        elif strategy_mismatch:
+            parallel_diagnosis_code = "strategy_mismatch"
+            parallel_diagnosis = (
+                "exec/s is healthy but coverage/features are stalled; "
+                "reduce parallelism and prioritize target/seed strategy changes"
+            )
+        else:
+            parallel_diagnosis_code = "balanced"
+            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
         quality_degraded = bool(
             seed_quality_issue
             or list(state.get("coverage_missing_execution_targets") or [])
@@ -9269,7 +9353,20 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         should_improve = False
         replan_required = False
         if base_should_improve:
-            if seed_quality_issue and can_in_place:
+            if cold_start_seed_replan_triggered:
+                if can_replan:
+                    should_improve = True
+                    replan_required = True
+                    improve_mode = "seed_replan"
+                    replan_reason = "seed_cold_start_failure"
+                elif can_in_place:
+                    should_improve = True
+                    improve_mode = "in_place"
+                    replan_reason = "seed_cold_start_failure_fallback_in_place"
+                else:
+                    round_budget_exhausted = True
+                    stop_reason = "coverage_loop_budget_exhausted"
+            elif seed_quality_issue and can_in_place:
                 should_improve = True
                 improve_mode = "in_place"
                 if cold_start_failure:
@@ -9307,7 +9404,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             else:
                 round_budget_text = "unlimited" if unlimited_rounds else str(max_rounds)
                 reason = (
-                    f"mode=in_place; round={next_round}/{round_budget_text}, max_cov={current_cov}, prev_cov={prev_cov}, "
+                    f"mode={improve_mode or 'in_place'}; round={next_round}/{round_budget_text}, max_cov={current_cov}, prev_cov={prev_cov}, "
                     f"max_ft={current_ft}, prev_ft={prev_ft}"
                 )
             if seed_quality_issue:
@@ -9381,6 +9478,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "crash_found": bool(state.get("crash_found")),
                 "run_error_kind": str(state.get("run_error_kind") or ""),
                 "run_error_kind_effective": run_error_kind,
+                "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
+                "cold_start_trigger_snapshot": {
+                    "quality_score": round(quality_score, 6),
+                    "quality_threshold": round(cold_start_quality_threshold, 6),
+                    "early_new_units_30s": int(early_new_units_30s),
+                    "early_units_30s_threshold": int(cold_start_early_units_threshold),
+                    "cold_start_failure": bool(cold_start_failure),
+                },
                 "should_improve": should_improve,
                 "ts": int(time.time()),
             }
@@ -9429,6 +9534,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "coverage_run_error_kind_effective": run_error_kind,
+            "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
+            "cold_start_trigger_snapshot": {
+                "quality_score": round(quality_score, 6),
+                "quality_threshold": round(cold_start_quality_threshold, 6),
+                "early_new_units_30s": int(early_new_units_30s),
+                "early_units_30s_threshold": int(cold_start_early_units_threshold),
+                "cold_start_failure": bool(cold_start_failure),
+            },
             "message": "coverage analysis done",
             "auto_stop_policy": auto_stop_policy,
             "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
@@ -11586,6 +11699,8 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
+        "cold_start_seed_replan_triggered": bool(out.get("cold_start_seed_replan_triggered") or False),
+        "cold_start_trigger_snapshot": dict(out.get("cold_start_trigger_snapshot") or {}),
         "coverage_history": list(out.get("coverage_history") or []),
         "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),
         "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),

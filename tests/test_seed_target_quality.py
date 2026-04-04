@@ -169,6 +169,35 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     assert {"coverage_potential", "validity", "novelty", "redundancy_penalty"}.issubset(set(components.keys()))
 
 
+def test_seed_quality_score_rewards_early_yield_signal():
+    low_yield_log = "\n".join(
+        [
+            "#192 INITED cov: 5 ft: 19 corp: 8/120b exec/s: 0 rss: 99Mb",
+            "#131072 pulse cov: 6 ft: 21 corp: 8/120b lim: 1000 exec/s: 65536 rss: 162Mb",
+            "#262144 pulse cov: 7 ft: 25 corp: 8/120b lim: 1000 exec/s: 52428 rss: 163Mb",
+        ]
+    )
+    high_yield_log = "\n".join(
+        [
+            "#192 INITED cov: 5 ft: 19 corp: 8/120b exec/s: 0 rss: 99Mb",
+            "#131072 pulse cov: 6 ft: 21 corp: 14/200b lim: 1000 exec/s: 65536 rss: 162Mb",
+            "#262144 pulse cov: 7 ft: 25 corp: 18/280b lim: 1000 exec/s: 52428 rss: 163Mb",
+        ]
+    )
+    base_kwargs = {
+        "initial_corpus_files": 8,
+        "initial_corpus_bytes": 120,
+        "final_stats": {"cov": 7, "ft": 25, "corpus_files": 18, "corpus_size_bytes": 280},
+        "required_families": ["flow_structures"],
+        "covered_families": ["flow_structures"],
+        "repo_examples_count": 1,
+        "plateau_idle_seconds": 0,
+    }
+    low = _seed_quality_from_run(log=low_yield_log, **base_kwargs)
+    high = _seed_quality_from_run(log=high_yield_log, **base_kwargs)
+    assert float(high.get("seed_score") or 0.0) > float(low.get("seed_score") or 0.0)
+
+
 def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:6789")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,.svc")
