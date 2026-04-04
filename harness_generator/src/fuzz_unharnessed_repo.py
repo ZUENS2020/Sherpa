@@ -1123,9 +1123,9 @@ def _seed_quality_from_run(
         0.0,
         min(
             1.0,
-            0.45 * max(0.0, min(1.0, float(cov_gain) / 24.0))
-            + 0.30 * max(0.0, min(1.0, float(ft_gain) / 240.0))
-            + 0.25 * early_units_norm,
+            0.35 * max(0.0, min(1.0, float(cov_gain) / 24.0))
+            + 0.25 * max(0.0, min(1.0, float(ft_gain) / 240.0))
+            + 0.40 * early_units_norm,
         ),
     )
 
@@ -4199,6 +4199,22 @@ EOF
             if previous_seed_feedback
             else "{}"
         )
+        previous_cold_start = bool(previous_seed_feedback.get("cold_start_failure") or False)
+        previous_early_units_30 = int(previous_seed_feedback.get("early_new_units_30s") or 0)
+        previous_missing_families = list(previous_seed_feedback.get("missing_required_families") or [])
+        if not previous_missing_families:
+            previous_missing_families = list(previous_seed_feedback.get("missing_families") or [])
+        cold_start_recovery_directive = ""
+        if previous_cold_start:
+            cold_start_recovery_directive = textwrap.dedent(
+                f"""
+                Cold-start recovery directive (must follow):
+                - Previous run had cold_start_failure=1 and early_new_units_30s={previous_early_units_30}.
+                - Prioritize semantically different, high-signal seeds over random variants.
+                - First fill missing required families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
+                - Do not finish until you add seeds that explicitly target those families and likely increase early coverage.
+                """
+            ).strip()
 
         instructions = textwrap.dedent(
             f"""
@@ -4238,6 +4254,7 @@ EOF
 
             Previous run seed feedback (if available):
             {previous_seed_feedback_text}
+            {cold_start_recovery_directive}
 
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
