@@ -1804,6 +1804,13 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
         "last_error": "fuzzer produced oom-like artifacts for demo_fuzz",
         "run_error_kind": "run_resource_exhaustion",
         "crash_found": False,
+        "repair_mode": True,
+        "repair_origin_stage": "fix-harness",
+        "repair_error_kind": "harness_bug",
+        "repair_error_code": "crash_triage_harness_bug",
+        "repair_signature": "abcdef123456",
+        "repair_recent_attempts": [{"origin": "fix-harness", "error_kind": "harness_bug"}],
+        "repair_error_digest": {"error_code": "crash_triage_harness_bug"},
     }
 
     class _FakeCompiledWorkflow:
@@ -1837,6 +1844,13 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
 
     assert result["workflow_last_step"] == "run"
     assert result["workflow_recommended_next"] == "coverage-analysis"
+    assert result["repair_mode"] is True
+    assert result["repair_origin_stage"] == "fix-harness"
+    assert result["repair_error_kind"] == "harness_bug"
+    assert result["repair_error_code"] == "crash_triage_harness_bug"
+    assert result["repair_signature"] == "abcdef123456"
+    assert isinstance(result["repair_recent_attempts"], list)
+    assert isinstance(result["repair_error_digest"], dict)
 
 
 def test_node_run_stops_when_same_timeout_signature_repeats(tmp_path: Path, monkeypatch):
