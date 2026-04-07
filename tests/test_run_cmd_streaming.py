@@ -503,6 +503,67 @@ def test_pass_generate_seeds_passes_idle_timeout_override(tmp_path: Path, monkey
     assert captured_kwargs["idle_timeout_override"] == 180
 
 
+def test_pass_synthesize_harness_retries_provider_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+    (gen.fuzz_dir / "targets.json").write_text("[]\n", encoding="utf-8")
+    sleeps: list[int] = []
+    monkeypatch.setattr(fur.time, "sleep", lambda s: sleeps.append(int(s)))
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES", "2")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC", "3")
+
+    calls = {"n": 0}
+
+    class _Patcher:
+        last_cli_error_kind = ""
+        last_cli_error_message = ""
+
+        def run_codex_command(self, *_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                self.last_cli_error_kind = "provider_overloaded"
+                self.last_cli_error_message = "Decode server is overloaded"
+                return None
+            self.last_cli_error_kind = ""
+            self.last_cli_error_message = ""
+            return "ok"
+
+    gen.patcher = _Patcher()
+    gen._pass_synthesize_harness(timeout=30)
+
+    assert calls["n"] == 3
+    assert sleeps == [3, 6]
+
+
+def test_pass_synthesize_harness_surfaces_provider_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+    (gen.fuzz_dir / "targets.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC", "1")
+    monkeypatch.setattr(fur.time, "sleep", lambda _s: None)
+
+    class _Patcher:
+        last_cli_error_kind = "provider_overloaded"
+        last_cli_error_message = "Decode server is overloaded"
+
+        def run_codex_command(self, *_args, **_kwargs):
+            self.last_cli_error_kind = "provider_overloaded"
+            self.last_cli_error_message = "Decode server is overloaded"
+            return None
+
+    gen.patcher = _Patcher()
+    try:
+        gen._pass_synthesize_harness(timeout=30)
+        assert False, "expected HarnessGeneratorError"
+    except fur.HarnessGeneratorError as e:
+        assert "provider_overloaded" in str(e)
+
+
 def test_write_run_summary_includes_seed_generation_failures(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     gen.time_budget = 120

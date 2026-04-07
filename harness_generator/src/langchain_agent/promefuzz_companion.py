@@ -348,6 +348,7 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
     work_root = companion_root / "work"
     work_root.mkdir(parents=True, exist_ok=True)
     meta, meta_path = preprocessor.run(output_dir=work_root / "meta")
+    invalid_meta_files = list(getattr(preprocessor, "invalid_meta_files", []) or [])
 
     headers: list[Path] = []
     if (repo_root / "include").is_dir():
@@ -362,6 +363,8 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
             "ok": True,
             "backend": "promefuzz-mcp",
             "meta_path": str(meta_path),
+            "meta_invalid_file_count": int(len(invalid_meta_files)),
+            "meta_invalid_files": invalid_meta_files[:120],
             "api_path": str(api_path) if api_path else "",
             "api_count": int(api_collection.count),
             "api_functions": top_functions,
