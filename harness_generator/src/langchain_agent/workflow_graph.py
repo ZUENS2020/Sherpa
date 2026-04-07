@@ -2416,6 +2416,87 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _aggregate_seed_quality_from_run_details(
+    run_details: list[dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    quality_docs: list[dict[str, Any]] = [
+        dict(detail.get("seed_quality") or {})
+        for detail in (run_details or [])
+        if isinstance(detail.get("seed_quality"), dict) and detail.get("seed_quality")
+    ]
+    if not quality_docs:
+        return dict(fallback or {})
+
+    merged = dict(quality_docs[0])
+
+    def _min_float(key: str) -> None:
+        vals: list[float] = []
+        for doc in quality_docs:
+            try:
+                vals.append(float(doc.get(key) or 0.0))
+            except Exception:
+                continue
+        if vals:
+            merged[key] = min(vals)
+
+    def _max_float(key: str) -> None:
+        vals: list[float] = []
+        for doc in quality_docs:
+            try:
+                vals.append(float(doc.get(key) or 0.0))
+            except Exception:
+                continue
+        if vals:
+            merged[key] = max(vals)
+
+    def _min_int(key: str) -> None:
+        vals: list[int] = []
+        for doc in quality_docs:
+            try:
+                vals.append(int(doc.get(key) or 0))
+            except Exception:
+                continue
+        if vals:
+            merged[key] = min(vals)
+
+    def _max_int(key: str) -> None:
+        vals: list[int] = []
+        for doc in quality_docs:
+            try:
+                vals.append(int(doc.get(key) or 0))
+            except Exception:
+                continue
+        if vals:
+            merged[key] = max(vals)
+
+    _min_float("seed_score")
+    _min_float("merge_retained_ratio_files")
+    _min_float("merge_retained_ratio_bytes")
+    _min_int("early_new_units_30s")
+    _min_int("early_new_units_60s")
+    _max_int("initial_inited_cov")
+    _max_int("final_cov")
+    _max_int("cov_delta")
+    _max_int("initial_inited_ft")
+    _max_int("final_ft")
+    _max_int("ft_delta")
+    _max_int("initial_corpus_files")
+    _max_int("final_corpus_files")
+    merged["cold_start_failure"] = any(bool(doc.get("cold_start_failure") or False) for doc in quality_docs)
+
+    all_flags: set[str] = set()
+    for doc in quality_docs:
+        for flag in list(doc.get("quality_flags") or []):
+            sval = str(flag or "").strip()
+            if sval:
+                all_flags.add(sval)
+    if all_flags:
+        merged["quality_flags"] = sorted(all_flags)
+
+    return merged
+
+
 def _build_harness_feedback(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "execution_plan_path": str(state.get("execution_plan_path") or ""),
@@ -8866,6 +8947,20 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 else 0
             )
 
+        aggregated_seed_quality = _aggregate_seed_quality_from_run_details(
+            run_details,
+            dict(state.get("coverage_seed_quality") or {}),
+        )
+        aggregated_quality_flags: set[str] = set()
+        for detail in run_details:
+            sq = detail.get("seed_quality") or {}
+            if not isinstance(sq, dict):
+                continue
+            for flag in list(sq.get("quality_flags") or []):
+                sval = str(flag or "").strip()
+                if sval:
+                    aggregated_quality_flags.add(sval)
+
         out = {
             **state,
             "last_step": "run",
@@ -8907,10 +9002,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 or str(state.get("selected_target_api") or "").strip()
             ),
             "coverage_seed_profile": last_seed_profile,
-            "coverage_seed_quality": next(
-                (dict(detail.get("seed_quality") or {}) for detail in run_details if detail.get("seed_quality")),
-                dict(state.get("coverage_seed_quality") or {}),
-            ),
+            "coverage_seed_quality": aggregated_seed_quality,
             "coverage_seed_families_required": list(
                 _first_seed_meta_list("seed_families_required")
                 or list(state.get("coverage_seed_families_required") or [])
@@ -8924,14 +9016,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 or list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
-                next(
-                    (
-                        list((detail.get("seed_quality") or {}).get("quality_flags") or [])
-                        for detail in run_details
-                        if detail.get("seed_quality")
-                    ),
-                    list(state.get("coverage_quality_flags") or []),
-                )
+                sorted(aggregated_quality_flags)
+                or list(state.get("coverage_quality_flags") or [])
             ),
             "coverage_target_depth_score": int(state.get("coverage_target_depth_score") or 0),
             "coverage_target_depth_class": str(state.get("coverage_target_depth_class") or ""),
