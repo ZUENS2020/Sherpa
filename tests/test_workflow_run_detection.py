@@ -317,6 +317,73 @@ def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path)
     assert payload["seed_generation_failed_fuzzers"] == ["demo_fuzz"]
 
 
+def test_node_run_aggregates_seed_quality_across_all_fuzzers(tmp_path: Path):
+    gen = _MultiRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                seed_quality={
+                    "seed_score": 0.91,
+                    "early_new_units_30s": 3,
+                    "merge_retained_ratio_files": 0.92,
+                    "cold_start_failure": False,
+                    "quality_flags": [],
+                },
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                seed_quality={
+                    "seed_score": 0.44,
+                    "early_new_units_30s": 0,
+                    "merge_retained_ratio_files": 0.21,
+                    "cold_start_failure": True,
+                    "quality_flags": ["low_early_yield"],
+                },
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                seed_quality={
+                    "seed_score": 0.66,
+                    "early_new_units_30s": 1,
+                    "merge_retained_ratio_files": 0.55,
+                    "cold_start_failure": False,
+                    "quality_flags": ["missing_required_families"],
+                },
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    sq = dict(out.get("coverage_seed_quality") or {})
+    assert sq.get("seed_score") == 0.44
+    assert sq.get("early_new_units_30s") == 0
+    assert sq.get("merge_retained_ratio_files") == 0.21
+    assert sq.get("cold_start_failure") is True
+    assert set(out.get("coverage_quality_flags") or []) >= {"low_early_yield", "missing_required_families"}
+
+
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
     gen = _SlowSeedGenerator(
         tmp_path,
