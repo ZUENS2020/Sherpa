@@ -3,7 +3,7 @@ Preprocessor module - AST preprocessing.
 """
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from loguru import logger
 import subprocess
 import json
@@ -16,14 +16,21 @@ from ..build import BinaryBuilder
 class Meta:
     """Metadata container."""
 
-    def __init__(self, meta_dict: dict):
-        self.meta = meta_dict
+    def __init__(self, meta_dict: Optional[dict[str, Any]]):
+        self.meta: dict[str, Any] = meta_dict if isinstance(meta_dict, dict) else {}
 
     @classmethod
     def load(cls, path: Path) -> "Meta":
         """Load meta from JSON file."""
-        with open(path, "r") as f:
-            data = json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load meta json {path}: {e}")
+            return cls({})
+        if not isinstance(data, dict):
+            logger.warning(f"Invalid meta json payload (non-dict) in {path}: {type(data).__name__}")
+            return cls({})
         return cls(data)
 
     def dump(self, path: Path):
@@ -46,6 +53,7 @@ class ASTPreprocessor:
         self.compile_commands_path = compile_commands_path
         self.pool_size = pool_size
         self.source_files: list[Path] = []
+        self.invalid_meta_files: list[str] = []
 
         # Get binary builder
         self.builder = BinaryBuilder()
@@ -84,11 +92,17 @@ class ASTPreprocessor:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / "meta.json"
 
-        all_meta = {}
+        all_meta: dict[str, Any] = {}
+        self.invalid_meta_files = []
 
         for source_file in self.source_files:
             meta = self._process_file(source_file, preprocessor_bin)
-            all_meta.update(meta.meta)
+            meta_payload = getattr(meta, "meta", None)
+            if not isinstance(meta_payload, dict):
+                logger.warning(f"Skipping invalid meta payload from {source_file}: {type(meta_payload).__name__}")
+                self.invalid_meta_files.append(str(source_file))
+                continue
+            all_meta.update(meta_payload)
 
         # Persist to file
         final_meta = Meta(all_meta)
@@ -120,6 +134,10 @@ class ASTPreprocessor:
                 return Meta({})
 
             if meta_file.exists():
-                return Meta.load(meta_file)
+                meta = Meta.load(meta_file)
+                if not meta.meta:
+                    # Keep record for visibility when a source produced unusable metadata.
+                    self.invalid_meta_files.append(str(source_file))
+                return meta
 
             return Meta({})

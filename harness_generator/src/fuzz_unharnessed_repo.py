@@ -2609,17 +2609,47 @@ EOF
             "=== fuzz/PLAN.md ===\n" + plan_text +
             "\n\n=== fuzz/targets.json ===\n" + targets_text
         )
-        stdout = self.patcher.run_codex_command(
-            instructions,
-            additional_context=context,
-            stage_skill="synthesize",
-            timeout=timeout,
-            max_attempts=1,
-            max_cli_retries=_workflow_opencode_cli_retries(),
-            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
-            activity_watch_paths=_synthesize_activity_watch_paths(),
-        )
+        overload_retry_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES") or "3").strip()
+        overload_backoff_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC") or "10").strip()
+        try:
+            overload_retries = max(0, min(int(overload_retry_raw), 8))
+        except Exception:
+            overload_retries = 3
+        try:
+            overload_backoff_sec = max(1, min(int(overload_backoff_raw), 120))
+        except Exception:
+            overload_backoff_sec = 10
+
+        stdout = None
+        for overload_try in range(overload_retries + 1):
+            stdout = self.patcher.run_codex_command(
+                instructions,
+                additional_context=context,
+                stage_skill="synthesize",
+                timeout=timeout,
+                max_attempts=1,
+                max_cli_retries=_workflow_opencode_cli_retries(),
+                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+                activity_watch_paths=_synthesize_activity_watch_paths(),
+            )
+            if stdout is not None:
+                break
+            last_kind = str(getattr(self.patcher, "last_cli_error_kind", "") or "").strip().lower()
+            if last_kind != "provider_overloaded" or overload_try >= overload_retries:
+                break
+            backoff = min(120, overload_backoff_sec * (2**overload_try))
+            print(
+                "[warn] OpenCode provider overloaded during synthesize "
+                f"(retry {overload_try + 1}/{overload_retries}); backoff={backoff}s"
+            )
+            time.sleep(backoff)
+
         if stdout is None:
+            last_kind = str(getattr(self.patcher, "last_cli_error_kind", "") or "").strip().lower()
+            last_msg = str(getattr(self.patcher, "last_cli_error_message", "") or "").strip()
+            if last_kind == "provider_overloaded":
+                detail = f": {last_msg}" if last_msg else ""
+                raise HarnessGeneratorError(f"provider_overloaded{detail}")
             partial_outputs = False
             try:
                 for p in self.fuzz_dir.rglob("*"):

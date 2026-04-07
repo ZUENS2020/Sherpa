@@ -832,6 +832,9 @@ class CodexHelper:
                     # Prefer OPENAI_API_KEY to align with OpenCode/OpenAI-compatible tooling.
                     os.environ.setdefault("OPENAI_API_KEY", key)
 
+        self.last_cli_error_kind = ""
+        self.last_cli_error_message = ""
+
         LOGGER.debug("OpenCodeHelper working directory: %s", self.working_dir)
 
     def _docker_git(self, args: Sequence[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -988,6 +991,8 @@ class CodexHelper:
             "请求太频繁",
             "访问频繁",
             "请稍后再试",
+            "Decode server is overloaded",
+            "server is overloaded",
         )
 
         # Fatal errors that should not be retried – raise immediately with a
@@ -1001,6 +1006,8 @@ class CodexHelper:
         )
 
         done_path = self.working_dir / SENTINEL
+        self.last_cli_error_kind = ""
+        self.last_cli_error_message = ""
         watch_specs: List[str] = []
         for spec in (activity_watch_paths or ()):
             txt = str(spec).strip()
@@ -1645,6 +1652,13 @@ class CodexHelper:
                             captured_chunks.append(item)
                             last_activity_ts = now
                             if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
+                                lowered = item.lower()
+                                if "overloaded" in lowered:
+                                    self.last_cli_error_kind = "provider_overloaded"
+                                    self.last_cli_error_message = item.strip()[:500]
+                                elif not self.last_cli_error_kind:
+                                    self.last_cli_error_kind = "provider_retryable_error"
+                                    self.last_cli_error_message = item.strip()[:500]
                                 LOGGER.warning("[OpenCodeHelper] retryable error detected → abort")
                                 saw_retry_error = True
                                 _kill_proc("retryable_error")
@@ -1654,6 +1668,8 @@ class CodexHelper:
                             for fatal_err in FATAL_ERRORS:
                                 if fatal_err in item:
                                     detail = item.strip()[:500]
+                                    self.last_cli_error_kind = "provider_fatal_error"
+                                    self.last_cli_error_message = detail
                                     LOGGER.error("[OpenCodeHelper] fatal CLI error: %s", detail)
                                     _kill_proc("fatal_error")
                                     raise RuntimeError(
@@ -1685,6 +1701,9 @@ class CodexHelper:
                     saw_retry_error = True
 
                 if saw_retry_error:
+                    if not self.last_cli_error_kind:
+                        self.last_cli_error_kind = "provider_retryable_error"
+                        self.last_cli_error_message = "retryable OpenCode CLI failure"
                     _record_session_attempt("retryable_error")
                     time.sleep(backoff)
                     backoff *= 2
@@ -1703,6 +1722,9 @@ class CodexHelper:
             diff_changed = bool(diff_now) and diff_now != baseline_diff
 
             if not done_path.exists():
+                if not self.last_cli_error_kind:
+                    self.last_cli_error_kind = "missing_sentinel"
+                    self.last_cli_error_message = "OpenCode did not create done sentinel"
                 LOGGER.warning("[OpenCodeHelper] sentinel not created; next attempt")
                 logger.info("[OpenCodeHelper] sentinel not created; next attempt")
                 run_meta["status"] = "retry_no_sentinel"
@@ -1736,6 +1758,9 @@ class CodexHelper:
             _record_session_attempt("retry_no_diff")
 
         LOGGER.warning("[OpenCodeHelper] exhausted attempts — no edits produced")
+        if not self.last_cli_error_kind:
+            self.last_cli_error_kind = "exhausted_no_edits"
+            self.last_cli_error_message = "OpenCode exhausted attempts without producing edits"
         _record_session_attempt("exhausted")
         _append_opencode_metadata(
             self.working_dir,
@@ -1751,4 +1776,3 @@ class CodexHelper:
             },
         )
         return None
-
