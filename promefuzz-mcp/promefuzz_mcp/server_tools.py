@@ -4,6 +4,7 @@ Server tools - MCP tool definitions for PromeFuzz.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,6 +52,108 @@ def register_tools(mcp):
                 }
             )
         return out
+
+    def _load_meta_doc(meta_path: str) -> dict[str, Any]:
+        path = Path(str(meta_path or "")).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"meta_path not found: {path}")
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid meta json (expected object): {path}")
+        return data
+
+    def _parse_loc(loc: str) -> tuple[str, int, int]:
+        text = str(loc or "").strip()
+        if not text:
+            return "", 0, 0
+        parts = text.rsplit(":", 2)
+        if len(parts) == 3:
+            file_path, line_txt, col_txt = parts
+            try:
+                return file_path, int(line_txt), int(col_txt)
+            except Exception:
+                return text, 0, 0
+        if len(parts) == 2:
+            file_path, line_txt = parts
+            try:
+                return file_path, int(line_txt), 0
+            except Exception:
+                return text, 0, 0
+        return text, 0, 0
+
+    def _definition_rows(meta_doc: dict[str, Any], *, kind: str = "all") -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        kind_norm = str(kind or "all").strip().lower()
+        include_functions = kind_norm in {"all", "function", "func"}
+        include_classes = kind_norm in {"all", "class"}
+
+        if include_functions:
+            functions = meta_doc.get("functions")
+            if isinstance(functions, dict):
+                for loc, obj in functions.items():
+                    if not isinstance(obj, dict):
+                        continue
+                    file_path, line, column = _parse_loc(str(loc))
+                    decl_loc = str(obj.get("declLoc") or "")
+                    decl_file, decl_line, decl_col = _parse_loc(decl_loc)
+                    out.append(
+                        {
+                            "kind": "function",
+                            "name": str(obj.get("name") or ""),
+                            "loc": str(loc),
+                            "decl_loc": decl_loc,
+                            "file": file_path,
+                            "line": line,
+                            "column": column,
+                            "decl_file": decl_file,
+                            "decl_line": decl_line,
+                            "decl_column": decl_col,
+                            "heldby_namespace": str(obj.get("heldbyNamespace") or ""),
+                            "heldby_class": str(obj.get("heldbyClass") or ""),
+                        }
+                    )
+
+        if include_classes:
+            classes = meta_doc.get("classes")
+            if isinstance(classes, dict):
+                for loc, obj in classes.items():
+                    if not isinstance(obj, dict):
+                        continue
+                    file_path, line, column = _parse_loc(str(loc))
+                    out.append(
+                        {
+                            "kind": "class",
+                            "name": str(obj.get("name") or ""),
+                            "loc": str(loc),
+                            "file": file_path,
+                            "line": line,
+                            "column": column,
+                            "heldby_namespace": str(obj.get("heldbyNamespace") or ""),
+                            "heldby_class": str(obj.get("heldbyClass") or ""),
+                        }
+                    )
+        return out
+
+    def _read_source_window(path: Path, center_line: int, *, context_lines: int = 40) -> tuple[int, int, str]:
+        start = max(1, int(center_line) - max(1, int(context_lines)) // 2)
+        end = start + max(1, int(context_lines)) - 1
+        return _read_source_range(path, start, end)
+
+    def _read_source_range(path: Path, start_line: int, end_line: int, *, max_chars: int = 20000) -> tuple[int, int, str]:
+        start = max(1, int(start_line))
+        end = max(start, int(end_line))
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        total = len(lines)
+        if total == 0:
+            return start, end, ""
+        s_idx = min(total, start) - 1
+        e_idx = min(total, end)
+        body = "".join(lines[s_idx:e_idx])
+        if len(body) > max_chars:
+            body = body[: max_chars - 3] + "..."
+        return s_idx + 1, e_idx, body
 
     # ===================== Preprocessor Tools =====================
 
@@ -175,6 +278,193 @@ def register_tools(mcp):
             "nodes": result.get("nodes", []),
             "edges": result.get("edges", []),
             "output_file": str(saved_path) if saved_path else None,
+        }
+
+    @mcp.tool()
+    async def list_definitions(
+        meta_path: str,
+        symbol_query: str = "",
+        kind: str = "all",
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """
+        List symbol definitions extracted by preprocessor meta.json.
+
+        Args:
+            meta_path: Path to preprocessor meta.json
+            symbol_query: Optional case-insensitive name filter
+            kind: one of all/function/class
+            limit: max returned rows
+        """
+        try:
+            meta_doc = _load_meta_doc(meta_path)
+        except Exception as e:
+            return {"status": "error", "error": str(e), "definitions": []}
+
+        rows = _definition_rows(meta_doc, kind=kind)
+        query = str(symbol_query or "").strip().lower()
+        if query:
+            rows = [r for r in rows if query in str(r.get("name") or "").lower()]
+        rows = sorted(rows, key=lambda x: (str(x.get("kind") or ""), str(x.get("name") or ""), str(x.get("loc") or "")))
+        max_rows = max(1, min(int(limit or 200), 2000))
+        return {
+            "status": "success",
+            "meta_path": str(meta_path),
+            "count": len(rows),
+            "definitions": rows[:max_rows],
+        }
+
+    @mcp.tool()
+    async def read_definition(
+        meta_path: str,
+        symbol: str,
+        kind: str = "function",
+        occurrence: int = 0,
+        context_lines: int = 50,
+    ) -> dict[str, Any]:
+        """
+        Read one symbol definition and return source snippet around its location.
+        """
+        symbol_txt = str(symbol or "").strip()
+        if not symbol_txt:
+            return {"status": "error", "error": "symbol is required", "found": False}
+        try:
+            meta_doc = _load_meta_doc(meta_path)
+        except Exception as e:
+            return {"status": "error", "error": str(e), "found": False}
+
+        defs = _definition_rows(meta_doc, kind=kind)
+        matches = [d for d in defs if str(d.get("name") or "") == symbol_txt]
+        if not matches:
+            return {"status": "success", "found": False, "symbol": symbol_txt, "definition": None}
+        idx = max(0, min(int(occurrence or 0), len(matches) - 1))
+        target = matches[idx]
+        prefer_decl = target.get("decl_file") and int(target.get("decl_line") or 0) > 0
+        file_path = str(target.get("decl_file") if prefer_decl else target.get("file") or "")
+        line_no = int(target.get("decl_line") if prefer_decl else target.get("line") or 0)
+        if not file_path or line_no <= 0:
+            return {"status": "success", "found": True, "symbol": symbol_txt, "definition": target, "snippet": ""}
+        path = Path(file_path)
+        if not path.is_file():
+            return {
+                "status": "success",
+                "found": True,
+                "symbol": symbol_txt,
+                "definition": target,
+                "snippet": "",
+                "warning": f"source file not found: {path}",
+            }
+        start, end, snippet = _read_source_window(path, line_no, context_lines=context_lines)
+        return {
+            "status": "success",
+            "found": True,
+            "symbol": symbol_txt,
+            "definition": target,
+            "source_path": str(path),
+            "start_line": start,
+            "end_line": end,
+            "snippet": snippet,
+        }
+
+    @mcp.tool()
+    async def read_source(
+        path: str,
+        start_line: int = 1,
+        end_line: int = 200,
+        max_chars: int = 20000,
+    ) -> dict[str, Any]:
+        """
+        Read source code by file path and line range.
+        """
+        source = Path(str(path or "")).expanduser()
+        if not source.is_file():
+            return {"status": "error", "error": f"path not found: {source}"}
+        try:
+            start, end, snippet = _read_source_range(source, start_line, end_line, max_chars=max_chars)
+        except Exception as e:
+            return {"status": "error", "error": f"read_source_failed:{e}"}
+        return {
+            "status": "success",
+            "path": str(source),
+            "start_line": start,
+            "end_line": end,
+            "snippet": snippet,
+        }
+
+    @mcp.tool()
+    async def find_references(
+        meta_path: str,
+        symbol: str,
+        source_roots: Optional[list[str]] = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """
+        Find textual references of a symbol across files inferred from meta.json (and optional source roots).
+        """
+        symbol_txt = str(symbol or "").strip()
+        if not symbol_txt:
+            return {"status": "error", "error": "symbol is required", "references": []}
+        try:
+            meta_doc = _load_meta_doc(meta_path)
+        except Exception as e:
+            return {"status": "error", "error": str(e), "references": []}
+
+        files: set[Path] = set()
+        definition_lines: set[tuple[str, int]] = set()
+        for row in _definition_rows(meta_doc, kind="all"):
+            for key_file, key_line in (
+                ("file", "line"),
+                ("decl_file", "decl_line"),
+            ):
+                p = str(row.get(key_file) or "").strip()
+                n = int(row.get(key_line) or 0)
+                if p:
+                    files.add(Path(p))
+                    if n > 0:
+                        definition_lines.add((str(Path(p)), n))
+
+        if isinstance(source_roots, list):
+            for root in source_roots:
+                p = Path(str(root or "")).expanduser()
+                if p.is_file():
+                    files.add(p)
+                elif p.is_dir():
+                    for suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"):
+                        files.update(p.rglob(f"*{suffix}"))
+
+        pattern = re.compile(rf"\b{re.escape(symbol_txt)}\b")
+        refs: list[dict[str, Any]] = []
+        max_refs = max(1, min(int(limit or 200), 5000))
+        for path in sorted(files):
+            if len(refs) >= max_refs:
+                break
+            if not path.is_file():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for i, line in enumerate(f, start=1):
+                        if len(refs) >= max_refs:
+                            break
+                        m = pattern.search(line)
+                        if not m:
+                            continue
+                        refs.append(
+                            {
+                                "path": str(path),
+                                "line": i,
+                                "column": int(m.start()) + 1,
+                                "text": line.rstrip("\n"),
+                                "is_definition": (str(path), i) in definition_lines,
+                            }
+                        )
+            except Exception:
+                continue
+
+        return {
+            "status": "success",
+            "symbol": symbol_txt,
+            "count": len(refs),
+            "references": refs,
         }
 
     @mcp.tool()

@@ -108,8 +108,23 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     selected_doc = json.loads(selected_targets.read_text(encoding="utf-8"))
     assert selected_doc
     assert isinstance(selected_doc[0].get("target_score_breakdown"), dict)
+    assert isinstance(selected_doc[0].get("score_breakdown"), dict)
+    assert set(selected_doc[0].get("score_breakdown", {}).keys()) == {
+        "coverage_gap",
+        "complexity_depth",
+        "api_relevance",
+        "recent_yield_penalty",
+    }
+    assert "target" in selected_doc[0]
+    assert "score_total" in selected_doc[0]
+    assert "rank" in selected_doc[0]
     assert selected_doc[0].get("target_scoring_enabled") is True
     assert out.get("target_scoring_enabled") is True
+    assert out.get("target_score_breakdown_available") is True
+    assert int(out.get("decision_trace_count") or 0) >= 1
+    assert isinstance(out.get("latest_decision_snapshot"), dict)
+    trace_path = tmp_path / "fuzz" / "decision_trace.jsonl"
+    assert trace_path.is_file()
     assert "antlr_plan_context.json" in str(out.get("codex_hint") or "")
 
 

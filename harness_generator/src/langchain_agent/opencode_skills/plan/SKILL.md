@@ -17,6 +17,9 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - `fuzz/target_analysis.json` (if present)
 - `fuzz/antlr_plan_context.json` (if present)
 - MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
+  - code navigation: `list_definitions`, `read_definition`, `read_source`, `find_references`
+  - preprocessor: `run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`
+  - semantic (if enabled): `init_knowledge_base`, `retrieve_documents`, `comprehend_*`
 - repository source/build metadata
 
 ## Required outputs
@@ -25,7 +28,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - `fuzz/execution_plan.json`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
 2. Read target analysis and identify runtime-viable public entrypoints.
 3. Produce `fuzz/targets.json` as a strict non-empty array.
 4. Produce `fuzz/execution_plan.json` with prioritized execution targets.
