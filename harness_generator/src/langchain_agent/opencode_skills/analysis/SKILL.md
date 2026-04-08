@@ -17,6 +17,7 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 - repository source tree (read-only)
 - MCP tools from task-scoped PromeFuzz companion (HTTP MCP), when available
 - preferred MCP tools in this round:
+  - code navigation: `list_definitions`, `read_definition`, `read_source`, `find_references`
   - preprocessor: `run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`
   - semantic (if enabled): `init_knowledge_base`, `retrieve_documents`, `comprehend_*`
 - optional companion outputs under `/shared/output/_k8s_jobs/<job-id>/promefuzz/` as fallback
@@ -32,7 +33,7 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 
 ## Workflow
 1. Query MCP evidence first when MCP is available.
-   Use preprocessor tools first, then semantic tools for evidence-backed summaries.
+   Use code-navigation tools first to locate concrete symbols/definitions, then preprocessor tools, then semantic tools for evidence-backed summaries.
 2. Read existing analysis artifacts (if any) and companion file outputs as fallback.
 3. Refresh static analysis summaries for grammar/target context.
 4. Update `fuzz/analysis_context.json` with concise evidence from MCP and static analysis.

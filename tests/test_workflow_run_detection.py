@@ -1663,6 +1663,27 @@ def test_node_crash_analysis_records_constraint_memory_when_model_returns_false_
     assert entry.get("source_stage") == "crash-analysis"
 
 
+def test_constraint_memory_observation_has_m1_alias_fields(tmp_path: Path):
+    count, path, entry = workflow_graph._record_constraint_memory_observation(
+        repo_root=tmp_path,
+        signature="sig-m1-1",
+        stage="crash-triage",
+        classification="harness_bug",
+        reason="demo reason",
+        evidence=["line-a"],
+        confidence=0.9,
+        repeats=2,
+    )
+    assert count >= 1
+    assert Path(path).is_file()
+    assert entry.get("signature") == "sig-m1-1"
+    assert entry.get("source") == "crash-triage"
+    assert entry.get("source_stage") == "crash-triage"
+    assert isinstance(entry.get("confidence"), float)
+    assert int(entry.get("last_seen") or 0) > 0
+    assert int(entry.get("count") or 0) >= 1
+
+
 def test_route_after_crash_analysis_routes_to_plan_on_false_positive():
     route = workflow_graph._route_after_crash_analysis_state(
         {

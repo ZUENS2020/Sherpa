@@ -43,6 +43,13 @@ from persistent_config import (
     load_config,
     save_config,
 )
+from workflow_context_store import (
+    context_dir_for_repo_root,
+    merge_result_into_contexts,
+    read_context_docs,
+    strip_meta,
+    write_context_docs,
+)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -1893,7 +1900,11 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
                 analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
                 target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
+                target_score_breakdown_available=bool(payload.get("target_score_breakdown_available") or False),
                 constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
+                decision_trace_count=int(payload.get("decision_trace_count") or 0),
+                latest_decision_snapshot=dict(payload.get("latest_decision_snapshot") or {}),
+                crash_signature_dedup_hit=bool(payload.get("crash_signature_dedup_hit") or False),
             )
         except Exception:
             pass
@@ -3591,7 +3602,11 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_coverage_bottleneck_kind", "")
     view.setdefault("analysis_evidence_count", 0)
     view.setdefault("target_scoring_enabled", False)
+    view.setdefault("target_score_breakdown_available", False)
     view.setdefault("constraint_memory_count", 0)
+    view.setdefault("decision_trace_count", 0)
+    view.setdefault("latest_decision_snapshot", {})
+    view.setdefault("crash_signature_dedup_hit", False)
 
     companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
     if companion_status:
@@ -3822,7 +3837,11 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
                 "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
                 "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
+                "target_score_breakdown_available": bool((active_child or job).get("target_score_breakdown_available", False)),
                 "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
+                "decision_trace_count": int((active_child or job).get("decision_trace_count", 0) or 0),
+                "latest_decision_snapshot": dict((active_child or job).get("latest_decision_snapshot") or {}),
+                "crash_signature_dedup_hit": bool((active_child or job).get("crash_signature_dedup_hit", False)),
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
@@ -3971,18 +3990,18 @@ def _run_fuzz_job(
                 current_repo_root = str(resume_repo_root or "").strip()
                 current_node_name = ""
                 last_result: object = {}
-                stage_ctx: dict[str, str] = {
-                    "last_fuzzer": "",
-                    "last_crash_artifact": "",
-                    "re_workspace_root": "",
-                    "restart_to_plan_reason": "",
-                    "restart_to_plan_stage": "",
-                    "restart_to_plan_error_text": "",
-                    "restart_to_plan_report_path": "",
-                    "run_oom_retry_count": "",
-                    "run_rss_limit_mb_override": "",
-                    "run_parallel_fuzzers_override": "",
-                }
+                context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
+                control_doc, workflow_doc = read_context_docs(
+                    context_dir or None,
+                    job_id=job_id,
+                )
+                control_ctx: dict[str, object] = strip_meta(control_doc)
+                workflow_ctx: dict[str, object] = strip_meta(workflow_doc)
+                control_ctx["time_budget"] = int(total_time_budget_value)
+                control_ctx["run_time_budget"] = int(run_time_budget_value)
+                control_ctx["coverage_loop_max_rounds"] = int(coverage_loop_max_rounds)
+                control_ctx["max_fix_rounds"] = int(max_fix_rounds)
+                control_ctx["same_error_max_retries"] = int(same_error_max_retries)
                 current_stage = start_step
                 if current_stage not in _STAGED_WORKFLOW_STEPS:
                     current_stage = "analysis"
@@ -4108,7 +4127,8 @@ def _run_fuzz_job(
                                 "job_name": "",
                                 "ok": True,
                                 "repo_root": current_repo_root,
-                                "stage_ctx": dict(stage_ctx),
+                                "control_context": dict(control_ctx),
+                                "workflow_context": dict(workflow_ctx),
                                 "result": stage_result,
                             }
                         )
@@ -4125,6 +4145,8 @@ def _run_fuzz_job(
                         last_result = stage_result
                         current_stage = "plan"
                         continue
+                    if current_repo_root:
+                        context_dir = str(context_dir_for_repo_root(current_repo_root) or context_dir).strip()
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
                     result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=idx)
                     stage_job_names.append(job_name)
@@ -4168,29 +4190,9 @@ def _run_fuzz_job(
                         "resume_from_step": stage,
                         "resume_repo_root": (current_repo_root or None),
                         "stop_after_step": stage,
-                        "last_fuzzer": (stage_ctx.get("last_fuzzer") or None),
-                        "last_crash_artifact": (stage_ctx.get("last_crash_artifact") or None),
-                        "re_workspace_root": (stage_ctx.get("re_workspace_root") or None),
-                        "restart_to_plan_reason": (stage_ctx.get("restart_to_plan_reason") or None),
-                        "restart_to_plan_stage": (stage_ctx.get("restart_to_plan_stage") or None),
-                        "restart_to_plan_error_text": (stage_ctx.get("restart_to_plan_error_text") or None),
-                        "restart_to_plan_report_path": (stage_ctx.get("restart_to_plan_report_path") or None),
-                        "crash_triage_label": str(stage_ctx.get("crash_triage_label") or ""),
-                        "crash_triage_confidence": float(stage_ctx.get("crash_triage_confidence") or 0.0),
-                        "crash_triage_reason": str(stage_ctx.get("crash_triage_reason") or ""),
-                        "crash_triage_done": bool(stage_ctx.get("crash_triage_done") or False),
-                        "repair_mode": bool(stage_ctx.get("repair_mode") or False),
-                        "repair_origin_stage": str(stage_ctx.get("repair_origin_stage") or ""),
-                        "repair_error_kind": str(stage_ctx.get("repair_error_kind") or ""),
-                        "repair_error_code": str(stage_ctx.get("repair_error_code") or ""),
-                        "repair_signature": str(stage_ctx.get("repair_signature") or ""),
-                        "repair_recent_attempts": list(stage_ctx.get("repair_recent_attempts") or []),
-                        "repair_error_digest": dict(stage_ctx.get("repair_error_digest") or {}),
-                        "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
-                        "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
-                        "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
+                        "context_dir": (context_dir or None),
                         "run_unlimited_round_budget_sec": int(
-                            stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                            control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                         ),
                         "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
                         "analysis_companion_ready": bool(companion_mcp_ready),
@@ -4198,13 +4200,14 @@ def _run_fuzz_job(
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
                     }
+                    control_ctx["target_node_name"] = (current_node_name if can_pin_node else "")
                     run_fuzzer_count = 1
                     run_parallelism = 1
                     if stage == "run":
                         run_fuzzer_count = _estimate_run_fuzzer_count(current_repo_root or "")
-                        run_parallelism = _estimate_run_parallelism(stage_ctx)
+                        run_parallelism = _estimate_run_parallelism(control_ctx)
                     effective_round_budget = int(
-                        stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                        control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                     )
                     wait_timeout = _k8s_stage_wait_timeout_sec(
                         stage=stage,
@@ -4216,7 +4219,7 @@ def _run_fuzz_job(
                     )
                     wait_override_key = f"{stage}_timeout_wait_sec_override"
                     try:
-                        wait_override_sec = int(stage_ctx.get(wait_override_key) or 0)
+                        wait_override_sec = int(control_ctx.get(wait_override_key) or 0)
                     except Exception:
                         wait_override_sec = 0
                     if wait_override_sec > 0:
@@ -4240,7 +4243,7 @@ def _run_fuzz_job(
                         stage_fail_error = _redact_sensitive_text(str(e))
                         failure_doc = dict(e.result or {})
                         stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
-                        oom_retry_count = int(stage_ctx.get("run_oom_retry_count") or 0)
+                        oom_retry_count = int(control_ctx.get("run_oom_retry_count") or 0)
                         if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
                             rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
                             try:
@@ -4248,18 +4251,18 @@ def _run_fuzz_job(
                             except Exception:
                                 base_rss = 131072
                             retry_rss = max(2048, int(base_rss * 0.75))
-                            stage_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
-                            stage_ctx["run_rss_limit_mb_override"] = str(retry_rss)
-                            stage_ctx["run_parallel_fuzzers_override"] = "1"
+                            control_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
+                            control_ctx["run_rss_limit_mb_override"] = str(retry_rss)
+                            control_ctx["run_parallel_fuzzers_override"] = "1"
                             stage_result = {
                                 "message": "run stage oom_killed; retrying run once with reduced rss/parallel",
                                 "repo_root": current_repo_root,
                                 "workflow_last_step": stage,
                                 "workflow_recommended_next": "run",
                                 "restart_to_plan": False,
-                                "run_oom_retry_count": stage_ctx["run_oom_retry_count"],
-                                "run_rss_limit_mb_override": stage_ctx["run_rss_limit_mb_override"],
-                                "run_parallel_fuzzers_override": stage_ctx["run_parallel_fuzzers_override"],
+                                "run_oom_retry_count": control_ctx["run_oom_retry_count"],
+                                "run_rss_limit_mb_override": control_ctx["run_rss_limit_mb_override"],
+                                "run_parallel_fuzzers_override": control_ctx["run_parallel_fuzzers_override"],
                             }
                             stage_failed = False
                             stage_fail_reason = ""
@@ -4280,7 +4283,7 @@ def _run_fuzz_job(
                     except Exception as e:
                         is_k8s_timeout = "k8s_job_timeout" in str(e)
                         timeout_retry_key = f"{stage}_timeout_retry_count"
-                        timeout_retry_count = int(stage_ctx.get(timeout_retry_key) or 0)
+                        timeout_retry_count = int(control_ctx.get(timeout_retry_key) or 0)
                         try:
                             max_timeout_retries = int(os.environ.get("SHERPA_K8S_TIMEOUT_MAX_RETRIES", "0"))
                             if max_timeout_retries <= 0:
@@ -4291,17 +4294,17 @@ def _run_fuzz_job(
                             current_wait = max(300, wait_timeout)
                             try:
                                 current_wait = max(
-                                    current_wait, int(stage_ctx.get(wait_override_key) or current_wait)
+                                    current_wait, int(control_ctx.get(wait_override_key) or current_wait)
                                 )
                             except Exception:
                                 pass
                             extended_wait = int(current_wait * 1.5)
-                            stage_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
-                            stage_ctx[wait_override_key] = str(extended_wait)
+                            control_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
+                            control_ctx[wait_override_key] = str(extended_wait)
                             if stage == "run":
-                                stage_ctx["run_timeout_budget_sec_override"] = str(
+                                control_ctx["run_timeout_budget_sec_override"] = str(
                                     int(
-                                        int(stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
+                                        int(control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
                                         * 1.5
                                     )
                                 )
@@ -4321,11 +4324,11 @@ def _run_fuzz_job(
                                 "workflow_last_step": stage,
                                 "workflow_recommended_next": stage,
                                 "restart_to_plan": False,
-                                timeout_retry_key: stage_ctx[timeout_retry_key],
-                                wait_override_key: stage_ctx[wait_override_key],
+                                timeout_retry_key: control_ctx[timeout_retry_key],
+                                wait_override_key: control_ctx[wait_override_key],
                             }
                             if stage == "run":
-                                stage_result["run_timeout_budget_sec_override"] = stage_ctx.get(
+                                stage_result["run_timeout_budget_sec_override"] = control_ctx.get(
                                     "run_timeout_budget_sec_override", ""
                                 )
                             stage_failed = False
@@ -4368,59 +4371,40 @@ def _run_fuzz_job(
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
-                        for key in (
-                            "last_fuzzer",
-                            "last_crash_artifact",
-                            "re_workspace_root",
-                            "restart_to_plan_reason",
-                            "restart_to_plan_stage",
-                            "restart_to_plan_error_text",
-                            "restart_to_plan_report_path",
-                            "run_oom_retry_count",
-                            "run_rss_limit_mb_override",
-                            "run_parallel_fuzzers_override",
-                            "run_timeout_retry_count",
-                            "run_timeout_budget_sec_override",
-                        ):
-                            v = str(stage_result.get(key) or "").strip()
-                            if v:
-                                stage_ctx[key] = v
-                        for key in (
-                            "crash_triage_label",
-                            "crash_triage_reason",
-                            "repair_origin_stage",
-                            "repair_error_kind",
-                            "repair_error_code",
-                            "repair_signature",
-                        ):
-                            v = str(stage_result.get(key) or "").strip()
-                            if v:
-                                stage_ctx[key] = v
-                        if stage_result.get("crash_triage_confidence") is not None:
-                            try:
-                                stage_ctx["crash_triage_confidence"] = float(stage_result.get("crash_triage_confidence") or 0.0)
-                            except Exception:
-                                pass
-                        if stage_result.get("crash_triage_done") is not None:
-                            stage_ctx["crash_triage_done"] = bool(stage_result.get("crash_triage_done") or False)
-                        if stage_result.get("repair_mode") is not None:
-                            stage_ctx["repair_mode"] = bool(stage_result.get("repair_mode") or False)
-                        if isinstance(stage_result.get("repair_recent_attempts"), list):
-                            stage_ctx["repair_recent_attempts"] = list(stage_result.get("repair_recent_attempts") or [])
-                        if isinstance(stage_result.get("repair_error_digest"), dict):
-                            stage_ctx["repair_error_digest"] = dict(stage_result.get("repair_error_digest") or {})
+                        next_context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
+                        if next_context_dir and next_context_dir != context_dir:
+                            context_dir = next_context_dir
+                            control_doc, workflow_doc = read_context_docs(
+                                context_dir,
+                                job_id=job_id,
+                            )
+                            control_ctx = strip_meta(control_doc)
+                            workflow_ctx = strip_meta(workflow_doc)
+                        control_ctx, workflow_ctx = merge_result_into_contexts(
+                            stage_result,
+                            control=control_ctx,
+                            workflow=workflow_ctx,
+                        )
                         if not bool(stage_result.get("restart_to_plan")):
-                            stage_ctx["restart_to_plan_reason"] = ""
-                            stage_ctx["restart_to_plan_stage"] = ""
-                            stage_ctx["restart_to_plan_error_text"] = ""
-                            stage_ctx["restart_to_plan_report_path"] = ""
+                            workflow_ctx["restart_to_plan_reason"] = ""
+                            workflow_ctx["restart_to_plan_stage"] = ""
+                            workflow_ctx["restart_to_plan_error_text"] = ""
+                            workflow_ctx["restart_to_plan_report_path"] = ""
+                        if context_dir:
+                            write_context_docs(
+                                context_dir,
+                                control=control_ctx,
+                                workflow=workflow_ctx,
+                                job_id=job_id,
+                            )
                         stage_results.append(
                             {
                                 "stage": stage,
                                 "job_name": job_name,
                                 "ok": (not stage_failed),
                                 "repo_root": current_repo_root,
-                                "stage_ctx": dict(stage_ctx),
+                                "control_context": dict(control_ctx),
+                                "workflow_context": dict(workflow_ctx),
                                 "result": stage_result,
                             }
                         )

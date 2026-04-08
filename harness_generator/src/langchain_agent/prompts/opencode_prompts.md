@@ -56,7 +56,7 @@ Constraints:
 - Read-only exploration commands are allowed.
 - This stage is analysis-only: do not modify repository business source files.
 - Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
-- When MCP tools are available, use preprocessor MCP tools first (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`) and then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
+- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
 - If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
 
@@ -95,8 +95,8 @@ Build-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available (crash/build hints, candidate APIs, coverage hints) before proposing strategy changes.
-- Prefer preprocessor outputs and companion artifacts first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available (code-navigation evidence first, then crash/build hints, candidate APIs, coverage hints) before proposing strategy changes.
+- Prefer code-navigation + preprocessor outputs and companion artifacts first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
@@ -134,8 +134,8 @@ Crash-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available, especially crash-path and API-candidate context.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available, especially code-navigation output for crash-path and API-candidate context.
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
@@ -168,8 +168,8 @@ Coverage-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available (coverage hints + target candidates) before deciding replan strategy.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available (code-navigation first, then coverage hints + target candidates) before deciding replan strategy.
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - do not produce doc-only adjustments disconnected from next build/run outcomes
@@ -202,7 +202,7 @@ Fix-harness planning focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available (preprocessor first, semantic evidence second).
+- Query MCP evidence first when available (code-navigation first, preprocessor second, semantic evidence third).
 - If MCP is unavailable, continue in degraded mode and explicitly state it in `fuzz/PLAN.md`.
 - when diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - doc-only or no-op repair plans are invalid
@@ -235,8 +235,8 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available and reflect cited findings in scaffold choices.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available and reflect cited findings in scaffold choices (code-navigation first).
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and note the missing MCP evidence in `fuzz/README.md` or `fuzz/repo_understanding.json`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
