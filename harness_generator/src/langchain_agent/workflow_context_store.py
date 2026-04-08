@@ -9,8 +9,6 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 CONTROL_CONTEXT_KEYS = {
-    "resume_from_step",
-    "stop_after_step",
     "time_budget",
     "run_time_budget",
     "coverage_loop_max_rounds",
@@ -135,4 +133,3 @@ def merge_result_into_contexts(result: dict[str, Any], *, control: dict[str, Any
 
 def strip_meta(doc: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in (doc or {}).items() if k not in _META_KEYS}
-

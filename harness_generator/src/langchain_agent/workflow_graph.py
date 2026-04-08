@@ -11948,38 +11948,39 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
     # max_steps <= 0 means unlimited workflow steps.
     max_steps = 0 if max_steps_env <= 0 else max(3, max_steps_env)
     wf = build_fuzz_workflow().compile()
-    raw: Any = wf.invoke(
-        {
-            "repo_url": inp.repo_url,
-            "model": str(inp.model or ""),
-            "email": inp.email,
-            "time_budget": inp.time_budget,
-            "run_time_budget": inp.run_time_budget,
-            "workflow_started_at": time.time(),
-            "max_len": inp.max_len,
-            "docker_image": inp.docker_image,
-            "ai_key_path": str(inp.ai_key_path),
-            "resume_from_step": resume_step,
-            "resume_repo_root": str(inp.resume_repo_root or ""),
-            "stop_after_step": stop_after_step,
-            "context_dir": resolved_context_dir,
-            "coverage_loop_max_rounds": max(
-                0,
-                int(inp.coverage_loop_max_rounds if inp.coverage_loop_max_rounds is not None else 0),
-            ),
-            "max_fix_rounds": max(
-                0,
-                int(inp.max_fix_rounds if inp.max_fix_rounds is not None else 0),
-            ),
-            "same_error_max_retries": max(
-                0,
-                int(inp.same_error_max_retries if inp.same_error_max_retries is not None else 0),
-            ),
-            **control_state,
-            **workflow_state,
-            "max_steps": max_steps,
-        }
-    )
+    # Keep persisted contexts as defaults, but ensure current stage dispatch
+    # parameters from k8s payload always take precedence.
+    invoke_payload: dict[str, Any] = {
+        **control_state,
+        **workflow_state,
+        "repo_url": inp.repo_url,
+        "model": str(inp.model or ""),
+        "email": inp.email,
+        "time_budget": inp.time_budget,
+        "run_time_budget": inp.run_time_budget,
+        "workflow_started_at": time.time(),
+        "max_len": inp.max_len,
+        "docker_image": inp.docker_image,
+        "ai_key_path": str(inp.ai_key_path),
+        "resume_from_step": resume_step,
+        "resume_repo_root": str(inp.resume_repo_root or ""),
+        "stop_after_step": stop_after_step,
+        "context_dir": resolved_context_dir,
+        "coverage_loop_max_rounds": max(
+            0,
+            int(inp.coverage_loop_max_rounds if inp.coverage_loop_max_rounds is not None else 0),
+        ),
+        "max_fix_rounds": max(
+            0,
+            int(inp.max_fix_rounds if inp.max_fix_rounds is not None else 0),
+        ),
+        "same_error_max_retries": max(
+            0,
+            int(inp.same_error_max_retries if inp.same_error_max_retries is not None else 0),
+        ),
+        "max_steps": max_steps,
+    }
+    raw: Any = wf.invoke(invoke_payload)
     out = _normalize_error_state(cast(dict[str, Any], raw) if isinstance(raw, dict) else {})
     final_context_dir = str(context_dir_for_repo_root(out.get("repo_root")) or resolved_context_dir).strip()
     if final_context_dir:
