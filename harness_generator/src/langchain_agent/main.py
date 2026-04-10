@@ -360,6 +360,37 @@ def _k8s_worker_memory_limit() -> str:
     return (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi") or "").strip()
 
 
+def _memory_text_to_mb(raw: str) -> int:
+    txt = str(raw or "").strip()
+    if not txt:
+        return 0
+    units = {
+        "Ki": 1 / 1024,
+        "Mi": 1,
+        "Gi": 1024,
+        "Ti": 1024 * 1024,
+        "K": 1000 / (1024 * 1024),
+        "M": 1000 * 1000 / (1024 * 1024),
+        "G": 1000 * 1000 * 1000 / (1024 * 1024),
+        "T": 1000 * 1000 * 1000 * 1000 / (1024 * 1024),
+    }
+    for suffix, mul in units.items():
+        if txt.endswith(suffix):
+            try:
+                return max(0, int(float(txt[: -len(suffix)]) * float(mul)))
+            except (ValueError, TypeError):
+                return 0
+    try:
+        # Bare number: treat as bytes.
+        return max(0, int(int(float(txt)) / (1024 * 1024)))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _k8s_worker_memory_limit_mb() -> int:
+    return _memory_text_to_mb(_k8s_worker_memory_limit())
+
+
 def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -4245,12 +4276,19 @@ def _run_fuzz_job(
                         stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
                         oom_retry_count = int(control_ctx.get("run_oom_retry_count") or 0)
                         if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
-                            rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
+                            rss_raw = str(control_ctx.get("run_rss_limit_mb_override") or "").strip()
+                            if not rss_raw:
+                                rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
                             try:
                                 base_rss = int(rss_raw) if rss_raw else 131072
                             except Exception:
                                 base_rss = 131072
                             retry_rss = max(2048, int(base_rss * 0.75))
+                            # Keep libFuzzer rss below pod cgroup limit to avoid repeated OOMKilled loops.
+                            pod_limit_mb = _k8s_worker_memory_limit_mb()
+                            if pod_limit_mb > 0:
+                                capped_rss = max(2048, int(pod_limit_mb * 0.8))
+                                retry_rss = min(retry_rss, capped_rss)
                             control_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
                             control_ctx["run_rss_limit_mb_override"] = str(retry_rss)
                             control_ctx["run_parallel_fuzzers_override"] = "1"
