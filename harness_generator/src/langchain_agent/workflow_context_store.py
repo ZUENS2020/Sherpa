@@ -25,30 +25,72 @@ CONTROL_CONTEXT_KEYS = {
     "re_workspace_root",
 }
 
+CONTROL_CONTEXT_DYNAMIC_SUFFIXES = (
+    "_timeout_retry_count",
+    "_timeout_wait_sec_override",
+)
+
 WORKFLOW_CONTEXT_KEYS = {
-    "crash_triage_label",
-    "crash_triage_confidence",
-    "crash_triage_reason",
-    "crash_triage_done",
-    "repair_mode",
-    "repair_origin_stage",
-    "repair_error_kind",
-    "repair_error_code",
-    "repair_signature",
-    "repair_recent_attempts",
-    "repair_error_digest",
+    "last_step",
+    "last_error",
+    "message",
+    "failed",
+    "next",
     "decision_trace_count",
     "latest_decision_snapshot",
-    "crash_signature_dedup_hit",
     "target_score_breakdown_available",
-    "coverage_bottleneck_kind",
-    "coverage_bottleneck_reason",
+    "prompt_render_degraded",
+    "prompt_render_issue",
     "restart_to_plan",
     "restart_to_plan_reason",
     "restart_to_plan_stage",
     "restart_to_plan_error_text",
     "restart_to_plan_report_path",
     "restart_to_plan_count",
+    "cold_start_seed_replan_triggered",
+    "degraded_seed_replan_triggered",
+    "cold_start_seed_replan_skipped_budget",
+    "cold_start_trigger_snapshot",
+}
+
+WORKFLOW_CONTEXT_PREFIXES = (
+    "analysis_",
+    "antlr_",
+    "auto_stop_",
+    "build_",
+    "codex_",
+    "constraint_",
+    "continuous_",
+    "coverage_",
+    "crash_",
+    "decision_",
+    "degraded_",
+    "early_",
+    "fix_",
+    "first_",
+    "plan_",
+    "prompt_",
+    "re_",
+    "repair_",
+    "restart_",
+    "run_",
+    "same_",
+    "selected_",
+    "synthesize_",
+    "target_",
+)
+
+WORKFLOW_CONTEXT_KEY_SUFFIXES = (
+    "_path",
+    "_summary",
+    "_count",
+    "_reason",
+    "_kind",
+    "_signature",
+)
+
+CONTEXT_REJECT_KEYS = {
+    "generator",
 }
 
 _META_KEYS = {"schema_version", "updated_at", "job_id"}
@@ -84,11 +126,57 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _sanitize_doc(doc: dict[str, Any], allowed_keys: set[str], job_id: str) -> dict[str, Any]:
+def _coerce_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            out[str(k)] = _coerce_json_value(v)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [_coerce_json_value(x) for x in value]
+    return str(value)
+
+
+def _is_control_key(key: str) -> bool:
+    if key in CONTROL_CONTEXT_KEYS:
+        return True
+    return key.endswith(CONTROL_CONTEXT_DYNAMIC_SUFFIXES)
+
+
+def _is_workflow_key(key: str) -> bool:
+    if key in WORKFLOW_CONTEXT_KEYS:
+        return True
+    if key.startswith(WORKFLOW_CONTEXT_PREFIXES):
+        return True
+    if key.endswith(WORKFLOW_CONTEXT_KEY_SUFFIXES):
+        return True
+    return False
+
+
+def _sanitize_doc(
+    doc: dict[str, Any],
+    *,
+    kind: str,
+    job_id: str,
+) -> dict[str, Any]:
     out = _base_doc(job_id)
-    for k in allowed_keys:
-        if k in doc:
-            out[k] = doc[k]
+    if not isinstance(doc, dict):
+        return out
+    for raw_key, raw_value in doc.items():
+        key = str(raw_key or "").strip()
+        if not key or key in _META_KEYS or key in CONTEXT_REJECT_KEYS:
+            continue
+        if kind == "control":
+            if not _is_control_key(key):
+                continue
+        else:
+            if not _is_workflow_key(key):
+                continue
+        out[key] = _coerce_json_value(raw_value)
     return out
 
 
@@ -99,8 +187,8 @@ def read_context_docs(context_dir: str | Path | None, *, job_id: str) -> tuple[d
     ctrl_raw = _read_json(ctrl_path)
     wf_raw = _read_json(wf_path)
     return (
-        _sanitize_doc(ctrl_raw, CONTROL_CONTEXT_KEYS, job_id),
-        _sanitize_doc(wf_raw, WORKFLOW_CONTEXT_KEYS, job_id),
+        _sanitize_doc(ctrl_raw, kind="control", job_id=job_id),
+        _sanitize_doc(wf_raw, kind="workflow", job_id=job_id),
     )
 
 
@@ -110,8 +198,8 @@ def write_context_docs(context_dir: str | Path | None, *, control: dict[str, Any
     root = Path(context_dir).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     ctrl_path, wf_path = context_paths(root)
-    ctrl_doc = _sanitize_doc(control, CONTROL_CONTEXT_KEYS, job_id)
-    wf_doc = _sanitize_doc(workflow, WORKFLOW_CONTEXT_KEYS, job_id)
+    ctrl_doc = _sanitize_doc(control, kind="control", job_id=job_id)
+    wf_doc = _sanitize_doc(workflow, kind="workflow", job_id=job_id)
     now = int(time.time())
     ctrl_doc["updated_at"] = now
     wf_doc["updated_at"] = now
@@ -122,12 +210,15 @@ def write_context_docs(context_dir: str | Path | None, *, control: dict[str, Any
 def merge_result_into_contexts(result: dict[str, Any], *, control: dict[str, Any], workflow: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     out_control = dict(control or {})
     out_workflow = dict(workflow or {})
-    for k in CONTROL_CONTEXT_KEYS:
-        if k in result and result.get(k) is not None:
-            out_control[k] = result.get(k)
-    for k in WORKFLOW_CONTEXT_KEYS:
-        if k in result and result.get(k) is not None:
-            out_workflow[k] = result.get(k)
+    for raw_key, raw_value in (result or {}).items():
+        key = str(raw_key or "").strip()
+        if not key or raw_value is None or key in _META_KEYS or key in CONTEXT_REJECT_KEYS:
+            continue
+        if _is_control_key(key):
+            out_control[key] = _coerce_json_value(raw_value)
+            continue
+        if _is_workflow_key(key):
+            out_workflow[key] = _coerce_json_value(raw_value)
     return out_control, out_workflow
 
 
