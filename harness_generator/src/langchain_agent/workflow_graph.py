@@ -164,6 +164,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_families_covered: list[str]
     coverage_seed_families_missing: list[str]
     coverage_quality_flags: list[str]
+    degraded_seed_replan_triggered: bool
     plan_retry_reason: str
     plan_targets_schema_valid_before_retry: bool
     plan_targets_schema_valid_after_retry: bool
@@ -3433,6 +3434,25 @@ def _render_opencode_prompt_safe(
         )
 
 
+def _attach_prompt_render_status(
+    out: dict[str, Any],
+    *,
+    issue: str = "",
+) -> dict[str, Any]:
+    issue_text = str(issue or "").strip()
+    if issue_text:
+        prev = str(out.get("prompt_render_issue") or "").strip()
+        merged = issue_text
+        if prev and issue_text not in prev:
+            merged = f"{prev}; {issue_text}"
+        out["prompt_render_degraded"] = True
+        out["prompt_render_issue"] = merged[:4096]
+        return out
+    out["prompt_render_degraded"] = bool(out.get("prompt_render_degraded") or False)
+    out["prompt_render_issue"] = str(out.get("prompt_render_issue") or "")
+    return out
+
+
 def _default_run_rss_limit_mb() -> int:
     raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
     try:
@@ -4676,6 +4696,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     companion_doc: dict[str, Any] = {}
     companion_summary = ""
     analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
+    prompt_render_issue = ""
 
     for attempt in range(1, attempts + 1):
         try:
@@ -4724,7 +4745,15 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 analysis_hint = "\n".join(analysis_lines)
                 if hint:
                     analysis_hint = f"{analysis_hint}\n\nCoordinator hint:\n{hint}"
-                prompt = _render_opencode_prompt("analysis_with_hint", hint=analysis_hint)
+                prompt, render_issue = _render_opencode_prompt_safe(
+                    "analysis_with_hint",
+                    fallback_name="plan_with_hint",
+                    hint=analysis_hint,
+                    fallback_hint=analysis_hint,
+                )
+                if render_issue:
+                    prompt_render_issue = str(render_issue)
+                    _wf_log(cast(dict[str, Any], state), f"analysis: prompt render degraded -> {render_issue}")
                 gen.patcher.run_codex_command(
                     prompt,
                     stage_skill="analysis",
@@ -4771,6 +4800,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "target_analysis_summary": target_analysis_summary,
                 "message": "analysis completed",
             }
+            out = _attach_prompt_render_status(out, issue=prompt_render_issue)
             out = _clear_error_markers_on_success(out)
             _wf_log(cast(dict[str, Any], out), f"<- analysis ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -4799,6 +4829,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "target_analysis_summary": target_analysis_summary,
         "message": "analysis degraded",
     }
+    out = _attach_prompt_render_status(out, issue=prompt_render_issue or fallback_error)
     out = _clear_error_markers_on_success(out)
     _wf_log(cast(dict[str, Any], out), f"<- analysis degraded err={fallback_error} dt={_fmt_dt(time.perf_counter()-t0)}")
     return out
@@ -4814,6 +4845,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> plan")
     hint = (state.get("codex_hint") or "").strip()
+    prompt_render_issue = ""
     restart_to_plan = bool(state.get("restart_to_plan") or False)
     restart_reason = str(state.get("restart_to_plan_reason") or "").strip()
     restart_stage = str(state.get("restart_to_plan_stage") or "").strip()
@@ -4972,6 +5004,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_error": "Missing OPENAI_API_KEY for planning",
             "message": "plan failed",
         }
+        out = _attach_prompt_render_status(out)
         _wf_log(cast(dict[str, Any], out), f"<- plan err=missing-key dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     try:
@@ -5008,6 +5041,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 known_issues=render_known_issues,
             )
             if render_issue:
+                prompt_render_issue = str(render_issue)
                 hint = (hint + "\n\nKnown Issues:\n- " + render_issue).strip()
                 _wf_log(cast(dict[str, Any], state), f"plan: prompt render degraded -> {render_issue}")
             gen.patcher.run_codex_command(
@@ -5033,12 +5067,15 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             cleared_done = _clear_opencode_done_sentinel(gen.repo_root)
             if cleared_done:
                 _wf_log(cast(dict[str, Any], state), "plan: cleared stale done sentinel before schema-fix retry")
-            prompt, _ = _render_opencode_prompt_safe(
+            prompt, schema_render_issue = _render_opencode_prompt_safe(
                 "plan_fix_targets_schema",
                 fallback_name="plan_with_hint",
                 schema_error=targets_err,
                 fallback_hint=f"Known Issues:\n- targets schema invalid: {targets_err}",
             )
+            if schema_render_issue:
+                prompt_render_issue = str(schema_render_issue)
+                _wf_log(cast(dict[str, Any], state), f"plan: schema-fix prompt render degraded -> {schema_render_issue}")
             gen.patcher.run_codex_command(
                 prompt,
                 stage_skill="plan_fix_targets_schema",
@@ -5071,6 +5108,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "last_error": f"targets schema validation failed: {targets_err}",
                     "message": "plan failed",
                 }
+                out = _attach_prompt_render_status(out, issue=prompt_render_issue or targets_err)
                 if not ok_targets:
                     _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
                     return out
@@ -5239,6 +5277,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_score_breakdown_available": target_score_breakdown_available,
             "message": "planned",
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         out = _clear_error_markers_on_success(out)
         choose_target_snapshot = {
             "kind": "choose_target",
@@ -5279,6 +5318,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             state=cast(dict[str, Any], state),
         )
         out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -5293,6 +5333,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
+    prompt_render_issue = ""
     repair_mode = bool(state.get("repair_mode") or False)
     repair_origin_stage = str(state.get("repair_origin_stage") or "").strip().lower()
     if repair_origin_stage not in {"build", "crash", "coverage", "fix-harness"}:
@@ -5442,6 +5483,17 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         restored_from_cache = False
     if restored_from_cache:
         _wf_log(cast(dict[str, Any], state), "synthesize: restored cached build.py/build_strategy template")
+
+    def _remember_prompt_render_issue(issue: str) -> None:
+        nonlocal prompt_render_issue
+        issue_text = str(issue or "").strip()
+        if not issue_text:
+            return
+        if not prompt_render_issue:
+            prompt_render_issue = issue_text
+            return
+        if issue_text not in prompt_render_issue:
+            prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
 
     def _synthesis_output_status() -> dict[str, Any]:
         fuzz_dir = gen.repo_root / "fuzz"
@@ -5670,7 +5722,17 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
 
     def _run_synthesize_completion(timeout: int) -> None:
         missing_items = "\n".join(f"- {item}" for item in _missing_synthesis_items()) or "- no missing items detected"
-        prompt = _render_opencode_prompt("synthesize_complete_scaffold", missing_items=missing_items)
+        completion_hint = f"Complete required fuzz scaffold artifacts.\nMissing items:\n{missing_items}"
+        prompt, render_issue = _render_opencode_prompt_safe(
+            "synthesize_complete_scaffold",
+            fallback_name="synthesize_with_hint",
+            missing_items=missing_items,
+            hint=completion_hint,
+            fallback_hint=completion_hint,
+        )
+        if render_issue:
+            _remember_prompt_render_issue(render_issue)
+            _wf_log(cast(dict[str, Any], state), f"synthesize completion: prompt render degraded -> {render_issue}")
         gen.patcher.run_codex_command(
             prompt,
             additional_context=_completion_context() or None,
@@ -5781,6 +5843,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "last_error": "Missing OPENAI_API_KEY for synthesis",
             "message": "synthesize failed",
         }
+        out = _attach_prompt_render_status(out)
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err=missing-key dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     try:
@@ -5804,7 +5867,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 synth_template_name = "synthesize_repair_build_with_hint"
                 synth_stage_skill = "synthesize_repair_build"
         if hint:
-            prompt = _render_opencode_prompt(synth_template_name, hint=hint)
+            prompt, render_issue = _render_opencode_prompt_safe(
+                synth_template_name,
+                fallback_name="synthesize_with_hint",
+                hint=hint,
+                fallback_hint=hint,
+            )
+            if render_issue:
+                _remember_prompt_render_issue(render_issue)
+                _wf_log(cast(dict[str, Any], state), f"synthesize: prompt render degraded -> {render_issue}")
             # Provide context from plan/targets if present.
             plan = (gen.repo_root / "fuzz" / "PLAN.md")
             targets = (gen.repo_root / "fuzz" / "targets.json")
@@ -6063,6 +6134,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "crash_signature_dedup_hit": bool(state.get("crash_signature_dedup_hit") or False),
             "message": "synthesized",
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         out = _clear_error_markers_on_success(out)
         _wf_log(cast(dict[str, Any], out), f"<- synthesize ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -6074,6 +6146,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             state=cast(dict[str, Any], state),
         )
         out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -8086,6 +8159,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     # Ask an LLM to draft an *OpenCode instruction* tailored to the diagnostics.
     llm = _llm_or_none()
     codex_hint = (state.get("codex_hint") or "").strip()
+    prompt_render_issue = ""
 
     targeted_fix_lines = _build_file_targeted_fix_lines(gen.repo_root, last_error, stdout_tail, stderr_tail)
     if not codex_hint:
@@ -8324,11 +8398,17 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     if len(context) > context_max_chars:
         context = context[:context_max_chars]
 
-    prompt = _render_opencode_prompt(
+    prompt, render_issue = _render_opencode_prompt_safe(
         "fix_build_execute",
+        fallback_name="plan_repair_build_with_hint",
         codex_hint=codex_hint.strip(),
         build_log_file=build_log_file or "fuzz/build_full.log",
+        hint=codex_hint.strip(),
+        fallback_hint=codex_hint.strip(),
     )
+    if render_issue:
+        prompt_render_issue = str(render_issue)
+        _wf_log(cast(dict[str, Any], state), f"fix_build: prompt render degraded -> {render_issue}")
 
     try:
         _wf_log(cast(dict[str, Any], state), f"fix_build: running opencode (hint_lines={len(codex_hint.splitlines())})")
@@ -8371,6 +8451,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fix_action_type": "opencode",
             "fix_effect": fix_effect,
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         if changed_paths_count == 0 and next_noop_streak >= max_noop_streak:
             out["failed"] = False
             out["fix_build_terminal_reason"] = "fix_build_noop_streak_exceeded"
@@ -8403,6 +8484,7 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fix_action_type": "opencode",
             "fix_effect": "regressed",
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- fix_build err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -9549,6 +9631,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         run_error_kind_raw = str(state.get("run_error_kind") or "").strip().lower()
         run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or run_error_kind_raw
         cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
+        seed_generation_degraded = bool(state.get("coverage_seed_generation_degraded") or False)
         quality_score = float(seed_feedback.get("seed_score") or seed_quality.get("seed_score") or 0.0)
         early_new_units_30s = int(
             seed_feedback.get("early_new_units_30s")
@@ -9561,6 +9644,23 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             cold_start_failure
             and quality_score < cold_start_quality_threshold
             and early_new_units_30s <= cold_start_early_units_threshold
+        )
+        degraded_seed_replan_triggered = bool(
+            seed_generation_degraded
+            and (
+                quality_score < cold_start_quality_threshold
+                or early_new_units_30s <= cold_start_early_units_threshold
+                or any(
+                    flag in quality_flags
+                    for flag in {
+                        "low_early_yield",
+                        "missing_required_families",
+                        "missing_execution_targets",
+                        "seed_family_undercovered",
+                        "repo_examples_missing",
+                    }
+                )
+            )
         )
         seed_quality_issue = bool(
             any(
@@ -9621,6 +9721,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             coverage_bottleneck_kind = "seed_limited"
             if cold_start_failure:
                 coverage_bottleneck_reason = "cold_start_failure"
+            elif seed_generation_degraded:
+                coverage_bottleneck_reason = "seed_generation_degraded"
             elif merge_retained_low:
                 coverage_bottleneck_reason = "merge_retained_low"
             elif seed_families_missing:
@@ -9648,16 +9750,24 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         should_improve = False
         replan_required = False
         if base_should_improve:
-            if cold_start_seed_replan_triggered:
+            if cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
                 if can_replan:
                     should_improve = True
                     replan_required = True
                     improve_mode = "seed_replan"
-                    replan_reason = "seed_cold_start_failure"
+                    replan_reason = (
+                        "seed_cold_start_failure"
+                        if cold_start_seed_replan_triggered
+                        else "seed_generation_degraded"
+                    )
                 elif can_in_place:
                     should_improve = True
                     improve_mode = "in_place"
-                    replan_reason = "seed_cold_start_failure_fallback_in_place"
+                    replan_reason = (
+                        "seed_cold_start_failure_fallback_in_place"
+                        if cold_start_seed_replan_triggered
+                        else "seed_generation_degraded_fallback_in_place"
+                    )
                 else:
                     round_budget_exhausted = True
                     stop_reason = "coverage_loop_budget_exhausted"
@@ -9706,6 +9816,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 reason += f"; seed_quality_flags={','.join(quality_flags) or 'none'}"
             if cold_start_failure:
                 reason += "; cold_start_failure=1"
+            if seed_generation_degraded:
+                reason += "; seed_generation_degraded=1"
             if merge_retained_low:
                 reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
             if parallel_diagnosis_code != "balanced":
@@ -9774,12 +9886,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "run_error_kind": str(state.get("run_error_kind") or ""),
                 "run_error_kind_effective": run_error_kind,
                 "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
+                "degraded_seed_replan_triggered": degraded_seed_replan_triggered,
                 "cold_start_trigger_snapshot": {
                     "quality_score": round(quality_score, 6),
                     "quality_threshold": round(cold_start_quality_threshold, 6),
                     "early_new_units_30s": int(early_new_units_30s),
                     "early_units_30s_threshold": int(cold_start_early_units_threshold),
                     "cold_start_failure": bool(cold_start_failure),
+                    "seed_generation_degraded": bool(seed_generation_degraded),
                 },
                 "should_improve": should_improve,
                 "ts": int(time.time()),
@@ -9831,12 +9945,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
             "coverage_run_error_kind_effective": run_error_kind,
             "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
+            "degraded_seed_replan_triggered": degraded_seed_replan_triggered,
             "cold_start_trigger_snapshot": {
                 "quality_score": round(quality_score, 6),
                 "quality_threshold": round(cold_start_quality_threshold, 6),
                 "early_new_units_30s": int(early_new_units_30s),
                 "early_units_30s_threshold": int(cold_start_early_units_threshold),
                 "cold_start_failure": bool(cold_start_failure),
+                "seed_generation_degraded": bool(seed_generation_degraded),
             },
             "message": "coverage analysis done",
             "auto_stop_policy": auto_stop_policy,
@@ -9909,6 +10025,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> improve-harness")
+    prompt_render_issue = ""
     try:
         if not bool(state.get("coverage_should_improve")):
             out = {
@@ -10036,9 +10153,18 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                     "last_error": "Missing OPENAI_API_KEY for improve-harness in-place repair",
                     "message": "improve-harness failed",
                 }
+                out = _attach_prompt_render_status(out)
                 _wf_log(cast(dict[str, Any], out), f"<- improve-harness err=missing-key dt={_fmt_dt(time.perf_counter()-t0)}")
                 return out
-            prompt = _render_opencode_prompt("improve_harness_in_place_with_hint", hint=hint)
+            prompt, render_issue = _render_opencode_prompt_safe(
+                "improve_harness_in_place_with_hint",
+                fallback_name="plan_repair_coverage_with_hint",
+                hint=hint,
+                fallback_hint=hint,
+            )
+            if render_issue:
+                prompt_render_issue = str(render_issue)
+                _wf_log(cast(dict[str, Any], state), f"improve-harness: prompt render degraded -> {render_issue}")
             ctx_parts: list[str] = []
             try:
                 exec_plan = gen.repo_root / "fuzz" / "execution_plan.json"
@@ -10112,6 +10238,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             "auto_stop_blocked_reason": str(state.get("auto_stop_blocked_reason") or ""),
             "continuous_loop_count": int(state.get("continuous_loop_count") or 0),
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         if out["auto_stop_policy"] == "hard_fail_only":
             replan_ineffective = str(out.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
                 out.get("coverage_replan_effective", True)
@@ -10127,6 +10254,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         return out
     except Exception as e:
         out = {**state, "last_step": "improve-harness", "last_error": str(e), "message": "improve-harness failed"}
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- improve-harness err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -10141,6 +10269,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> fix_crash")
+    prompt_render_issue = ""
 
     repo_root = gen.repo_root
     snapshot = snapshot_repo_text(repo_root)
@@ -10154,9 +10283,18 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     harness_error = bool(re.search(r"HARNESS ERROR", analysis_text, re.IGNORECASE))
 
     if harness_error:
-        prompt = _render_opencode_prompt("fix_crash_harness_error")
+        prompt, render_issue = _render_opencode_prompt_safe(
+            "fix_crash_harness_error",
+            fallback_name="fix_crash_upstream_bug",
+        )
     else:
-        prompt = _render_opencode_prompt("fix_crash_upstream_bug")
+        prompt, render_issue = _render_opencode_prompt_safe(
+            "fix_crash_upstream_bug",
+            fallback_name="fix_crash_harness_error",
+        )
+    if render_issue:
+        prompt_render_issue = str(render_issue)
+        _wf_log(cast(dict[str, Any], state), f"fix-crash: prompt render degraded -> {render_issue}")
 
     ctx_parts: list[str] = []
     if last_fuzzer:
@@ -10194,6 +10332,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 "fix_patch_files": [],
                 "fix_patch_bytes": int(patch_bytes),
             }
+            out = _attach_prompt_render_status(out, issue=prompt_render_issue)
             _wf_log(cast(dict[str, Any], out), f"<- fix_crash err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
 
@@ -10233,6 +10372,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "fix_patch_files": changed_files,
             "fix_patch_bytes": int(patch_bytes),
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         _wf_log(cast(dict[str, Any], out), f"<- fix_crash ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -10243,6 +10383,7 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             "crash_fix_attempts": attempts,
             "message": "opencode fix_crash failed",
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- fix_crash err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -10293,7 +10434,17 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
     re_run_text = re_run_report.read_text(encoding="utf-8", errors="replace") if re_run_report.is_file() else ""
     stderr_tail = str(state.get("repair_stderr_tail") or "")[:4000]
 
-    prompt = _render_opencode_prompt("crash_triage_with_hint", hint=str(state.get("codex_hint") or ""))
+    prompt_render_issue = ""
+    prompt, render_issue = _render_opencode_prompt_safe(
+        "crash_triage_with_hint",
+        fallback_name="analysis_with_hint",
+        fallback_hint=str(state.get("codex_hint") or ""),
+        known_issues=["crash-triage prompt render degraded"],
+        hint=str(state.get("codex_hint") or ""),
+    )
+    if render_issue:
+        prompt_render_issue = str(render_issue)
+        _wf_log(cast(dict[str, Any], state), f"crash-triage prompt degraded: {prompt_render_issue}")
     context_parts = [
         f"last_fuzzer: {str(state.get('last_fuzzer') or '').strip()}",
         f"last_crash_artifact: {str(state.get('last_crash_artifact') or '').strip()}",
@@ -10468,6 +10619,7 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "constraint_memory_count": int(constraint_count),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
+    out = _attach_prompt_render_status(out, issue=prompt_render_issue)
     out = _record_decision_trace(
         out,
         stage="crash-triage",
@@ -10512,7 +10664,17 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         except Exception:
             triage_doc = {}
 
-    prompt = _render_opencode_prompt("crash_analysis_with_hint", hint=str(state.get("codex_hint") or ""))
+    prompt_render_issue = ""
+    prompt, render_issue = _render_opencode_prompt_safe(
+        "crash_analysis_with_hint",
+        fallback_name="analysis_with_hint",
+        fallback_hint=str(state.get("codex_hint") or ""),
+        known_issues=["crash-analysis prompt render degraded"],
+        hint=str(state.get("codex_hint") or ""),
+    )
+    if render_issue:
+        prompt_render_issue = str(render_issue)
+        _wf_log(cast(dict[str, Any], state), f"crash-analysis prompt degraded: {prompt_render_issue}")
     context_parts = [
         f"last_fuzzer: {str(state.get('last_fuzzer') or '').strip()}",
         f"last_crash_artifact: {str(state.get('last_crash_artifact') or '').strip()}",
@@ -10688,6 +10850,7 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         "constraint_memory_count": int(constraint_count),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
+    out = _attach_prompt_render_status(out, issue=prompt_render_issue)
     out = _record_decision_trace(
         out,
         stage="crash-analysis",
@@ -10726,7 +10889,17 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
     analysis_text = crash_analysis.read_text(encoding="utf-8", errors="replace") if crash_analysis.is_file() else ""
     triage_text = triage_json.read_text(encoding="utf-8", errors="replace") if triage_json.is_file() else ""
 
-    prompt = _render_opencode_prompt("fix_harness_after_run")
+    prompt_render_issue = ""
+    prompt, render_issue = _render_opencode_prompt_safe(
+        "fix_harness_after_run",
+        fallback_name="synthesize_repair_fix_harness_with_hint",
+        fallback_hint=str(state.get("codex_hint") or ""),
+        known_issues=["fix-harness prompt render degraded"],
+        hint=str(state.get("codex_hint") or ""),
+    )
+    if render_issue:
+        prompt_render_issue = str(render_issue)
+        _wf_log(cast(dict[str, Any], state), f"fix-harness prompt degraded: {prompt_render_issue}")
     ctx_parts: list[str] = []
     if info_text:
         ctx_parts.append("=== crash_info.md ===\n" + info_text)
@@ -10766,6 +10939,7 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
                 "fix_patch_files": [],
                 "fix_patch_bytes": int(patch_bytes),
             }
+            out = _attach_prompt_render_status(out, issue=prompt_render_issue)
             _wf_log(cast(dict[str, Any], out), f"<- fix-harness err=no-op dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
         out = {
@@ -10782,6 +10956,7 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
             "fix_patch_files": changed_files,
             "fix_patch_bytes": int(patch_bytes),
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         _wf_log(cast(dict[str, Any], out), f"<- fix-harness ok dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
     except Exception as e:
@@ -10796,6 +10971,7 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
             "restart_to_plan_error_text": str(e),
             "message": "fix-harness failed",
         }
+        out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- fix-harness err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
 
@@ -12061,6 +12237,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "cold_start_seed_replan_triggered": bool(out.get("cold_start_seed_replan_triggered") or False),
+        "degraded_seed_replan_triggered": bool(out.get("degraded_seed_replan_triggered") or False),
         "cold_start_trigger_snapshot": dict(out.get("cold_start_trigger_snapshot") or {}),
         "coverage_history": list(out.get("coverage_history") or []),
         "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),

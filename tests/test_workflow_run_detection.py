@@ -1453,6 +1453,54 @@ def test_node_coverage_analysis_cold_start_stays_in_place_when_threshold_not_met
     assert out["cold_start_seed_replan_triggered"] is False
 
 
+def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 6,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "readpng2_decode_data_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_generation_degraded": True,
+            "coverage_seed_quality": {
+                "quality_flags": [
+                    "missing_required_families",
+                    "seed_family_undercovered",
+                ],
+                "cold_start_failure": False,
+                "seed_score": 0.66,
+                "early_new_units_30s": 5,
+                "merge_retained_ratio_files": 0.9,
+            },
+            "coverage_quality_flags": [
+                "missing_required_families",
+                "seed_family_undercovered",
+            ],
+            "run_details": [
+                {
+                    "fuzzer": "readpng2_decode_data_fuzz",
+                    "final_cov": 8,
+                    "final_ft": 10,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert out["coverage_improve_mode"] == "seed_replan"
+    assert out["coverage_replan_required"] is True
+    assert out["cold_start_seed_replan_triggered"] is False
+    assert out["degraded_seed_replan_triggered"] is True
+    snap = dict(out.get("cold_start_trigger_snapshot") or {})
+    assert snap.get("seed_generation_degraded") is True
+
+
 def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
