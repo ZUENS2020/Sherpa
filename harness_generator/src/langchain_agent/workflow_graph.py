@@ -49,6 +49,7 @@ _RECOVERABLE_RUN_ERROR_KINDS = {
     "run_timeout",
     "run_finalize_timeout",
     "run_resource_exhaustion",
+    "dict_parse_error",
 }
 
 _FATAL_RUN_ERROR_KINDS = {
@@ -134,6 +135,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
     coverage_exhausted_targets: list[str]
+    coverage_attempted_targets: list[str]
     coverage_feedback_for_plan: str
     crash_stack_signature: str
     crash_stack_type: str
@@ -1326,9 +1328,29 @@ def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
-def _select_primary_target(repo_root: Path) -> dict[str, Any]:
+def _select_primary_target(
+    repo_root: Path,
+    *,
+    exclude_names: list[str] | None = None,
+    prefer_deeper: bool = False,
+) -> dict[str, Any]:
     targets = _load_targets_doc(repo_root)
-    return dict(targets[0]) if targets else {}
+    if not targets:
+        return {}
+    candidates = targets
+    if exclude_names:
+        filtered = [t for t in candidates if t.get("name") not in set(exclude_names)]
+        if filtered:
+            candidates = filtered
+    if prefer_deeper:
+        _depth_order = {"deep": 0, "medium": 1, "shallow": 2}
+        candidates = sorted(
+            candidates,
+            key=lambda t: _depth_order.get(
+                str(t.get("depth_class", "shallow")).lower(), 2
+            ),
+        )
+    return dict(candidates[0])
 
 
 def _selected_targets_path(repo_root: Path) -> Path:
@@ -5122,7 +5144,16 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "Use `fuzz/antlr_plan_context.json` as grammar-aware grounding for API/entrypoint selection.\n"
                 f"{antlr_context_summary}"
             )
-        primary_target = _select_primary_target(gen.repo_root)
+        # On replan, prefer deeper targets and skip already-attempted ones.
+        _attempted = list(state.get("coverage_attempted_targets") or [])
+        _is_replan = str(state.get("coverage_improve_mode") or "") == "replan" or bool(
+            state.get("coverage_replan_required") or False
+        )
+        primary_target = _select_primary_target(
+            gen.repo_root,
+            exclude_names=_attempted if _is_replan else None,
+            prefer_deeper=_is_replan,
+        )
         selected_targets_path = ""
         execution_plan_path = ""
         try:
@@ -5216,6 +5247,14 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "analysis_evidence_count": analysis_evidence_count,
             "selected_targets_path": selected_targets_path,
             "execution_plan_path": execution_plan_path,
+            "coverage_attempted_targets": list(
+                dict.fromkeys(
+                    _attempted + [new_target_name or prev_target_name]
+                )
+            ),
+            # Reset continuous loop counter on replan so the new strategy
+            # gets a fresh set of attempts.
+            "continuous_loop_count": 0,
             "coverage_target_name": new_target_name or prev_target_name,
             "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
@@ -9129,6 +9168,18 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         f"(exec/s=0 with no-interesting-input warnings): {joined}"
                     )
 
+        # Auto-repair corrupted dict files on dict_parse_error so next build
+        # regenerates them from scratch.
+        if run_error_kind == "dict_parse_error":
+            dict_dir = gen.fuzz_dir / "dict"
+            if dict_dir.is_dir():
+                for df in dict_dir.iterdir():
+                    if df.suffix == ".dict":
+                        try:
+                            df.unlink()
+                        except OSError:
+                            pass
+
         if crash_candidates:
             if _finalize_timed_out("packaging crash artifacts"):
                 crash_found = False
@@ -9195,6 +9246,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             dict(state.get("coverage_seed_quality") or {}),
         )
         aggregated_quality_flags: set[str] = set()
+        cold_start_failure_any = False
         for detail in run_details:
             sq = detail.get("seed_quality") or {}
             if not isinstance(sq, dict):
@@ -9203,6 +9255,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 sval = str(flag or "").strip()
                 if sval:
                     aggregated_quality_flags.add(sval)
+            if bool(sq.get("cold_start_failure")):
+                cold_start_failure_any = True
 
         out = {
             **state,
@@ -9276,6 +9330,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_generation_degraded": bool(
                 seed_generation_failed_fuzzers
                 or int(seed_count_filtered_total.get("total") or 0) <= 1
+                or cold_start_failure_any
             ),
             "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
@@ -9750,7 +9805,17 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         should_improve = False
         replan_required = False
         if base_should_improve:
-            if cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
+            # Zero-coverage after at least one round indicates a fundamental
+            # problem (broken dict, bad harness, invalid seeds).  Force a
+            # full replan instead of incremental in-place tweaks.
+            if current_cov <= 0 and current_round > 0:
+                # Always force replan on zero coverage — the system must not
+                # stop; it should switch strategy (target, seeds, harness).
+                should_improve = True
+                replan_required = True
+                improve_mode = "replan"
+                replan_reason = "zero_coverage_force_replan"
+            elif cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
                 if can_replan:
                     should_improve = True
                     replan_required = True
@@ -11697,6 +11762,12 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
         return "stop"
     if bool(state.get("coverage_should_improve")):
         return "improve-harness"
+    # Circuit breaker: force a full replan after repeated no-improvement
+    # loops instead of blindly re-running the same failing configuration.
+    max_continuous = int(os.environ.get("SHERPA_MAX_CONTINUOUS_LOOP", "3"))
+    loop_count = int(state.get("continuous_loop_count") or 0)
+    if loop_count >= max_continuous:
+        return "plan"
     if _auto_stop_policy() == "hard_fail_only":
         return "run"
     return "stop"
@@ -11709,6 +11780,11 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
+    # Circuit breaker: force replan after repeated no-improvement loops.
+    max_continuous = int(os.environ.get("SHERPA_MAX_CONTINUOUS_LOOP", "3"))
+    loop_count = int(state.get("continuous_loop_count") or 0)
+    if loop_count >= max_continuous:
+        return "plan"
     if str(state.get("coverage_improve_mode") or "").strip() == "replan" and not bool(
         state.get("coverage_replan_effective", True)
     ):
