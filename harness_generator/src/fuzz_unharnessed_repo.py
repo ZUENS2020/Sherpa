@@ -302,6 +302,28 @@ PROFILE_DICTIONARY_TOKENS: Dict[str, List[str]] = {
     "generic": [],
 }
 
+# ── libFuzzer dictionary token normalizer ──────────────────────────────
+# libFuzzer dict format only recognizes \xNN hex escapes inside quoted
+# strings.  C-style escapes (\r, \n, \t …) extracted from harness source
+# must be converted to their \xNN equivalents before writing to .dict files.
+_C_ESCAPE_TO_HEX: Dict[str, str] = {
+    r"\r": r"\x0d",
+    r"\n": r"\x0a",
+    r"\t": r"\x09",
+    r"\a": r"\x07",
+    r"\b": r"\x08",
+    r"\f": r"\x0c",
+    r"\v": r"\x0b",
+}
+
+
+def _normalize_dict_token(tok: str) -> str:
+    """Convert C-style escape sequences to ``\\xNN`` for libFuzzer compatibility."""
+    for c_esc, hex_esc in _C_ESCAPE_TO_HEX.items():
+        tok = tok.replace(c_esc, hex_esc)
+    return tok
+
+
 # ── Per-profile adaptive max_len (bytes) ─────────────────────────────────
 PROFILE_MAX_LEN: Dict[str, int] = {
     "parser-structure": 4096,
@@ -4644,7 +4666,7 @@ EOF
                         literal = m.group(0)
                         # Skip very common/useless strings
                         if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
-                            tokens.append(literal)
+                            tokens.append(_normalize_dict_token(literal))
                 except Exception:
                     pass
 
@@ -5344,6 +5366,11 @@ EOF
                     run_error_kind = "run_timeout"
                 if not error:
                     error = f"fuzzer run timed out for {bin_path.name}"
+            elif "parsedictionaryfile: error" in log_lower:
+                if not run_error_kind:
+                    run_error_kind = "dict_parse_error"
+                if not error:
+                    error = f"fuzzer dictionary parse error for {bin_path.name}; regenerate dict file"
             else:
                 if not run_error_kind:
                     run_error_kind = "nonzero_exit_without_crash"
