@@ -2309,3 +2309,45 @@ def test_node_re_run_rebuilds_workspace_when_missing(tmp_path: Path, monkeypatch
     assert out["re_run_done"] is True
     assert out["re_run_ok"] is True
     assert out["crash_repro_ok"] is True
+
+
+def test_state_typeddict_contains_all_node_output_keys():
+    """Ensure FuzzWorkflowState TypedDict has all keys used by node outputs.
+
+    LangGraph silently drops state keys not defined in the TypedDict, causing
+    subtle bugs where values computed in one node don't propagate to the next.
+    This test guards against that by checking critical keys are defined.
+    """
+    import typing
+    hints = typing.get_type_hints(workflow_graph.FuzzWorkflowState)
+    critical_keys = [
+        "coverage_seed_generation_degraded",
+        "coverage_seed_generation_failed_fuzzers",
+        "coverage_seed_generation_failed_count",
+        "coverage_seed_generation_error_by_fuzzer",
+        "coverage_repo_examples_filtered",
+        "coverage_repo_examples_rejected_count",
+        "coverage_repo_examples_accepted_count",
+        "cold_start_seed_replan_triggered",
+        "cold_start_trigger_snapshot",
+        "auto_stop_policy",
+        "auto_stop_blocked_reason",
+        "continuous_loop_count",
+        "run_parallel_engine",
+        "run_parallel_outer",
+        "run_parallel_inner",
+        "run_parallel_cpu_budget",
+        "coverage_parallel_diagnosis_code",
+        "coverage_parallel_diagnosis",
+        "coverage_parallel_engine",
+        "coverage_parallel_outer",
+        "coverage_parallel_inner",
+        "coverage_parallel_cpu_budget",
+        "coverage_parallel_utilization_ratio",
+        "coverage_total_execs_per_sec",
+        "coverage_run_error_kind_effective",
+        "degraded_seed_replan_triggered",
+        "coverage_attempted_targets",
+    ]
+    missing = [k for k in critical_keys if k not in hints]
+    assert not missing, f"FuzzWorkflowState TypedDict missing keys (LangGraph will drop them): {missing}"

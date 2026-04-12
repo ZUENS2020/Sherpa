@@ -125,6 +125,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_seed_counts_raw: dict[str, int]
     coverage_seed_counts_filtered: dict[str, int]
     coverage_seed_noise_rejected_count: int
+    coverage_seed_generation_failed_fuzzers: list[str]
+    coverage_seed_generation_error_by_fuzzer: dict[str, str]
+    coverage_seed_generation_failed_count: int
+    coverage_seed_generation_degraded: bool
     coverage_missing_execution_targets: list[str]
     coverage_seed_family_coverage: dict[str, Any]
     coverage_seed_feedback: dict[str, Any]
@@ -132,11 +136,30 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_quality_oracle: str
     coverage_bottleneck_kind: str
     coverage_bottleneck_reason: str
+    coverage_parallel_diagnosis_code: str
+    coverage_parallel_diagnosis: str
+    coverage_parallel_engine: str
+    coverage_parallel_outer: int
+    coverage_parallel_inner: int
+    coverage_parallel_cpu_budget: int
+    coverage_parallel_utilization_ratio: float
+    coverage_total_execs_per_sec: int
+    coverage_underutilized_execs_threshold: int
+    coverage_run_error_kind_effective: str
+    coverage_repo_examples_filtered: bool
+    coverage_repo_examples_rejected_count: int
+    coverage_repo_examples_accepted_count: int
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
     coverage_exhausted_targets: list[str]
     coverage_attempted_targets: list[str]
     coverage_feedback_for_plan: str
+    cold_start_seed_replan_triggered: bool
+    cold_start_trigger_snapshot: dict[str, Any]
+    auto_stop_policy: str
+    auto_stop_blocked_reason: str
+    continuous_loop_count: int
+    target_score_breakdown_available: bool
     crash_stack_signature: str
     crash_stack_type: str
     crash_stack_top_frames: str
@@ -218,8 +241,17 @@ class FuzzWorkflowState(TypedDict, total=False):
     synthesize_target_relation: str
     synthesize_target_runtime_viability: str
     run_children_exit_count: int
+    run_cancel_requested_count: int
+    run_cancel_effective_count: int
+    run_parallel_engine: str
+    run_parallel_outer: int
+    run_parallel_inner: int
+    run_parallel_cpu_budget: int
     run_details: list[dict[str, Any]]
     run_batch_plan: list[dict[str, Any]]
+    first_crash_fuzzer: str
+    early_stop_reason: str
+    early_stopped_fuzzers: list[str]
     last_crash_artifact: str
     last_fuzzer: str
     crash_signature: str
