@@ -3403,8 +3403,10 @@ def _solve_parallelism(
     sanitizer_l = (sanitizer or "").strip().lower()
 
     # ASAN/MSAN/TSAN are memory-heavy in multi-process mode; cap inner fanout.
+    # Allow up to 4 workers – modern pods typically have ≥4 CPU and ASAN
+    # overhead is ~2×, so 4 workers still fit within typical memory budgets.
     if sanitizer_l in {"address", "memory", "thread"}:
-        inner_cap = max(1, min(cpu, 2))
+        inner_cap = max(1, min(cpu, 4))
     else:
         inner_cap = max(1, cpu)
 
@@ -5305,6 +5307,40 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 coverage_stop_reason = "no_material_change"
                 coverage_replan_reason = "no_material_change"
                 repair_force_strategy_change = True
+
+        # ── Corpus carry-over on target change ──────────────────────────
+        # When a replan selects a different target, copy the old fuzzer's
+        # corpus into the new fuzzer's corpus dir so coverage progress
+        # isn't lost.  Only carry over if seed profiles match (otherwise
+        # the input format may be incompatible).
+        _corpus_carryover_count = 0
+        if replan_mode and target_changed and new_target_name:
+            _prev_seed_prof = str(state.get("coverage_seed_profile") or "")
+            if _prev_seed_prof == new_seed_profile or not _prev_seed_prof:
+                _corpus_root = gen.repo_root / "fuzz" / "corpus"
+                if _corpus_root.is_dir():
+                    # Collect all corpus files from previous fuzzers
+                    _old_corpus_files: list[Path] = []
+                    for _sub in _corpus_root.iterdir():
+                        if _sub.is_dir() and _sub.name != new_target_name:
+                            for _cf in _sub.iterdir():
+                                if _cf.is_file():
+                                    _old_corpus_files.append(_cf)
+                    if _old_corpus_files:
+                        _new_corpus_dir = _corpus_root / new_target_name
+                        _new_corpus_dir.mkdir(parents=True, exist_ok=True)
+                        for _cf in _old_corpus_files:
+                            _dst = _new_corpus_dir / _cf.name
+                            if not _dst.exists():
+                                try:
+                                    import shutil
+                                    shutil.copy2(str(_cf), str(_dst))
+                                    _corpus_carryover_count += 1
+                                except Exception:
+                                    pass
+                        if _corpus_carryover_count > 0:
+                            print(f"[*] Corpus carry-over: copied {_corpus_carryover_count} files to {new_target_name}")
+
         out = {
             **state,
             "last_step": "plan",
@@ -10105,7 +10141,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 selected_target_score_breakdown or state.get("target_score_breakdown_available")
             ),
         }
-        if auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
+        if should_improve or current_cov > prev_cov:
+            # Reset the circuit-breaker counter whenever the coverage loop
+            # makes genuine progress so that a brief stall followed by new
+            # coverage does not accumulate towards a spurious replan.
+            out["continuous_loop_count"] = 0
+        elif auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
             out["auto_stop_blocked_reason"] = "coverage_no_improve"
             out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
@@ -10128,11 +10169,32 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             out["coverage_source_report"] = source_report
             out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
 
-        # Track exhausted targets for coverage-guided replan
-        exhausted = list(state.get("coverage_exhausted_targets") or [])
-        if plateau_streak >= 2 and current_target_api and current_target_api not in exhausted:
-            exhausted.append(current_target_api)
-        out["coverage_exhausted_targets"] = exhausted
+        # Track exhausted targets for coverage-guided replan.
+        # Each entry is either a plain target name (legacy) or a dict
+        # {"name": ..., "round": ...}.  Entries older than
+        # SHERPA_EXHAUSTED_TARGET_TTL rounds (default 5) are pruned so that
+        # a temporarily-failed target can be retried later.
+        _exhausted_ttl = int(os.environ.get("SHERPA_EXHAUSTED_TARGET_TTL", "5"))
+        _raw_exhausted = list(state.get("coverage_exhausted_targets") or [])
+        # Normalise legacy plain-string entries
+        exhausted_entries: list[dict[str, Any]] = []
+        for _e in _raw_exhausted:
+            if isinstance(_e, dict):
+                exhausted_entries.append(_e)
+            elif isinstance(_e, str) and _e:
+                exhausted_entries.append({"name": _e, "round": max(0, current_round - 1)})
+        # Add current target if plateau detected
+        _exhausted_names = {e["name"] for e in exhausted_entries}
+        if plateau_streak >= 2 and current_target_api and current_target_api not in _exhausted_names:
+            exhausted_entries.append({"name": current_target_api, "round": current_round})
+        # Prune expired entries
+        exhausted_entries = [
+            e for e in exhausted_entries
+            if current_round - int(e.get("round") or 0) < _exhausted_ttl
+        ]
+        out["coverage_exhausted_targets"] = exhausted_entries
+        # Convenience flat list for downstream consumers
+        exhausted = [str(e.get("name") or e) for e in exhausted_entries]
 
         # Build coverage feedback for plan stage (replan context)
         if replan_required and history:
