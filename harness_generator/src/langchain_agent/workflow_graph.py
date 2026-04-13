@@ -1360,6 +1360,47 @@ def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)]
 
 
+def _enrich_targets_depth(repo_root: Path) -> None:
+    """Back-fill depth_score / depth_class on every target in targets.json.
+
+    OpenCode often omits these fields.  Without them all targets look equal
+    and _select_primary_target cannot prefer deeper ones on replan.
+    """
+    targets_path = repo_root / "fuzz" / "targets.json"
+    if not targets_path.is_file():
+        return
+    try:
+        data = json.loads(targets_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return
+    if not isinstance(data, list) or not data:
+        return
+    changed = False
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("depth_score") and item.get("depth_class"):
+            continue
+        name = str(item.get("name") or "")
+        desc = str(item.get("description") or "")
+        ttype = str(item.get("target_type") or "")
+        score, depth_class, reason = _score_target_depth(
+            name, desc, target_type=ttype,
+        )
+        item["depth_score"] = score
+        item["depth_class"] = depth_class
+        item["selection_bias_reason"] = reason
+        changed = True
+    if changed:
+        try:
+            targets_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+
 def _select_primary_target(
     repo_root: Path,
     *,
@@ -5166,6 +5207,10 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not ok_targets:
                     _wf_log(cast(dict[str, Any], out), f"<- plan err=targets-schema dt={_fmt_dt(time.perf_counter()-t0)}")
                     return out
+
+        # Back-fill depth_score/depth_class when OpenCode omits them so that
+        # _select_primary_target can differentiate targets on replan.
+        _enrich_targets_depth(gen.repo_root)
 
         fix_on_crash, _ = _derive_plan_policy(gen.repo_root)
         plan_hint = _make_plan_hint(gen.repo_root)
