@@ -51,6 +51,13 @@ WORKFLOW_CONTEXT_KEYS = {
     "degraded_seed_replan_triggered",
     "cold_start_seed_replan_skipped_budget",
     "cold_start_trigger_snapshot",
+    "vuln_hunting_enabled",
+    "vuln_focus_profile",
+    "target_surface_policy",
+    "security_evidence_count",
+    "vuln_candidate_count",
+    "security_priority_mode",
+    "latest_vuln_decision_snapshot",
 }
 
 WORKFLOW_CONTEXT_PREFIXES = (
@@ -74,6 +81,7 @@ WORKFLOW_CONTEXT_PREFIXES = (
     "repair_",
     "restart_",
     "run_",
+    "security_",
     "same_",
     "selected_",
     "synthesize_",

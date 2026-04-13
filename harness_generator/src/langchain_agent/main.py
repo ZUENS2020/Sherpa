@@ -1930,6 +1930,11 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
                 fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
                 analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
+                security_evidence_count=int(payload.get("security_evidence_count") or 0),
+                vuln_candidate_count=int(payload.get("vuln_candidate_count") or 0),
+                vuln_hunting_enabled=bool(payload.get("vuln_hunting_enabled") or False),
+                security_priority_mode=bool(payload.get("security_priority_mode") or False),
+                latest_vuln_decision_snapshot=dict(payload.get("latest_vuln_decision_snapshot") or {}),
                 target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
                 target_score_breakdown_available=bool(payload.get("target_score_breakdown_available") or False),
                 constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
@@ -3632,6 +3637,11 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_coverage_quality_flags", [])
     view.setdefault("fuzz_coverage_bottleneck_kind", "")
     view.setdefault("analysis_evidence_count", 0)
+    view.setdefault("security_evidence_count", 0)
+    view.setdefault("vuln_candidate_count", 0)
+    view.setdefault("vuln_hunting_enabled", False)
+    view.setdefault("security_priority_mode", False)
+    view.setdefault("latest_vuln_decision_snapshot", {})
     view.setdefault("target_scoring_enabled", False)
     view.setdefault("target_score_breakdown_available", False)
     view.setdefault("constraint_memory_count", 0)
@@ -3867,6 +3877,11 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
                 "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
+                "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
+                "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),
+                "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
+                "security_priority_mode": bool((active_child or job).get("security_priority_mode", False)),
+                "latest_vuln_decision_snapshot": dict((active_child or job).get("latest_vuln_decision_snapshot") or {}),
                 "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
                 "target_score_breakdown_available": bool((active_child or job).get("target_score_breakdown_available", False)),
                 "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
@@ -4522,6 +4537,21 @@ def _run_fuzz_job(
                 or run_terminal_reason
                 or "workflow_failed"
             ).strip()
+        final_metric_fields: dict[str, object] = {}
+        if isinstance(res, dict):
+            final_metric_fields = {
+                "analysis_evidence_count": int(res.get("analysis_evidence_count") or 0),
+                "security_evidence_count": int(res.get("security_evidence_count") or 0),
+                "vuln_candidate_count": int(res.get("vuln_candidate_count") or 0),
+                "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
+                "security_priority_mode": bool(res.get("security_priority_mode") or False),
+                "latest_vuln_decision_snapshot": dict(res.get("latest_vuln_decision_snapshot") or {}),
+                "target_scoring_enabled": bool(res.get("target_scoring_enabled") or False),
+                "target_score_breakdown_available": bool(res.get("target_score_breakdown_available") or False),
+                "decision_trace_count": int(res.get("decision_trace_count") or 0),
+                "latest_decision_snapshot": dict(res.get("latest_decision_snapshot") or {}),
+                "crash_signature_dedup_hit": bool(res.get("crash_signature_dedup_hit") or False),
+            }
         _job_update(
             job_id,
             status=final_status,
@@ -4530,6 +4560,7 @@ def _run_fuzz_job(
             recoverable=False,
             resume_error_code=None,
             last_resume_finished_at=time.time() if resumed else None,
+            **final_metric_fields,
         )
     except (
         RuntimeError,

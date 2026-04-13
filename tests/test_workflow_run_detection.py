@@ -1549,6 +1549,153 @@ def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path)
     assert str(top.get("target_score_penalty_reason") or "") == "cold_start_low_yield"
 
 
+def test_build_selected_targets_doc_prefers_high_vuln_signal_when_base_factors_equal(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "parse_low_risk",
+                    "api": "parse_low_risk",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 14,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "vuln_likelihood": 0.20,
+                    "exploitability": 0.20,
+                    "reachability_confidence": 0.40,
+                },
+                {
+                    "name": "parse_high_risk",
+                    "api": "parse_high_risk",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 14,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "vuln_likelihood": 0.95,
+                    "exploitability": 0.90,
+                    "reachability_confidence": 0.95,
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    assert len(selected) == 2
+    assert selected[0]["target"] == "parse_high_risk"
+    assert selected[0]["score_total"] > selected[1]["score_total"]
+    assert selected[0]["security_priority_mode"] is True
+    assert isinstance(selected[0].get("security_score_breakdown"), dict)
+
+
+def test_build_selected_targets_doc_internal_api_threshold_contract(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    monkeypatch.setenv("SHERPA_VULN_INTERNAL_API_MIN_SCORE", "0.75")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "public_parser_api",
+                    "api": "public_parser_api",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 14,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "vuln_likelihood": 0.70,
+                    "exploitability": 0.70,
+                    "reachability_confidence": 0.90,
+                },
+                {
+                    "name": "internal_high_risk",
+                    "api": "core::internal::decode",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 14,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "vuln_likelihood": 0.90,
+                    "exploitability": 0.90,
+                    "reachability_confidence": 0.90,
+                },
+                {
+                    "name": "internal_low_risk",
+                    "api": "core::internal::parse",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 14,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "vuln_likelihood": 0.20,
+                    "exploitability": 0.20,
+                    "reachability_confidence": 0.40,
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "target_analysis.json").write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    {
+                        "name": "internal_high_risk",
+                        "api": "core::internal::decode",
+                        "vuln_likelihood": 0.90,
+                        "exploitability": 0.90,
+                        "reachability_confidence": 0.90,
+                        "evidence_ids": ["SEC-0001", "SEC-0002"],
+                    },
+                    {
+                        "name": "internal_low_risk",
+                        "api": "core::internal::parse",
+                        "vuln_likelihood": 0.20,
+                        "exploitability": 0.20,
+                        "reachability_confidence": 0.40,
+                        "evidence_ids": ["SEC-0003"],
+                    },
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    by_target = {str(item.get("target") or ""): item for item in selected}
+
+    high = by_target["internal_high_risk"]
+    low = by_target["internal_low_risk"]
+    assert high["api_surface_exception"]["used"] is True
+    assert high["api_surface_exception"]["reason"]
+    assert high["api_surface_exception"]["evidence_ids"] == ["SEC-0001", "SEC-0002"]
+
+    assert low["api_surface_exception"]["used"] is False
+    assert "internal_api_below_vuln_threshold" in str(low.get("penalty_reason") or "")
+    assert low["score_total"] < by_target["public_parser_api"]["score_total"]
+
+
 def test_route_after_re_build_routes_to_re_run_on_success():
     route = workflow_graph._route_after_re_build_state(
         {
