@@ -26,6 +26,14 @@ def test_merge_result_into_contexts_persists_run_and_coverage_fields() -> None:
         "cold_start_seed_replan_triggered": True,
         "degraded_seed_replan_triggered": False,
         "run_rss_limit_mb_override": "98304",
+        "security_evidence_count": 7,
+        "vuln_candidate_count": 3,
+        "vuln_hunting_enabled": True,
+        "security_priority_mode": True,
+        "latest_vuln_decision_snapshot": {
+            "kind": "choose_target",
+            "selected_target": "parse_zip",
+        },
     }
     merged_control, merged_workflow = store.merge_result_into_contexts(
         result, control=control, workflow=workflow
@@ -41,6 +49,11 @@ def test_merge_result_into_contexts_persists_run_and_coverage_fields() -> None:
     assert merged_workflow["coverage_replan_required"] is True
     assert merged_workflow["cold_start_seed_replan_triggered"] is True
     assert merged_workflow["degraded_seed_replan_triggered"] is False
+    assert merged_workflow["security_evidence_count"] == 7
+    assert merged_workflow["vuln_candidate_count"] == 3
+    assert merged_workflow["vuln_hunting_enabled"] is True
+    assert merged_workflow["security_priority_mode"] is True
+    assert merged_workflow["latest_vuln_decision_snapshot"]["selected_target"] == "parse_zip"
 
 
 def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) -> None:
@@ -53,6 +66,11 @@ def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) 
         "coverage_quality_flags": ["missing_required_families"],
         "run_details": [{"fuzzer": "demo_fuzz"}],
         "decision_trace_count": 5,
+        "security_evidence_count": 2,
+        "vuln_candidate_count": 1,
+        "vuln_hunting_enabled": True,
+        "security_priority_mode": True,
+        "latest_vuln_decision_snapshot": {"kind": "choose_target", "selected_target": "parse_zip"},
     }
     store.write_context_docs(
         context_dir,
@@ -70,6 +88,11 @@ def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) 
     assert read_workflow["coverage_quality_flags"] == ["missing_required_families"]
     assert read_workflow["run_details"][0]["fuzzer"] == "demo_fuzz"
     assert read_workflow["decision_trace_count"] == 5
+    assert read_workflow["security_evidence_count"] == 2
+    assert read_workflow["vuln_candidate_count"] == 1
+    assert read_workflow["vuln_hunting_enabled"] is True
+    assert read_workflow["security_priority_mode"] is True
+    assert read_workflow["latest_vuln_decision_snapshot"]["selected_target"] == "parse_zip"
     assert "run_parallel_fuzzers_override" not in read_workflow
 
 

@@ -1074,8 +1074,37 @@ def _seed_quality_from_run(
                 break
         return chosen
 
-    at_30s = _event_by_iter(131072)
-    at_60s = _event_by_iter(262144)
+    def _event_by_elapsed_sec(target_sec: float) -> Dict[str, int | str]:
+        """Find the event closest to *target_sec* elapsed wall-clock time.
+
+        libFuzzer reports average exec/s since start, so
+        elapsed ≈ iteration / execs_per_sec.  Falls back to the old
+        iteration-based heuristic when exec/s is unavailable.
+        """
+        chosen: Dict[str, int | str] = {}
+        for event in events:
+            eps = int(event.get("execs_per_sec") or 0)
+            it = int(event.get("iteration") or 0)
+            if eps > 0 and it > 0:
+                elapsed = float(it) / float(eps)
+                if elapsed <= target_sec:
+                    chosen = event
+                else:
+                    break
+            else:
+                # exec/s not yet reported (first few lines) — always accept
+                chosen = event
+        return chosen
+
+    # Prefer wall-clock estimation; fall back to iteration count when
+    # exec/s is unavailable in any event (e.g. very short runs).
+    _have_exec_rate = any(int(e.get("execs_per_sec") or 0) > 0 for e in events)
+    if _have_exec_rate:
+        at_30s = _event_by_elapsed_sec(30.0)
+        at_60s = _event_by_elapsed_sec(60.0)
+    else:
+        at_30s = _event_by_iter(131072)
+        at_60s = _event_by_iter(262144)
     early_new_units_30s = max(0, int(at_30s.get("corpus_files") or 0) - initial_corpus_files)
     early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
     final_files = int(final_stats.get("corpus_files") or 0)
@@ -4633,29 +4662,19 @@ EOF
           3. String literals extracted from the harness source file
         Returns the path to the generated .dict file, or None if no tokens found.
         """
-        tokens: list[str] = []
+        # Priority order: harness literals (most project-specific) → existing
+        # dict files → profile tokens (generic fill-up).  The list is capped
+        # at 256 entries later, so higher-priority tokens must come first.
+        harness_tokens: list[str] = []
+        existing_dict_tokens: list[str] = []
+        profile_tokens: list[str] = list(
+            PROFILE_DICTIONARY_TOKENS.get(seed_profile or "generic", [])
+        )
 
-        # 1. Profile-based tokens
-        profile_tokens = PROFILE_DICTIONARY_TOKENS.get(seed_profile or "generic", [])
-        tokens.extend(profile_tokens)
-
-        # 2. Collect tokens from existing .dict files in fuzz/
         dict_dir = self.repo_root / FUZZ_DICT_DIR
         dict_dir.mkdir(parents=True, exist_ok=True)
-        for existing_dict in self.fuzz_dir.rglob("*.dict"):
-            try:
-                for line in existing_dict.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        # Accept lines like: keyword="value" or just "value"
-                        if "=" in line:
-                            line = line.split("=", 1)[1].strip()
-                        if line.startswith('"') and line.endswith('"'):
-                            tokens.append(line)
-            except Exception:
-                pass
 
-        # 3. Extract string literals from harness source
+        # 1. Extract string literals from harness source (highest priority)
         harness_extensions = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
         for src in self.fuzz_dir.iterdir():
             if src.is_file() and src.suffix in harness_extensions:
@@ -4666,9 +4685,29 @@ EOF
                         literal = m.group(0)
                         # Skip very common/useless strings
                         if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
-                            tokens.append(_normalize_dict_token(literal))
+                            harness_tokens.append(_normalize_dict_token(literal))
                 except Exception:
                     pass
+
+        # 2. Collect tokens from existing .dict files in fuzz/
+        for existing_dict in self.fuzz_dir.rglob("*.dict"):
+            try:
+                for line in existing_dict.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Accept lines like: keyword="value" or just "value"
+                        if "=" in line:
+                            line = line.split("=", 1)[1].strip()
+                        if line.startswith('"') and line.endswith('"'):
+                            existing_dict_tokens.append(line)
+            except Exception:
+                pass
+
+        # 3. Profile-based tokens (lowest priority – generic fill-up)
+        # (already collected above)
+
+        # Merge in priority order
+        tokens: list[str] = harness_tokens + existing_dict_tokens + profile_tokens
 
         # Deduplicate while preserving order
         seen: set[str] = set()
@@ -4790,7 +4829,11 @@ EOF
             env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
             env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
-            corpus_files = sorted(corpus_dir.rglob("*"))[:50]  # sample up to 50
+            # Sample corpus files for coverage profiling.  Prefer the most
+            # recently modified files (they tend to reach newer code paths).
+            _all_corpus = [f for f in corpus_dir.rglob("*") if f.is_file()]
+            _all_corpus.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            corpus_files = _all_corpus[:200]  # cap to keep runtime bounded
             if not corpus_files:
                 return None
 

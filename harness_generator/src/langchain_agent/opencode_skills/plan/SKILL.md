@@ -30,9 +30,11 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 ## Workflow
 1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
 2. Read target analysis and identify runtime-viable public entrypoints.
-3. Produce `fuzz/targets.json` as a strict non-empty array.
-4. Produce `fuzz/execution_plan.json` with prioritized execution targets.
-5. Write concise implementation guidance into `fuzz/PLAN.md`.
+3. Apply vulnerability-first scoring when selecting targets:
+   - `score_total = 0.40*vuln_likelihood + 0.20*exploitability + 0.15*reachability_confidence + 0.10*coverage_gap + 0.08*complexity_depth + 0.05*api_relevance + 0.02*consumer_order_support - recent_yield_penalty`.
+4. Produce `fuzz/targets.json` as a strict non-empty array.
+5. Produce `fuzz/execution_plan.json` with prioritized execution targets.
+6. Write concise implementation guidance into `fuzz/PLAN.md`.
 
 ## Constraints
 - In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
@@ -40,12 +42,17 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
 - Rank runtime-executable/public targets first.
+- Keep vulnerability signals primary; coverage/complexity are secondary references.
 - `fuzz/execution_plan.json` must include `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`.
 - Naming contract to reduce target/binary mismatch:
   - `target_name` should be API-centric and suffix-free (for example: `decode`).
   - `expected_fuzzer_name` must map predictably to the harness/binary name (prefer `<target_name>_fuzz` or `<target_name>_fuzzer`).
   - Keep `expected_fuzzer_name` consistent with `fuzz/harness_index.json` and harness filename stem.
 - Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
+- `fuzz/selected_targets.json` must include `security_score_breakdown`.
+- Internal/private API selection requires explicit `api_surface_exception`:
+  - allow only when `vuln_likelihood >= 0.75`
+  - include non-empty `reason` and `evidence_ids`.
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]`.
 - If MCP is unavailable, continue in degraded mode and explicitly note missing MCP evidence in `fuzz/PLAN.md`.
 

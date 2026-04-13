@@ -30,6 +30,9 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 - `fuzz/analysis_context.json`
 - `fuzz/antlr_plan_context.json` (if grammar/static context is available)
 - `fuzz/target_analysis.json` (preliminary - do NOT reclassify target types here)
+- `fuzz/analysis_context.json.analysis_evidence.security_evidence`
+- `fuzz/analysis_context.json.analysis_evidence.vuln_candidate_inventory`
+- `VULN_HYPOTHESES` section with evidence-linked risk hypotheses
 
 ## Workflow
 1. Query MCP evidence first when MCP is available.
@@ -37,8 +40,13 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 2. Read existing analysis artifacts (if any) and companion file outputs as fallback.
 3. Refresh static analysis summaries for grammar/target context.
 4. Update `fuzz/analysis_context.json` with concise evidence from MCP and static analysis.
-5. Do NOT reclassify `target_type` or `seed_profile` in this stage — that will be done by the seed generation stage with full function code context.
-6. Ensure downstream plan can consume paths and summaries directly.
+   Include vulnerability evidence fields:
+   - `security_evidence[]` entries with `evidence_id`, `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`.
+   - `vuln_candidate_inventory[]` entries with `candidate_id`, `api`, `file`, `target_type`, `vuln_likelihood`, `exploitability`, `reachability_confidence`, `evidence_ids`.
+   - summary counters: `security_evidence_count`, `vuln_candidate_count`, `security_mode`, `vuln_focus_profile`, `target_surface_policy`.
+5. Add `VULN_HYPOTHESES` in analysis notes/output and ensure every hypothesis cites existing `evidence_id` values.
+6. Do NOT reclassify `target_type` or `seed_profile` in this stage — that will be done by the seed generation stage with full function code context.
+7. Ensure downstream plan can consume paths and summaries directly.
 
 ## Note on target_type classification
 The preliminary target analysis in `fuzz/target_analysis.json` uses regex/tree-sitter heuristics.

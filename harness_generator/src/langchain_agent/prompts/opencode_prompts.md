@@ -25,6 +25,17 @@ Constraints:
 - `target_type` must be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`.
 - `seed_profile` must be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`.
 - Keep runtime-viable/public entrypoints first.
+- Internal/private API handling:
+  - allow internal/private API only when `vuln_likelihood >= 0.75`.
+  - when internal/private API is selected, `api_surface_exception.used` must be `true` with non-empty `reason` and `evidence_ids`.
+  - otherwise prefer public/stable API and keep `api_surface_exception.used=false`.
+- Target selection is vulnerability-first by default (`security_priority_mode=true`):
+  - prioritize targets by `score_total = 0.40*vuln_likelihood + 0.20*exploitability + 0.15*reachability_confidence + 0.10*coverage_gap + 0.08*complexity_depth + 0.05*api_relevance + 0.02*consumer_order_support - recent_yield_penalty`
+  - coverage/complexity are reference factors only; do not override higher vulnerability risk signals.
+- `fuzz/selected_targets.json` must include per-target:
+  - `security_score_breakdown`
+  - `api_surface_exception`
+  - `security_priority_mode`
 - Add execution metadata in `fuzz/selected_targets.json` semantics:
   - `execution_priority` (higher priority first, default top 3)
   - `must_run` for high-value parser/archive/decoder targets.
@@ -50,6 +61,9 @@ Required outputs:
 - `fuzz/analysis_context.json`
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
+- `fuzz/analysis_context.json.analysis_evidence.security_evidence`
+- `fuzz/analysis_context.json.analysis_evidence.vuln_candidate_inventory`
+- `VULN_HYPOTHESES` section in analysis notes: each hypothesis must cite at least one `evidence_id`
 
 Constraints:
 - Do NOT run build/execute commands.
@@ -59,6 +73,9 @@ Constraints:
 - When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
 - If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
+- For each vulnerability hypothesis, include:
+  - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
+  - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
 
 Target-type classification:
 - Entries in `fuzz/target_analysis.json` have `target_type: "pending"` — you MUST classify each one.

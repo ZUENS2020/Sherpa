@@ -196,6 +196,13 @@ class FuzzWorkflowState(TypedDict, total=False):
     plan_used_fallback_targets: bool
     replan_effective: bool
     replan_stop_reason: str
+    vuln_hunting_enabled: bool
+    vuln_focus_profile: str
+    target_surface_policy: str
+    security_evidence_count: int
+    vuln_candidate_count: int
+    security_priority_mode: bool
+    latest_vuln_decision_snapshot: dict[str, Any]
 
     step_count: int
     max_steps: int
@@ -618,6 +625,11 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
         "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
         "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
+        "security_evidence_count": int(state.get("security_evidence_count") or 0),
+        "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+        "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or False),
+        "security_priority_mode": bool(state.get("security_priority_mode") or False),
+        "latest_vuln_decision_snapshot": dict(state.get("latest_vuln_decision_snapshot") or {}),
         "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
         "target_score_breakdown_available": bool(state.get("target_score_breakdown_available") or False),
         "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
@@ -1476,6 +1488,204 @@ def _target_scoring_weights() -> dict[str, float]:
     }
 
 
+def _vuln_hunting_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_VULN_HUNTING_ENABLED") or "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _vuln_score_mode() -> str:
+    raw = (os.environ.get("SHERPA_VULN_SCORE_MODE") or "risk_first_v1").strip().lower()
+    if raw in {"risk_first_v1"}:
+        return raw
+    return "risk_first_v1"
+
+
+def _vuln_internal_api_min_score() -> float:
+    raw = (os.environ.get("SHERPA_VULN_INTERNAL_API_MIN_SCORE") or "0.75").strip()
+    try:
+        return max(0.0, min(float(raw), 1.0))
+    except Exception:
+        return 0.75
+
+
+def _vuln_min_evidence_confidence() -> float:
+    raw = (os.environ.get("SHERPA_VULN_MIN_EVIDENCE_CONFIDENCE") or "0.45").strip()
+    try:
+        return max(0.0, min(float(raw), 1.0))
+    except Exception:
+        return 0.45
+
+
+def _vuln_topk() -> int:
+    raw = (os.environ.get("SHERPA_VULN_TOPK") or "24").strip()
+    try:
+        return max(1, min(int(raw), 80))
+    except Exception:
+        return 24
+
+
+def _vuln_score_weights() -> dict[str, float]:
+    return {
+        "vuln_likelihood": 0.40,
+        "exploitability": 0.20,
+        "reachability_confidence": 0.15,
+        "coverage_gap": 0.10,
+        "complexity_depth": 0.08,
+        "api_relevance": 0.05,
+        "consumer_order_support": 0.02,
+    }
+
+
+def _security_signal_ids() -> tuple[str, ...]:
+    return (
+        "mem_oob_candidate",
+        "integer_overflow_candidate",
+        "format_string_candidate",
+        "path_traversal_candidate",
+        "command_injection_candidate",
+        "authz_bypass_candidate",
+        "null_deref_candidate",
+        "uaf_candidate",
+    )
+
+
+def _security_signal_patterns() -> dict[str, str]:
+    return {
+        "mem_oob_candidate": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|\[[^\]]+\]|pointer|offset|index|bounds?)",
+        "integer_overflow_candidate": r"(overflow|underflow|size_t|ssize_t|uint|int\d+_t|length|len|count|capacity|shift|multiply|\*)",
+        "format_string_candidate": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)",
+        "path_traversal_candidate": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)",
+        "command_injection_candidate": r"(system\(|popen\(|exec\(|spawn\(|shell|command)",
+        "authz_bypass_candidate": r"(auth|authorize|permission|acl|role|token|session|bypass|skip[_-]?check)",
+        "null_deref_candidate": r"(null|nullptr|none|optional|dereference|->)",
+        "uaf_candidate": r"(free\(|delete|release|destroy|dispose|lifetime|dangling)",
+    }
+
+
+def _empty_security_scores() -> dict[str, float]:
+    return {signal: 0.0 for signal in _security_signal_ids()}
+
+
+def _compute_security_signal_scores(
+    *,
+    name: str,
+    signature: str,
+    file_hint: str,
+    risk_signals: list[str] | None = None,
+) -> dict[str, float]:
+    text = f"{name}\n{signature}\n{file_hint}".lower()
+    scores = _empty_security_scores()
+    signals = {str(x).strip().lower() for x in list(risk_signals or []) if str(x).strip()}
+    for signal_id, pattern in _security_signal_patterns().items():
+        if re.search(pattern, text, re.IGNORECASE):
+            scores[signal_id] = max(scores[signal_id], 0.62)
+        if signal_id in signals:
+            scores[signal_id] = max(scores[signal_id], 0.78)
+    if "bounds" in signals:
+        scores["mem_oob_candidate"] = max(scores["mem_oob_candidate"], 0.68)
+        scores["integer_overflow_candidate"] = max(scores["integer_overflow_candidate"], 0.56)
+    if "parser-like" in signals or "state-machine" in signals:
+        scores["null_deref_candidate"] = max(scores["null_deref_candidate"], 0.5)
+    return {k: round(max(0.0, min(float(v), 1.0)), 4) for k, v in scores.items()}
+
+
+def _derive_security_priority(
+    *,
+    target_type: str,
+    runtime_viability: str,
+    security_scores: dict[str, float] | None = None,
+) -> tuple[float, float, float, str]:
+    scores = dict(_empty_security_scores())
+    for key, value in dict(security_scores or {}).items():
+        if key in scores:
+            try:
+                scores[key] = max(0.0, min(float(value), 1.0))
+            except Exception:
+                scores[key] = 0.0
+    non_zero = [float(v) for v in scores.values() if float(v) > 0.0]
+    non_zero.sort(reverse=True)
+    top = non_zero[0] if non_zero else 0.0
+    top3_avg = (sum(non_zero[:3]) / min(3, len(non_zero))) if non_zero else 0.0
+    target_type_l = str(target_type or "").strip().lower()
+    runtime_viability_l = str(runtime_viability or "").strip().lower()
+
+    vuln_likelihood = 0.65 * top + 0.35 * top3_avg
+    if target_type_l in {"parser", "decoder", "archive", "document"}:
+        vuln_likelihood += 0.06
+
+    exploitability = (
+        0.50 * max(scores["mem_oob_candidate"], scores["uaf_candidate"])
+        + 0.22 * scores["integer_overflow_candidate"]
+        + 0.14 * scores["command_injection_candidate"]
+        + 0.08 * scores["path_traversal_candidate"]
+        + 0.06 * scores["authz_bypass_candidate"]
+    )
+
+    reachability = {"high": 0.82, "medium": 0.62, "low": 0.40}.get(runtime_viability_l, 0.5)
+    if target_type_l in {"parser", "decoder", "archive"}:
+        reachability += 0.08
+    if scores["format_string_candidate"] > 0.0 or scores["null_deref_candidate"] > 0.0:
+        reachability += 0.03
+
+    vuln_likelihood = max(0.0, min(vuln_likelihood, 1.0))
+    exploitability = max(0.0, min(exploitability, 1.0))
+    reachability = max(0.0, min(reachability, 1.0))
+
+    ordered = sorted(scores.items(), key=lambda kv: float(kv[1]), reverse=True)
+    reason_parts = [f"{sig}:{score:.2f}" for sig, score in ordered if float(score) > 0.0][:3]
+    reason = ", ".join(reason_parts) if reason_parts else "no_strong_security_signal"
+    return (
+        round(vuln_likelihood, 4),
+        round(exploitability, 4),
+        round(reachability, 4),
+        reason,
+    )
+
+
+def _extract_security_scores(item: dict[str, Any]) -> dict[str, float]:
+    raw = item.get("security_signal_scores")
+    if not isinstance(raw, dict):
+        return _empty_security_scores()
+    out = _empty_security_scores()
+    for key in _security_signal_ids():
+        try:
+            out[key] = max(0.0, min(float(raw.get(key) or 0.0), 1.0))
+        except Exception:
+            out[key] = 0.0
+    return out
+
+
+def _top_security_signals(
+    security_scores: dict[str, float] | None,
+    *,
+    threshold: float | None = None,
+) -> list[str]:
+    th = _vuln_min_evidence_confidence() if threshold is None else max(0.0, min(float(threshold), 1.0))
+    pairs = sorted(
+        ((str(k), float(v)) for k, v in dict(security_scores or {}).items()),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    return [sig for sig, score in pairs if score >= th]
+
+
+def _is_internal_api_symbol(api: str) -> bool:
+    low = str(api or "").strip().lower()
+    if not low:
+        return False
+    patterns = (
+        "::detail::",
+        "::detail",
+        "::internal::",
+        "::internal",
+        "_internal",
+        "/internal/",
+        ".internal.",
+        "__",
+    )
+    return any(p in low for p in patterns)
+
+
 def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
     return max(lo, min(hi, float(value)))
 
@@ -1601,7 +1811,102 @@ def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[s
     return {"score_penalty": float(penalty), "reason": reason, "seed_feedback": feedback}
 
 
+def _target_analysis_lookup_keys(target_name: str, api: str) -> set[str]:
+    keys: set[str] = set()
+    for raw in (target_name, api):
+        norm = _normalize_exec_target_token(raw)
+        if norm:
+            keys.add(norm)
+        if raw:
+            tail = str(raw).split("::")[-1].split(".")[-1].strip()
+            norm_tail = _normalize_exec_target_token(tail)
+            if norm_tail:
+                keys.add(norm_tail)
+    return keys
+
+
+def _targets_material_signature(targets_text: str) -> tuple[tuple[str, str, str, str, str], ...] | None:
+    """
+    Build a semantic signature from strict required target keys.
+    This avoids false replan "changes" caused only by auto-enriched metadata
+    (e.g. depth_score/selection_bias_reason) or JSON formatting differences.
+    """
+    try:
+        parsed = json.loads(targets_text or "[]")
+    except Exception:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    sig: list[tuple[str, str, str, str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        sig.append(
+            (
+                str(item.get("name") or "").strip(),
+                str(item.get("api") or "").strip(),
+                str(item.get("lang") or "").strip(),
+                str(item.get("target_type") or "").strip(),
+                str(item.get("seed_profile") or "").strip(),
+            )
+        )
+    return tuple(sig)
+
+
+def _load_target_analysis_security_index(repo_root: Path) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    target_path = repo_root / "fuzz" / "target_analysis.json"
+    try:
+        target_doc = json.loads(target_path.read_text(encoding="utf-8", errors="replace")) if target_path.is_file() else {}
+    except Exception:
+        target_doc = {}
+    for item in list((target_doc.get("recommended_targets") if isinstance(target_doc, dict) else []) or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        api = str(item.get("api") or name).strip()
+        for key in _target_analysis_lookup_keys(name, api):
+            out.setdefault(key, dict(item))
+
+    analysis_path = repo_root / "fuzz" / "analysis_context.json"
+    try:
+        analysis_doc = json.loads(analysis_path.read_text(encoding="utf-8", errors="replace")) if analysis_path.is_file() else {}
+    except Exception:
+        analysis_doc = {}
+    analysis_evidence = dict((analysis_doc.get("analysis_evidence") if isinstance(analysis_doc, dict) else {}) or {})
+    for item in list(analysis_evidence.get("vuln_candidate_inventory") or []):
+        if not isinstance(item, dict):
+            continue
+        api = str(item.get("api") or "").strip()
+        name = str(item.get("name") or api).strip()
+        for key in _target_analysis_lookup_keys(name, api):
+            merged = dict(out.get(key) or {})
+            merged.update(item)
+            out[key] = merged
+    return out
+
+
+def _lookup_target_security_candidate(
+    *,
+    target_name: str,
+    api: str,
+    index: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    for key in _target_analysis_lookup_keys(target_name, api):
+        if key in index:
+            return dict(index.get(key) or {})
+    return {}
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
+    security_lookup = _load_target_analysis_security_index(repo_root)
+    security_priority_mode = bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
+    degrade_reason = ""
+    if not _vuln_hunting_enabled():
+        degrade_reason = "vuln_hunting_disabled"
+    elif _vuln_score_mode() != "risk_first_v1":
+        degrade_reason = "unsupported_vuln_score_mode"
+    score_weights = _vuln_score_weights()
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
         target_name = str(item.get("name") or "").strip()
@@ -1620,6 +1925,47 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
             )
             selection_rationale = selection_rationale or auto_rationale
             runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
+        security_candidate = _lookup_target_security_candidate(
+            target_name=target_name,
+            api=api,
+            index=security_lookup,
+        )
+        security_scores = _extract_security_scores(item)
+        if not any(float(v) > 0.0 for v in security_scores.values()):
+            security_scores = _extract_security_scores(security_candidate)
+        if not any(float(v) > 0.0 for v in security_scores.values()):
+            security_scores = _compute_security_signal_scores(
+                name=target_name,
+                signature=f"{api} {selection_rationale}",
+                file_hint=str(item.get("file") or security_candidate.get("file") or ""),
+                risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
+            )
+        vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
+        exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
+        reachability_raw = security_candidate.get("reachability_confidence", item.get("reachability_confidence"))
+        security_reason = str(
+            security_candidate.get("security_priority_reason")
+            or item.get("security_priority_reason")
+            or ""
+        ).strip()
+        try:
+            vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
+            exploitability = max(0.0, min(float(exploitability_raw), 1.0))
+            reachability_confidence = max(0.0, min(float(reachability_raw), 1.0))
+        except Exception:
+            vuln_likelihood, exploitability, reachability_confidence, derived_reason = _derive_security_priority(
+                target_type=target_type,
+                runtime_viability=runtime_viability,
+                security_scores=security_scores,
+            )
+            if not security_reason:
+                security_reason = derived_reason
+        if not security_reason:
+            _, _, _, security_reason = _derive_security_priority(
+                target_type=target_type,
+                runtime_viability=runtime_viability,
+                security_scores=security_scores,
+            )
         scoring_source = {
             "api": api,
             "target_type": target_type,
@@ -1636,7 +1982,35 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
         runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
         score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
         score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
-        adjusted_target_score = max(0.0, float(score_breakdown.get("weighted_total") or 0.0) - score_penalty)
+        score_total = (
+            float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
+            + float(score_weights["exploitability"]) * float(exploitability)
+            + float(score_weights["reachability_confidence"]) * float(reachability_confidence)
+            + float(score_weights["coverage_gap"]) * float(score_breakdown.get("coverage_gap") or 0.0)
+            + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
+            + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
+            + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
+            - float(score_penalty)
+        )
+        adjusted_target_score = max(0.0, float(score_total))
+        internal_api = _is_internal_api_symbol(api)
+        internal_min = _vuln_internal_api_min_score()
+        api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
+        if internal_api:
+            if security_priority_mode and vuln_likelihood >= internal_min:
+                api_surface_exception = {
+                    "used": True,
+                    "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
+                    "evidence_ids": list(security_candidate.get("evidence_ids") or []),
+                }
+            else:
+                adjusted_target_score = max(0.0, adjusted_target_score - 0.75)
+                if not runtime_penalty.get("reason"):
+                    runtime_penalty["reason"] = "internal_api_below_vuln_threshold"
+                elif "internal_api_below_vuln_threshold" not in str(runtime_penalty.get("reason") or ""):
+                    runtime_penalty["reason"] = (
+                        f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
+                    )
         score_breakdown_fixed = {
             "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
             "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
@@ -1664,17 +2038,43 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "score_total": float(adjusted_target_score),
                 "score_breakdown": score_breakdown_fixed,
                 "penalty_reason": str(runtime_penalty.get("reason") or ""),
+                "security_score_breakdown": {
+                    "vuln_likelihood": float(vuln_likelihood),
+                    "exploitability": float(exploitability),
+                    "reachability_confidence": float(reachability_confidence),
+                    "coverage_gap_ref": float(score_breakdown.get("coverage_gap") or 0.0),
+                    "complexity_depth_ref": float(score_breakdown.get("complexity_depth") or 0.0),
+                    "api_relevance_ref": float(score_breakdown.get("api_relevance") or 0.0),
+                    "consumer_order_support_ref": float(score_breakdown.get("consumer_order_support") or 0.0),
+                    "recent_yield_penalty": float(score_penalty),
+                    "weights": {k: float(v) for k, v in score_weights.items()},
+                },
+                "security_priority_mode": bool(security_priority_mode),
+                "degraded_reason": str(degrade_reason),
+                "vuln_likelihood": float(vuln_likelihood),
+                "exploitability": float(exploitability),
+                "reachability_confidence": float(reachability_confidence),
+                "security_priority_reason": security_reason,
+                "security_signals": _top_security_signals(security_scores),
+                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+                "api_surface_exception": api_surface_exception,
                 "target_score_breakdown": score_breakdown,
                 "target_score": float(adjusted_target_score),
                 "target_score_penalty": float(score_penalty),
                 "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
                 "target_score_breakdown_available": True,
                 "target_scoring_enabled": True,
+                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+                "vuln_focus_profile": "broad_high_risk",
+                "target_surface_policy": "risk_first",
             }
         )
     ranked_items.sort(
         key=lambda row: (
             -float(row.get("target_score") or 0.0),
+            -float(row.get("vuln_likelihood") or 0.0),
+            -float(row.get("exploitability") or 0.0),
+            -float(row.get("reachability_confidence") or 0.0),
             -int(row.get("depth_score") or 0),
             -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
             str(row.get("target_name") or ""),
@@ -3403,8 +3803,10 @@ def _solve_parallelism(
     sanitizer_l = (sanitizer or "").strip().lower()
 
     # ASAN/MSAN/TSAN are memory-heavy in multi-process mode; cap inner fanout.
+    # Allow up to 4 workers – modern pods typically have ≥4 CPU and ASAN
+    # overhead is ~2×, so 4 workers still fit within typical memory budgets.
     if sanitizer_l in {"address", "memory", "thread"}:
-        inner_cap = max(1, min(cpu, 2))
+        inner_cap = max(1, min(cpu, 4))
     else:
         inner_cap = max(1, cpu)
 
@@ -3815,6 +4217,12 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                                 "target_type": "pending",
                                 "seed_profile": "pending",
                                 "risk_signals": [],
+                                "security_signals": [],
+                                "security_signal_scores": _empty_security_scores(),
+                                "vuln_likelihood": 0.0,
+                                "exploitability": 0.0,
+                                "reachability_confidence": 0.0,
+                                "security_priority_reason": "",
                                 "analysis_source": "tree-sitter",
                             }
                         )
@@ -3947,6 +4355,14 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         {"id": "parser-like", "pattern": r"(parse|scan|lexer|token|load|decode|emit|dump|serialize|format|arg_id)"},
         {"id": "bounds", "pattern": r"(memcpy|memmove|strncpy|size_t|length|len|offset|index)"},
         {"id": "state-machine", "pattern": r"(state|transition|consume|next|advance|dispatch|handler)"},
+        {"id": "mem_oob_candidate", "pattern": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|offset|index|bounds?)"},
+        {"id": "integer_overflow_candidate", "pattern": r"(overflow|underflow|size_t|uint|int32_t|int64_t|length|count|\*)"},
+        {"id": "format_string_candidate", "pattern": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)"},
+        {"id": "path_traversal_candidate", "pattern": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)"},
+        {"id": "command_injection_candidate", "pattern": r"(system\(|popen\(|exec\(|spawn\(|shell|command)"},
+        {"id": "authz_bypass_candidate", "pattern": r"(auth|authorize|permission|acl|role|token|session|bypass|skip[_-]?check)"},
+        {"id": "null_deref_candidate", "pattern": r"(null|nullptr|optional|dereference|->)"},
+        {"id": "uaf_candidate", "pattern": r"(free\(|delete|release|destroy|dispose|dangling)"},
     ]
     candidate_functions: list[dict[str, Any]] = []
     for p in source_files:
@@ -3985,6 +4401,12 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     "target_type": "pending",
                     "seed_profile": "pending",
                     "risk_signals": risk_signals,
+                    "security_signals": [],
+                    "security_signal_scores": _empty_security_scores(),
+                    "vuln_likelihood": 0.0,
+                    "exploitability": 0.0,
+                    "reachability_confidence": 0.0,
+                    "security_priority_reason": "",
                     "analysis_source": "regex",
                 }
             )
@@ -4011,16 +4433,47 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         item["runtime_viability"] = runtime_viability
         item["selection_rationale"] = selection_rationale
         item["runtime_replacement_candidates"] = replacement_candidates
+        security_scores = _compute_security_signal_scores(
+            name=str(item.get("name") or ""),
+            signature=str(item.get("signature") or ""),
+            file_hint=str(item.get("file") or ""),
+            risk_signals=list(item.get("risk_signals") or []),
+        )
+        vuln_likelihood, exploitability, reachability_confidence, security_reason = _derive_security_priority(
+            target_type=str(item.get("target_type") or "generic"),
+            runtime_viability=runtime_viability,
+            security_scores=security_scores,
+        )
+        item["security_signal_scores"] = security_scores
+        item["security_signals"] = _top_security_signals(security_scores)
+        item["vuln_likelihood"] = vuln_likelihood
+        item["exploitability"] = exploitability
+        item["reachability_confidence"] = reachability_confidence
+        item["security_priority_reason"] = security_reason
 
-    candidate_functions.sort(
-        key=lambda item: (
-            {"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
-            int(item.get("depth_score") or 0),
-            len(list(item.get("risk_signals") or [])),
-            str(item.get("name") or ""),
-        ),
-        reverse=True,
-    )
+    if _vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1":
+        candidate_functions.sort(
+            key=lambda item: (
+                float(item.get("vuln_likelihood") or 0.0),
+                float(item.get("exploitability") or 0.0),
+                float(item.get("reachability_confidence") or 0.0),
+                {"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
+                int(item.get("depth_score") or 0),
+                len(list(item.get("risk_signals") or [])),
+                str(item.get("name") or ""),
+            ),
+            reverse=True,
+        )
+    else:
+        candidate_functions.sort(
+            key=lambda item: (
+                {"high": 2, "medium": 1, "low": 0}.get(str(item.get("runtime_viability") or "").lower(), 0),
+                int(item.get("depth_score") or 0),
+                len(list(item.get("risk_signals") or [])),
+                str(item.get("name") or ""),
+            ),
+            reverse=True,
+        )
 
     recommended_targets = []
     seen: set[tuple[str, str]] = set()
@@ -4050,9 +4503,18 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "runtime_viability": str(item.get("runtime_viability") or ""),
                 "selection_rationale": str(item.get("selection_rationale") or ""),
                 "runtime_replacement_candidates": list(item.get("runtime_replacement_candidates") or []),
+                "security_signals": list(item.get("security_signals") or []),
+                "security_signal_scores": dict(item.get("security_signal_scores") or {}),
+                "vuln_likelihood": float(item.get("vuln_likelihood") or 0.0),
+                "exploitability": float(item.get("exploitability") or 0.0),
+                "reachability_confidence": float(item.get("reachability_confidence") or 0.0),
+                "security_priority_reason": str(item.get("security_priority_reason") or ""),
+                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+                "vuln_focus_profile": "broad_high_risk",
+                "target_surface_policy": "risk_first",
             }
         )
-        if len(recommended_targets) >= 24:
+        if len(recommended_targets) >= _vuln_topk():
             break
 
     return {
@@ -4067,6 +4529,9 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         "tree_sitter_enabled": tree_sitter_enabled,
         "semgrep_enabled": semgrep_enabled,
         "analysis_backend": "regex-fallback",
+        "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+        "vuln_focus_profile": "broad_high_risk",
+        "target_surface_policy": "risk_first",
     }
 
 
@@ -4187,6 +4652,9 @@ def _build_analysis_evidence_index(
 ) -> dict[str, Any]:
     evidence_counter = 0
     evidence_index: dict[str, dict[str, Any]] = {}
+    security_evidence: list[dict[str, Any]] = []
+    vuln_candidate_inventory: list[dict[str, Any]] = []
+    min_confidence = _vuln_min_evidence_confidence()
 
     def _new_evidence_id() -> str:
         nonlocal evidence_counter
@@ -4246,6 +4714,60 @@ def _build_analysis_evidence_index(
                 "target_type": target_type or "generic",
                 "seed_profile": str(item.get("seed_profile") or ""),
                 "runtime_viability": str(item.get("runtime_viability") or ""),
+            }
+        )
+        security_scores = _extract_security_scores(item)
+        security_signals = list(item.get("security_signals") or _top_security_signals(security_scores))
+        if not security_signals:
+            security_signals = _top_security_signals(security_scores, threshold=min_confidence)
+        candidate_evidence_ids: list[str] = [ev_id]
+        for signal_id in security_signals:
+            try:
+                signal_score = max(0.0, min(float(security_scores.get(signal_id) or 0.0), 1.0))
+            except Exception:
+                signal_score = 0.0
+            if signal_score < min_confidence:
+                continue
+            source_line = item.get("line")
+            try:
+                source_line_int = int(source_line) if source_line is not None else 0
+            except Exception:
+                source_line_int = 0
+            sec_ev_id = _add_evidence(
+                kind="security_signal",
+                source_path=file_hint or "fuzz/target_analysis.json",
+                summary=f"security signal `{signal_id}` on `{api}`",
+                score=signal_score,
+                payload={
+                    "api": api,
+                    "signal_id": signal_id,
+                    "security_priority_reason": str(item.get("security_priority_reason") or ""),
+                    "target_type": target_type or "generic",
+                },
+            )
+            candidate_evidence_ids.append(sec_ev_id)
+            security_evidence.append(
+                {
+                    "evidence_id": sec_ev_id,
+                    "signal_id": signal_id,
+                    "severity": "high" if signal_score >= 0.75 else ("medium" if signal_score >= 0.55 else "low"),
+                    "confidence": round(signal_score, 4),
+                    "source_path": file_hint or "fuzz/target_analysis.json",
+                    "line": source_line_int,
+                    "summary": f"`{api}` matched {signal_id} (score={signal_score:.2f})",
+                }
+            )
+        vuln_candidate_inventory.append(
+            {
+                "candidate_id": f"VC-{len(vuln_candidate_inventory) + 1:04d}",
+                "api": api,
+                "name": str(item.get("name") or api),
+                "file": file_hint,
+                "target_type": target_type or "generic",
+                "vuln_likelihood": float(item.get("vuln_likelihood") or 0.0),
+                "exploitability": float(item.get("exploitability") or 0.0),
+                "reachability_confidence": float(item.get("reachability_confidence") or 0.0),
+                "evidence_ids": list(dict.fromkeys(candidate_evidence_ids)),
             }
         )
 
@@ -4370,6 +4892,8 @@ def _build_analysis_evidence_index(
         "callgraph_summary": callgraph_summary,
         "consumer_patterns": consumer_patterns,
         "semantic_evidence": semantic_evidence,
+        "security_evidence": security_evidence,
+        "vuln_candidate_inventory": vuln_candidate_inventory,
         "evidence_index": evidence_index,
         "summary": {
             "evidence_count": len(evidence_index),
@@ -4377,6 +4901,11 @@ def _build_analysis_evidence_index(
             "callgraph_summary_count": len(callgraph_summary),
             "consumer_pattern_count": len(consumer_patterns),
             "semantic_evidence_count": len(semantic_evidence),
+            "security_evidence_count": len(security_evidence),
+            "vuln_candidate_count": len(vuln_candidate_inventory),
+            "security_mode": "risk_first_v1",
+            "vuln_focus_profile": "broad_high_risk",
+            "target_surface_policy": "risk_first",
         },
     }
 
@@ -4609,6 +5138,17 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "analysis_report_path": str(state.get("analysis_report_path") or ""),
             "analysis_context_path": str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
+            "security_evidence_count": int(state.get("security_evidence_count") or 0),
+            "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+            "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or _vuln_hunting_enabled()),
+            "vuln_focus_profile": str(state.get("vuln_focus_profile") or "broad_high_risk"),
+            "target_surface_policy": str(state.get("target_surface_policy") or "risk_first"),
+            "security_priority_mode": bool(
+                state.get("security_priority_mode")
+                if state.get("security_priority_mode") is not None
+                else (_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
+            ),
+            "latest_vuln_decision_snapshot": dict(state.get("latest_vuln_decision_snapshot") or {}),
             "antlr_context_path": str(state.get("antlr_context_path") or ""),
             "antlr_context_summary": str(state.get("antlr_context_summary") or ""),
             "target_analysis_path": str(state.get("target_analysis_path") or ""),
@@ -4817,6 +5357,9 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "antlr_context_summary": antlr_context_summary,
                 "target_analysis_path": target_analysis_path,
                 "target_analysis_summary": target_analysis_summary,
+                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+                "vuln_focus_profile": "broad_high_risk",
+                "target_surface_policy": "risk_first",
                 "companion": companion_doc,
                 "analysis_evidence": evidence_doc,
             }
@@ -4889,6 +5432,12 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "analysis_report_path": analysis_report_path,
                 "analysis_context_path": analysis_context_path,
                 "analysis_evidence_count": analysis_evidence_count,
+                "security_evidence_count": int((evidence_doc.get("summary") or {}).get("security_evidence_count") or 0),
+                "vuln_candidate_count": int((evidence_doc.get("summary") or {}).get("vuln_candidate_count") or 0),
+                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+                "vuln_focus_profile": "broad_high_risk",
+                "target_surface_policy": "risk_first",
+                "security_priority_mode": bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1"),
                 "antlr_context_path": antlr_context_path,
                 "antlr_context_summary": antlr_context_summary,
                 "target_analysis_path": target_analysis_path,
@@ -4918,6 +5467,16 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         "analysis_report_path": analysis_report_path,
         "analysis_context_path": analysis_context_path,
         "analysis_evidence_count": analysis_evidence_count,
+        "security_evidence_count": int(state.get("security_evidence_count") or 0),
+        "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+        "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or _vuln_hunting_enabled()),
+        "vuln_focus_profile": str(state.get("vuln_focus_profile") or "broad_high_risk"),
+        "target_surface_policy": str(state.get("target_surface_policy") or "risk_first"),
+        "security_priority_mode": bool(
+            state.get("security_priority_mode")
+            if state.get("security_priority_mode") is not None
+            else (_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
+        ),
         "antlr_context_path": antlr_context_path,
         "antlr_context_summary": antlr_context_summary,
         "target_analysis_path": target_analysis_path,
@@ -5258,6 +5817,11 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             or selected_primary.get("score_breakdown")
             or any(bool(item.get("score_breakdown")) for item in selected_targets_doc)
         )
+        security_priority_mode = bool(
+            selected_primary.get("security_priority_mode")
+            if selected_primary.get("security_priority_mode") is not None
+            else (_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
+        )
         replan_mode = str(state.get("coverage_improve_mode") or "") == "replan" or bool(state.get("coverage_replan_required") or False)
         replan_effective = bool(state.get("coverage_replan_effective") or False)
         replan_stop_reason = ""
@@ -5281,11 +5845,22 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 new_targets_text = ""
             depth_rank = {"shallow": 0, "medium": 1, "deep": 2}
             plan_changed = new_plan_text != prev_plan_text
-            targets_changed = new_targets_text != prev_targets_text
+            prev_targets_sig = _targets_material_signature(prev_targets_text)
+            new_targets_sig = _targets_material_signature(new_targets_text)
+            if prev_targets_sig is not None and new_targets_sig is not None:
+                targets_changed = new_targets_sig != prev_targets_sig
+            else:
+                targets_changed = new_targets_text != prev_targets_text
             target_changed = new_target_name != prev_target_name
-            depth_improved = (
-                new_depth_score > prev_target_depth_score
-                or depth_rank.get(new_depth_class, -1) > depth_rank.get(prev_target_depth_class, -1)
+            # Treat depth changes as material only when replan actually moves to
+            # a different target. This avoids false "effective replan" positives
+            # when the same target gets minor heuristic score drift.
+            depth_improved = bool(
+                target_changed
+                and (
+                    new_depth_score > prev_target_depth_score
+                    or depth_rank.get(new_depth_class, -1) > depth_rank.get(prev_target_depth_class, -1)
+                )
             )
             replan_effective = any((plan_changed, targets_changed, target_changed, depth_improved))
             coverage_replan_effective = replan_effective
@@ -5305,6 +5880,40 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 coverage_stop_reason = "no_material_change"
                 coverage_replan_reason = "no_material_change"
                 repair_force_strategy_change = True
+
+        # ── Corpus carry-over on target change ──────────────────────────
+        # When a replan selects a different target, copy the old fuzzer's
+        # corpus into the new fuzzer's corpus dir so coverage progress
+        # isn't lost.  Only carry over if seed profiles match (otherwise
+        # the input format may be incompatible).
+        _corpus_carryover_count = 0
+        if replan_mode and target_changed and new_target_name:
+            _prev_seed_prof = str(state.get("coverage_seed_profile") or "")
+            if _prev_seed_prof == new_seed_profile or not _prev_seed_prof:
+                _corpus_root = gen.repo_root / "fuzz" / "corpus"
+                if _corpus_root.is_dir():
+                    # Collect all corpus files from previous fuzzers
+                    _old_corpus_files: list[Path] = []
+                    for _sub in _corpus_root.iterdir():
+                        if _sub.is_dir() and _sub.name != new_target_name:
+                            for _cf in _sub.iterdir():
+                                if _cf.is_file():
+                                    _old_corpus_files.append(_cf)
+                    if _old_corpus_files:
+                        _new_corpus_dir = _corpus_root / new_target_name
+                        _new_corpus_dir.mkdir(parents=True, exist_ok=True)
+                        for _cf in _old_corpus_files:
+                            _dst = _new_corpus_dir / _cf.name
+                            if not _dst.exists():
+                                try:
+                                    import shutil
+                                    shutil.copy2(str(_cf), str(_dst))
+                                    _corpus_carryover_count += 1
+                                except Exception:
+                                    pass
+                        if _corpus_carryover_count > 0:
+                            print(f"[*] Corpus carry-over: copied {_corpus_carryover_count} files to {new_target_name}")
+
         out = {
             **state,
             "last_step": "plan",
@@ -5323,6 +5932,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_summary": target_analysis_summary,
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
+            "security_evidence_count": int(state.get("security_evidence_count") or 0),
+            "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+            "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or _vuln_hunting_enabled()),
+            "vuln_focus_profile": str(state.get("vuln_focus_profile") or "broad_high_risk"),
+            "target_surface_policy": str(state.get("target_surface_policy") or "risk_first"),
+            "security_priority_mode": bool(security_priority_mode),
             "selected_targets_path": selected_targets_path,
             "execution_plan_path": execution_plan_path,
             "coverage_attempted_targets": list(
@@ -5396,6 +6011,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         }
         out = _attach_prompt_render_status(out, issue=prompt_render_issue)
         out = _clear_error_markers_on_success(out)
+        security_breakdown = dict(selected_primary.get("security_score_breakdown") or {})
+        api_surface_exception = dict(selected_primary.get("api_surface_exception") or {})
         choose_target_snapshot = {
             "kind": "choose_target",
             "selected_target": str(selected_primary.get("target") or new_target_name or ""),
@@ -5413,6 +6030,19 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             ),
             "selected_targets_path": selected_targets_path,
             "degraded_reason": "" if selected_targets_doc else "selected_targets_missing_or_empty",
+            "security_priority_mode": bool(security_priority_mode),
+            "top_vuln_candidate": str(selected_primary.get("target") or new_target_name or ""),
+            "security_score_breakdown": security_breakdown,
+            "api_surface_exception_used": bool(api_surface_exception.get("used") or False),
+        }
+        out["latest_vuln_decision_snapshot"] = {
+            "kind": "choose_target",
+            "selected_target": str(choose_target_snapshot.get("selected_target") or ""),
+            "selected_api": str(choose_target_snapshot.get("selected_api") or ""),
+            "security_priority_mode": bool(security_priority_mode),
+            "top_vuln_candidate": str(choose_target_snapshot.get("top_vuln_candidate") or ""),
+            "security_score_breakdown": security_breakdown,
+            "api_surface_exception_used": bool(choose_target_snapshot.get("api_surface_exception_used") or False),
         }
         out = _record_decision_trace(
             out,
@@ -10105,7 +10735,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 selected_target_score_breakdown or state.get("target_score_breakdown_available")
             ),
         }
-        if auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
+        if should_improve or current_cov > prev_cov:
+            # Reset the circuit-breaker counter whenever the coverage loop
+            # makes genuine progress so that a brief stall followed by new
+            # coverage does not accumulate towards a spurious replan.
+            out["continuous_loop_count"] = 0
+        elif auto_stop_policy == "hard_fail_only" and (not bool(out.get("failed"))) and not str(out.get("last_error") or "").strip() and not bool(should_improve):
             out["auto_stop_blocked_reason"] = "coverage_no_improve"
             out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
@@ -10128,11 +10763,32 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             out["coverage_source_report"] = source_report
             out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
 
-        # Track exhausted targets for coverage-guided replan
-        exhausted = list(state.get("coverage_exhausted_targets") or [])
-        if plateau_streak >= 2 and current_target_api and current_target_api not in exhausted:
-            exhausted.append(current_target_api)
-        out["coverage_exhausted_targets"] = exhausted
+        # Track exhausted targets for coverage-guided replan.
+        # Each entry is either a plain target name (legacy) or a dict
+        # {"name": ..., "round": ...}.  Entries older than
+        # SHERPA_EXHAUSTED_TARGET_TTL rounds (default 5) are pruned so that
+        # a temporarily-failed target can be retried later.
+        _exhausted_ttl = int(os.environ.get("SHERPA_EXHAUSTED_TARGET_TTL", "5"))
+        _raw_exhausted = list(state.get("coverage_exhausted_targets") or [])
+        # Normalise legacy plain-string entries
+        exhausted_entries: list[dict[str, Any]] = []
+        for _e in _raw_exhausted:
+            if isinstance(_e, dict):
+                exhausted_entries.append(_e)
+            elif isinstance(_e, str) and _e:
+                exhausted_entries.append({"name": _e, "round": max(0, current_round - 1)})
+        # Add current target if plateau detected
+        _exhausted_names = {e["name"] for e in exhausted_entries}
+        if plateau_streak >= 2 and current_target_api and current_target_api not in _exhausted_names:
+            exhausted_entries.append({"name": current_target_api, "round": current_round})
+        # Prune expired entries
+        exhausted_entries = [
+            e for e in exhausted_entries
+            if current_round - int(e.get("round") or 0) < _exhausted_ttl
+        ]
+        out["coverage_exhausted_targets"] = exhausted_entries
+        # Convenience flat list for downstream consumers
+        exhausted = [str(e.get("name") or e) for e in exhausted_entries]
 
         # Build coverage feedback for plan stage (replan context)
         if replan_required and history:
@@ -12395,6 +13051,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "cold_start_trigger_snapshot": dict(out.get("cold_start_trigger_snapshot") or {}),
         "coverage_history": list(out.get("coverage_history") or []),
         "analysis_evidence_count": int(out.get("analysis_evidence_count") or 0),
+        "security_evidence_count": int(out.get("security_evidence_count") or 0),
+        "vuln_candidate_count": int(out.get("vuln_candidate_count") or 0),
+        "vuln_hunting_enabled": bool(out.get("vuln_hunting_enabled") or False),
+        "vuln_focus_profile": str(out.get("vuln_focus_profile") or ""),
+        "target_surface_policy": str(out.get("target_surface_policy") or ""),
+        "security_priority_mode": bool(out.get("security_priority_mode") or False),
+        "latest_vuln_decision_snapshot": dict(out.get("latest_vuln_decision_snapshot") or {}),
         "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
         "target_score_breakdown_available": bool(out.get("target_score_breakdown_available") or False),
         "constraint_memory_count": int(out.get("constraint_memory_count") or 0),

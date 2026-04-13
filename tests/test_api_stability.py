@@ -631,6 +631,39 @@ def test_list_tasks_returns_recent_tasks_with_child_summary():
     assert items[1]["job_id"] == task_old
 
 
+def test_list_tasks_exposes_vuln_hunting_fields_from_active_child():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="running",
+        security_evidence_count=9,
+        vuln_candidate_count=4,
+        vuln_hunting_enabled=True,
+        security_priority_mode=True,
+        latest_vuln_decision_snapshot={
+            "kind": "choose_target",
+            "selected_target": "parse_zip",
+        },
+    )
+    web_main._job_update(task_id, children=[child_id], status="running")
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+        detail = client.get(f"/api/task/{task_id}").json()
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["security_evidence_count"] == 9
+    assert listing[0]["vuln_candidate_count"] == 4
+    assert listing[0]["vuln_hunting_enabled"] is True
+    assert listing[0]["security_priority_mode"] is True
+    assert listing[0]["latest_vuln_decision_snapshot"]["selected_target"] == "parse_zip"
+    assert detail["children"][0]["security_evidence_count"] == 9
+    assert detail["children"][0]["vuln_candidate_count"] == 4
+    assert detail["children"][0]["vuln_hunting_enabled"] is True
+    assert detail["children"][0]["security_priority_mode"] is True
+
+
 def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     web_main._create_job("fuzz", "https://github.com/example/repo.git")
     web_main._create_job("task", "batch")

@@ -118,9 +118,18 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert "target" in selected_doc[0]
     assert "score_total" in selected_doc[0]
     assert "rank" in selected_doc[0]
+    assert "security_score_breakdown" in selected_doc[0]
+    assert isinstance(selected_doc[0].get("security_score_breakdown"), dict)
+    assert "api_surface_exception" in selected_doc[0]
+    assert isinstance(selected_doc[0].get("api_surface_exception"), dict)
+    assert selected_doc[0].get("security_priority_mode") is True
     assert selected_doc[0].get("target_scoring_enabled") is True
     assert out.get("target_scoring_enabled") is True
     assert out.get("target_score_breakdown_available") is True
+    assert out.get("security_priority_mode") is True
+    assert isinstance(out.get("latest_vuln_decision_snapshot"), dict)
+    assert out.get("latest_vuln_decision_snapshot", {}).get("kind") == "choose_target"
+    assert "security_score_breakdown" in out.get("latest_vuln_decision_snapshot", {})
     assert int(out.get("decision_trace_count") or 0) >= 1
     assert isinstance(out.get("latest_decision_snapshot"), dict)
     trace_path = tmp_path / "fuzz" / "decision_trace.jsonl"
@@ -208,6 +217,24 @@ def test_node_analysis_writes_analysis_evidence_index(tmp_path: Path, monkeypatc
     assert isinstance(evidence_doc.get("api_inventory"), list)
     assert isinstance(evidence_doc.get("callgraph_summary"), list)
     assert isinstance(evidence_doc.get("semantic_evidence"), list)
+    assert isinstance(evidence_doc.get("security_evidence"), list)
+    assert isinstance(evidence_doc.get("vuln_candidate_inventory"), list)
+    evidence_index = dict(evidence_doc.get("evidence_index") or {})
+    indexed_ids = {str(k) for k in evidence_index.keys() if str(k)}
+    for candidate in list(evidence_doc.get("vuln_candidate_inventory") or []):
+        if not isinstance(candidate, dict):
+            continue
+        for evidence_id in list(candidate.get("evidence_ids") or []):
+            assert str(evidence_id) in indexed_ids
+    assert int(summary.get("security_evidence_count") or 0) >= 0
+    assert int(summary.get("vuln_candidate_count") or 0) >= 0
+    assert summary.get("security_mode") == "risk_first_v1"
+    assert summary.get("vuln_focus_profile") == "broad_high_risk"
+    assert summary.get("target_surface_policy") == "risk_first"
+    assert out.get("security_evidence_count") == int(summary.get("security_evidence_count") or 0)
+    assert out.get("vuln_candidate_count") == int(summary.get("vuln_candidate_count") or 0)
+    assert out.get("vuln_hunting_enabled") is True
+    assert out.get("security_priority_mode") is True
 
 
 def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path: Path, monkeypatch):
