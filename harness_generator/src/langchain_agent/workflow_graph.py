@@ -5176,14 +5176,15 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "Use `fuzz/antlr_plan_context.json` as grammar-aware grounding for API/entrypoint selection.\n"
                 f"{antlr_context_summary}"
             )
-        # On replan, prefer deeper targets and skip already-attempted ones.
+        # Always skip already-attempted targets when re-entering plan, and
+        # prefer deeper targets when an explicit replan was requested.
         _attempted = list(state.get("coverage_attempted_targets") or [])
         _is_replan = str(state.get("coverage_improve_mode") or "") == "replan" or bool(
             state.get("coverage_replan_required") or False
         )
         primary_target = _select_primary_target(
             gen.repo_root,
-            exclude_names=_attempted if _is_replan else None,
+            exclude_names=_attempted if _attempted else None,
             prefer_deeper=_is_replan,
         )
         selected_targets_path = ""
