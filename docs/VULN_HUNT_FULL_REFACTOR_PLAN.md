@@ -209,7 +209,7 @@ Sherpa 的 `_node_vuln_hunt` 模仿 FuzzingBrain 的多阶段策略：
 | Phase 1 | 按漏洞分类逐类攻击 (OOB/UAF/整数溢出/注入...) | 按 `signal_type` 分类，每类生成针对性候选 |
 | Phase 2 | LLM 筛 top-k 可疑函数 | LLM 从 target_analysis 中筛高风险函数 |
 | Phase 3 | 沿调用路径精准构造 | 利用 analysis_context 的调用图信息构造攻击路径 |
-| Phase 4 | Claude Security Agent 深度审计 | OpenCode 安全审计（已部分实现） |
+| Phase 4 | Claude Security Agent 深度审计 | OpenCode 安全审计（analysis prompt 已实现 `security_evidence[]` 输出） |
 
 ### 4.2 候选状态机
 
@@ -310,7 +310,7 @@ stateDiagram-v2
   },
 
   // 状态
-  "status": "pending",                      // pending → validating → confirmed/rejected/inconclusive → cooling
+  "status": "pending",                      // pending → deep_analysis → validating → confirmed/rejected/inconclusive → cooling
   "validation_rounds": 0,
   "max_validation_rounds": 5,               // 模仿 FuzzingBrain 的 MAX_ITERATIONS
   "created_at": "2026-04-14T12:00:00Z",
@@ -622,11 +622,11 @@ score_total = 0.45 * vuln_likelihood
 
 | 现有阶段 | 升级内容 |
 |----------|---------|
-| `analysis` | 增加安全审计输出（已部分实现：`security_evidence[]`） |
-| 新增 `vuln-hunt` | analysis 之后，产出候选清单 + 攻击策略 |
-| `plan` | 从 coverage-first 改为 candidate-first，读 `vuln_candidates.json` |
-| `synthesize` | hint 注入 `attack_hint`（已部分实现） |
-| `seed_generation` | 注入 `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS`（已实现） |
+| `analysis` | 安全审计输出 `security_evidence[]`（✅ 已实现） |
+| 新增 `vuln-hunt` | analysis 之后，产出候选清单 + 攻击策略（Phase 1a） |
+| `plan` | 从 coverage-first 改为 candidate-first，读 `vuln_candidates.json`（candidate-first 声明 ✅ 已实现，读 candidates 待 Phase 1a） |
+| `synthesize` | hint 注入漏洞路径（✅ 已实现 `vuln_hint_lines`），完整 `attack_hint` 契约待 Phase 1a |
+| `seed_generation` | 注入 `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS`（✅ 已实现） |
 | `run` | 运行后提取细粒度覆盖率数据（新增） |
 | `coverage_analysis` | 增加代码路径级反馈输出（新增） |
 | `improve_harness` | 接收覆盖率路径反馈，针对性调整（新增） |
@@ -695,7 +695,7 @@ score_total = 0.45 * vuln_likelihood
 ```mermaid
 flowchart LR
     subgraph done["✅ 已完成"]
-        PRE["前置工作<br/>评分切换 / security_evidence<br/>suggested_families / seed guidance"]
+        PRE["前置工作<br/>评分切换 0.88 / security_evidence<br/>suggested_families / vuln_hint<br/>seed guidance / dict_parse_error fix"]
     end
     subgraph p1["Phase 1"]
         P1A["1a: 最小闭环<br/>_node_vuln_hunt<br/>+ candidate-first plan"]
@@ -831,19 +831,21 @@ SHERPA_VULN_COOLING_HOURS=24
 
 以下改动已合入 `sherpa-improvements` 和 `dev` 分支：
 
-| 改动 | 对应 Phase | 状态 |
-|------|-----------|------|
-| 评分权重切换到 0.88 vuln-dominant | Phase 2 | ✅ 已完成 |
-| `required_families` → `suggested_families` 全链路重命名 | Phase 5 | ✅ 已完成 |
-| analysis prompt 增加安全审计输出 (`security_evidence[]`) | Phase 1a 前置 | ✅ 已完成 |
-| `_load_security_evidence_list()` 严格合约 | Phase 1a 前置 | ✅ 已完成 |
-| synthesize hint 注入漏洞路径 (`attack_hint` 雏形) | Phase 1a 前置 | ✅ 已完成 |
-| `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS` | Phase 1a 前置 | ✅ 已完成 |
-| dict_parse_error 立即 exhaust target | Phase 5 | ✅ 已完成 |
-| 降级传播到 decision snapshot | Phase 4 | ✅ 已完成 |
-| plan prompt candidate-first 排序声明 | Phase 2 | ✅ 已完成 |
+| 改动 | 性质 | 状态 |
+|------|------|------|
+| 评分权重切换到 0.88 vuln-dominant（`0.45 vuln + 0.25 exploit + 0.18 reach`） | 前置：评分基础 | ✅ 已完成 |
+| `required_families` → `suggested_families` 全链路重命名 | 前置：去硬约束 | ✅ 已完成 |
+| analysis prompt 增加安全审计输出（`security_evidence[]`） | 前置：数据源 | ✅ 已完成 |
+| `_load_security_evidence_list()` 严格合约 | 前置：数据源 | ✅ 已完成 |
+| synthesize hint 注入漏洞路径（`vuln_hint_lines`） | 前置：攻击引导 | ✅ 已完成 |
+| `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS` | 前置：种子引导 | ✅ 已完成 |
+| dict_parse_error 立即 exhaust target | 前置：Bug 修复 | ✅ 已完成 |
+| 降级传播到 decision snapshot | 前置：可观测性 | ✅ 已完成 |
+| plan prompt candidate-first 排序声明 | 前置：排序策略 | ✅ 已完成 |
 
-**下一步**：Phase 1a — 实现 `_node_vuln_hunt` 节点。
+**当前状态**：所有前置工作已完成，评分、数据源、种子引导、可观测性基础就绪。
+
+**下一步**：Phase 1a — 实现 `_node_vuln_hunt` 节点（候选生成 + `attack_hint` 完整契约 + `vuln_candidates.json` 产出）。
 
 ---
 
