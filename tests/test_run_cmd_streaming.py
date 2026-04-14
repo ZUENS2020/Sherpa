@@ -461,14 +461,14 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
     assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
     assert "fuzz/PLAN.md" in captured["instructions"]
-    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
     assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
     assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
     assert "fuzz/PLAN.md" in captured["instructions"]
-    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
@@ -626,7 +626,7 @@ def test_pass_generate_seeds_prefers_selected_seed_profile_over_observed(tmp_pat
     gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
     gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
     (gen.fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"demo_parse","api":"demo_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"demo_parse","api":"demo_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     (gen.fuzz_dir / "observed_target.json").write_text(
@@ -874,15 +874,15 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
             corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
             (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
             (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
-                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","required_families":["document_markers"],"missing_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","suggested_families":["document_markers"],"missing_suggested_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
                 encoding="utf-8",
             )
             (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
-                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
                 encoding="utf-8",
             )
             (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
-                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
                 encoding="utf-8",
             )
             return "seed-ok"

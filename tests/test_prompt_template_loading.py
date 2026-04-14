@@ -75,6 +75,37 @@ def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
     assert "analysis-only" in out
     assert "MCP tools are available" in out
     assert "analysis-context" in out
+    assert "analysis_evidence.security_evidence[]" in out
+    legacy_security_path = "security_evidence" + ".vuln_patterns"
+    assert legacy_security_path not in out
+    assert "MUST classify each one" not in out
+    assert "Keep `target_type` and `seed_profile` unchanged in analysis." in out
+
+
+def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
+    prompt_text = (
+        ROOT
+        / "harness_generator"
+        / "src"
+        / "langchain_agent"
+        / "prompts"
+        / "opencode_prompts.md"
+    ).read_text(encoding="utf-8")
+    skill_text = (
+        ROOT
+        / "harness_generator"
+        / "src"
+        / "langchain_agent"
+        / "opencode_skills"
+        / "analysis"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "analysis_evidence.security_evidence[]" in prompt_text
+    legacy_security_path = "security_evidence" + ".vuln_patterns"
+    assert legacy_security_path not in prompt_text
+    assert "Do not reclassify target_type or seed_profile here." in skill_text
+    assert "must classify" not in prompt_text.lower()
 
 
 def test_repair_plan_prompts_are_split_by_origin() -> None:

@@ -328,7 +328,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "target_api": str(out.get("coverage_target_api") or out.get("selected_target_api") or ""),
             "seed_profile": str(out.get("coverage_seed_profile") or ""),
             "seed_quality": dict(out.get("coverage_seed_quality") or {}),
-            "seed_families_required": list(out.get("coverage_seed_families_required") or []),
+            "seed_families_suggested": list(out.get("coverage_seed_families_suggested") or []),
             "seed_families_covered": list(out.get("coverage_seed_families_covered") or []),
             "seed_families_missing": list(out.get("coverage_seed_families_missing") or []),
             "quality_flags": list(out.get("coverage_quality_flags") or []),
@@ -377,7 +377,7 @@ def write_run_summary(out: dict[str, Any]) -> None:
         },
         "seed_quality": dict(out.get("coverage_seed_quality") or {}),
         "seed_family_coverage": {
-            "required": list(out.get("coverage_seed_families_required") or []),
+            "suggested": list(out.get("coverage_seed_families_suggested") or []),
             "covered": list(out.get("coverage_seed_families_covered") or []),
             "missing": list(out.get("coverage_seed_families_missing") or []),
             "quality_flags": list(out.get("coverage_quality_flags") or []),

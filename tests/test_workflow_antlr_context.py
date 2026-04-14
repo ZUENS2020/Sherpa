@@ -249,9 +249,30 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     antlr_ctx.write_text('{"entrypoint_candidates":[{"name":"parse_zip"}]}\n', encoding="utf-8")
     target_ctx = fuzz_dir / "target_analysis.json"
     target_ctx.write_text('{"recommended_targets":[{"name":"a","seed_profile":"parser-structure"}]}\n', encoding="utf-8")
+    analysis_ctx = fuzz_dir / "analysis_context.json"
+    analysis_ctx.write_text(
+        json.dumps(
+            {
+                "analysis_evidence": {
+                    "security_evidence": [
+                        {
+                            "evidence_id": "EV-0001",
+                            "signal_id": "mem_oob_candidate",
+                            "confidence": 0.91,
+                            "source_path": "src/demo.c",
+                            "line": 27,
+                            "summary": "unchecked memcpy length from attacker-controlled field",
+                        }
+                    ]
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     selected_targets = fuzz_dir / "selected_targets.json"
     selected_targets.write_text(
-        '[{"target_name":"a","api":"a","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"a","api":"a","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
 
@@ -259,6 +280,7 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
 
     class _Patcher:
         def run_codex_command(self, _prompt: str, **kwargs):
+            captured["prompt"] = _prompt
             captured["additional_context"] = str(kwargs.get("additional_context") or "")
             # Produce minimal synth outputs to satisfy guard.
             (fuzz_dir / "harness.cc").write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n", encoding="utf-8")
@@ -286,6 +308,8 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
             "antlr_context_summary": "antlr_context_file=fuzz/antlr_plan_context.json",
             "target_analysis_path": str(target_ctx),
             "target_analysis_summary": "target_analysis_file=fuzz/target_analysis.json",
+            "analysis_context_path": str(analysis_ctx),
+            "analysis_evidence_count": 1,
             "selected_targets_path": str(selected_targets),
         }
     )
@@ -293,6 +317,59 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     assert "fuzz/antlr_plan_context.json" in captured.get("additional_context", "")
     assert "fuzz/target_analysis.json" in captured.get("additional_context", "")
     assert "fuzz/selected_targets.json" in captured.get("additional_context", "")
+    assert "Vulnerability-Directed Harness Guidance" in captured.get("prompt", "")
+    assert "mem_oob_candidate" in captured.get("prompt", "")
+
+
+def test_node_synthesize_marks_degraded_when_security_evidence_schema_is_invalid(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"a","api":"a","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+    analysis_ctx = fuzz_dir / "analysis_context.json"
+    analysis_ctx.write_text(
+        json.dumps({"analysis_evidence": {"security_evidence": {"legacy": "invalid"}}}) + "\n",
+        encoding="utf-8",
+    )
+    selected_targets = fuzz_dir / "selected_targets.json"
+    selected_targets.write_text(
+        '[{"target_name":"a","api":"a","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **_kwargs):
+            (fuzz_dir / "harness.cc").write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n", encoding="utf-8")
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["a"],"chosen_target_api":"a","chosen_target_reason":"runtime","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["demo"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+    out = workflow_graph._node_synthesize(
+        {
+            "generator": gen,
+            "codex_hint": "schema-check",
+            "analysis_context_path": str(analysis_ctx),
+            "analysis_evidence_count": 1,
+            "selected_targets_path": str(selected_targets),
+        }
+    )
+    assert out["last_error"] == ""
+    assert out["prompt_render_degraded"] is True
+    assert "security_evidence_schema_invalid" in str(out.get("prompt_render_issue") or "")
 
 
 def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path, monkeypatch):
@@ -305,7 +382,7 @@ def test_node_synthesize_accepts_soft_target_drift_and_records_it(tmp_path: Path
     )
     selected_targets = fuzz_dir / "selected_targets.json"
     selected_targets.write_text(
-        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
 
@@ -366,7 +443,7 @@ def test_analyze_harness_target_alignment_prefers_external_api_over_local_helper
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","seed_families_required":["replacement_fields"],"seed_families_optional":[]}]',
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","seed_families_suggested":["replacement_fields"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     (fuzz_dir / "format_fuzz.cc").write_text(
@@ -394,7 +471,7 @@ def test_node_synthesize_repairs_readme_for_target_drift(tmp_path: Path, monkeyp
         encoding="utf-8",
     )
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","runtime_viability":"low","seed_families_required":["replacement_fields"],"seed_families_optional":[]}]',
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"parser","seed_profile":"parser-format","runtime_viability":"low","seed_families_suggested":["replacement_fields"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     prompts: list[str] = []

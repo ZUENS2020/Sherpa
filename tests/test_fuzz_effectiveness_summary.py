@@ -105,7 +105,7 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
                 "plateau_after_sec": 180,
                 "quality_flags": ["high_homogeneity"],
             },
-            "coverage_seed_families_required": ["document_markers", "flow_structures"],
+            "coverage_seed_families_suggested": ["document_markers", "flow_structures"],
             "coverage_seed_families_covered": ["document_markers"],
             "coverage_seed_families_missing": ["flow_structures"],
             "coverage_target_api": "fmt::println",

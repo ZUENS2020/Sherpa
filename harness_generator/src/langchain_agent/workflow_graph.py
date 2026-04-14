@@ -185,7 +185,7 @@ class FuzzWorkflowState(TypedDict, total=False):
     selected_target_api: str
     selected_target_runtime_viability: str
     coverage_seed_quality: dict[str, Any]
-    coverage_seed_families_required: list[str]
+    coverage_seed_families_suggested: list[str]
     coverage_seed_families_covered: list[str]
     coverage_seed_families_missing: list[str]
     coverage_quality_flags: list[str]
@@ -1888,6 +1888,48 @@ def _load_target_analysis_security_index(repo_root: Path) -> dict[str, dict[str,
     return out
 
 
+def _load_security_evidence_list(
+    repo_root: Path,
+    analysis_context_path: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Load security evidence from analysis_context using a strict list-only contract.
+
+    Contract:
+      analysis_context.json.analysis_evidence.security_evidence must be list[object].
+    Any non-list schema returns empty evidence with a structured issue code.
+    """
+    path_text = str(analysis_context_path or "").strip()
+    if not path_text:
+        return [], ""
+    ctx_path = Path(path_text)
+    if not ctx_path.is_absolute():
+        ctx_path = repo_root / ctx_path
+    if not ctx_path.is_file():
+        return [], ""
+    try:
+        raw_doc = json.loads(ctx_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return [], f"security_evidence_load_error:{exc}"
+    if not isinstance(raw_doc, dict):
+        return [], "security_evidence_schema_invalid:analysis_context_not_object"
+    analysis_evidence = raw_doc.get("analysis_evidence")
+    if analysis_evidence is None:
+        return [], ""
+    if not isinstance(analysis_evidence, dict):
+        return [], "security_evidence_schema_invalid:analysis_evidence_not_object"
+    security_evidence = analysis_evidence.get("security_evidence")
+    if security_evidence is None:
+        return [], ""
+    if not isinstance(security_evidence, list):
+        return [], "security_evidence_schema_invalid:security_evidence_not_list"
+    normalized: list[dict[str, Any]] = []
+    for item in security_evidence:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+    return normalized, ""
+
+
 def _lookup_target_security_candidate(
     *,
     target_name: str,
@@ -2034,7 +2076,7 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "runtime_viability": runtime_viability,
                 "selection_rationale": selection_rationale,
                 "runtime_replacement_candidates": runtime_replacement_candidates,
-                "seed_families_required": required,
+                "seed_families_suggested": required,
                 "seed_families_optional": optional,
                 "wrapper_fuzzer_name": wrapper_fuzzer_name,
                 "score_total": float(adjusted_target_score),
@@ -3014,9 +3056,9 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "cold_start_failure": bool(quality.get("cold_start_failure") or False),
         "merge_retained_ratio_files": float(quality.get("merge_retained_ratio_files") or 1.0),
         "merge_retained_ratio_bytes": float(quality.get("merge_retained_ratio_bytes") or 1.0),
-        "required_families": list(state.get("coverage_seed_families_required") or []),
+        "suggested_families": list(state.get("coverage_seed_families_suggested") or []),
         "covered_families": list(state.get("coverage_seed_families_covered") or []),
-        "missing_families": list(state.get("coverage_seed_families_missing") or []),
+        "missing_suggested_families": list(state.get("coverage_seed_families_missing") or []),
         "quality_flags": list(state.get("coverage_quality_flags") or quality.get("quality_flags") or []),
         "seed_score": float(quality.get("seed_score") or 0.0),
         "seed_score_components": dict(quality.get("seed_score_components") or {}),
@@ -3946,6 +3988,17 @@ def _attach_prompt_render_status(
             merged = f"{prev}; {issue_text}"
         out["prompt_render_degraded"] = True
         out["prompt_render_issue"] = merged[:4096]
+        for snapshot_key in ("latest_decision_snapshot", "latest_vuln_decision_snapshot"):
+            snapshot = out.get(snapshot_key)
+            if not isinstance(snapshot, dict):
+                continue
+            snapshot_doc = dict(snapshot)
+            degraded_prev = str(snapshot_doc.get("degraded_reason") or "").strip()
+            if not degraded_prev:
+                snapshot_doc["degraded_reason"] = issue_text
+            elif issue_text not in degraded_prev:
+                snapshot_doc["degraded_reason"] = f"{degraded_prev}; {issue_text}"
+            out[snapshot_key] = snapshot_doc
         return out
     out["prompt_render_degraded"] = bool(out.get("prompt_render_degraded") or False)
     out["prompt_render_issue"] = str(out.get("prompt_render_issue") or "")
@@ -5807,7 +5860,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         new_depth_class = str(primary_target.get("depth_class") or "")
         new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
         selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
-        seed_families_required = list(selected_primary.get("seed_families_required") or [])
+        seed_families_suggested = list(selected_primary.get("seed_families_suggested") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
         target_scoring_enabled = bool(
@@ -5955,9 +6008,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
             "selected_target_runtime_viability": selected_runtime_viability or str(state.get("selected_target_runtime_viability") or ""),
             "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
-            "coverage_seed_families_required": seed_families_required or list(state.get("coverage_seed_families_required") or []),
+            "coverage_seed_families_suggested": seed_families_suggested or list(state.get("coverage_seed_families_suggested") or []),
             "coverage_seed_families_covered": list(state.get("coverage_seed_families_covered") or []),
-            "coverage_seed_families_missing": list(state.get("coverage_seed_families_missing") or seed_families_required),
+            "coverage_seed_families_missing": list(state.get("coverage_seed_families_missing") or seed_families_suggested),
             "coverage_seed_quality": dict(state.get("coverage_seed_quality") or {}),
             "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
             "coverage_target_depth_score": new_depth_score,
@@ -6124,32 +6177,50 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         )
     # Inject vulnerability-directed harness guidance from security evidence
     if _vuln_hunting_enabled() and analysis_context_path:
-        try:
-            _ac_path = gen.repo_root / analysis_context_path if not Path(analysis_context_path).is_absolute() else Path(analysis_context_path)
-            if _ac_path.is_file():
-                _ac = json.loads(_ac_path.read_text(encoding="utf-8", errors="replace"))
-                _sec_ev = (_ac.get("analysis_evidence") or {}).get("security_evidence") or {}
-                _vuln_patterns = list(_sec_ev.get("vuln_patterns") or [])
-                _high_conf = [v for v in _vuln_patterns if float(v.get("confidence") or 0) >= 0.5]
-                if _high_conf:
-                    _vuln_hint_lines = [
-                        "\n## Vulnerability-Directed Harness Guidance",
-                        "Prioritize exercising these high-risk code paths:",
-                    ]
-                    for _vp in _high_conf[:8]:
-                        _vuln_hint_lines.append(
-                            f"- {_vp.get('function', '?')} ({_vp.get('pattern_id', '?')}): "
-                            f"{_vp.get('evidence', 'n/a')}"
-                        )
-                    _vuln_hint_lines.extend([
-                        "Design the harness to:",
-                        "- Feed attacker-controlled data through these paths",
-                        "- Exercise boundary conditions (max lengths, zero sizes, negative values)",
-                        "- Test error handling paths (corrupt headers, truncated input, invalid checksums)",
-                    ])
-                    hint = (hint + "\n" + "\n".join(_vuln_hint_lines)).strip()
-        except Exception:
-            pass
+        security_evidence, security_issue = _load_security_evidence_list(
+            gen.repo_root,
+            analysis_context_path,
+        )
+        if security_issue:
+            issue_text = str(security_issue or "").strip()
+            if issue_text:
+                if not prompt_render_issue:
+                    prompt_render_issue = issue_text
+                elif issue_text not in prompt_render_issue:
+                    prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
+            _wf_log(cast(dict[str, Any], state), f"synthesize: security evidence degraded -> {security_issue}")
+        high_conf: list[dict[str, Any]] = []
+        for entry in security_evidence:
+            try:
+                confidence = float(entry.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            if confidence >= 0.5:
+                high_conf.append(entry)
+        if high_conf:
+            vuln_hint_lines = [
+                "\n## Vulnerability-Directed Harness Guidance",
+                "Prioritize exercising these high-risk code paths:",
+            ]
+            for entry in high_conf[:8]:
+                signal_id = str(entry.get("signal_id") or "unknown_signal").strip() or "unknown_signal"
+                summary = str(entry.get("summary") or "n/a").strip() or "n/a"
+                source_path = str(entry.get("source_path") or "").strip()
+                source_line = int(entry.get("line") or 0) if str(entry.get("line") or "").strip() else 0
+                location = source_path
+                if source_line > 0:
+                    location = f"{source_path}:{source_line}" if source_path else f"line:{source_line}"
+                suffix = f" [{location}]" if location else ""
+                vuln_hint_lines.append(f"- {signal_id}: {summary}{suffix}")
+            vuln_hint_lines.extend(
+                [
+                    "Design the harness to:",
+                    "- Feed attacker-controlled data through these paths",
+                    "- Exercise boundary conditions (max lengths, zero sizes, negative values)",
+                    "- Test error handling paths (corrupt headers, truncated input, invalid checksums)",
+                ]
+            )
+            hint = (hint + "\n" + "\n".join(vuln_hint_lines)).strip()
     if selected_targets_path:
         selected_target_soft_hint = (
             "Use `fuzz/selected_targets.json` as a preferred target plan, not a hard stop.\n"
@@ -10038,9 +10109,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             ),
             "coverage_seed_profile": last_seed_profile,
             "coverage_seed_quality": aggregated_seed_quality,
-            "coverage_seed_families_required": list(
-                _first_seed_meta_list("seed_families_required")
-                or list(state.get("coverage_seed_families_required") or [])
+            "coverage_seed_families_suggested": list(
+                _first_seed_meta_list("seed_families_suggested")
+                or list(state.get("coverage_seed_families_suggested") or [])
             ),
             "coverage_seed_families_covered": list(
                 _first_seed_meta_list("seed_family_coverage", "covered")
@@ -10170,7 +10241,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "initial_corpus_files": int(seed_quality.get("initial_corpus_files") or 0),
                     "final_corpus_files": int(seed_quality.get("final_corpus_files") or 0),
                     "quality_flags": list(seed_quality.get("quality_flags") or []),
-                    "missing_required_families": list(out.get("coverage_seed_families_missing") or []),
+                    "missing_suggested_families": list(out.get("coverage_seed_families_missing") or []),
                     "merge_retained_ratio_files": float(seed_quality.get("merge_retained_ratio_files") or 1.0),
                     "merge_retained_ratio_bytes": float(seed_quality.get("merge_retained_ratio_bytes") or 1.0),
                     "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
@@ -10381,7 +10452,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         seed_quality = dict(state.get("coverage_seed_quality") or {})
         seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
         quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
-        seed_families_required = list(state.get("coverage_seed_families_required") or [])
+        seed_families_suggested = list(state.get("coverage_seed_families_suggested") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
         seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
         if not current_seed_profile:
@@ -10666,7 +10737,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "corpus_sources": list(state.get("coverage_corpus_sources") or []),
                 "seed_counts": dict(state.get("coverage_seed_counts") or {}),
                 "seed_quality": seed_quality,
-                "seed_families_required": seed_families_required,
+                "seed_families_suggested": seed_families_suggested,
                 "seed_families_covered": seed_families_covered,
                 "seed_families_missing": seed_families_missing,
                 "quality_flags": quality_flags,
@@ -10715,7 +10786,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_target_api": current_target_api or current_target_name or str(state.get("coverage_target_api") or ""),
             "coverage_seed_profile": current_seed_profile,
             "coverage_seed_quality": seed_quality,
-            "coverage_seed_families_required": seed_families_required,
+            "coverage_seed_families_suggested": seed_families_suggested,
             "coverage_seed_families_covered": seed_families_covered,
             "coverage_seed_families_missing": seed_families_missing,
             "coverage_quality_flags": quality_flags,
@@ -10883,7 +10954,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
         replan_required = bool(state.get("coverage_replan_required"))
         seed_quality = dict(state.get("coverage_seed_quality") or {})
         quality_flags = list(state.get("coverage_quality_flags") or [])
-        seed_families_required = list(state.get("coverage_seed_families_required") or [])
+        seed_families_suggested = list(state.get("coverage_seed_families_suggested") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
         seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
         seed_counts_raw = dict(state.get("coverage_seed_counts_raw") or {})
@@ -10940,7 +11011,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                 f"- Current target API: {target_api or selected_target_api or 'unknown'}\n"
                 f"- Current seed_profile: {seed_profile or 'generic'}\n"
                 f"- Seed quality flags: {', '.join(quality_flags) if quality_flags else 'none'}\n"
-                f"- Required seed families: {', '.join(seed_families_required) if seed_families_required else 'none'}\n"
+                f"- Suggested seed families: {', '.join(seed_families_suggested) if seed_families_suggested else 'none'}\n"
                 f"- Covered seed families: {', '.join(seed_families_covered) if seed_families_covered else 'none'}\n"
                 f"- Missing seed families: {', '.join(seed_families_missing) if seed_families_missing else 'none'}\n"
                 f"- Seed raw counts: {seed_counts_raw or {}}\n"
@@ -11051,7 +11122,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
                     "selection_bias_reason": selection_bias_reason or "",
                     "replan_reason": replan_reason or cov_reason or "",
                     "quality_flags": quality_flags,
-                    "seed_families_required": seed_families_required,
+                    "seed_families_suggested": seed_families_suggested,
                     "seed_families_covered": seed_families_covered,
                     "seed_families_missing": seed_families_missing,
                     "seed_counts_raw": seed_counts_raw,

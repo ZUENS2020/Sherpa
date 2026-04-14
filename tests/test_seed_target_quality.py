@@ -35,7 +35,7 @@ def test_resolve_seed_target_metadata_prefers_selected_targets(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     gen = _make_generator(tmp_path)
@@ -110,7 +110,7 @@ def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"generic","seed_profile":"generic","seed_families_required":[],"seed_families_optional":[]}]',
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"generic","seed_profile":"generic","seed_families_suggested":[],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     (fuzz_dir / "observed_target.json").write_text(
