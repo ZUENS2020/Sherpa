@@ -57,7 +57,7 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "`name`, `api`, `lang`, `target_type`, `seed_profile`" in out
     assert "Keep runtime-viable/public entrypoints first." in out
     assert "Target selection is vulnerability-first" in out
-    assert "score_total = 0.40*vuln_likelihood" in out
+    assert "score_total = 0.45*vuln_likelihood" in out
     assert "`security_score_breakdown`" in out
     assert "`api_surface_exception`" in out
 

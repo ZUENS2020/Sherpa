@@ -30,8 +30,8 @@ Constraints:
   - when internal/private API is selected, `api_surface_exception.used` must be `true` with non-empty `reason` and `evidence_ids`.
   - otherwise prefer public/stable API and keep `api_surface_exception.used=false`.
 - Target selection is vulnerability-first by default (`security_priority_mode=true`):
-  - prioritize targets by `score_total = 0.40*vuln_likelihood + 0.20*exploitability + 0.15*reachability_confidence + 0.10*coverage_gap + 0.08*complexity_depth + 0.05*api_relevance + 0.02*consumer_order_support - recent_yield_penalty`
-  - coverage/complexity are reference factors only; do not override higher vulnerability risk signals.
+  - prioritize targets by `score_total = 0.45*vuln_likelihood + 0.25*exploitability + 0.18*reachability_confidence + 0.05*coverage_gap + 0.04*complexity_depth + 0.02*api_relevance + 0.01*consumer_order_support - recent_yield_penalty`
+  - vulnerability scores (0.88 total weight) dominate; coverage/complexity (0.12) are reference tiebreakers only.
 - `fuzz/selected_targets.json` must include per-target:
   - `security_score_breakdown`
   - `api_surface_exception`
@@ -76,6 +76,19 @@ Constraints:
 - For each vulnerability hypothesis, include:
   - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
   - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
+
+Security analysis (vulnerability-directed):
+- Identify unsafe memory operations: unchecked memcpy/memmove/strcpy, raw pointer arithmetic, manual buffer management without bounds validation
+- Flag integer arithmetic without overflow checks: size calculations, length fields, shift operations, multiply that could wrap
+- Locate format string sinks: printf-family calls with non-literal format arguments
+- Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
+- Map trust boundaries: where external/untrusted data first enters internal processing functions
+- For each finding, record in `analysis_context.json.security_evidence.vuln_patterns[]`:
+  - `pattern_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, null_deref_candidate, uaf_candidate
+  - `location`: file:line
+  - `function`: function name where the pattern occurs
+  - `evidence`: concrete description of why this is a risk
+  - `confidence`: 0.0-1.0
 
 Target-type classification:
 - Entries in `fuzz/target_analysis.json` have `target_type: "pending"` — you MUST classify each one.

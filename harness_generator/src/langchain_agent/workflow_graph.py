@@ -1525,14 +1525,16 @@ def _vuln_topk() -> int:
 
 
 def _vuln_score_weights() -> dict[str, float]:
+    # Vulnerability scores dominate (0.88); coverage/complexity are
+    # reference tiebreakers only (0.12).
     return {
-        "vuln_likelihood": 0.40,
-        "exploitability": 0.20,
-        "reachability_confidence": 0.15,
-        "coverage_gap": 0.10,
-        "complexity_depth": 0.08,
-        "api_relevance": 0.05,
-        "consumer_order_support": 0.02,
+        "vuln_likelihood": 0.45,
+        "exploitability": 0.25,
+        "reachability_confidence": 0.18,
+        "coverage_gap": 0.05,
+        "complexity_depth": 0.04,
+        "api_relevance": 0.02,
+        "consumer_order_support": 0.01,
     }
 
 
@@ -6120,6 +6122,34 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "Use `fuzz/analysis_context.json` as the canonical evidence index for API/callgraph/consumer pattern decisions.\n"
             f"Available evidence_count={analysis_evidence_count}."
         )
+    # Inject vulnerability-directed harness guidance from security evidence
+    if _vuln_hunting_enabled() and analysis_context_path:
+        try:
+            _ac_path = gen.repo_root / analysis_context_path if not Path(analysis_context_path).is_absolute() else Path(analysis_context_path)
+            if _ac_path.is_file():
+                _ac = json.loads(_ac_path.read_text(encoding="utf-8", errors="replace"))
+                _sec_ev = (_ac.get("analysis_evidence") or {}).get("security_evidence") or {}
+                _vuln_patterns = list(_sec_ev.get("vuln_patterns") or [])
+                _high_conf = [v for v in _vuln_patterns if float(v.get("confidence") or 0) >= 0.5]
+                if _high_conf:
+                    _vuln_hint_lines = [
+                        "\n## Vulnerability-Directed Harness Guidance",
+                        "Prioritize exercising these high-risk code paths:",
+                    ]
+                    for _vp in _high_conf[:8]:
+                        _vuln_hint_lines.append(
+                            f"- {_vp.get('function', '?')} ({_vp.get('pattern_id', '?')}): "
+                            f"{_vp.get('evidence', 'n/a')}"
+                        )
+                    _vuln_hint_lines.extend([
+                        "Design the harness to:",
+                        "- Feed attacker-controlled data through these paths",
+                        "- Exercise boundary conditions (max lengths, zero sizes, negative values)",
+                        "- Test error handling paths (corrupt headers, truncated input, invalid checksums)",
+                    ])
+                    hint = (hint + "\n" + "\n".join(_vuln_hint_lines)).strip()
+        except Exception:
+            pass
     if selected_targets_path:
         selected_target_soft_hint = (
             "Use `fuzz/selected_targets.json` as a preferred target plan, not a hard stop.\n"
@@ -10408,6 +10438,9 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             and quality_score < cold_start_quality_threshold
             and early_new_units_30s <= cold_start_early_units_threshold
         )
+        # Family-based flags (missing_suggested_families, seed_family_undercovered,
+        # repo_examples_missing) are advisory and should NOT trigger replan.
+        # Only actual runtime performance signals should drive replan decisions.
         degraded_seed_replan_triggered = bool(
             seed_generation_degraded
             and (
@@ -10417,10 +10450,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     flag in quality_flags
                     for flag in {
                         "low_early_yield",
-                        "missing_required_families",
                         "missing_execution_targets",
-                        "seed_family_undercovered",
-                        "repo_examples_missing",
                     }
                 )
             )
@@ -10432,11 +10462,11 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     "low_retention",
                     "low_early_yield",
                     "high_homogeneity",
-                    "missing_required_families",
-                    "repo_examples_missing",
-                    "seed_family_undercovered",
                     "seed_noise_high",
                     "missing_execution_targets",
+                    # Advisory flags (missing_suggested_families, repo_examples_missing,
+                    # seed_family_undercovered) intentionally excluded — they are
+                    # informational and should not block or trigger replan.
                 }
             )
             or cold_start_failure
@@ -10777,9 +10807,14 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 exhausted_entries.append(_e)
             elif isinstance(_e, str) and _e:
                 exhausted_entries.append({"name": _e, "round": max(0, current_round - 1)})
-        # Add current target if plateau detected
+        # Add current target if plateau detected or fatal run error
         _exhausted_names = {e["name"] for e in exhausted_entries}
-        if plateau_streak >= 2 and current_target_api and current_target_api not in _exhausted_names:
+        _run_err = str(state.get("coverage_run_error_kind_effective") or "")
+        _exhaust_now = (
+            (plateau_streak >= 2)
+            or (_run_err == "dict_parse_error")  # dict errors mean target is fundamentally broken
+        )
+        if _exhaust_now and current_target_api and current_target_api not in _exhausted_names:
             exhausted_entries.append({"name": current_target_api, "round": current_round})
         # Prune expired entries
         exhausted_entries = [
