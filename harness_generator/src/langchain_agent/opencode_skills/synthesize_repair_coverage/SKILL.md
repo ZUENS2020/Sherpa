@@ -35,6 +35,10 @@ Use this skill when `coverage-analysis` selected replan and returned coverage di
 - Edits must be coverage-repair-driven (seed/modeling/call-path/depth).
 - No doc-only no-op patch.
 - Preserve runtime viability for next build/run cycle.
+- LibFuzzer harness contract is mandatory:
+  - do not define custom `main()` in harness source;
+  - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
+- Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 
 ## Command policy

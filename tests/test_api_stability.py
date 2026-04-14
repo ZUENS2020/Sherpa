@@ -42,9 +42,16 @@ def _isolate_runtime_state(monkeypatch, tmp_path: Path):
     db_url = "postgresql://sherpa:sherpa@127.0.0.1:55432/sherpa"
     monkeypatch.setenv("DATABASE_URL", db_url)
     monkeypatch.setenv("SHERPA_WEB_AUTO_RESUME_ON_START", "0")
+    monkeypatch.setenv("SHERPA_K8S_ANALYSIS_COMPANION_ENABLED", "0")
     monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
     monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic/v1")
     monkeypatch.setenv("MINIMAX_MODEL", "MiniMax-M2.7-highspeed")
+    monkeypatch.delenv("LLM_key", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("SHERPA_OPENCODE_MCP_SERVERS_JSON", raising=False)
+    monkeypatch.delenv("SHERPA_OPENCODE_MCP_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
@@ -445,7 +452,14 @@ def test_task_submit_child_spawn_happens_outside_parent_stdout_redirect(monkeypa
     assert status["status"] == "running"
 
 
-def test_task_submit_allows_non_docker_job_in_native_mode():
+def test_task_submit_allows_non_docker_job_in_native_mode(monkeypatch):
+    def _fake_submit(job, _cfg):
+        child_id = web_main._create_job("fuzz", job.code_url)
+        web_main._job_update(child_id, status="running")
+        return child_id
+
+    monkeypatch.setattr(web_main, "_submit_fuzz_job", _fake_submit)
+
     with TestClient(web_main.app) as client:
         response = client.post(
             "/api/task",
@@ -462,25 +476,6 @@ def test_task_submit_allows_non_docker_job_in_native_mode():
 
     assert response.status_code == 200
 
-
-def test_task_submit_marks_error_and_finished_at_when_init_fails(monkeypatch):
-    def _raise_init_error(*args, **kwargs):
-        raise RuntimeError("clone failed")
-
-    monkeypatch.setattr(web_main, "_ensure_oss_fuzz_checkout", _raise_init_error)
-
-    with TestClient(web_main.app) as client:
-        response = client.post(
-            "/api/task",
-            json={"jobs": [{"code_url": "https://github.com/example/repo.git"}]},
-        )
-        assert response.status_code == 200
-        job_id = response.json()["job_id"]
-        status = client.get(f"/api/task/{job_id}").json()
-
-    assert status["status"] == "error"
-    assert "clone failed" in (status.get("error") or "")
-    assert status["finished_at"] is not None
 
 
 def test_task_submit_accepts_unlimited_total_and_run_budget(monkeypatch):
@@ -634,6 +629,39 @@ def test_list_tasks_returns_recent_tasks_with_child_summary():
     assert items[0]["child_count"] == 1
     assert items[0]["children_status"]["running"] == 1
     assert items[1]["job_id"] == task_old
+
+
+def test_list_tasks_exposes_vuln_hunting_fields_from_active_child():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="running",
+        security_evidence_count=9,
+        vuln_candidate_count=4,
+        vuln_hunting_enabled=True,
+        security_priority_mode=True,
+        latest_vuln_decision_snapshot={
+            "kind": "choose_target",
+            "selected_target": "parse_zip",
+        },
+    )
+    web_main._job_update(task_id, children=[child_id], status="running")
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+        detail = client.get(f"/api/task/{task_id}").json()
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["security_evidence_count"] == 9
+    assert listing[0]["vuln_candidate_count"] == 4
+    assert listing[0]["vuln_hunting_enabled"] is True
+    assert listing[0]["security_priority_mode"] is True
+    assert listing[0]["latest_vuln_decision_snapshot"]["selected_target"] == "parse_zip"
+    assert detail["children"][0]["security_evidence_count"] == 9
+    assert detail["children"][0]["vuln_candidate_count"] == 4
+    assert detail["children"][0]["vuln_hunting_enabled"] is True
+    assert detail["children"][0]["security_priority_mode"] is True
 
 
 def test_list_tasks_applies_limit_and_filters_non_task_jobs():

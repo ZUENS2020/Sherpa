@@ -8,37 +8,34 @@ from loguru import logger
 class TypeRelevance:
     """Calculate type-based relevance between API functions."""
 
-    def __init__(self, api_collection, meta):
+    def __init__(self, api_collection=None, meta=None):
         self.api_collection = api_collection
         self.meta = meta
 
     def calculate(self) -> dict:
         """Calculate type relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("TypeRelevance.calculate() not yet implemented")
 
 
 class ClassRelevance:
     """Calculate class-based relevance between API functions."""
 
-    def __init__(self, api_collection, info_repo):
+    def __init__(self, api_collection=None, info_repo=None):
         self.api_collection = api_collection
         self.info_repo = info_repo
 
     def calculate(self) -> dict:
         """Calculate class relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("ClassRelevance.calculate() not yet implemented")
 
 
 class CallRelevance:
     """Calculate call-based relevance between API functions."""
 
-    def __init__(self, api_collection, call_graph):
+    def __init__(self, api_collection=None, call_graph=None):
         self.api_collection = api_collection
         self.call_graph = call_graph
 
     def calculate(self) -> dict:
         """Calculate call relevance."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("CallRelevance.calculate() not yet implemented")

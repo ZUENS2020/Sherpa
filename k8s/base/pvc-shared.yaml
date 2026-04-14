@@ -37,13 +37,3 @@ spec:
   resources:
     requests:
       storage: 20Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: sherpa-oss-fuzz
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 20Gi

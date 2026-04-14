@@ -17,6 +17,7 @@ from fuzz_unharnessed_repo import (
     RepoSpec,
     _classify_seed_family,
     _host_git_proxy_env,
+    _infer_target_type,
     _seed_families_for_target,
     _seed_quality_from_run,
 )
@@ -34,7 +35,7 @@ def test_resolve_seed_target_metadata_prefers_selected_targets(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     gen = _make_generator(tmp_path)
@@ -109,7 +110,7 @@ def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
     (fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"generic","seed_profile":"generic","seed_families_required":[],"seed_families_optional":[]}]',
+        '[{"target_name":"parse_replacement_field_then_tail","api":"parse_replacement_field_then_tail","target_type":"generic","seed_profile":"generic","seed_families_suggested":[],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     (fuzz_dir / "observed_target.json").write_text(
@@ -160,12 +161,41 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     )
     flags = set(quality["quality_flags"])
     assert "low_retention" in flags
-    assert "missing_required_families" in flags
+    assert "missing_suggested_families" in flags
     assert "repo_examples_missing" in flags
     assert isinstance(quality.get("seed_score"), float)
     assert 0.0 <= float(quality.get("seed_score") or 0.0) <= 1.0
     components = dict(quality.get("seed_score_components") or {})
     assert {"coverage_potential", "validity", "novelty", "redundancy_penalty"}.issubset(set(components.keys()))
+
+
+def test_seed_quality_score_rewards_early_yield_signal():
+    low_yield_log = "\n".join(
+        [
+            "#192 INITED cov: 5 ft: 19 corp: 8/120b exec/s: 0 rss: 99Mb",
+            "#131072 pulse cov: 6 ft: 21 corp: 8/120b lim: 1000 exec/s: 65536 rss: 162Mb",
+            "#262144 pulse cov: 7 ft: 25 corp: 8/120b lim: 1000 exec/s: 52428 rss: 163Mb",
+        ]
+    )
+    high_yield_log = "\n".join(
+        [
+            "#192 INITED cov: 5 ft: 19 corp: 8/120b exec/s: 0 rss: 99Mb",
+            "#131072 pulse cov: 6 ft: 21 corp: 14/200b lim: 1000 exec/s: 65536 rss: 162Mb",
+            "#262144 pulse cov: 7 ft: 25 corp: 18/280b lim: 1000 exec/s: 52428 rss: 163Mb",
+        ]
+    )
+    base_kwargs = {
+        "initial_corpus_files": 8,
+        "initial_corpus_bytes": 120,
+        "final_stats": {"cov": 7, "ft": 25, "corpus_files": 18, "corpus_size_bytes": 280},
+        "required_families": ["flow_structures"],
+        "covered_families": ["flow_structures"],
+        "repo_examples_count": 1,
+        "plateau_idle_seconds": 0,
+    }
+    low = _seed_quality_from_run(log=low_yield_log, **base_kwargs)
+    high = _seed_quality_from_run(log=high_yield_log, **base_kwargs)
+    assert float(high.get("seed_score") or 0.0) > float(low.get("seed_score") or 0.0)
 
 
 def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
@@ -229,6 +259,14 @@ def test_fmt_seed_families_replace_generic_parser_format():
     assert "width_precision" in required
     assert "malformed_replacement_fields" in required
     assert optional == []
+
+
+def test_infer_target_type_keeps_inflate_on_archive_side():
+    assert _infer_target_type("inflateBack9", "stream inflate decoder") == "archive"
+
+
+def test_infer_target_type_classifies_read_string_as_parser():
+    assert _infer_target_type("read_string", "token scanner") == "parser"
 
 
 def test_filter_seed_corpus_rejects_noisy_fmt_binary_variants(tmp_path: Path):

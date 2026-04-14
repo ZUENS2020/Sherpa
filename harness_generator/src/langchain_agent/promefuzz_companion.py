@@ -191,12 +191,14 @@ def _collect_repo_inventory(repo_root: Path) -> RepoInventory:
 
 def _seed_profile_for_symbol(symbol: str) -> str:
     low = symbol.lower()
-    if any(k in low for k in ("parse", "token", "format", "scan", "yaml", "json", "xml")):
-        return "parser-format"
-    if any(k in low for k in ("read", "load", "line", "lex")):
-        return "parser-token"
     if any(k in low for k in ("inflate", "deflate", "zip", "gzip", "archive", "tar", "lz", "zstd")):
         return "archive-container"
+    if any(k in low for k in ("parse", "token", "format", "scan", "yaml", "json", "xml")):
+        return "parser-format"
+    if any(k in low for k in ("read_string", "read_line", "readline", "read_token", "read field", "lex", "load")):
+        return "parser-token"
+    if re.search(r"\bread_(string|line|token|field|record|key|value)\b", low):
+        return "parser-token"
     if any(k in low for k in ("decode", "decoder", "decompress", "unpack", "deserialize")):
         return "decoder-binary"
     return "unknown"
@@ -346,6 +348,7 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
     work_root = companion_root / "work"
     work_root.mkdir(parents=True, exist_ok=True)
     meta, meta_path = preprocessor.run(output_dir=work_root / "meta")
+    invalid_meta_files = list(getattr(preprocessor, "invalid_meta_files", []) or [])
 
     headers: list[Path] = []
     if (repo_root / "include").is_dir():
@@ -360,6 +363,8 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
             "ok": True,
             "backend": "promefuzz-mcp",
             "meta_path": str(meta_path),
+            "meta_invalid_file_count": int(len(invalid_meta_files)),
+            "meta_invalid_files": invalid_meta_files[:120],
             "api_path": str(api_path) if api_path else "",
             "api_count": int(api_collection.count),
             "api_functions": top_functions,

@@ -9,6 +9,12 @@ from pathlib import Path
 
 from fuzz_relative_functions import fuzz_logic
 from persistent_config import apply_config_to_env, load_config
+from errors import SherpaError
+from workflow_context_store import (
+    context_dir_for_repo_root,
+    read_context_docs,
+    strip_meta,
+)
 
 
 def _decode_payload() -> dict:
@@ -47,7 +53,7 @@ def _opencode_defunct_threshold() -> int:
     raw = (os.environ.get("SHERPA_OPENCODE_DEFUNCT_THRESHOLD") or "3").strip()
     try:
         return max(0, min(int(raw), 200))
-    except Exception:
+    except (ValueError, TypeError):
         return 3
 
 
@@ -60,7 +66,7 @@ def _count_opencode_defunct_processes() -> int:
             timeout=5,
             check=False,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return 0
     if int(proc.returncode or 0) != 0:
         return 0
@@ -90,7 +96,7 @@ def _reap_any_dead_children(max_rounds: int = 16) -> int:
             pid, _ = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
             break
-        except Exception:
+        except OSError:
             break
         if pid == 0:
             break
@@ -109,7 +115,7 @@ def _merge_opencode_mcp_servers(companion_url: str) -> None:
             parsed = json.loads(current_raw)
             if isinstance(parsed, dict):
                 payload = dict(parsed)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             payload = {}
     payload["promefuzz"] = {
         "type": "remote",
@@ -138,7 +144,7 @@ def _resolve_analysis_companion_url(payload: dict, job_id: str) -> str:
     path_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_MCP_PATH") or "/mcp").strip()
     try:
         port = max(1, min(int(port_raw), 65535))
-    except Exception:
+    except (ValueError, TypeError):
         port = 18080
     path = path_raw if path_raw.startswith("/") else f"/{path_raw}"
     svc = f"sherpa-promefuzz-{jid[:10]}"
@@ -150,6 +156,7 @@ def main() -> int:
     job_id = str(payload.get("job_id") or "")
     if job_id:
         os.environ["SHERPA_JOB_ID"] = job_id
+        os.environ["SHERPA_CURRENT_JOB_ID"] = job_id
     result_path = Path(str(payload.get("result_path") or f"/shared/output/_k8s_jobs/{job_id}/result.json")).expanduser()
     error_path = Path(str(payload.get("error_path") or f"/shared/output/_k8s_jobs/{job_id}/error.txt")).expanduser()
 
@@ -180,13 +187,27 @@ def main() -> int:
 
         # Native runtime baseline: never execute inner Docker in k8s worker.
         effective_docker_image = None
-        run_rss_limit_mb_override = str(payload.get("run_rss_limit_mb_override") or "").strip()
+        context_dir = str(payload.get("context_dir") or "").strip()
+        if not context_dir:
+            context_dir = str(
+                context_dir_for_repo_root(str(payload.get("resume_repo_root") or "").strip())
+                or ""
+            ).strip()
+        control_doc, _workflow_doc = read_context_docs(
+            context_dir or None,
+            job_id=job_id,
+        )
+        control_ctx = strip_meta(control_doc)
+
+        run_rss_limit_mb_override = str(control_ctx.get("run_rss_limit_mb_override") or "").strip()
         if run_rss_limit_mb_override:
             os.environ["SHERPA_RUN_RSS_LIMIT_MB"] = run_rss_limit_mb_override
-        run_parallel_fuzzers_override = str(payload.get("run_parallel_fuzzers_override") or "").strip()
+        run_parallel_fuzzers_override = str(control_ctx.get("run_parallel_fuzzers_override") or "").strip()
         if run_parallel_fuzzers_override:
             os.environ["SHERPA_PARALLEL_FUZZERS"] = run_parallel_fuzzers_override
-        run_unlimited_round_budget_sec = str(payload.get("run_unlimited_round_budget_sec") or "").strip()
+        run_unlimited_round_budget_sec = str(control_ctx.get("run_timeout_budget_sec_override") or "").strip()
+        if not run_unlimited_round_budget_sec:
+            run_unlimited_round_budget_sec = str(payload.get("run_unlimited_round_budget_sec") or "").strip()
         if run_unlimited_round_budget_sec:
             os.environ["SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC"] = run_unlimited_round_budget_sec
 
@@ -195,6 +216,9 @@ def main() -> int:
             max_len=_parse_int_keep_zero(payload.get("max_len"), 0),
             time_budget=_parse_int_keep_zero(payload.get("time_budget"), 900),
             run_time_budget=_parse_int_keep_zero(payload.get("run_time_budget"), 900),
+            coverage_loop_max_rounds=_parse_int_keep_zero(payload.get("coverage_loop_max_rounds"), 0),
+            max_fix_rounds=_parse_int_keep_zero(payload.get("max_fix_rounds"), 0),
+            same_error_max_retries=_parse_int_keep_zero(payload.get("same_error_max_retries"), 0),
             email=(str(payload.get("email") or "").strip() or None),
             docker_image=effective_docker_image,
             ai_key_path=(Path(str(payload.get("ai_key_path") or "")).expanduser() if payload.get("ai_key_path") else None),
@@ -203,16 +227,7 @@ def main() -> int:
             resume_from_step=(str(payload.get("resume_from_step") or "").strip() or None),
             resume_repo_root=(str(payload.get("resume_repo_root") or "").strip() or None),
             stop_after_step=(str(payload.get("stop_after_step") or "").strip() or None),
-            last_fuzzer=(str(payload.get("last_fuzzer") or "").strip() or None),
-            last_crash_artifact=(str(payload.get("last_crash_artifact") or "").strip() or None),
-            re_workspace_root=(str(payload.get("re_workspace_root") or "").strip() or None),
-            coverage_loop_max_rounds=0,
-            max_fix_rounds=0,
-            same_error_max_retries=0,
-            restart_to_plan_reason=(str(payload.get("restart_to_plan_reason") or "").strip() or None),
-            restart_to_plan_stage=(str(payload.get("restart_to_plan_stage") or "").strip() or None),
-            restart_to_plan_error_text=(str(payload.get("restart_to_plan_error_text") or "").strip() or None),
-            restart_to_plan_report_path=(str(payload.get("restart_to_plan_report_path") or "").strip() or None),
+            context_dir=(context_dir or None),
         )
         out = {
             "ok": True,
@@ -222,7 +237,7 @@ def main() -> int:
         _write_json(result_path, out)
         print(f"[k8s-worker] done job_id={job_id} result_path={result_path}")
         return 0
-    except Exception as e:
+    except (SherpaError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         tb = traceback.format_exc()
         msg = f"{e}\n{tb}"
         _write_error(error_path, msg)

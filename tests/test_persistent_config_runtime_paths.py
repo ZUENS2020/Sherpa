@@ -125,9 +125,9 @@ def test_write_opencode_env_uses_runtime_parent_and_cross_device_fallback(
 def test_normalize_model_for_opencode_prefixes_single_configured_provider():
     cfg = pc.WebPersistentConfig()
 
-    out = pc.normalize_model_for_opencode("MiniMax-M2.7-highspeed", cfg=cfg)
+    out = pc.normalize_model_for_opencode("deepseek-reasoner", cfg=cfg)
 
-    assert out == "minimax/MiniMax-M2.7-highspeed"
+    assert out == "deepseek/deepseek-reasoner"
 
 
 def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: pytest.MonkeyPatch):
@@ -143,3 +143,33 @@ def test_build_opencode_runtime_config_merges_mcp_servers_from_env(monkeypatch: 
     assert payload.get("mcp", {}).get("promefuzz", {}).get("type") == "remote"
     assert payload.get("mcp", {}).get("promefuzz", {}).get("url") == "http://promefuzz.svc:18080/mcp"
     assert payload.get("mcp", {}).get("promefuzz", {}).get("enabled") is True
+
+
+def test_apply_llm_env_source_ignores_placeholder_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_key", "-")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://modelservice.jdcloud.com/coding/openai/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "GLM-5")
+
+    cfg = pc.apply_llm_env_source(pc.WebPersistentConfig())
+    assert cfg.openai_api_key is None
+
+    runtime = pc.build_opencode_runtime_config(cfg)
+    provider = runtime.get("provider", {}).get("jdcloud", {})
+    options = provider.get("options", {})
+    assert "apiKey" not in options
+
+
+def test_apply_llm_env_source_strips_provider_prefix_from_model(monkeypatch: pytest.MonkeyPatch):
+    cfg = pc.WebPersistentConfig()
+    monkeypatch.setenv("LLM_key", "pk-test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://modelservice.jdcloud.com/coding/openai/v1")
+    monkeypatch.setenv("OPENCODE_MODEL", "jdcloud/GLM-5")
+
+    out = pc.apply_llm_env_source(cfg)
+    assert out.openai_model == "GLM-5"
+    assert out.opencode_model == "GLM-5"
+    assert out.opencode_providers[0].name == "jdcloud"
+    assert out.opencode_providers[0].models == ["GLM-5"]

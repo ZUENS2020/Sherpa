@@ -1,5 +1,8 @@
 # main.py
 from __future__ import annotations
+from loguru import logger
+
+from errors import K8sJobError
 from fastapi import FastAPI, Body, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -30,7 +33,7 @@ from fuzz_relative_functions import fuzz_logic
 from job_store import JobStore, PostgresJobStore
 from persistent_config import (
     WebPersistentConfig,
-    apply_minimax_env_source,
+    apply_llm_env_source,
     apply_config_to_env,
     as_public_dict,
     list_opencode_provider_models_resolved,
@@ -39,6 +42,13 @@ from persistent_config import (
     opencode_runtime_config_path,
     load_config,
     save_config,
+)
+from workflow_context_store import (
+    context_dir_for_repo_root,
+    merge_result_into_contexts,
+    read_context_docs,
+    strip_meta,
+    write_context_docs,
 )
 
 @asynccontextmanager
@@ -100,6 +110,7 @@ _JOB_MEMORY_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_JOB_LOG_MAX_CHARS", "
 _JOB_RESTORE_LOG_MAX_CHARS = int(os.environ.get("SHERPA_WEB_RESTORE_LOG_MAX_CHARS", "200000"))
 
 _SENSITIVE_ENV_KEYS = (
+    "LLM_key",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -154,9 +165,28 @@ def _cfg_set(cfg: WebPersistentConfig) -> None:
 
 def _normalized_opencode_model_value(raw_model: object) -> str:
     value = str(raw_model or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL"}:
+        return ""
     if not value:
         return ""
     return normalize_model_for_opencode(value, cfg=_cfg_get())
+
+
+def _normalized_plain_model_value(raw_model: object) -> str:
+    value = str(raw_model or "").strip()
+    if value in {"-", "auto", "AUTO", "none", "None", "null", "NULL"}:
+        return ""
+    return value
+
+
+def _openai_model_env_value(raw_model: str, normalized_model: str) -> str:
+    plain = _normalized_plain_model_value(raw_model)
+    if plain:
+        return plain
+    normalized = str(normalized_model or "").strip()
+    if "/" in normalized:
+        return normalized.split("/", 1)[1]
+    return normalized
 
 
 def _track_job_future(job_id: str, future: Future) -> None:
@@ -199,7 +229,7 @@ def _cancel_job_future(job_id: str) -> bool:
 def _read_text_if_exists(path: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8").strip()
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -209,7 +239,7 @@ def _read_int_if_exists(path: str) -> int | None:
         return None
     try:
         return int(raw)
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 
@@ -229,7 +259,7 @@ def _cgroup_memory_status() -> dict[str, object]:
             if key.strip() == "oom_kill":
                 try:
                     oom_kill_count = int(value.strip())
-                except Exception:
+                except (ValueError, TypeError):
                     pass
                 break
 
@@ -239,7 +269,7 @@ def _cgroup_memory_status() -> dict[str, object]:
             parsed_limit = int(limit_raw)
             if parsed_limit < (1 << 60):
                 limit_bytes = parsed_limit
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
     usage_ratio = None
@@ -259,7 +289,7 @@ def _process_rss_bytes() -> int | None:
         raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if raw > 0:
             return int(raw) * 1024
-    except Exception:
+    except (OSError, ValueError):
         pass
 
     proc_status = _read_text_if_exists("/proc/self/status")
@@ -270,7 +300,7 @@ def _process_rss_bytes() -> int | None:
         if len(parts) >= 2:
             try:
                 return int(parts[1]) * 1024
-            except Exception:
+            except (ValueError, TypeError):
                 return None
     return None
 
@@ -330,6 +360,37 @@ def _k8s_worker_memory_limit() -> str:
     return (os.environ.get("SHERPA_K8S_JOB_MEMORY_LIMIT", "64Gi") or "").strip()
 
 
+def _memory_text_to_mb(raw: str) -> int:
+    txt = str(raw or "").strip()
+    if not txt:
+        return 0
+    units = {
+        "Ki": 1 / 1024,
+        "Mi": 1,
+        "Gi": 1024,
+        "Ti": 1024 * 1024,
+        "K": 1000 / (1024 * 1024),
+        "M": 1000 * 1000 / (1024 * 1024),
+        "G": 1000 * 1000 * 1000 / (1024 * 1024),
+        "T": 1000 * 1000 * 1000 * 1000 / (1024 * 1024),
+    }
+    for suffix, mul in units.items():
+        if txt.endswith(suffix):
+            try:
+                return max(0, int(float(txt[: -len(suffix)]) * float(mul)))
+            except (ValueError, TypeError):
+                return 0
+    try:
+        # Bare number: treat as bytes.
+        return max(0, int(int(float(txt)) / (1024 * 1024)))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _k8s_worker_memory_limit_mb() -> int:
+    return _memory_text_to_mb(_k8s_worker_memory_limit())
+
+
 def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -342,7 +403,7 @@ def _docker_cli(args: list[str], *, timeout: int = 20) -> tuple[int, str, str]:
             check=False,
         )
         return int(proc.returncode), proc.stdout or "", proc.stderr or ""
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         return 1, "", str(e)
 
 
@@ -379,7 +440,7 @@ def _k8s_keep_finished_jobs() -> bool:
 def _k8s_job_ttl_seconds() -> int:
     try:
         return max(0, int(os.environ.get("SHERPA_K8S_JOB_TTL_SECONDS", "3600")))
-    except Exception:
+    except (ValueError, TypeError):
         return 3600
 
 
@@ -397,7 +458,7 @@ def _kubectl(args: list[str], *, input_text: str | None = None, timeout: int = 3
             check=False,
         )
         return int(proc.returncode), proc.stdout or "", proc.stderr or ""
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         return 1, "", str(e)
 
 
@@ -445,7 +506,7 @@ def _k8s_analysis_companion_port() -> int:
     raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_PORT") or "18080").strip()
     try:
         port = int(raw)
-    except Exception:
+    except (ValueError, TypeError):
         port = 18080
     return max(1, min(port, 65535))
 
@@ -603,7 +664,7 @@ def _k8s_start_analysis_companion(job_id: str) -> tuple[str, str, str]:
             pod_doc = json.loads(pod_out)
             phase = str(((pod_doc.get("status") or {}) if isinstance(pod_doc, dict) else {}).get("phase") or "").strip().lower()
             pod_ok = phase == "running"
-        except Exception:
+        except (json.JSONDecodeError, ValueError, KeyError):
             pod_ok = False
     svc_rc, _, _ = _kubectl(["get", "service", service_name], timeout=15)
     svc_ok = svc_rc == 0
@@ -644,7 +705,7 @@ def _analysis_companion_status_for_job(job_id: str) -> dict[str, object]:
     try:
         raw = status_path.read_text(encoding="utf-8", errors="replace")
         parsed = json.loads(raw)
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         return {}
     if not isinstance(parsed, dict):
         return {}
@@ -692,7 +753,7 @@ def _analysis_context_path_for_repo(repo_root: str | None) -> Path | None:
         return None
     try:
         root = Path(raw).expanduser()
-    except Exception:
+    except (OSError, RuntimeError):
         return None
     return root / "fuzz" / "analysis_context.json"
 
@@ -706,7 +767,7 @@ def _k8s_analysis_companion_timeout_sec() -> int:
     raw = (os.environ.get("SHERPA_K8S_ANALYSIS_COMPANION_TIMEOUT_SEC") or "180").strip()
     try:
         return max(10, min(int(raw), 3600))
-    except Exception:
+    except (ValueError, TypeError):
         return 180
 
 
@@ -719,7 +780,7 @@ def _k8s_analysis_rag_wait_timeout_sec() -> int:
     raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC", "120") or "").strip()
     try:
         return max(10, min(int(raw), 3600))
-    except Exception:
+    except (ValueError, TypeError):
         return 120
 
 
@@ -760,7 +821,7 @@ def _k8s_wait_analysis_companion_result(
         if rc == 0:
             try:
                 doc = json.loads(out)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 doc = {}
             phase = str(((doc.get("status") or {}) if isinstance(doc, dict) else {}).get("phase") or "").strip().lower()
             if phase in {"succeeded", "failed"}:
@@ -794,18 +855,21 @@ def _k8s_git_env_items() -> list[dict[str, object]]:
 def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("ascii")
-    raw_model = str(payload.get("model") or "").strip()
+    cfg_model = _normalized_plain_model_value(_cfg_get().openai_model)
+    raw_model = _normalized_plain_model_value(payload.get("model")) or cfg_model
     normalized_model = _normalized_opencode_model_value(raw_model)
+    if not normalized_model:
+        normalized_model = _normalized_opencode_model_value(cfg_model)
+    openai_model_env = _openai_model_env_value(raw_model, normalized_model)
     ttl = _k8s_job_ttl_seconds()
     keep_finished = _k8s_keep_finished_jobs()
 
     config_name = (os.environ.get("SHERPA_K8S_CONFIGMAP_NAME", "sherpa-config") or "").strip()
-    minimax_secret = (os.environ.get("SHERPA_K8S_MINIMAX_SECRET_NAME", "sherpa-minimax") or "").strip()
+    llm_secret = (os.environ.get("SHERPA_K8S_LLM_SECRET_NAME", "sherpa-llm") or "").strip()
     pg_secret = (os.environ.get("SHERPA_K8S_POSTGRES_SECRET_NAME", "sherpa-postgres") or "").strip()
 
     pvc_tmp = (os.environ.get("SHERPA_K8S_PVC_TMP", "sherpa-shared-tmp") or "").strip()
     pvc_output = (os.environ.get("SHERPA_K8S_PVC_OUTPUT", "sherpa-shared-output") or "").strip()
-    pvc_oss = (os.environ.get("SHERPA_K8S_PVC_OSS_FUZZ", "sherpa-oss-fuzz") or "").strip()
     pvc_cfg = (os.environ.get("SHERPA_K8S_PVC_CONFIG", "sherpa-config") or "").strip()
     pvc_logs = (os.environ.get("SHERPA_K8S_PVC_JOB_LOGS", "sherpa-job-logs") or "").strip()
     target_node_name = str(payload.get("target_node_name") or "").strip()
@@ -851,7 +915,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                                 "-lc",
                                 (
                                     "set -eu\n"
-                                    "for d in /app/config /app/job-logs /shared/tmp /shared/output /shared/oss-fuzz; do\n"
+                                    "for d in /app/config /app/job-logs /shared/tmp /shared/output; do\n"
                                     '  mkdir -p "$d"\n'
                                     "  chown 10001:10001 \"$d\" || true\n"
                                     "  chmod 0777 \"$d\" || true\n"
@@ -869,7 +933,6 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "volumeMounts": [
                                 {"name": "shared-tmp", "mountPath": "/shared/tmp"},
                                 {"name": "shared-output", "mountPath": "/shared/output"},
-                                {"name": "oss-fuzz", "mountPath": "/shared/oss-fuzz"},
                                 {"name": "config", "mountPath": "/app/config"},
                                 {"name": "job-logs", "mountPath": "/app/job-logs"},
                             ],
@@ -891,7 +954,7 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "env": [
                                 {"name": "SHERPA_K8S_WORKER_PAYLOAD_B64", "value": payload_b64},
                                 {"name": "OPENCODE_MODEL", "value": normalized_model},
-                                {"name": "OPENAI_MODEL", "value": raw_model},
+                                {"name": "OPENAI_MODEL", "value": openai_model_env},
                                 {"name": "OPENCODE_CONFIG", "value": str(opencode_runtime_config_path())},
                                 {"name": "SHERPA_K8S_JOB_MEMORY_LIMIT", "value": _k8s_worker_memory_limit()},
                                 *_k8s_git_env_items(),
@@ -900,7 +963,6 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                             "volumeMounts": [
                                 {"name": "shared-tmp", "mountPath": "/shared/tmp"},
                                 {"name": "shared-output", "mountPath": "/shared/output"},
-                                {"name": "oss-fuzz", "mountPath": "/shared/oss-fuzz"},
                                 {"name": "config", "mountPath": "/app/config"},
                                 {"name": "job-logs", "mountPath": "/app/job-logs"},
                             ],
@@ -909,7 +971,6 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
                     "volumes": [
                         {"name": "shared-tmp", "persistentVolumeClaim": {"claimName": pvc_tmp}},
                         {"name": "shared-output", "persistentVolumeClaim": {"claimName": pvc_output}},
-                        {"name": "oss-fuzz", "persistentVolumeClaim": {"claimName": pvc_oss}},
                         {"name": "config", "persistentVolumeClaim": {"claimName": pvc_cfg}},
                         {"name": "job-logs", "persistentVolumeClaim": {"claimName": pvc_logs}},
                     ],
@@ -921,8 +982,8 @@ def _k8s_build_manifest(job_name: str, payload: dict[str, object]) -> str:
     env_from = [*_k8s_proxy_env_from_items()]
     if config_name:
         env_from.append({"configMapRef": {"name": config_name}})
-    if minimax_secret:
-        env_from.append({"secretRef": {"name": minimax_secret}})
+    if llm_secret:
+        env_from.append({"secretRef": {"name": llm_secret}})
     if pg_secret:
         env_from.append({"secretRef": {"name": pg_secret}})
     manifest["spec"]["template"]["spec"]["containers"][0]["envFrom"] = env_from
@@ -961,7 +1022,7 @@ def _k8s_get_job_pod_details(job_name: str) -> dict[str, object]:
         return {}
     try:
         doc = json.loads(out)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return {}
     items = doc.get("items") if isinstance(doc, dict) else None
     if not isinstance(items, list) or not items or not isinstance(items[0], dict):
@@ -1056,7 +1117,7 @@ def _classify_k8s_stage_failure(stage: str, pod_details: dict[str, object], logs
         exit_code = pod_details.get("last_exit_code")
     try:
         exit_code_int = int(exit_code) if exit_code is not None else None
-    except Exception:
+    except (ValueError, TypeError):
         exit_code_int = None
 
     error_kind = "unknown"
@@ -1118,7 +1179,7 @@ def _k8s_get_job_pod_phase(job_name: str) -> tuple[str, str]:
         return "Unknown", ""
     try:
         doc = json.loads(out)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return "Unknown", ""
     items = doc.get("items") if isinstance(doc, dict) else None
     if not isinstance(items, list) or not items:
@@ -1163,7 +1224,7 @@ def _k8s_wait_job(job_name: str, *, timeout_sec: int, on_progress=None) -> tuple
             continue
         try:
             doc = json.loads(out)
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             if callable(on_progress):
                 on_progress("Unknown", "bad_job_json")
             time.sleep(2)
@@ -1237,7 +1298,7 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
         return False, f"get_node_failed:{(err_get or out_get).strip()}"
     try:
         node_doc = json.loads(out_get)
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError) as e:
         return False, f"bad_node_json:{e}"
 
     spec_doc = node_doc.get("spec") if isinstance(node_doc, dict) else {}
@@ -1265,11 +1326,11 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
     max_mem_pct = 95
     try:
         max_cpu_pct = max(1, min(100, int(os.environ.get("SHERPA_K8S_NODE_MAX_CPU_PCT", "95"))))
-    except Exception:
+    except (ValueError, TypeError):
         max_cpu_pct = 95
     try:
         max_mem_pct = max(1, min(100, int(os.environ.get("SHERPA_K8S_NODE_MAX_MEM_PCT", "95"))))
-    except Exception:
+    except (ValueError, TypeError):
         max_mem_pct = 95
 
     def _parse_cpu_to_millicores(raw: str) -> int | None:
@@ -1280,7 +1341,7 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
             if txt.endswith("m"):
                 return int(float(txt[:-1]))
             return int(float(txt) * 1000.0)
-        except Exception:
+        except (ValueError, TypeError):
             return None
 
     def _parse_memory_to_bytes(raw: str) -> int | None:
@@ -1305,11 +1366,11 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
             if txt.endswith(suffix):
                 try:
                     return int(float(txt[: -len(suffix)]) * float(mul))
-                except Exception:
+                except (ValueError, TypeError):
                     return None
         try:
             return int(float(txt))
-        except Exception:
+        except (ValueError, TypeError):
             return None
 
     # First preference: live usage from metrics-server.
@@ -1335,7 +1396,7 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
                     if mem_pct >= max_mem_pct:
                         return False, f"node_mem_busy:{mem_pct}%"
                     return True, f"node_ready_cpu={cpu_pct}%_mem={mem_pct}%"
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
     # Fallback: request-based capacity check (works without metrics-server).
@@ -1345,7 +1406,7 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
             backoff_sec = int(
                 (os.environ.get("SHERPA_K8S_METRICS_API_UNAVAILABLE_BACKOFF_SEC") or "300").strip()
             )
-        except Exception:
+        except (ValueError, TypeError):
             backoff_sec = 300
         _K8S_METRICS_API_UNAVAILABLE_UNTIL = now_ts + float(max(30, backoff_sec))
 
@@ -1364,7 +1425,7 @@ def _k8s_node_can_run_job(node_name: str) -> tuple[bool, str]:
 
     try:
         pods_doc = json.loads(out_pods)
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return True, "node_ready_no_metrics_capacity_unknown"
 
     items = pods_doc.get("items") if isinstance(pods_doc, dict) else []
@@ -1470,7 +1531,7 @@ def _execute_k8s_job(
                 error_lines.append("")
                 error_lines.append(log_tail)
             error_path.write_text("\n".join(error_lines).strip() + "\n", encoding="utf-8")
-        except Exception:
+        except OSError:
             pass
         try:
             result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1486,7 +1547,7 @@ def _execute_k8s_job(
                 ),
                 encoding="utf-8",
             )
-        except Exception:
+        except OSError:
             pass
         if not _k8s_keep_finished_jobs():
             _k8s_delete_job(job_name)
@@ -1496,18 +1557,18 @@ def _execute_k8s_job(
         elif str(failure_result.get("error_code") or "").strip():
             msg += f": {failure_result.get('error_code')}"
         if logs.strip():
-            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+            logger.info(f"[job {job_id}] k8s logs tail:\n{logs}")
         raise _K8sJobFailure(msg, result=failure_result)
     if not result_path.is_file():
         logs = _k8s_collect_job_logs(job_name)
         if logs.strip():
-            print(f"[job {job_id}] k8s logs tail:\n{logs}")
+            logger.info(f"[job {job_id}] k8s logs tail:\n{logs}")
         raise RuntimeError("k8s_job_missing_result")
     raw = result_path.read_text(encoding="utf-8", errors="replace")
     try:
         doc = json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"k8s_job_bad_result_json: {e}")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise K8sJobError(f"k8s_job_bad_result_json: {e}") from e
     # Capture node before deleting the Job/Pod so stage pinning can persist
     # even when keep-finished-jobs is disabled.
     stage_node_name = _k8s_get_job_node_name(job_name)
@@ -1536,30 +1597,30 @@ def _k8s_stage_wait_timeout_sec(
     """
     try:
         grace_run = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_GRACE_SEC", "900"))
-    except Exception:
+    except (ValueError, TypeError):
         grace_run = 900
     try:
         grace_default = int(os.environ.get("SHERPA_K8S_STAGE_TIMEOUT_GRACE_SEC", "180"))
-    except Exception:
+    except (ValueError, TypeError):
         grace_default = 180
     try:
         inter_round_buffer_sec = int(
             os.environ.get("SHERPA_K8S_RUN_TIMEOUT_INTER_ROUND_BUFFER_SEC", "120")
         )
-    except Exception:
+    except (ValueError, TypeError):
         inter_round_buffer_sec = 120
     if run_unlimited_round_budget_sec is None:
         try:
             run_unlimited_round_budget = int(
                 os.environ.get("SHERPA_RUN_UNLIMITED_ROUND_BUDGET_SEC", "7200")
             )
-        except Exception:
+        except (ValueError, TypeError):
             run_unlimited_round_budget = 7200
     else:
         run_unlimited_round_budget = int(run_unlimited_round_budget_sec)
     try:
         run_timeout_cap_sec = int(os.environ.get("SHERPA_K8S_RUN_TIMEOUT_MAX_SEC", "0"))
-    except Exception:
+    except (ValueError, TypeError):
         run_timeout_cap_sec = 0
 
     grace_run = max(60, grace_run)
@@ -1582,7 +1643,7 @@ def _k8s_stage_wait_timeout_sec(
         )
     try:
         seed_gen_retry_multiplier = int(os.environ.get("SHERPA_SEED_GEN_RETRY_MULTIPLIER", "3"))
-    except Exception:
+    except (ValueError, TypeError):
         seed_gen_retry_multiplier = 3
     seed_gen_retry_multiplier = max(1, seed_gen_retry_multiplier)
     run_base *= seed_gen_retry_multiplier
@@ -1611,7 +1672,7 @@ def _estimate_run_fuzzer_count(repo_root: str) -> int:
                     count += 1
             if count > 0:
                 return count
-    except Exception:
+    except OSError:
         pass
 
     execution_plan = root / "fuzz" / "execution_plan.json"
@@ -1623,7 +1684,7 @@ def _estimate_run_fuzzer_count(repo_root: str) -> int:
                 count = len([t for t in targets if isinstance(t, dict)])
                 if count > 0:
                     return count
-    except Exception:
+    except (OSError, json.JSONDecodeError, ValueError):
         pass
     return 1
 
@@ -1636,7 +1697,7 @@ def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
     ).strip()
     try:
         return max(1, min(int(raw), 64))
-    except Exception:
+    except (ValueError, TypeError):
         return 3
 
 
@@ -1693,7 +1754,7 @@ def _read_log_tail(path: Path, *, max_chars: int) -> str:
         return ""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return ""
     if max_chars > 0:
         return text[-max_chars:]
@@ -1869,8 +1930,17 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
                 fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
                 analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
+                security_evidence_count=int(payload.get("security_evidence_count") or 0),
+                vuln_candidate_count=int(payload.get("vuln_candidate_count") or 0),
+                vuln_hunting_enabled=bool(payload.get("vuln_hunting_enabled") or False),
+                security_priority_mode=bool(payload.get("security_priority_mode") or False),
+                latest_vuln_decision_snapshot=dict(payload.get("latest_vuln_decision_snapshot") or {}),
                 target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
+                target_score_breakdown_available=bool(payload.get("target_score_breakdown_available") or False),
                 constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
+                decision_trace_count=int(payload.get("decision_trace_count") or 0),
+                latest_decision_snapshot=dict(payload.get("latest_decision_snapshot") or {}),
+                crash_signature_dedup_hit=bool(payload.get("crash_signature_dedup_hit") or False),
             )
         except Exception:
             pass
@@ -2088,17 +2158,13 @@ _RESUMABLE_WORKFLOW_STEPS = {
     "plan",
     "synthesize",
     "build",
-    "fix_build",
     "run",
     "crash-triage",
-    "fix-harness",
     "coverage-analysis",
     "improve-harness",
     "re-build",
     "re-run",
     "crash-analysis",
-    "repro_crash",
-    "fix_crash",
 }
 _STAGED_WORKFLOW_STEPS = (
     "analysis",
@@ -2107,7 +2173,6 @@ _STAGED_WORKFLOW_STEPS = (
     "build",
     "run",
     "crash-triage",
-    "fix-harness",
     "coverage-analysis",
     "improve-harness",
     "re-build",
@@ -2125,7 +2190,7 @@ def _normalize_resume_step(raw: str | None) -> str:
     if s in {"crash_triage", "crash-triage"}:
         return "crash-triage"
     if s in {"fix_harness", "fix-harness"}:
-        return "fix-harness"
+        return "plan"
     if s in {"crash_analysis", "crash-analysis"}:
         return "crash-analysis"
     if s in _RESUMABLE_WORKFLOW_STEPS:
@@ -2135,8 +2200,6 @@ def _normalize_resume_step(raw: str | None) -> str:
 
 def _staged_sequence_from(raw_start: str | None) -> list[str]:
     start = _normalize_resume_step(raw_start)
-    if start in {"fix_build", "fix_crash"}:
-        start = "build"
     try:
         idx = _STAGED_WORKFLOW_STEPS.index(start)
     except ValueError:
@@ -2156,7 +2219,6 @@ def _legacy_error_code_for_job(job: dict | None) -> str:
     result = job.get("result")
     if isinstance(result, dict):
         for key in (
-            "fix_build_terminal_reason",
             "run_terminal_reason",
             "build_error_code",
             "run_error_kind",
@@ -2399,7 +2461,7 @@ def _safe_float(raw: object) -> float | None:
         v = float(raw)
         if math.isfinite(v):
             return v
-    except Exception:
+    except (ValueError, TypeError):
         return None
     return None
 
@@ -2926,7 +2988,6 @@ def _system_status() -> dict:
         "memory": memory,
         "config": {
             "runtime_mode": "native",
-            "oss_fuzz_dir": cfg.oss_fuzz_dir,
             "openai_base_url": cfg.openai_base_url,
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openrouter_model": cfg.openrouter_model,
@@ -3199,6 +3260,12 @@ def put_config(request: dict = Body(...)):
             raise HTTPException(status_code=400, detail=f"invalid config payload: {exc}") from exc
         payload = validated.model_dump()
 
+    for model_key in ("openai_model", "opencode_model", "openrouter_model"):
+        if model_key in request:
+            model_val = _normalized_plain_model_value(request.get(model_key))
+            if not model_val:
+                raise HTTPException(status_code=400, detail=f"{model_key} is invalid")
+
     candidate = WebPersistentConfig(**payload)
     if int(candidate.fuzz_time_budget) < 0:
         raise HTTPException(
@@ -3234,7 +3301,7 @@ def put_config(request: dict = Body(...)):
     # Native runtime baseline in k8s mode; keep fields for compatibility only.
     payload["fuzz_use_docker"] = False
     payload["fuzz_docker_image"] = ""
-    runtime_cfg = apply_minimax_env_source(WebPersistentConfig(**payload))
+    runtime_cfg = apply_llm_env_source(WebPersistentConfig(**payload))
 
     # Keep persisted config free of API secrets; runtime values come from environment.
     persisted_cfg = WebPersistentConfig(**runtime_cfg.model_dump())
@@ -3268,6 +3335,32 @@ def health_check():
     return {"ok": True}
 
 
+def _healthz_db_status() -> dict[str, object]:
+    db_url = _job_store_database_url()
+    if not db_url:
+        return {"ok": False, "error": "DATABASE_URL missing"}
+    try:
+        import psycopg  # type: ignore
+
+        with psycopg.connect(db_url, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": _redact_sensitive_text(str(exc))[:300]}
+
+
+@app.get("/healthz")
+def healthz():
+    db = _healthz_db_status()
+    return {
+        "ok": bool(db.get("ok")),
+        "service": "up",
+        "db": db,
+    }
+
+
 def _create_job(kind: str, repo: str | None = None) -> str:
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -3295,43 +3388,6 @@ def _create_job(kind: str, repo: str | None = None) -> str:
         _persist_job_state(job_payload)
     return job_id
 
-
-def _ensure_oss_fuzz_checkout(*, repo_url: str, target_dir: Path, force: bool) -> None:
-    if target_dir.is_dir() and (target_dir / "infra" / "helper.py").is_file():
-        print("[init] oss-fuzz already present")
-        return
-
-    auto_repair = (os.environ.get("SHERPA_OSS_FUZZ_AUTO_REPAIR", "1") or "").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    should_repair = bool(force or auto_repair)
-
-    if target_dir.exists():
-        if not should_repair:
-            raise RuntimeError(
-                f"oss-fuzz dir exists but invalid (missing infra/helper.py): {target_dir}"
-            )
-        print(
-            "[init] oss-fuzz directory exists but invalid; "
-            f"auto-repair enabled, resetting: {target_dir}"
-        )
-        for child in target_dir.iterdir():
-            try:
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink(missing_ok=True)
-            except Exception:
-                pass
-    target_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["git", "clone", "--depth", "1", repo_url, str(target_dir)]
-    print("[init] " + " ".join(cmd))
-    subprocess.check_call(cmd)
-    if not (target_dir / "infra" / "helper.py").is_file():
-        raise RuntimeError("oss-fuzz clone completed but infra/helper.py not found")
 
 
 def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
@@ -3391,7 +3447,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
         return any(n in output for n in needles)
 
     def _run_build(cmd: list[str], *, buildkit: str | None = None) -> tuple[int, str]:
-        print("[init] " + " ".join(cmd))
+        logger.info("[init] " + " ".join(cmd))
         env = os.environ.copy()
         if buildkit is not None:
             env["DOCKER_BUILDKIT"] = buildkit
@@ -3432,11 +3488,11 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
 
             if item:
                 output_chunks.append(item)
-                print(item, end="")
+                logger.info(item.rstrip())
 
             now = time.monotonic()
             if now - last_heartbeat >= 10:
-                print("[init] docker build still running...")
+                logger.info("[init] docker build still running...")
                 last_heartbeat = now
 
             if proc.poll() is not None and line_q.empty():
@@ -3477,7 +3533,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 # Try without --progress on older Docker.
                 continue
             if _buildkit_unavailable(output):
-                print("[init] buildx unavailable; retrying docker build with classic builder (DOCKER_BUILDKIT=0)")
+                logger.info("[init] buildx unavailable; retrying docker build with classic builder (DOCKER_BUILDKIT=0)")
                 legacy_cmd = [arg for arg in cmd if not arg.startswith("--progress=")]
                 rc2, output2 = _run_build(legacy_cmd, buildkit="0")
                 last_rc = rc2
@@ -3485,7 +3541,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 if rc2 == 0:
                     return
                 if _docker_daemon_unreachable(output2) and attempt < max_attempts:
-                    print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                    logger.info(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                     time.sleep(backoff)
                     backoff *= 2
                     retry_outer = True
@@ -3493,7 +3549,7 @@ def _ensure_docker_image(image: str, dockerfile: Path, *, force: bool) -> None:
                 # Keep trying other build command variants before failing.
                 continue
             if _docker_daemon_unreachable(output) and attempt < max_attempts:
-                print(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
+                logger.info(f"[init] docker daemon not ready; retrying in {backoff:.0f}s (attempt {attempt}/{max_attempts})")
                 time.sleep(backoff)
                 backoff *= 2
                 retry_outer = True
@@ -3581,8 +3637,17 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_coverage_quality_flags", [])
     view.setdefault("fuzz_coverage_bottleneck_kind", "")
     view.setdefault("analysis_evidence_count", 0)
+    view.setdefault("security_evidence_count", 0)
+    view.setdefault("vuln_candidate_count", 0)
+    view.setdefault("vuln_hunting_enabled", False)
+    view.setdefault("security_priority_mode", False)
+    view.setdefault("latest_vuln_decision_snapshot", {})
     view.setdefault("target_scoring_enabled", False)
+    view.setdefault("target_score_breakdown_available", False)
     view.setdefault("constraint_memory_count", 0)
+    view.setdefault("decision_trace_count", 0)
+    view.setdefault("latest_decision_snapshot", {})
+    view.setdefault("crash_signature_dedup_hit", False)
 
     companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
     if companion_status:
@@ -3812,8 +3877,17 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
                 "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
+                "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
+                "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),
+                "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
+                "security_priority_mode": bool((active_child or job).get("security_priority_mode", False)),
+                "latest_vuln_decision_snapshot": dict((active_child or job).get("latest_vuln_decision_snapshot") or {}),
                 "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
+                "target_score_breakdown_available": bool((active_child or job).get("target_score_breakdown_available", False)),
                 "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
+                "decision_trace_count": int((active_child or job).get("decision_trace_count", 0) or 0),
+                "latest_decision_snapshot": dict((active_child or job).get("latest_decision_snapshot") or {}),
+                "crash_signature_dedup_hit": bool((active_child or job).get("crash_signature_dedup_hit", False)),
             }
         )
     tasks.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
@@ -3871,14 +3945,24 @@ def _run_fuzz_job(
     tee = _Tee(job_id, log_file=log_file)
     out_token = _ACTIVE_JOB_STDOUT_TEE.set(tee)
     err_token = _ACTIVE_JOB_STDERR_TEE.set(tee)
+    log_sink_id: int | None = None
     companion_pod = ""
     companion_service = ""
     companion_url = ""
     try:
-        print(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
+        # Ensure per-job logs are persisted even when loguru writes directly to
+        # process stderr/stdout instead of the job-aware stream wrappers.
+        current_thread_id = threading.get_ident()
+        log_sink_id = logger.add(
+            tee,
+            level="DEBUG",
+            format="{message}",
+            filter=lambda record, tid=current_thread_id: record["thread"].id == tid,
+        )
+        logger.info(f"[job {job_id}] start repo={request.code_url} resumed={int(resumed)} trigger={trigger}")
         if _is_cancel_requested(job_id):
             raise RuntimeError(cancel_error)
-        print(f"[job {job_id}] about to dispatch k8s worker...")
+        logger.info(f"[job {job_id}] about to dispatch k8s worker...")
         docker_enabled, docker_image_value = _resolve_job_docker_policy(request, cfg)
         total_budget_src = (
             request.total_time_budget
@@ -3914,18 +3998,20 @@ def _run_fuzz_job(
             or cfg.openai_api_key
             or ""
         ).strip()
-        opencode_model_env = (os.environ.get("OPENCODE_MODEL") or "").strip()
-        openai_model = (
+        opencode_model_env = _normalized_plain_model_value(os.environ.get("OPENCODE_MODEL") or "")
+        openai_model = _normalized_plain_model_value(
             os.environ.get("OPENAI_MODEL")
             or opencode_model_env
+            or cfg.openai_model
             or "deepseek-reasoner"
-        ).strip()
+        )
+        requested_model = _normalized_plain_model_value(request.model or "")
         if openai_key:
-            model_value = request.model or opencode_model_env or openai_model
+            model_value = requested_model or opencode_model_env or openai_model
         else:
-            model_value = request.model or cfg.openrouter_model
+            model_value = requested_model or _normalized_plain_model_value(cfg.openrouter_model)
         runtime_mode = "native" if _executor_mode() == "k8s_job" else "docker"
-        print(
+        logger.info(
             f"[job {job_id}] params runtime={runtime_mode} "
             f"time_budget={total_budget_log} run_time_budget={run_budget_log} "
             f"unlimited_round_limit={unlimited_round_limit_value if unlimited_round_limit_value > 0 else 'unlimited'} "
@@ -3934,10 +4020,10 @@ def _run_fuzz_job(
             f"max_fix_rounds={max_fix_rounds} "
             f"same_error_max_retries={same_error_max_retries}"
         )
-        print(f"[job {job_id}] log_file={log_file}")
+        logger.info(f"[job {job_id}] log_file={log_file}")
         mode = _executor_mode()
         docker_image = None if mode == "k8s_job" else docker_image_value
-        print(
+        logger.info(
             f"[job {job_id}] executor_mode={mode} "
             f"docker_image={docker_image if docker_image else '(native)'}"
         )
@@ -3950,21 +4036,19 @@ def _run_fuzz_job(
                 current_repo_root = str(resume_repo_root or "").strip()
                 current_node_name = ""
                 last_result: object = {}
-                stage_ctx: dict[str, str] = {
-                    "last_fuzzer": "",
-                    "last_crash_artifact": "",
-                    "re_workspace_root": "",
-                    "restart_to_plan_reason": "",
-                    "restart_to_plan_stage": "",
-                    "restart_to_plan_error_text": "",
-                    "restart_to_plan_report_path": "",
-                    "run_oom_retry_count": "",
-                    "run_rss_limit_mb_override": "",
-                    "run_parallel_fuzzers_override": "",
-                }
+                context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
+                control_doc, workflow_doc = read_context_docs(
+                    context_dir or None,
+                    job_id=job_id,
+                )
+                control_ctx: dict[str, object] = strip_meta(control_doc)
+                workflow_ctx: dict[str, object] = strip_meta(workflow_doc)
+                control_ctx["time_budget"] = int(total_time_budget_value)
+                control_ctx["run_time_budget"] = int(run_time_budget_value)
+                control_ctx["coverage_loop_max_rounds"] = int(coverage_loop_max_rounds)
+                control_ctx["max_fix_rounds"] = int(max_fix_rounds)
+                control_ctx["same_error_max_retries"] = int(same_error_max_retries)
                 current_stage = start_step
-                if current_stage in {"fix_build", "fix_crash"}:
-                    current_stage = "build"
                 if current_stage not in _STAGED_WORKFLOW_STEPS:
                     current_stage = "analysis"
                 try:
@@ -3977,7 +4061,7 @@ def _run_fuzz_job(
                     try:
                         companion_pod, companion_service, companion_url = _k8s_start_analysis_companion(job_id)
                         if companion_pod:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion started pod={companion_pod} "
                                 f"service={companion_service or '-'}"
                             )
@@ -4000,7 +4084,7 @@ def _run_fuzz_job(
                             err_txt = str(status_doc.get("error") or "").strip()
                             mcp_url_txt = str(status_doc.get("mcp_url") or companion_url).strip()
                             mcp_ready = _analysis_companion_is_ready(status_doc, require_rag=False)
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion ready "
                                 f"state={state_txt or '-'} backend={backend_txt or '-'} "
                                 f"mcp_ready={int(mcp_ready)}"
@@ -4013,7 +4097,7 @@ def _run_fuzz_job(
                             )
                             companion_mcp_ready = bool(mcp_ready)
                     except Exception as e:
-                        print(f"[job {job_id}] analysis companion failed (continuing): {e}")
+                        logger.info(f"[job {job_id}] analysis companion failed (continuing): {e}")
                         _job_update(
                             job_id,
                             analysis_companion_error=str(e),
@@ -4053,7 +4137,7 @@ def _run_fuzz_job(
                                 analysis_companion_error=(None if rag_ready else (err_txt or "rag_not_ready")),
                             )
                             if not rag_ready:
-                                print(
+                                logger.info(
                                     f"[job {job_id}] analysis companion not rag-ready before plan "
                                     f"(state={str(rag_status.get('state') or '-')} rag_ok={int(bool(rag_status.get('rag_ok')))}); "
                                     "degraded continue without MCP injection"
@@ -4065,7 +4149,7 @@ def _run_fuzz_job(
                                 analysis_companion_ready=False,
                                 analysis_companion_error=f"rag_wait_timeout:{e}",
                             )
-                            print(
+                            logger.info(
                                 f"[job {job_id}] analysis companion rag wait failed (continuing): {e}"
                             )
                     if stage == "analysis" and _has_reusable_analysis_context(current_repo_root):
@@ -4089,7 +4173,8 @@ def _run_fuzz_job(
                                 "job_name": "",
                                 "ok": True,
                                 "repo_root": current_repo_root,
-                                "stage_ctx": dict(stage_ctx),
+                                "control_context": dict(control_ctx),
+                                "workflow_context": dict(workflow_ctx),
                                 "result": stage_result,
                             }
                         )
@@ -4099,13 +4184,15 @@ def _run_fuzz_job(
                             workflow_active_step="",
                             k8s_phase="analysis:Reused",
                         )
-                        print(
+                        logger.info(
                             f"[job {job_id}] stage {stage} reused existing analysis context: "
                             f"{reusable_path or '(unknown path)'}"
                         )
                         last_result = stage_result
                         current_stage = "plan"
                         continue
+                    if current_repo_root:
+                        context_dir = str(context_dir_for_repo_root(current_repo_root) or context_dir).strip()
                     job_name = _k8s_job_name(job_id, resumed=resumed, stage=stage, seq=idx)
                     result_path, error_path = _k8s_result_paths(job_id, stage=stage, seq=idx)
                     stage_job_names.append(job_name)
@@ -4122,14 +4209,14 @@ def _run_fuzz_job(
                     if current_node_name:
                         can_pin_node, node_check_reason = _k8s_node_can_run_job(current_node_name)
                         if not can_pin_node:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] stage {stage} skip node pinning ({current_node_name}): {node_check_reason}"
                             )
                         else:
                             if node_check_reason in {"node_ready", "node_ready_no_metrics"}:
-                                print(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
+                                logger.info(f"[job {job_id}] stage {stage} node pinning on {current_node_name}")
                             else:
-                                print(
+                                logger.info(
                                     f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}"
                                 )
 
@@ -4145,23 +4232,13 @@ def _run_fuzz_job(
                         "email": request.email,
                         "docker_image": docker_image,
                         "ai_key_path": str(opencode_env_path()),
-                        "oss_fuzz_dir": cfg.oss_fuzz_dir,
                         "model": model_value,
                         "resume_from_step": stage,
                         "resume_repo_root": (current_repo_root or None),
                         "stop_after_step": stage,
-                        "last_fuzzer": (stage_ctx.get("last_fuzzer") or None),
-                        "last_crash_artifact": (stage_ctx.get("last_crash_artifact") or None),
-                        "re_workspace_root": (stage_ctx.get("re_workspace_root") or None),
-                        "restart_to_plan_reason": (stage_ctx.get("restart_to_plan_reason") or None),
-                        "restart_to_plan_stage": (stage_ctx.get("restart_to_plan_stage") or None),
-                        "restart_to_plan_error_text": (stage_ctx.get("restart_to_plan_error_text") or None),
-                        "restart_to_plan_report_path": (stage_ctx.get("restart_to_plan_report_path") or None),
-                        "run_oom_retry_count": (stage_ctx.get("run_oom_retry_count") or None),
-                        "run_rss_limit_mb_override": (stage_ctx.get("run_rss_limit_mb_override") or None),
-                        "run_parallel_fuzzers_override": (stage_ctx.get("run_parallel_fuzzers_override") or None),
+                        "context_dir": (context_dir or None),
                         "run_unlimited_round_budget_sec": int(
-                            stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                            control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                         ),
                         "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
                         "analysis_companion_ready": bool(companion_mcp_ready),
@@ -4169,13 +4246,14 @@ def _run_fuzz_job(
                         "error_path": str(error_path),
                         "target_node_name": (current_node_name if can_pin_node else None),
                     }
+                    control_ctx["target_node_name"] = (current_node_name if can_pin_node else "")
                     run_fuzzer_count = 1
                     run_parallelism = 1
                     if stage == "run":
                         run_fuzzer_count = _estimate_run_fuzzer_count(current_repo_root or "")
-                        run_parallelism = _estimate_run_parallelism(stage_ctx)
+                        run_parallelism = _estimate_run_parallelism(control_ctx)
                     effective_round_budget = int(
-                        stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+                        control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
                     )
                     wait_timeout = _k8s_stage_wait_timeout_sec(
                         stage=stage,
@@ -4187,7 +4265,7 @@ def _run_fuzz_job(
                     )
                     wait_override_key = f"{stage}_timeout_wait_sec_override"
                     try:
-                        wait_override_sec = int(stage_ctx.get(wait_override_key) or 0)
+                        wait_override_sec = int(control_ctx.get(wait_override_key) or 0)
                     except Exception:
                         wait_override_sec = 0
                     if wait_override_sec > 0:
@@ -4211,26 +4289,33 @@ def _run_fuzz_job(
                         stage_fail_error = _redact_sensitive_text(str(e))
                         failure_doc = dict(e.result or {})
                         stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
-                        oom_retry_count = int(stage_ctx.get("run_oom_retry_count") or 0)
+                        oom_retry_count = int(control_ctx.get("run_oom_retry_count") or 0)
                         if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
-                            rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
+                            rss_raw = str(control_ctx.get("run_rss_limit_mb_override") or "").strip()
+                            if not rss_raw:
+                                rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
                             try:
                                 base_rss = int(rss_raw) if rss_raw else 131072
                             except Exception:
                                 base_rss = 131072
                             retry_rss = max(2048, int(base_rss * 0.75))
-                            stage_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
-                            stage_ctx["run_rss_limit_mb_override"] = str(retry_rss)
-                            stage_ctx["run_parallel_fuzzers_override"] = "1"
+                            # Keep libFuzzer rss below pod cgroup limit to avoid repeated OOMKilled loops.
+                            pod_limit_mb = _k8s_worker_memory_limit_mb()
+                            if pod_limit_mb > 0:
+                                capped_rss = max(2048, int(pod_limit_mb * 0.8))
+                                retry_rss = min(retry_rss, capped_rss)
+                            control_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
+                            control_ctx["run_rss_limit_mb_override"] = str(retry_rss)
+                            control_ctx["run_parallel_fuzzers_override"] = "1"
                             stage_result = {
                                 "message": "run stage oom_killed; retrying run once with reduced rss/parallel",
                                 "repo_root": current_repo_root,
                                 "workflow_last_step": stage,
                                 "workflow_recommended_next": "run",
                                 "restart_to_plan": False,
-                                "run_oom_retry_count": stage_ctx["run_oom_retry_count"],
-                                "run_rss_limit_mb_override": stage_ctx["run_rss_limit_mb_override"],
-                                "run_parallel_fuzzers_override": stage_ctx["run_parallel_fuzzers_override"],
+                                "run_oom_retry_count": control_ctx["run_oom_retry_count"],
+                                "run_rss_limit_mb_override": control_ctx["run_rss_limit_mb_override"],
+                                "run_parallel_fuzzers_override": control_ctx["run_parallel_fuzzers_override"],
                             }
                             stage_failed = False
                             stage_fail_reason = ""
@@ -4251,7 +4336,7 @@ def _run_fuzz_job(
                     except Exception as e:
                         is_k8s_timeout = "k8s_job_timeout" in str(e)
                         timeout_retry_key = f"{stage}_timeout_retry_count"
-                        timeout_retry_count = int(stage_ctx.get(timeout_retry_key) or 0)
+                        timeout_retry_count = int(control_ctx.get(timeout_retry_key) or 0)
                         try:
                             max_timeout_retries = int(os.environ.get("SHERPA_K8S_TIMEOUT_MAX_RETRIES", "0"))
                             if max_timeout_retries <= 0:
@@ -4262,21 +4347,21 @@ def _run_fuzz_job(
                             current_wait = max(300, wait_timeout)
                             try:
                                 current_wait = max(
-                                    current_wait, int(stage_ctx.get(wait_override_key) or current_wait)
+                                    current_wait, int(control_ctx.get(wait_override_key) or current_wait)
                                 )
                             except Exception:
                                 pass
                             extended_wait = int(current_wait * 1.5)
-                            stage_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
-                            stage_ctx[wait_override_key] = str(extended_wait)
+                            control_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
+                            control_ctx[wait_override_key] = str(extended_wait)
                             if stage == "run":
-                                stage_ctx["run_timeout_budget_sec_override"] = str(
+                                control_ctx["run_timeout_budget_sec_override"] = str(
                                     int(
-                                        int(stage_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
+                                        int(control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
                                         * 1.5
                                     )
                                 )
-                            print(
+                            logger.info(
                                 f"[job {job_id}] {stage} stage k8s_job_timeout; "
                                 f"retrying with extended timeout "
                                 f"(retry {timeout_retry_count + 1}, "
@@ -4292,11 +4377,11 @@ def _run_fuzz_job(
                                 "workflow_last_step": stage,
                                 "workflow_recommended_next": stage,
                                 "restart_to_plan": False,
-                                timeout_retry_key: stage_ctx[timeout_retry_key],
-                                wait_override_key: stage_ctx[wait_override_key],
+                                timeout_retry_key: control_ctx[timeout_retry_key],
+                                wait_override_key: control_ctx[wait_override_key],
                             }
                             if stage == "run":
-                                stage_result["run_timeout_budget_sec_override"] = stage_ctx.get(
+                                stage_result["run_timeout_budget_sec_override"] = control_ctx.get(
                                     "run_timeout_budget_sec_override", ""
                                 )
                             stage_failed = False
@@ -4307,7 +4392,7 @@ def _run_fuzz_job(
                             stage_fail_error = _redact_sensitive_text(str(e))
                             if is_k8s_timeout:
                                 stage_fail_reason = "k8s_job_timeout"
-                                print(
+                                logger.info(
                                     f"[job {job_id}] {stage} stage k8s_job_timeout; "
                                     f"max retries exhausted ({timeout_retry_count}/{max_timeout_retries}) "
                                     f"-> fallback to plan"
@@ -4328,46 +4413,51 @@ def _run_fuzz_job(
                             }
                     if stage_node_name:
                         if current_node_name and stage_node_name != current_node_name:
-                            print(
+                            logger.info(
                                 f"[job {job_id}] stage {stage} node drift {current_node_name} -> {stage_node_name}, updating pin"
                             )
                         elif not current_node_name:
-                            print(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
+                            logger.info(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
                         current_node_name = stage_node_name
                     else:
-                        print(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
+                        logger.info(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
 
                     if isinstance(stage_result, dict):
                         current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
-                        for key in (
-                            "last_fuzzer",
-                            "last_crash_artifact",
-                            "re_workspace_root",
-                            "restart_to_plan_reason",
-                            "restart_to_plan_stage",
-                            "restart_to_plan_error_text",
-                            "restart_to_plan_report_path",
-                            "run_oom_retry_count",
-                            "run_rss_limit_mb_override",
-                            "run_parallel_fuzzers_override",
-                            "run_timeout_retry_count",
-                            "run_timeout_budget_sec_override",
-                        ):
-                            v = str(stage_result.get(key) or "").strip()
-                            if v:
-                                stage_ctx[key] = v
+                        next_context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
+                        if next_context_dir and next_context_dir != context_dir:
+                            context_dir = next_context_dir
+                            control_doc, workflow_doc = read_context_docs(
+                                context_dir,
+                                job_id=job_id,
+                            )
+                            control_ctx = strip_meta(control_doc)
+                            workflow_ctx = strip_meta(workflow_doc)
+                        control_ctx, workflow_ctx = merge_result_into_contexts(
+                            stage_result,
+                            control=control_ctx,
+                            workflow=workflow_ctx,
+                        )
                         if not bool(stage_result.get("restart_to_plan")):
-                            stage_ctx["restart_to_plan_reason"] = ""
-                            stage_ctx["restart_to_plan_stage"] = ""
-                            stage_ctx["restart_to_plan_error_text"] = ""
-                            stage_ctx["restart_to_plan_report_path"] = ""
+                            workflow_ctx["restart_to_plan_reason"] = ""
+                            workflow_ctx["restart_to_plan_stage"] = ""
+                            workflow_ctx["restart_to_plan_error_text"] = ""
+                            workflow_ctx["restart_to_plan_report_path"] = ""
+                        if context_dir:
+                            write_context_docs(
+                                context_dir,
+                                control=control_ctx,
+                                workflow=workflow_ctx,
+                                job_id=job_id,
+                            )
                         stage_results.append(
                             {
                                 "stage": stage,
                                 "job_name": job_name,
                                 "ok": (not stage_failed),
                                 "repo_root": current_repo_root,
-                                "stage_ctx": dict(stage_ctx),
+                                "control_context": dict(control_ctx),
+                                "workflow_context": dict(workflow_ctx),
                                 "result": stage_result,
                             }
                         )
@@ -4390,22 +4480,17 @@ def _run_fuzz_job(
                     )
                     last_result = stage_result
                     if stage_failed:
-                        print(
+                        logger.info(
                             f"[job {job_id}] stage {stage} failed ({stage_fail_reason}): "
                             f"{stage_fail_error} -> fallback to plan"
                         )
                     else:
-                        print(f"[job {job_id}] stage {stage} completed via job {job_name}")
+                        logger.info(f"[job {job_id}] stage {stage} completed via job {job_name}")
                     next_stage = ""
                     if isinstance(stage_result, dict):
-                        terminal_reason = str(stage_result.get("fix_build_terminal_reason") or "").strip()
-                        if stage == "build" and terminal_reason == "requires_env_rebuild":
-                            next_stage = "build"
-                            print(
-                                f"[job {job_id}] stage {stage} requested env rebuild; dispatching fresh build job"
-                            )
-                        else:
-                            next_stage = _normalize_resume_step(stage_result.get("workflow_recommended_next"))
+                        next_raw = str(stage_result.get("workflow_recommended_next") or "").strip()
+                        if next_raw:
+                            next_stage = _normalize_resume_step(next_raw)
                     if next_stage in {"", "stop"}:
                         break
                     current_stage = next_stage
@@ -4413,9 +4498,17 @@ def _run_fuzz_job(
                 res = dict(last_result) if isinstance(last_result, dict) else {"message": str(last_result or "")}
                 res["stage_results"] = stage_results
                 res["stage_job_names"] = stage_job_names
-                print(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
-        except Exception as fuzz_err:
-            print(f"[job {job_id}] k8s worker failed: {fuzz_err}")
+                logger.info(f"[job {job_id}] staged k8s workflow finished ({len(stage_results)} stages)")
+        except (
+            RuntimeError,
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+            _K8sJobFailure,
+            K8sJobError,
+        ) as fuzz_err:
+            logger.info(f"[job {job_id}] k8s worker failed: {fuzz_err}")
             import traceback
             traceback.print_exc()
             raise
@@ -4444,6 +4537,21 @@ def _run_fuzz_job(
                 or run_terminal_reason
                 or "workflow_failed"
             ).strip()
+        final_metric_fields: dict[str, object] = {}
+        if isinstance(res, dict):
+            final_metric_fields = {
+                "analysis_evidence_count": int(res.get("analysis_evidence_count") or 0),
+                "security_evidence_count": int(res.get("security_evidence_count") or 0),
+                "vuln_candidate_count": int(res.get("vuln_candidate_count") or 0),
+                "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
+                "security_priority_mode": bool(res.get("security_priority_mode") or False),
+                "latest_vuln_decision_snapshot": dict(res.get("latest_vuln_decision_snapshot") or {}),
+                "target_scoring_enabled": bool(res.get("target_scoring_enabled") or False),
+                "target_score_breakdown_available": bool(res.get("target_score_breakdown_available") or False),
+                "decision_trace_count": int(res.get("decision_trace_count") or 0),
+                "latest_decision_snapshot": dict(res.get("latest_decision_snapshot") or {}),
+                "crash_signature_dedup_hit": bool(res.get("crash_signature_dedup_hit") or False),
+            }
         _job_update(
             job_id,
             status=final_status,
@@ -4452,8 +4560,17 @@ def _run_fuzz_job(
             recoverable=False,
             resume_error_code=None,
             last_resume_finished_at=time.time() if resumed else None,
+            **final_metric_fields,
         )
-    except Exception as e:
+    except (
+        RuntimeError,
+        ValueError,
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        _K8sJobFailure,
+        K8sJobError,
+    ) as e:
         if _is_cancel_requested(job_id):
             fail_status = "error"
             err_text = cancel_error
@@ -4465,9 +4582,7 @@ def _run_fuzz_job(
             fail_result = dict(e.result or {})
         if isinstance(err_text, str) and ":" in err_text:
             reason = err_text.split(":", 1)[0].strip()
-            if fail_result is None and reason.startswith("fix_build_"):
-                fail_result = {"fix_build_terminal_reason": reason}
-            elif fail_result is None and reason.startswith("run_"):
+            if fail_result is None and reason.startswith("run_"):
                 fail_result = {"run_terminal_reason": reason}
         _job_update(
             job_id,
@@ -4478,15 +4593,20 @@ def _run_fuzz_job(
             last_resume_finished_at=time.time() if resumed else None,
         )
     finally:
+        if log_sink_id is not None:
+            try:
+                logger.remove(log_sink_id)
+            except Exception:
+                pass
         try:
             if companion_pod or companion_service:
                 _k8s_stop_analysis_companion(companion_pod, companion_service)
-                print(
+                logger.info(
                     f"[job {job_id}] analysis companion stopped pod={companion_pod or '-'} "
                     f"service={companion_service or '-'}"
                 )
-        except Exception as e:
-            print(f"[job {job_id}] analysis companion stop failed: {e}")
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+            logger.info(f"[job {job_id}] analysis companion stop failed: {e}")
             _job_update(job_id, analysis_companion_error=str(e))
         finally:
             _job_update(
@@ -4538,7 +4658,7 @@ def _resume_fuzz_job(job_id: str, cfg: WebPersistentConfig, *, trigger: str) -> 
 
     try:
         req = fuzz_model.model_validate(raw_request)
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         _mark_resume_failed(job_id, code="invalid_resume_context", message=f"invalid request payload for resume: {e}")
         return {"accepted": False, "reason": "invalid_resume_context"}
 
@@ -4805,48 +4925,17 @@ async def task_api(request: task_model = Body(...)):
         had_error = False
         child_ids: list[str] = []
         try:
-            print(f"[task {job_id}] start (jobs={len(request.jobs)})")
+            logger.info(f"[task {job_id}] start (jobs={len(request.jobs)})")
             if _is_cancel_requested(job_id):
                 raise RuntimeError(cancel_error)
             if request.auto_init:
                 with _INIT_LOCK:
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
-                    auto_init_oss_fuzz = (
-                        (os.environ.get("SHERPA_AUTO_INIT_OSS_FUZZ", "0") or "")
-                        .strip()
-                        .lower()
-                        in {"1", "true", "yes", "on"}
-                    )
-                    # Native k8s staged runtime does not require oss-fuzz checkout.
-                    # Force-disable auto-init here to avoid unrelated git clone failures.
-                    if _executor_mode() == "k8s_job" and auto_init_oss_fuzz:
-                        auto_init_oss_fuzz = False
-                        print("[task] skip oss-fuzz auto-init in k8s native runtime")
-                    if auto_init_oss_fuzz:
-                        repo_url = (
-                            (request.oss_fuzz_repo_url or "").strip()
-                            or os.environ.get("SHERPA_OSS_FUZZ_REPO_URL", "").strip()
-                            or "https://github.com/google/oss-fuzz.git"
-                        )
-                        target_dir = Path(
-                            (cfg.oss_fuzz_dir or "").strip()
-                            or os.environ.get("SHERPA_DEFAULT_OSS_FUZZ_DIR", "").strip()
-                            or str(_REPO_ROOT / "oss-fuzz")
-                        ).expanduser().resolve()
-                        print(f"[task] ensure oss-fuzz at {target_dir} from {repo_url}")
-                        _ensure_oss_fuzz_checkout(
-                            repo_url=repo_url,
-                            target_dir=target_dir,
-                            force=request.force_clone,
-                        )
-                    else:
-                        print("[task] skip oss-fuzz auto-init (SHERPA_AUTO_INIT_OSS_FUZZ=0)")
-
                     should_build_images = request.build_images
                     if should_build_images:
                         if _executor_mode() == "k8s_job":
-                            print("[task] skip prebuild images in k8s native runtime mode")
+                            logger.info("[task] skip prebuild images in k8s native runtime mode")
                             should_build_images = False
                     if should_build_images:
                         # Only build if any job uses Docker (explicit or default config).
@@ -4869,19 +4958,19 @@ async def task_api(request: task_model = Body(...)):
                                         inferred.add("java")
                                 images = sorted(inferred)
                             if not images:
-                                print("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
+                                logger.info("[task] skip prebuild images (no explicit image hints); lazy-build on demand")
                             for img in images:
                                 name = (img or "").strip().lower()
                                 if name in {"cpp", "c", "cxx"}:
                                     tag = os.environ.get("SHERPA_DOCKER_IMAGE_CPP", "sherpa-fuzz-cpp:latest")
-                                    print(f"[task] ensure image {tag}")
+                                    logger.info(f"[task] ensure image {tag}")
                                     _ensure_docker_image(tag, DOCKERFILE_FUZZ_CPP, force=request.force_build)
                                 elif name in {"java", "jazzer"}:
                                     tag = os.environ.get("SHERPA_DOCKER_IMAGE_JAVA", "sherpa-fuzz-java:latest")
-                                    print(f"[task] ensure image {tag}")
+                                    logger.info(f"[task] ensure image {tag}")
                                     _ensure_docker_image(tag, DOCKERFILE_FUZZ_JAVA, force=request.force_build)
                                 else:
-                                    print(f"[task] skip unknown image hint: {img}")
+                                    logger.info(f"[task] skip unknown image hint: {img}")
             # Submit child jobs after parent setup logs are written.
             # Each job now uses ContextVar-based log routing, so concurrent jobs
             # remain isolated without process-global stdout/stderr switching.

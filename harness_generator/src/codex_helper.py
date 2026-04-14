@@ -44,6 +44,8 @@ The CLI used is the OpenCode binary `opencode` in non-interactive mode (`opencod
 
 from __future__ import annotations
 
+from loguru import logger
+
 import logging
 import json
 import hashlib
@@ -401,11 +403,6 @@ def _docker_opencode_image() -> str:
     return os.environ.get("SHERPA_OPENCODE_DOCKER_IMAGE", "").strip()
 
 
-def _opencode_container_mode_enabled() -> bool:
-    if (os.environ.get("SHERPA_EXECUTOR_MODE", "") or "").strip().lower() == "k8s_job":
-        return False
-    return bool(_docker_opencode_image())
-
 
 def _opencode_auto_build_enabled() -> bool:
     return _bool_env("SHERPA_OPENCODE_AUTO_BUILD", True)
@@ -474,7 +471,7 @@ def _run_streaming_combined(
     Returns: (returncode, output_for_scan, output_tail)
     """
     cmd_list = list(cmd)
-    print(f"[*] ➜  {_redact_cmd_for_log(cmd_list, env=env)}")
+    logger.info(f"[*] ➜  {_redact_cmd_for_log(cmd_list, env=env)}")
     proc = subprocess.Popen(
         cmd_list,
         cwd=str(cwd) if cwd is not None else None,
@@ -492,7 +489,7 @@ def _run_streaming_combined(
     try:
         for line in proc.stdout:
             safe_line = _redact_text(line, env=env)
-            print(safe_line, end="")
+            logger.info("{}", safe_line.rstrip("\n"))
             tail_buf.append(safe_line.rstrip("\n"))
             scan_buf.append(safe_line)
     finally:
@@ -620,9 +617,9 @@ def _normalize_model_for_opencode(model: str, *, config_path: str) -> str:
         only = next(iter(providers.keys()))
         return f"{only}/{raw}"
 
-    # Heuristic for common GLM short model ids.
-    if raw.lower().startswith("glm-"):
-        return f"zai/{raw}"
+    # Heuristic for common GLM short model ids (hosted on jdcloud).
+    if raw.lower().startswith("glm"):
+        return f"jdcloud/{raw}"
 
     return raw
 
@@ -681,7 +678,7 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
     last_tail = ""
     attempts: list[str] = []
     for base_image in _opencode_base_image_candidates():
-        print(f"[OpenCodeHelper] building opencode image with base={base_image}")
+        logger.info(f"[OpenCodeHelper] building opencode image with base={base_image}")
         for attempt in range(1, max_retries + 1):
             build_cmd = [
                 "docker",
@@ -704,7 +701,7 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
                 return
             if attempt < max_retries and _is_opencode_build_transient_error(out_scan):
                 backoff_s = min(2 ** (attempt - 1), 10)
-                print(
+                logger.info(
                     f"[OpenCodeHelper] opencode image build transient error; "
                     f"retrying in {backoff_s}s (base={base_image}, attempt {attempt}/{max_retries})"
                 )
@@ -718,28 +715,6 @@ def _ensure_opencode_image(image: str, env: dict) -> None:
     )
 
 
-def _docker_opencode_env_args(env: dict) -> list[str]:
-    allowed_keys = [
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "OPENROUTER_API_KEY",
-        "OPENROUTER_BASE_URL",
-        "OPENROUTER_MODEL",
-        "OPENCODE_MODEL",
-        "OPENCODE_PERMISSION",
-        "OPENCODE_CONFIG",
-        "SHERPA_OPENCODE_NO_EXEC",
-        "SHERPA_OPENCODE_BLOCKLIST",
-        "SHERPA_OPENCODE_ALLOWLIST",
-    ]
-    allowed_keys.append("DEEPSEEK_API_KEY")
-    args: list[str] = []
-    for k in allowed_keys:
-        v = env.get(k)
-        if v is not None and str(v).strip() != "":
-            args += ["-e", f"{k}={v}"]
-    return args
-
 
 def _build_opencode_cmd(
     cli_exe: str,
@@ -747,53 +722,7 @@ def _build_opencode_cmd(
     working_dir: Path,
     env: dict,
 ) -> list[str]:
-    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
-    if not image:
-        return [cli_exe] + argv
-
-    # Run opencode inside a dedicated container.
-    shim_dir = env.get("SHERPA_OPENCODE_SHIM_DIR", "")
-    shared_out = env.get("SHERPA_OUTPUT_DIR", "").strip()
-    home_dir = _resolve_opencode_home_dir(shared_out, working_dir=working_dir)
-    try:
-        Path(home_dir).mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    path_in_container = "/opencode_shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    config_path = env.get("OPENCODE_CONFIG", "").strip()
-    config_mount = config_path or "/opencode.json"
-
-    docker_args = [
-        "docker",
-        "run",
-        "--rm",
-        "-v",
-        f"{str(working_dir.resolve())}:/repo",
-        "-w",
-        "/repo",
-        *_docker_opencode_env_args(env),
-        "-e",
-        f"PATH={path_in_container}",
-        "-e",
-        f"HOME={home_dir}",
-        *(
-            ["-v", f"{shim_dir}:/opencode_shims:ro"]
-            if shim_dir
-            else []
-        ),
-    ]
-    run_name = str(env.get("SHERPA_OPENCODE_RUN_NAME", "") or "").strip()
-    if run_name:
-        docker_args += ["--name", run_name]
-    if config_mount:
-        docker_args += ["-v", f"{config_mount}:{config_mount}:ro"]
-    if shared_out:
-        docker_args += ["-v", f"{shared_out}:{shared_out}"]
-    docker_args += [
-        image,
-        "opencode",
-    ]
-    return docker_args + argv
+    return [cli_exe] + argv
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +831,9 @@ class CodexHelper:
                 if key:
                     # Prefer OPENAI_API_KEY to align with OpenCode/OpenAI-compatible tooling.
                     os.environ.setdefault("OPENAI_API_KEY", key)
+
+        self.last_cli_error_kind = ""
+        self.last_cli_error_message = ""
 
         LOGGER.debug("OpenCodeHelper working directory: %s", self.working_dir)
 
@@ -1059,9 +991,23 @@ class CodexHelper:
             "请求太频繁",
             "访问频繁",
             "请稍后再试",
+            "Decode server is overloaded",
+            "server is overloaded",
+        )
+
+        # Fatal errors that should not be retried – raise immediately with a
+        # clear message so the caller gets an actionable diagnostic instead of
+        # an obscure downstream JSON-parsing failure.
+        FATAL_ERRORS = (
+            "ProviderModelNotFoundError",
+            "AuthenticationError",
+            "InvalidAPIKeyError",
+            "PermissionDeniedError",
         )
 
         done_path = self.working_dir / SENTINEL
+        self.last_cli_error_kind = ""
+        self.last_cli_error_message = ""
         watch_specs: List[str] = []
         for spec in (activity_watch_paths or ()):
             txt = str(spec).strip()
@@ -1237,13 +1183,10 @@ class CodexHelper:
             LOGGER.warning("[OpenCodeHelper] global policy file missing: %s", policy_source_path)
 
         repo_root = str(self.working_dir.resolve())
-        if _opencode_container_mode_enabled():
-            repo_path_hint = "The repository is mounted at /repo; use relative paths or /repo (avoid /shared/output)."
-        else:
-            repo_path_hint = (
-                f"The repository root is {repo_root}. "
-                "Use relative paths from the current working directory and do not assume /repo exists."
-            )
+        repo_path_hint = (
+            f"The repository root is {repo_root}. "
+            "Use relative paths from the current working directory and do not assume /repo exists."
+        )
 
         prompt_parts: List[str] = [
             "You are OpenCode running in a local Git repository.",
@@ -1391,10 +1334,6 @@ class CodexHelper:
                                 cli_exe = str(candidate)
                                 break
 
-                # If we're using a dedicated opencode container, default to docker CLI.
-                if _opencode_container_mode_enabled():
-                    cli_exe = "docker"
-
                 if cli_exe is None:
                     raise FileNotFoundError(
                         f"OpenCode CLI not found: '{self.codex_cli}'. "
@@ -1412,10 +1351,6 @@ class CodexHelper:
                     ),
                 )
                 run_name = ""
-                if _opencode_container_mode_enabled():
-                    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.working_dir.name or "repo").strip("-") or "repo"
-                    run_name = f"sherpa-opencode-{slug}-{os.getpid()}-{int(time.time())}-{cli_try}-{attempt}".lower()
-                    env["SHERPA_OPENCODE_RUN_NAME"] = run_name
                 if session_group:
                     env["SHERPA_OPENCODE_SESSION_GROUP"] = session_group
                 cmd: list[str] = ["run"]
@@ -1429,9 +1364,6 @@ class CodexHelper:
 
                 try:
                     _apply_opencode_exec_policy(env)
-                    image = _docker_opencode_image() if _opencode_container_mode_enabled() else ""
-                    if image:
-                        _ensure_opencode_image(image, env)
                     if session_group:
                         # Mark session as active as soon as we dispatch a run, even if this
                         # attempt later ends with no diff/no sentinel. This preserves dialogue
@@ -1445,7 +1377,7 @@ class CodexHelper:
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
-                        env=None if _opencode_container_mode_enabled() else env,
+                        env=env,
                         text=True,
                         errors="replace",
                         start_new_session=(os.name != "nt"),
@@ -1599,7 +1531,7 @@ class CodexHelper:
                             reason,
                             cleanup_error or "unknown",
                         )
-                        print(
+                        logger.info(
                             "[OpenCodeHelper] process cleanup failed "
                             f"(reason={reason}): {cleanup_error or 'unknown'}"
                         )
@@ -1635,7 +1567,7 @@ class CodexHelper:
                         if elapsed > timeout:
                             LOGGER.warning("[CodexHelper] hard timeout; killing opencode")
                             saw_retry_error = True
-                            print(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
+                            logger.info(f"[OpenCodeHelper] hard timeout after {elapsed:.0f}s; terminating agent")
                             _kill_proc("hard_timeout")
                             break
 
@@ -1668,7 +1600,7 @@ class CodexHelper:
                                     idle_for,
                                 )
                                 saw_retry_error = True
-                                print(
+                                logger.info(
                                     "[OpenCodeHelper] idle timeout after "
                                     f"{idle_for:.0f}s without activity; terminating agent"
                                 )
@@ -1678,7 +1610,7 @@ class CodexHelper:
                         # Heartbeat so job logs keep moving even if the agent is quiet.
                         if (now - last_heartbeat) > 10.0:
                             last_heartbeat = now
-                            print(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
+                            logger.info(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         if done_path.exists():
                             stale_done = False
@@ -1694,7 +1626,7 @@ class CodexHelper:
                                     done_mtime,
                                     attempt_started_at,
                                 )
-                                print("[OpenCodeHelper] stale done flag detected; removing and continuing")
+                                logger.info("[OpenCodeHelper] stale done flag detected; removing and continuing")
                                 try:
                                     done_path.unlink(missing_ok=True)
                                 except Exception as e:
@@ -1703,7 +1635,7 @@ class CodexHelper:
                                     ) from e
                             else:
                                 LOGGER.info("[OpenCodeHelper] done flag detected")
-                                print("[OpenCodeHelper] done flag detected; terminating")
+                                logger.info("[OpenCodeHelper] done flag detected; terminating")
                                 _kill_proc("done_flag")
                                 break
 
@@ -1716,14 +1648,33 @@ class CodexHelper:
                         if item is EOF:
                             break
                         if isinstance(item, str) and item:
-                            print(item, end="")
+                            logger.info("{}", item.rstrip("\n"))
                             captured_chunks.append(item)
                             last_activity_ts = now
                             if any(err in item for err in RETRY_ERRORS) and not _bool_env("SHERPA_OPENCODE_IGNORE_RETRY_ERRORS", False):
+                                lowered = item.lower()
+                                if "overloaded" in lowered:
+                                    self.last_cli_error_kind = "provider_overloaded"
+                                    self.last_cli_error_message = item.strip()[:500]
+                                elif not self.last_cli_error_kind:
+                                    self.last_cli_error_kind = "provider_retryable_error"
+                                    self.last_cli_error_message = item.strip()[:500]
                                 LOGGER.warning("[OpenCodeHelper] retryable error detected → abort")
                                 saw_retry_error = True
                                 _kill_proc("retryable_error")
                                 break
+                            # Detect fatal (non-retryable) errors and surface them
+                            # immediately so the caller gets a clear diagnostic.
+                            for fatal_err in FATAL_ERRORS:
+                                if fatal_err in item:
+                                    detail = item.strip()[:500]
+                                    self.last_cli_error_kind = "provider_fatal_error"
+                                    self.last_cli_error_message = detail
+                                    LOGGER.error("[OpenCodeHelper] fatal CLI error: %s", detail)
+                                    _kill_proc("fatal_error")
+                                    raise RuntimeError(
+                                        f"OpenCode CLI fatal error: {fatal_err} — {detail}"
+                                    )
 
                         # If process exited and queue is drained, we can stop.
                         if proc.poll() is not None and out_q.empty():
@@ -1736,7 +1687,7 @@ class CodexHelper:
                             if item2 is EOF:
                                 break
                             if isinstance(item2, str) and item2:
-                                print(item2, end="")
+                                logger.info("{}", item2.rstrip("\n"))
                                 captured_chunks.append(item2)
                     except Exception:
                         pass
@@ -1750,6 +1701,9 @@ class CodexHelper:
                     saw_retry_error = True
 
                 if saw_retry_error:
+                    if not self.last_cli_error_kind:
+                        self.last_cli_error_kind = "provider_retryable_error"
+                        self.last_cli_error_message = "retryable OpenCode CLI failure"
                     _record_session_attempt("retryable_error")
                     time.sleep(backoff)
                     backoff *= 2
@@ -1768,8 +1722,11 @@ class CodexHelper:
             diff_changed = bool(diff_now) and diff_now != baseline_diff
 
             if not done_path.exists():
+                if not self.last_cli_error_kind:
+                    self.last_cli_error_kind = "missing_sentinel"
+                    self.last_cli_error_message = "OpenCode did not create done sentinel"
                 LOGGER.warning("[OpenCodeHelper] sentinel not created; next attempt")
-                print("[OpenCodeHelper] sentinel not created; next attempt")
+                logger.info("[OpenCodeHelper] sentinel not created; next attempt")
                 run_meta["status"] = "retry_no_sentinel"
                 run_meta["cli_retries_used"] = cli_try
                 _append_opencode_metadata(self.working_dir, run_meta)
@@ -1794,13 +1751,16 @@ class CodexHelper:
                 return "".join(captured_chunks)
 
             LOGGER.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
-            print("[OpenCodeHelper] sentinel present but no diff; next attempt")
+            logger.info("[OpenCodeHelper] sentinel present but no diff; next attempt")
             run_meta["status"] = "retry_no_diff"
             run_meta["cli_retries_used"] = cli_try
             _append_opencode_metadata(self.working_dir, run_meta)
             _record_session_attempt("retry_no_diff")
 
         LOGGER.warning("[OpenCodeHelper] exhausted attempts — no edits produced")
+        if not self.last_cli_error_kind:
+            self.last_cli_error_kind = "exhausted_no_edits"
+            self.last_cli_error_message = "OpenCode exhausted attempts without producing edits"
         _record_session_attempt("exhausted")
         _append_opencode_metadata(
             self.working_dir,
@@ -1816,11 +1776,3 @@ class CodexHelper:
             },
         )
         return None
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compat alias – internal code may still import CodexPatcher.
-# ---------------------------------------------------------------------------
-
-
-CodexPatcher = CodexHelper

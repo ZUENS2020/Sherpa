@@ -1,17 +1,18 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+pydantic==2.12.5
 
-python-dotenv>=1.0
-PyYAML>=6.0
-GitPython>=3.1
-graphviz>=0.20
+python-dotenv==1.2.2
+PyYAML==6.0.3
+GitPython==3.1.46
+graphviz==0.21
 
-langchain>=0.2
-langchain-openai>=0.1
-langgraph>=0.2
-openai>=1.0
-psycopg[binary]>=3.2
-tree_sitter>=0.22
-tree_sitter_language_pack>=0.6
-semgrep>=1.118
+langchain==1.2.14
+langchain-openai==1.1.12
+langgraph==1.1.4
+openai==2.30.0
+psycopg[binary]==3.3.3
+tree_sitter==0.25.2
+tree_sitter_language_pack==1.4.1
+semgrep==1.157.0
+loguru==0.7.3

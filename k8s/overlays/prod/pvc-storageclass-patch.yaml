@@ -29,11 +29,3 @@ metadata:
 spec:
   storageClassName: manual
   volumeName: pv-sherpa-prod-job-logs
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: sherpa-oss-fuzz
-spec:
-  storageClassName: manual
-  volumeName: pv-sherpa-prod-oss-fuzz

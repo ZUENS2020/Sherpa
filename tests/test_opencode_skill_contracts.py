@@ -43,6 +43,9 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
     assert "api_surface_exception" in synth
+    assert "do not define custom `main()` in harness source" in synth
+    assert "LLVMFuzzerTestOneInput" in synth
+    assert "fopen(argv[1], ...)" in synth
 
 
 def test_synthesize_complete_scaffold_requires_missing_item_repair() -> None:
@@ -108,9 +111,11 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     plan_repair_build = _load("plan_repair_build")
     plan_repair_crash = _load("plan_repair_crash")
     plan_repair_coverage = _load("plan_repair_coverage")
+    plan_repair_fix_harness = _load("plan_repair_fix_harness")
     synth_repair_build = _load("synthesize_repair_build")
     synth_repair_crash = _load("synthesize_repair_crash")
     synth_repair_coverage = _load("synthesize_repair_coverage")
+    synth_repair_fix_harness = _load("synthesize_repair_fix_harness")
     improve_in_place = _load("improve_harness_in_place")
 
     assert "real archive samples first" in seed
@@ -122,8 +127,11 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "strategy change" in plan_repair_crash.lower()
     assert "strategy-diff" in plan_repair_coverage.lower()
     assert "Known Issues" in plan_repair_build
+    assert "Strategy Delta" in plan_repair_build
+    assert "Output Path Contract" in plan_repair_build
     assert "Known Issues" in plan_repair_crash
     assert "Known Issues" in plan_repair_coverage
+    assert "Known Issues" in plan_repair_fix_harness
     assert "target_name" in plan_repair_build and "expected_fuzzer_name" in plan_repair_build
     assert "api_surface_exception" in plan_repair_build
     assert "api_surface_exception" in plan_repair_crash
@@ -131,7 +139,28 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "api_surface_exception" in synth_repair_crash
     assert "MCP tools from task-scoped PromeFuzz companion" in plan_repair_build
     assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
+    assert "Strategy Delta" in synth_repair_build
+    assert "Output Path Contract" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
+    assert "crash_triage.json" in plan_repair_fix_harness
+    assert "repair_error_digest" in plan_repair_fix_harness
+    assert "strategy change" in plan_repair_fix_harness.lower()
+    assert "crash_info.md" in synth_repair_fix_harness
+    assert "crash_analysis.md" in synth_repair_fix_harness
+    assert "crash_triage.json" in synth_repair_fix_harness
+    assert "LLVMFuzzerTestOneInput" in synth_repair_fix_harness
+    assert "fopen(argv[1], ...)" in synth_repair_fix_harness
+    assert "doc-only/no-op patches are invalid" in synth_repair_fix_harness
+    assert "do not define custom `main()` in harness source" in synth_repair_build
+    assert "LLVMFuzzerTestOneInput" in synth_repair_build
+    assert "fopen(argv[1], ...)" in synth_repair_build
+    assert "do not define custom `main()` in harness source" in synth_repair_crash
+    assert "LLVMFuzzerTestOneInput" in synth_repair_crash
+    assert "fopen(argv[1], ...)" in synth_repair_crash
+    assert "do not define custom `main()` in harness source" in synth_repair_coverage
+    assert "LLVMFuzzerTestOneInput" in synth_repair_coverage
     assert "no target switching" in improve_in_place.lower() or "without switching targets" in improve_in_place.lower()
+    assert "do not define custom `main()` in harness source" in improve_in_place
+    assert "LLVMFuzzerTestOneInput" in improve_in_place
     assert "coverage" in synth_repair_coverage.lower()

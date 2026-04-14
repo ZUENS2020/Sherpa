@@ -15,11 +15,17 @@
 - `synthesize_complete_scaffold`
 - `plan_repair_build`
 - `plan_repair_crash`
+- `plan_repair_fix_harness`
 - `synthesize_repair_build`
 - `synthesize_repair_crash`
+- `synthesize_repair_fix_harness`
 - `seed_generation`
 - `crash_triage`
 - `crash_analysis`
+
+Legacy-only (not in active routing):
+
 - `fix_build`
 - `fix_crash_harness_error`
 - `fix_crash_upstream_bug`
+- `fix_harness_after_run`

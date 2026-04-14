@@ -20,6 +20,9 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/selected_targets.json` (if present)
 - `fuzz/observed_target.json` (if present)
 - MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
+  - code navigation: `list_definitions`, `read_definition`, `read_source`, `find_references`
+  - preprocessor: `run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`
+  - semantic (if enabled): `init_knowledge_base`, `retrieve_documents`, `comprehend_*`
 
 ## Required outputs
 - at least one harness source file under `fuzz/` (`*.c`, `*.cc`, `*.cpp`, `*.cxx`, or `*.java`) before docs/json completion
@@ -31,7 +34,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 ## Workflow
-1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
+1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
 2. Read planning artifacts and lock target alignment first.
 3. Create harness source(s) before scaffold documentation (`harness-first contract`).
 4. Create build glue with runtime artifact discovery and compiler-by-suffix behavior.
@@ -102,6 +105,10 @@ Compiler-by-suffix rule:
 ## Constraints
 - Multi-target buildability is required when execution plan has multiple targets.
 - Do not leave stale or missing execution target mappings in `fuzz/harness_index.json`.
+- LibFuzzer harness contract is mandatory:
+  - do not define custom `main()` in harness source;
+  - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
+- Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]` before broader edits.
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 

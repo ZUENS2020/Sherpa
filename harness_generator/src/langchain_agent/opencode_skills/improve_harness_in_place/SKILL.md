@@ -37,6 +37,10 @@ Use this skill after `coverage-analysis` selects `in_place` improvement mode.
 - No doc-only patch in this stage.
 - Include at least one strategy change versus the previous failed in-place cycle.
 - Keep scaffold runnable for next build/run.
+- LibFuzzer harness contract is mandatory:
+  - do not define custom `main()` in harness source;
+  - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
+- Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 
 ## Command policy
 - Allowed: read-only commands only.

@@ -25,6 +25,18 @@ Constraints:
 - `target_type` must be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`.
 - `seed_profile` must be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`.
 - Keep runtime-viable/public entrypoints first.
+- Internal/private API handling:
+  - allow internal/private API only when `vuln_likelihood >= 0.75`.
+  - when internal/private API is selected, `api_surface_exception.used` must be `true` with non-empty `reason` and `evidence_ids`.
+  - otherwise prefer public/stable API and keep `api_surface_exception.used=false`.
+- Target selection is vulnerability-first by default (`security_priority_mode=true`):
+  - ranking must be driven by risk dimensions first: `vuln_likelihood`, then `exploitability`, then `reachability_confidence`
+  - treat `score_total` and non-security dimensions (coverage/complexity/api-relevance) as reference output only, not the primary ordering basis.
+  - `score_total = 0.45*vuln_likelihood + 0.25*exploitability + 0.18*reachability_confidence + 0.05*coverage_gap + 0.04*complexity_depth + 0.02*api_relevance + 0.01*consumer_order_support - recent_yield_penalty` is retained for observability/comparison.
+- `fuzz/selected_targets.json` must include per-target:
+  - `security_score_breakdown`
+  - `api_surface_exception`
+  - `security_priority_mode`
 - Add execution metadata in `fuzz/selected_targets.json` semantics:
   - `execution_priority` (higher priority first, default top 3)
   - `must_run` for high-value parser/archive/decoder targets.
@@ -50,15 +62,37 @@ Required outputs:
 - `fuzz/analysis_context.json`
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
+- `fuzz/analysis_context.json.analysis_evidence.security_evidence`
+- `fuzz/analysis_context.json.analysis_evidence.vuln_candidate_inventory`
+- `VULN_HYPOTHESES` section in analysis notes: each hypothesis must cite at least one `evidence_id`
 
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
 - This stage is analysis-only: do not modify repository business source files.
 - Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
-- When MCP tools are available, use preprocessor MCP tools first (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`) and then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
+- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
 - If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
+- For each vulnerability hypothesis, include:
+  - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
+  - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
+
+Security analysis (vulnerability-directed):
+- Identify unsafe memory operations: unchecked memcpy/memmove/strcpy, raw pointer arithmetic, manual buffer management without bounds validation
+- Flag integer arithmetic without overflow checks: size calculations, length fields, shift operations, multiply that could wrap
+- Locate format string sinks: printf-family calls with non-literal format arguments
+- Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
+- Map trust boundaries: where external/untrusted data first enters internal processing functions
+- For each finding, append an entry to `analysis_evidence.security_evidence[]`:
+  - `evidence_id`: stable ID string
+  - `signal_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, authz_bypass_candidate, null_deref_candidate, uaf_candidate
+  - `severity`: low|medium|high
+  - `confidence`: 0.0-1.0
+  - `source_path`: source file path
+  - `line`: integer source line (0 allowed when unknown)
+  - `summary`: concrete risk explanation
+- Keep `target_type` and `seed_profile` unchanged in analysis. This stage records evidence and candidate inventory only.
 
 MANDATORY:
 - create `./done`
@@ -89,11 +123,16 @@ Build-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available (crash/build hints, candidate APIs, coverage hints) before proposing strategy changes.
-- Prefer preprocessor outputs and companion artifacts first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available (code-navigation evidence first, then crash/build hints, candidate APIs, coverage hints) before proposing strategy changes.
+- Prefer code-navigation + preprocessor outputs and companion artifacts first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
+
+Required planning sections in `fuzz/PLAN.md`:
+- `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
+- `Strategy Delta`: what changed versus the previous failed attempt
+- `Output Path Contract`: explicit statement that build artifacts must be emitted under `fuzz/out/`
 
 MANDATORY:
 - create `./done`
@@ -123,8 +162,8 @@ Crash-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available, especially crash-path and API-candidate context.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available, especially code-navigation output for crash-path and API-candidate context.
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
@@ -157,11 +196,44 @@ Coverage-repair focus:
 Constraints:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available (coverage hints + target candidates) before deciding replan strategy.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available (code-navigation first, then coverage hints + target candidates) before deciding replan strategy.
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - do not produce doc-only adjustments disconnected from next build/run outcomes
+
+MANDATORY:
+- create `./done`
+- write `fuzz/PLAN.md` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: plan_repair_fix_harness_with_hint -->
+You are coordinating a repair planning workflow for a crash triaged as a harness bug.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- produce a harness-focused repair plan for the next synthesize/build loop
+- update `fuzz/PLAN.md` and strict-schema `fuzz/targets.json`
+- keep `fuzz/execution_plan.json` aligned with reproducible harness-fix strategy
+
+Fix-harness planning focus:
+- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- output explicit strategy changes versus the latest failed cycle (must be material)
+- prioritize fixes under `fuzz/` harness/build glue, not documentation
+- prefer public/stable APIs and avoid internal/private symbols by default
+- if no public alternative exists, require `api_surface_exception` with concrete evidence
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- Query MCP evidence first when available (code-navigation first, preprocessor second, semantic evidence third).
+- If MCP is unavailable, continue in degraded mode and explicitly state it in `fuzz/PLAN.md`.
+- when diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
+- doc-only or no-op repair plans are invalid
 
 MANDATORY:
 - create `./done`
@@ -191,13 +263,15 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
-- Query MCP evidence first when available and reflect cited findings in scaffold choices.
-- Prefer preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
+- Query MCP evidence first when available and reflect cited findings in scaffold choices (code-navigation first).
+- Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and note the missing MCP evidence in `fuzz/README.md` or `fuzz/repo_understanding.json`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - Keep outputs aligned with `fuzz/selected_targets.json`; if target drifts, document rejection reason.
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
 - Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
+- LibFuzzer harness contract is mandatory: do not define custom `main()` in harness source; expose fuzz entry via `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)` (or language-equivalent entrypoint only).
+- Do not use argv/file-driven harness entry logic in libFuzzer mode (forbidden patterns include `fopen(argv[1], ...)`, `read(argv[1], ...)`, and manual corpus file loops).
 - `fuzz/README.md` must include:
   - `Selected target: ...`
   - `Final target: ...`
@@ -246,10 +320,17 @@ Build-repair constraints:
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
+
+Required notes in generated scaffold artifacts:
+- `Known Issues`: unresolved blockers and any missing diagnostics fields
+- `Strategy Delta`: concrete differences from previous failed attempt
+- `Output Path Contract`: explicit declaration that executable fuzzers must be produced under `fuzz/out/` (include expected binary stems)
 
 MANDATORY:
 - create `./done`
@@ -283,6 +364,8 @@ Crash-repair constraints:
 - avoid no-op doc-only edits
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
@@ -320,9 +403,49 @@ Coverage-repair constraints:
 - include and apply at least one material strategy change from previous cycle
 - avoid no-op doc-only edits
 - keep selected/final target, execution plan, and harness index consistent
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
+
+MANDATORY:
+- create `./done`
+- write `fuzz/out/` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: synthesize_repair_fix_harness_with_hint -->
+You are coordinating scaffold repair for a crash triaged as a harness bug.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- repair harness/build glue under `fuzz/` so harness misuse crashes are eliminated
+- keep reproducibility and target mapping intact for the next build/run cycle
+
+Required outputs:
+- harness source under `fuzz/`
+- `fuzz/build.py` or `fuzz/build.sh`
+- `fuzz/README.md`
+- `fuzz/repo_understanding.json`
+- `fuzz/build_strategy.json`
+- `fuzz/build_runtime_facts.json`
+- `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
+
+Fix-harness constraints:
+- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- include at least one material strategy change relative to previous failed attempt
+- apply concrete edits in offending `fuzz/` harness/build glue files (doc-only/no-op is invalid)
+- preserve libFuzzer entry contract: no custom `main()`, use `LLVMFuzzerTestOneInput` (or language-equivalent only)
+- forbid argv/file-driven harness entry logic (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
+- prefer public/stable APIs; internal/private APIs require `api_surface_exception` with non-empty evidence
+- if diagnostics include `non_public_api_usage`, replace offending symbols first
+- Do NOT run build/execute commands
+- Read-only exploration commands are allowed
+- query MCP evidence first when available; if unavailable, continue in degraded mode and document it
 
 MANDATORY:
 - create `./done`
@@ -353,6 +476,8 @@ Constraints:
 - consume `SeedFeedback` and `HarnessFeedback` before editing; include one concrete change tied to these signals.
 - pure doc-only edits are invalid in this stage.
 - include at least one material strategy change vs the previous failed cycle.
+- enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry.
+- forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 
 MANDATORY:
 - create `./done`

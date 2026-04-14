@@ -302,6 +302,28 @@ PROFILE_DICTIONARY_TOKENS: Dict[str, List[str]] = {
     "generic": [],
 }
 
+# ── libFuzzer dictionary token normalizer ──────────────────────────────
+# libFuzzer dict format only recognizes \xNN hex escapes inside quoted
+# strings.  C-style escapes (\r, \n, \t …) extracted from harness source
+# must be converted to their \xNN equivalents before writing to .dict files.
+_C_ESCAPE_TO_HEX: Dict[str, str] = {
+    r"\r": r"\x0d",
+    r"\n": r"\x0a",
+    r"\t": r"\x09",
+    r"\a": r"\x07",
+    r"\b": r"\x08",
+    r"\f": r"\x0c",
+    r"\v": r"\x0b",
+}
+
+
+def _normalize_dict_token(tok: str) -> str:
+    """Convert C-style escape sequences to ``\\xNN`` for libFuzzer compatibility."""
+    for c_esc, hex_esc in _C_ESCAPE_TO_HEX.items():
+        tok = tok.replace(c_esc, hex_esc)
+    return tok
+
+
 # ── Per-profile adaptive max_len (bytes) ─────────────────────────────────
 PROFILE_MAX_LEN: Dict[str, int] = {
     "parser-structure": 4096,
@@ -314,6 +336,76 @@ PROFILE_MAX_LEN: Dict[str, int] = {
     "document-text": 8192,
     "network-message": 4096,
     "generic": 1024,
+}
+
+# Vulnerability-directed seed guidance — appended when vuln hunting is enabled.
+VULN_SEED_GUIDANCE: Dict[str, str] = {
+    "decoder-binary": (
+        "\nAttack-pattern seeds for binary decoder vulnerabilities:\n"
+        "- Integer overflow: set dimension/length fields to 0xFFFFFFFF, 0x7FFFFFFF, 0x80000000\n"
+        "- Truncated input: valid header + truncated body (1-16 bytes total)\n"
+        "- Corrupt checksums: valid structure with flipped CRC/checksum bytes\n"
+        "- Oversized dimensions: width=65535 height=65535 with minimal pixel data\n"
+        "- Zero-length fields: valid header with length=0 for variable-length sections\n"
+        "- Nested containers: chunks referencing other chunks recursively\n"
+    ),
+    "parser-structure": (
+        "\nAttack-pattern seeds for parser vulnerabilities:\n"
+        "- Deeply nested structures (>100 levels) to trigger stack overflow\n"
+        "- Very long keys/values (>10000 chars) for buffer overflow\n"
+        "- Null bytes embedded in strings for C string handling bugs\n"
+        "- Mixed encodings (UTF-8 BOM + invalid byte sequences)\n"
+        "- Duplicate keys with conflicting types\n"
+    ),
+    "parser-token": (
+        "\nAttack-pattern seeds for tokenizer vulnerabilities:\n"
+        "- Extremely long tokens (>65536 chars) without delimiters\n"
+        "- Null byte mid-token\n"
+        "- Unicode combining characters and zero-width joiners\n"
+    ),
+    "archive-container": (
+        "\nAttack-pattern seeds for archive vulnerabilities:\n"
+        "- Zip bomb: nested archives with high compression ratio\n"
+        "- Path traversal: entries with ../../ prefix in filenames\n"
+        "- Symlink attacks: archive entries pointing to /etc/passwd\n"
+        "- Size overflow: uncompressed_size=0xFFFFFFFF with tiny compressed data\n"
+        "- Overlapping file entries with conflicting metadata\n"
+    ),
+    "network-message": (
+        "\nAttack-pattern seeds for network protocol vulnerabilities:\n"
+        "- Length field overflow: content-length=0xFFFFFFFF with small body\n"
+        "- Partial frames: connection reset mid-message\n"
+        "- Out-of-order sequences: response before request, duplicate sequence numbers\n"
+        "- Null bytes in protocol fields\n"
+    ),
+}
+
+# Vulnerability-directed dictionary tokens — appended when vuln hunting enabled.
+VULN_DICTIONARY_TOKENS: Dict[str, List[str]] = {
+    "decoder-binary": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 (integer overflow trigger)
+        '"\\x7f\\xff\\xff\\xff"',    # max int32
+        '"\\x80\\x00\\x00\\x00"',    # min int32 (sign flip)
+        '"\\x00\\x00\\x00\\x00"',    # zero length
+        '"\\x00\\x01"',              # minimal dimension
+        '"\\xff\\xff"',              # max uint16
+        '"\\x00\\x00\\xff\\xff"',    # mixed zero/max
+    ],
+    "parser-structure": [
+        '"\\x00"',                   # null byte injection
+        '"\\xef\\xbb\\xbf"',        # UTF-8 BOM
+        '"\\xff\\xfe"',             # UTF-16 LE BOM
+    ],
+    "archive-container": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 size field
+        '"../"',                     # path traversal
+        '"../../"',                  # deeper path traversal
+    ],
+    "network-message": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 length
+        '"\\x00\\x00\\x00\\x00"',    # zero length
+        '"\\r\\n\\r\\n"',           # HTTP double CRLF
+    ],
 }
 
 # Recognize fuzzer executables by name pattern.
@@ -1052,8 +1144,37 @@ def _seed_quality_from_run(
                 break
         return chosen
 
-    at_30s = _event_by_iter(131072)
-    at_60s = _event_by_iter(262144)
+    def _event_by_elapsed_sec(target_sec: float) -> Dict[str, int | str]:
+        """Find the event closest to *target_sec* elapsed wall-clock time.
+
+        libFuzzer reports average exec/s since start, so
+        elapsed ≈ iteration / execs_per_sec.  Falls back to the old
+        iteration-based heuristic when exec/s is unavailable.
+        """
+        chosen: Dict[str, int | str] = {}
+        for event in events:
+            eps = int(event.get("execs_per_sec") or 0)
+            it = int(event.get("iteration") or 0)
+            if eps > 0 and it > 0:
+                elapsed = float(it) / float(eps)
+                if elapsed <= target_sec:
+                    chosen = event
+                else:
+                    break
+            else:
+                # exec/s not yet reported (first few lines) — always accept
+                chosen = event
+        return chosen
+
+    # Prefer wall-clock estimation; fall back to iteration count when
+    # exec/s is unavailable in any event (e.g. very short runs).
+    _have_exec_rate = any(int(e.get("execs_per_sec") or 0) > 0 for e in events)
+    if _have_exec_rate:
+        at_30s = _event_by_elapsed_sec(30.0)
+        at_60s = _event_by_elapsed_sec(60.0)
+    else:
+        at_30s = _event_by_iter(131072)
+        at_60s = _event_by_iter(262144)
     early_new_units_30s = max(0, int(at_30s.get("corpus_files") or 0) - initial_corpus_files)
     early_new_units_60s = max(0, int(at_60s.get("corpus_files") or 0) - initial_corpus_files)
     final_files = int(final_stats.get("corpus_files") or 0)
@@ -1081,9 +1202,10 @@ def _seed_quality_from_run(
         quality_flags.append("low_early_yield")
     if initial_corpus_files >= 16 and final_files <= 12 and int(final_stats.get("cov") or 0) <= max(inited_cov, 1):
         quality_flags.append("high_homogeneity")
+    # Families are advisory (suggested) — flag as info signal, not blocker
     if missing_families:
-        quality_flags.append("missing_required_families")
-    if repo_examples_count == 0 and any(f in (YAML_SEED_FAMILIES | FMT_SEED_FAMILIES) for f in required_families):
+        quality_flags.append("missing_suggested_families")
+    if repo_examples_count == 0:
         quality_flags.append("repo_examples_missing")
     if seed_profile == "archive-container":
         if archive_valid_count < 1:
@@ -1123,9 +1245,9 @@ def _seed_quality_from_run(
         0.0,
         min(
             1.0,
-            0.45 * max(0.0, min(1.0, float(cov_gain) / 24.0))
-            + 0.30 * max(0.0, min(1.0, float(ft_gain) / 240.0))
-            + 0.25 * early_units_norm,
+            0.35 * max(0.0, min(1.0, float(cov_gain) / 24.0))
+            + 0.25 * max(0.0, min(1.0, float(ft_gain) / 240.0))
+            + 0.40 * early_units_norm,
         ),
     )
 
@@ -1146,8 +1268,7 @@ def _seed_quality_from_run(
         redundancy_penalty += 0.20
     if "low_early_yield" in quality_flags:
         redundancy_penalty += 0.20
-    if "missing_required_families" in quality_flags:
-        redundancy_penalty += 0.15
+    # missing_suggested_families is advisory — no penalty
     redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
 
     alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
@@ -1205,12 +1326,18 @@ def _infer_target_type(*parts: str) -> str:
     text = " ".join(p for p in parts if p).lower()
     if any(tok in text for tok in ("format", "printf", "replacement field", "specifier", "brace", "template")):
         return "parser"
-    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex", "reader")):
+    if any(tok in text for tok in ("parse", "parser", "scan", "scanner", "yaml", "json", "xml", "token", "lex")):
         return "parser"
-    if any(tok in text for tok in ("decode", "decoder", "decompress", "inflate", "unpack")):
-        return "decoder"
-    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z")):
+    # archive: container-format wrappers and zlib/gzip-style stream containers
+    if any(tok in text for tok in ("archive", "untar", "unzip", "tar", "zip", "rar", "7z", "gzip", "gunzip", "inflate", "deflate", "zlib")):
         return "archive"
+    # decoder: raw codec / compression primitives + explicit decode keywords
+    if any(tok in text for tok in ("lz", "zstd", "lzma", "brotli", "decode", "decoder", "decompress", "unpack")):
+        return "decoder"
+    if re.search(r"\bread_(?:string|line|token|field|record|key|value)\b", text):
+        return "parser"
+    if any(tok in text for tok in ("read string", "read_line", "readline", "reader")):
+        return "parser"
     if any(tok in text for tok in ("png", "jpeg", "jpg", "gif", "bmp", "image", "pixel")):
         return "image"
     if any(tok in text for tok in ("pdf", "doc", "document", "html", "markdown")):
@@ -1309,12 +1436,16 @@ def _seed_filter_mode() -> str:
 
 
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
+    """Return (suggested, optional) seed families as *hints* for AI seed
+    generation.  These are advisory — the AI may choose different families
+    based on project context.  Non-parser profiles intentionally return
+    empty suggested lists so the AI decides what's appropriate."""
     profile = str(seed_profile or "").strip().lower()
     text = " ".join(p for p in parts if p).lower()
-    required: list[str] = []
+    suggested: list[str] = []
     optional: list[str] = []
     if profile == "parser-format" and _is_fmt_format_target(text):
-        required.extend(
+        suggested.extend(
             [
                 "replacement_fields",
                 "escaped_braces",
@@ -1326,18 +1457,23 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
                 "malformed_replacement_fields",
             ]
         )
-        return required, optional
+        return suggested, optional
     if profile == "parser-structure":
-        required.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
+        suggested.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
         optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
     elif profile == "parser-token":
-        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
         optional.extend(["document_markers", "tags_directives", "flow_structures"])
     elif profile == "parser-format":
-        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
     elif profile == "parser-numeric":
-        required.extend(["delimiter_fragments", "malformed_separators"])
-    if any(tok in text for tok in ("yaml", "yml")):
+        suggested.extend(["delimiter_fragments", "malformed_separators"])
+    # decoder-binary, archive-container, serializer-structured,
+    # document-text, network-message, generic: no mandatory families —
+    # AI decides based on project context.
+
+    # YAML-specific enrichment — only for parser-* profiles
+    if profile.startswith("parser-") and any(tok in text for tok in ("yaml", "yml")):
         for family in [
             "flow_structures",
             "block_scalars",
@@ -1348,9 +1484,9 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
             "unterminated_fragments",
             "malformed_separators",
         ]:
-            if family not in required:
-                required.append(family)
-    return required, [x for x in optional if x not in required]
+            if family not in suggested:
+                suggested.append(family)
+    return suggested, [x for x in optional if x not in suggested]
 
 
 def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
@@ -2603,17 +2739,47 @@ EOF
             "=== fuzz/PLAN.md ===\n" + plan_text +
             "\n\n=== fuzz/targets.json ===\n" + targets_text
         )
-        stdout = self.patcher.run_codex_command(
-            instructions,
-            additional_context=context,
-            stage_skill="synthesize",
-            timeout=timeout,
-            max_attempts=1,
-            max_cli_retries=_workflow_opencode_cli_retries(),
-            idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
-            activity_watch_paths=_synthesize_activity_watch_paths(),
-        )
+        overload_retry_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES") or "3").strip()
+        overload_backoff_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC") or "10").strip()
+        try:
+            overload_retries = max(0, min(int(overload_retry_raw), 8))
+        except Exception:
+            overload_retries = 3
+        try:
+            overload_backoff_sec = max(1, min(int(overload_backoff_raw), 120))
+        except Exception:
+            overload_backoff_sec = 10
+
+        stdout = None
+        for overload_try in range(overload_retries + 1):
+            stdout = self.patcher.run_codex_command(
+                instructions,
+                additional_context=context,
+                stage_skill="synthesize",
+                timeout=timeout,
+                max_attempts=1,
+                max_cli_retries=_workflow_opencode_cli_retries(),
+                idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
+                activity_watch_paths=_synthesize_activity_watch_paths(),
+            )
+            if stdout is not None:
+                break
+            last_kind = str(getattr(self.patcher, "last_cli_error_kind", "") or "").strip().lower()
+            if last_kind != "provider_overloaded" or overload_try >= overload_retries:
+                break
+            backoff = min(120, overload_backoff_sec * (2**overload_try))
+            print(
+                "[warn] OpenCode provider overloaded during synthesize "
+                f"(retry {overload_try + 1}/{overload_retries}); backoff={backoff}s"
+            )
+            time.sleep(backoff)
+
         if stdout is None:
+            last_kind = str(getattr(self.patcher, "last_cli_error_kind", "") or "").strip().lower()
+            last_msg = str(getattr(self.patcher, "last_cli_error_message", "") or "").strip()
+            if last_kind == "provider_overloaded":
+                detail = f": {last_msg}" if last_msg else ""
+                raise HarnessGeneratorError(f"provider_overloaded{detail}")
             partial_outputs = False
             try:
                 for p in self.fuzz_dir.rglob("*"):
@@ -2957,10 +3123,11 @@ EOF
 
             errors_accum = (errors_accum + "\n\n" + diag)[-20000:]  # keep last 20k
 
+            problem_text = "Build finished with rc=0 but no binaries found" if rc == 0 else f"Non-zero exit code {rc}"
             fix_prompt = textwrap.dedent(
-                """
+                f"""
                 The *fuzz* build is still incorrect:
-                {problem}
+                {problem_text}
 
                 Read the diagnostics below and apply the **minimal** edits necessary so that running
                 `(cd fuzz && python build.py)` completes successfully **and** leaves at least one executable
@@ -2977,7 +3144,7 @@ EOF
 
                 When done, write `fuzz/build.py` into `./done`.
                 """
-            ).strip().format(problem=("Build finished with rc=0 but no binaries found" if rc == 0 else f"Non-zero exit code {rc}"))
+            ).strip()
 
             stdout = self.patcher.run_codex_command(fix_prompt, additional_context=errors_accum)
 
@@ -3156,7 +3323,7 @@ EOF
                 return "parser-numeric"
             if any(tok in lowered for tok in ("format", "replacement field", "specifier", "fmt::", "brace", "printf")):
                 return "parser-format"
-            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner")):
+            if any(tok in lowered for tok in ("token", "lexer", "lex", "scan", "scanner", "read_", "readline", "read line")):
                 return "parser-token"
             return "parser-structure"
         mapping = {
@@ -3232,9 +3399,13 @@ EOF
                 " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
                 "flow collections (`[]`/`{}`), tags, directives, malformed indentation, and truncated nested mappings."
             )
+        vuln_hint = ""
+        if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            vuln_hint = VULN_SEED_GUIDANCE.get(seed_profile, "")
         return (
             f"Target type for `{fuzzer_name}` is `{target_type}` and seed_profile is `{seed_profile}`. {common} {extra}"
             + yaml_hint
+            + vuln_hint
         )
 
     def _collect_repo_seed_examples(
@@ -3449,7 +3620,7 @@ EOF
             "rejected_count": rejected,
             "filtered": True,
             "family_limits": family_limits,
-            "required_families": sorted(required_set),
+            "suggested_families": sorted(required_set),
             "imported_corpus_zip_count": imported_zip_count,
             "imported_corpus_zip_rejected": imported_zip_rejected,
         }
@@ -3647,7 +3818,7 @@ EOF
         missing_required = [f for f in required_families if f and f not in covered_families]
         gaps: list[str] = []
         if missing_required:
-            gaps.append("missing required family coverage: " + ", ".join(missing_required[:6]))
+            gaps.append("missing suggested family coverage: " + ", ".join(missing_required[:6]))
         if seed_profile == "parser-structure":
             if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
                 gaps.append("missing malformed/truncated parser cases")
@@ -4192,6 +4363,20 @@ EOF
             if previous_seed_feedback
             else "{}"
         )
+        previous_cold_start = bool(previous_seed_feedback.get("cold_start_failure") or False)
+        previous_early_units_30 = int(previous_seed_feedback.get("early_new_units_30s") or 0)
+        previous_missing_families = list(previous_seed_feedback.get("missing_suggested_families") or [])
+        cold_start_recovery_directive = ""
+        if previous_cold_start:
+            cold_start_recovery_directive = textwrap.dedent(
+                f"""
+                Cold-start recovery directive (must follow):
+                - Previous run had cold_start_failure=1 and early_new_units_30s={previous_early_units_30}.
+                - Prioritize semantically different, high-signal seeds over random variants.
+                - First fill missing suggested families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
+                - Do not finish until you add seeds that explicitly target those families and likely increase early coverage.
+                """
+            ).strip()
 
         instructions = textwrap.dedent(
             f"""
@@ -4201,7 +4386,7 @@ EOF
 
             {seed_guidance}
 
-            Required seed families:
+            Suggested seed families:
             {", ".join(required_families) if required_families else "none"}
 
             Optional seed families:
@@ -4231,6 +4416,7 @@ EOF
 
             Previous run seed feedback (if available):
             {previous_seed_feedback_text}
+            {cold_start_recovery_directive}
 
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
@@ -4239,15 +4425,15 @@ EOF
             - For `archive-container`, keep malformed/truncated seeds <= 30% of the corpus. Prioritize valid archive samples.
             - For `archive-container`, ensure at least one semantically valid archive sample exists in the corpus.
             - Write a concise exploration summary to `{seed_exploration_path.relative_to(self.repo_root)}` before or alongside seed creation.
-            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
+            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `suggested_families`, `missing_suggested_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
             - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
             - Keep `sample_inputs_found` concrete. List real repo examples, existing corpus files, or note that none were found.
             - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
-            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
-            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `suggested_families`, `covered_families`, `missing_suggested_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
-            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
-            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `suggested_families`, `covered_families`, `missing_suggested_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Do not stop after creating only one tiny seed per family. Build a thicker warm-up corpus with multiple semantically different seeds per required family.
@@ -4438,7 +4624,7 @@ EOF
             "seed_profile": seed_profile,
             "target_type": target_type,
             "seed_profile_source": seed_profile_source,
-            "required_families": required_families,
+            "suggested_families": required_families,
             "optional_families": optional_families,
             "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
@@ -4496,7 +4682,7 @@ EOF
             "target_type": target_type,
             "selected_target": dict(selected_target),
             "observed_target": dict(observed_target),
-            "seed_families_required": required_families,
+            "seed_families_suggested": required_families,
             "seed_families_optional": optional_families,
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
@@ -4557,29 +4743,19 @@ EOF
           3. String literals extracted from the harness source file
         Returns the path to the generated .dict file, or None if no tokens found.
         """
-        tokens: list[str] = []
+        # Priority order: harness literals (most project-specific) → existing
+        # dict files → profile tokens (generic fill-up).  The list is capped
+        # at 256 entries later, so higher-priority tokens must come first.
+        harness_tokens: list[str] = []
+        existing_dict_tokens: list[str] = []
+        profile_tokens: list[str] = list(
+            PROFILE_DICTIONARY_TOKENS.get(seed_profile or "generic", [])
+        )
 
-        # 1. Profile-based tokens
-        profile_tokens = PROFILE_DICTIONARY_TOKENS.get(seed_profile or "generic", [])
-        tokens.extend(profile_tokens)
-
-        # 2. Collect tokens from existing .dict files in fuzz/
         dict_dir = self.repo_root / FUZZ_DICT_DIR
         dict_dir.mkdir(parents=True, exist_ok=True)
-        for existing_dict in self.fuzz_dir.rglob("*.dict"):
-            try:
-                for line in existing_dict.read_text(encoding="utf-8", errors="replace").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        # Accept lines like: keyword="value" or just "value"
-                        if "=" in line:
-                            line = line.split("=", 1)[1].strip()
-                        if line.startswith('"') and line.endswith('"'):
-                            tokens.append(line)
-            except Exception:
-                pass
 
-        # 3. Extract string literals from harness source
+        # 1. Extract string literals from harness source (highest priority)
         harness_extensions = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp")
         for src in self.fuzz_dir.iterdir():
             if src.is_file() and src.suffix in harness_extensions:
@@ -4590,9 +4766,34 @@ EOF
                         literal = m.group(0)
                         # Skip very common/useless strings
                         if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
-                            tokens.append(literal)
+                            harness_tokens.append(_normalize_dict_token(literal))
                 except Exception:
                     pass
+
+        # 2. Collect tokens from existing .dict files in fuzz/
+        for existing_dict in self.fuzz_dir.rglob("*.dict"):
+            try:
+                for line in existing_dict.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Accept lines like: keyword="value" or just "value"
+                        if "=" in line:
+                            line = line.split("=", 1)[1].strip()
+                        if line.startswith('"') and line.endswith('"'):
+                            existing_dict_tokens.append(line)
+            except Exception:
+                pass
+
+        # 3. Profile-based tokens (lowest priority – generic fill-up)
+        # (already collected above)
+
+        # Append vulnerability-directed tokens when vuln hunting is enabled
+        vuln_tokens: list[str] = []
+        if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            vuln_tokens = list(VULN_DICTIONARY_TOKENS.get(seed_profile or "generic", []))
+
+        # Merge in priority order
+        tokens: list[str] = harness_tokens + vuln_tokens + existing_dict_tokens + profile_tokens
 
         # Deduplicate while preserving order
         seen: set[str] = set()
@@ -4714,7 +4915,11 @@ EOF
             env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
             env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
-            corpus_files = sorted(corpus_dir.rglob("*"))[:50]  # sample up to 50
+            # Sample corpus files for coverage profiling.  Prefer the most
+            # recently modified files (they tend to reach newer code paths).
+            _all_corpus = [f for f in corpus_dir.rglob("*") if f.is_file()]
+            _all_corpus.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            corpus_files = _all_corpus[:200]  # cap to keep runtime bounded
             if not corpus_files:
                 return None
 
@@ -4848,7 +5053,7 @@ EOF
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
         bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         family_coverage = dict(bootstrap.get("seed_family_coverage") or {})
-        required_families = list(bootstrap.get("seed_families_required") or [])
+        required_families = list(bootstrap.get("seed_families_suggested") or [])
         covered_families = list(family_coverage.get("covered") or [])
 
         # Check corpus file count
@@ -4868,7 +5073,7 @@ EOF
         # Check family coverage
         missing_families = [f for f in required_families if f and f not in set(covered_families)]
         if missing_families:
-            issues.append(f"missing_families: {', '.join(missing_families)}")
+            issues.append(f"missing_suggested_families: {', '.join(missing_families)}")
 
         # Check archive validity
         if seed_profile == "archive-container" and file_count > 0:
@@ -4888,9 +5093,9 @@ EOF
             "seed_profile": seed_profile,
             "corpus_files": file_count,
             "corpus_bytes": total_bytes,
-            "required_families": required_families,
+            "suggested_families": required_families,
             "covered_families": covered_families,
-            "missing_families": missing_families,
+            "missing_suggested_families": missing_families,
             "issues": issues,
             "passed": len(issues) == 0,
         }
@@ -5182,7 +5387,7 @@ EOF
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
         seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
-        required_families = list(seed_bootstrap.get("seed_families_required") or [])
+        required_families = list(seed_bootstrap.get("seed_families_suggested") or [])
         covered_families = list(seed_family_coverage.get("covered") or [])
 
         # Detect new artifacts
@@ -5290,6 +5495,11 @@ EOF
                     run_error_kind = "run_timeout"
                 if not error:
                     error = f"fuzzer run timed out for {bin_path.name}"
+            elif "parsedictionaryfile: error" in log_lower:
+                if not run_error_kind:
+                    run_error_kind = "dict_parse_error"
+                if not error:
+                    error = f"fuzzer dictionary parse error for {bin_path.name}; regenerate dict file"
             else:
                 if not run_error_kind:
                     run_error_kind = "nonzero_exit_without_crash"

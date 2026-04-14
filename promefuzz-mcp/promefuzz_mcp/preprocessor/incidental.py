@@ -13,5 +13,4 @@ class IncidentalExtractor:
 
     def extract(self) -> dict:
         """Extract incidental relations."""
-        # Placeholder implementation
-        return {}
+        raise NotImplementedError("IncidentalExtractor.extract() not yet implemented")

@@ -548,6 +548,44 @@ def test_build_repair_contract_allows_entrypoint_when_present(tmp_path: Path):
     assert reason == ""
 
 
+def test_validate_harness_source_contract_rejects_custom_main(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.cc"
+    src.write_text(
+        'extern "C" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n'
+        "int main(int argc, char** argv) { return argc + (argv ? 0 : 1); }\n",
+        encoding="utf-8",
+    )
+    ok, reason = workflow_graph._validate_harness_source_contract(
+        tmp_path,
+        {"mappings": [{"target_name": "demo", "source_path": "fuzz/demo_fuzz.cc"}]},
+    )
+    assert ok is False
+    assert "custom main() is forbidden" in reason
+
+
+def test_validate_harness_source_contract_rejects_argv_file_entry(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    src = fuzz_dir / "demo_fuzz.c"
+    src.write_text(
+        '#include <stdio.h>\n'
+        'extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, unsigned long size){\n'
+        "  FILE* fp = fopen(argv[1], \"rb\");\n"
+        "  if (fp) fclose(fp);\n"
+        "  return (int)size + (data ? 0 : 1);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    ok, reason = workflow_graph._validate_harness_source_contract(
+        tmp_path,
+        {"mappings": [{"target_name": "demo", "source_path": "fuzz/demo_fuzz.c"}]},
+    )
+    assert ok is False
+    assert "fopen(argv[1], ...)" in reason
+
+
 def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -573,6 +611,34 @@ def test_build_failure_without_binaries_includes_artifact_diagnostics(tmp_path: 
     assert out["build_error_code"] == "no_fuzzer_binaries"
     assert "build dir artifacts (static libs)" in out["build_stdout_tail"]
     assert out["build_attempts"] == 4
+
+
+def test_build_detects_output_path_mismatch_before_hard_no_fuzzer_failure(tmp_path: Path, monkeypatch, _no_sleep):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "build.py").write_text("print('build')\n", encoding="utf-8")
+    _write_repo_understanding(fuzz_dir)
+    (fuzz_dir / "out").mkdir(parents=True, exist_ok=True)
+    misplaced = fuzz_dir / "demo_fuzz"
+    misplaced.write_text("", encoding="utf-8")
+    misplaced.chmod(0o755)
+
+    gen = _FakeGenerator(
+        tmp_path,
+        run_results=[(0, "build ok", "")],
+        bin_results=[[]],
+    )
+    monkeypatch.setenv("SHERPA_WORKFLOW_BUILD_LOCAL_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_BUILD_OUT_PATH_MISMATCH_SOFT_RETRY_LIMIT", "2")
+
+    out = workflow_graph._node_build({"generator": gen, "build_attempts": 0})
+
+    assert out["build_rc"] == 0
+    assert out["build_error_kind"] == "source"
+    assert out["build_error_code"] == "build_output_path_mismatch"
+    assert "Build output path mismatch" in out["last_error"]
+    assert out["build_output_path_mismatch_count"] == 1
+    assert workflow_graph._route_after_build_state(out) == "plan"
 
 
 def test_build_sh_uses_sh_when_bash_missing(tmp_path: Path, monkeypatch, _no_sleep):

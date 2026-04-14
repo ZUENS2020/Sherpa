@@ -461,14 +461,14 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
     assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
     assert "fuzz/PLAN.md" in captured["instructions"]
-    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
     assert "seed_check_yaml_parser_parse_fuzz.json" in captured["instructions"]
     assert "Before writing new seeds, inspect repository files relevant to target inputs" in captured["instructions"]
     assert "fuzz/PLAN.md" in captured["instructions"]
-    assert "If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
+    assert "If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing" in captured["instructions"]
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
@@ -501,6 +501,67 @@ def test_pass_generate_seeds_passes_idle_timeout_override(tmp_path: Path, monkey
 
     assert captured_kwargs["timeout"] == 900
     assert captured_kwargs["idle_timeout_override"] == 180
+
+
+def test_pass_synthesize_harness_retries_provider_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+    (gen.fuzz_dir / "targets.json").write_text("[]\n", encoding="utf-8")
+    sleeps: list[int] = []
+    monkeypatch.setattr(fur.time, "sleep", lambda s: sleeps.append(int(s)))
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES", "2")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC", "3")
+
+    calls = {"n": 0}
+
+    class _Patcher:
+        last_cli_error_kind = ""
+        last_cli_error_message = ""
+
+        def run_codex_command(self, *_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                self.last_cli_error_kind = "provider_overloaded"
+                self.last_cli_error_message = "Decode server is overloaded"
+                return None
+            self.last_cli_error_kind = ""
+            self.last_cli_error_message = ""
+            return "ok"
+
+    gen.patcher = _Patcher()
+    gen._pass_synthesize_harness(timeout=30)
+
+    assert calls["n"] == 3
+    assert sleeps == [3, 6]
+
+
+def test_pass_synthesize_harness_surfaces_provider_overloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "PLAN.md").write_text("plan\n", encoding="utf-8")
+    (gen.fuzz_dir / "targets.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES", "1")
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC", "1")
+    monkeypatch.setattr(fur.time, "sleep", lambda _s: None)
+
+    class _Patcher:
+        last_cli_error_kind = "provider_overloaded"
+        last_cli_error_message = "Decode server is overloaded"
+
+        def run_codex_command(self, *_args, **_kwargs):
+            self.last_cli_error_kind = "provider_overloaded"
+            self.last_cli_error_message = "Decode server is overloaded"
+            return None
+
+    gen.patcher = _Patcher()
+    try:
+        gen._pass_synthesize_harness(timeout=30)
+        assert False, "expected HarnessGeneratorError"
+    except fur.HarnessGeneratorError as e:
+        assert "provider_overloaded" in str(e)
 
 
 def test_write_run_summary_includes_seed_generation_failures(tmp_path: Path):
@@ -565,7 +626,7 @@ def test_pass_generate_seeds_prefers_selected_seed_profile_over_observed(tmp_pat
     gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
     gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
     (gen.fuzz_dir / "selected_targets.json").write_text(
-        '[{"target_name":"demo_parse","api":"demo_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_required":["document_markers"],"seed_families_optional":[]}]',
+        '[{"target_name":"demo_parse","api":"demo_parse","target_type":"parser","seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[]}]',
         encoding="utf-8",
     )
     (gen.fuzz_dir / "observed_target.json").write_text(
@@ -813,15 +874,15 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
             corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
             (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
             (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
-                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","required_families":["document_markers"],"missing_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","suggested_families":["document_markers"],"missing_suggested_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
                 encoding="utf-8",
             )
             (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
-                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
                 encoding="utf-8",
             )
             (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
-                '{"seed_profile":"parser-structure","required_families":["document_markers"],"covered_families":["document_markers"],"missing_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"required families covered but corpus still thin"}\n',
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
                 encoding="utf-8",
             )
             return "seed-ok"
