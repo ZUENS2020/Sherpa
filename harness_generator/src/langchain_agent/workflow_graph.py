@@ -2113,17 +2113,40 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
                 "target_surface_policy": "risk_first",
             }
         )
-    ranked_items.sort(
-        key=lambda row: (
-            -float(row.get("target_score") or 0.0),
-            -float(row.get("vuln_likelihood") or 0.0),
-            -float(row.get("exploitability") or 0.0),
-            -float(row.get("reachability_confidence") or 0.0),
-            -int(row.get("depth_score") or 0),
-            -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
-            str(row.get("target_name") or ""),
+    if security_priority_mode:
+        # In risk-first mode, ranking is driven by security risk directly.
+        # `score_total` is still emitted for observability/reference, not as the
+        # primary ordering key.
+        ranked_items.sort(
+            key=lambda row: (
+                1
+                if (
+                    _is_internal_api_symbol(str(row.get("api") or ""))
+                    and not bool((row.get("api_surface_exception") or {}).get("used"))
+                )
+                else 0,
+                -float(row.get("vuln_likelihood") or 0.0),
+                -float(row.get("exploitability") or 0.0),
+                -float(row.get("reachability_confidence") or 0.0),
+                -len(list(row.get("security_signals") or [])),
+                -float(row.get("target_score") or 0.0),
+                -int(row.get("depth_score") or 0),
+                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
+                str(row.get("target_name") or ""),
+            )
         )
-    )
+    else:
+        ranked_items.sort(
+            key=lambda row: (
+                -float(row.get("target_score") or 0.0),
+                -float(row.get("vuln_likelihood") or 0.0),
+                -float(row.get("exploitability") or 0.0),
+                -float(row.get("reachability_confidence") or 0.0),
+                -int(row.get("depth_score") or 0),
+                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
+                str(row.get("target_name") or ""),
+            )
+        )
     out: list[dict[str, Any]] = []
     max_targets = _execution_targets_max()
     for idx, row in enumerate(ranked_items):

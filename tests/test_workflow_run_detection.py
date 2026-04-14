@@ -1599,6 +1599,59 @@ def test_build_selected_targets_doc_prefers_high_vuln_signal_when_base_factors_e
     assert isinstance(selected[0].get("security_score_breakdown"), dict)
 
 
+def test_build_selected_targets_doc_risk_ranks_above_reference_score(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "high_risk_low_reference",
+                    "api": "high_risk_low_reference",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 2,
+                    "depth_class": "shallow",
+                    "runtime_viability": "medium",
+                    "coverage_gap": 0,
+                    "vuln_likelihood": 0.80,
+                    "exploitability": 0.80,
+                    "reachability_confidence": 0.80,
+                },
+                {
+                    "name": "low_risk_high_reference",
+                    "api": "low_risk_high_reference",
+                    "target_type": "parser",
+                    "seed_profile": "parser-structure",
+                    "depth_score": 30,
+                    "depth_class": "deep",
+                    "runtime_viability": "high",
+                    "coverage_gap": 10,
+                    "vuln_likelihood": 0.20,
+                    "exploitability": 0.20,
+                    "reachability_confidence": 0.20,
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    assert len(selected) == 2
+    assert selected[0]["target"] == "high_risk_low_reference"
+    # Keep score as reference-only output: it may still be lower than the
+    # reference-heavy target, but must not drive the ranking in risk-first mode.
+    assert float(selected[0]["score_total"]) <= float(selected[1]["score_total"])
+    assert selected[0]["security_priority_mode"] is True
+
+
 def test_build_selected_targets_doc_internal_api_threshold_contract(
     tmp_path: Path, monkeypatch
 ):
