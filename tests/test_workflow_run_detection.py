@@ -1215,8 +1215,8 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
             "coverage_target_name": "yaml_parser_parse_fuzz",
             "coverage_target_api": "fmt::println",
             "coverage_seed_profile": "parser-structure",
-            "coverage_seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"]},
-            "coverage_quality_flags": ["missing_required_families", "repo_examples_missing", "target_runtime_mismatch"],
+            "coverage_seed_quality": {"quality_flags": ["low_early_yield", "high_homogeneity", "target_runtime_mismatch"]},
+            "coverage_quality_flags": ["low_early_yield", "high_homogeneity", "target_runtime_mismatch"],
             "coverage_seed_families_required": ["flow_structures", "anchors_aliases"],
             "coverage_seed_families_covered": ["anchors_aliases"],
             "coverage_seed_families_missing": ["flow_structures"],
@@ -1230,7 +1230,7 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
                     "final_ft": 19,
                     "plateau_detected": True,
                     "plateau_idle_seconds": 180,
-                    "seed_quality": {"quality_flags": ["missing_required_families", "repo_examples_missing"]},
+                    "seed_quality": {"quality_flags": ["low_early_yield", "high_homogeneity"]},
                 }
             ],
             "crash_found": False,
@@ -1466,8 +1466,8 @@ def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(mo
             "coverage_seed_generation_degraded": True,
             "coverage_seed_quality": {
                 "quality_flags": [
-                    "missing_required_families",
-                    "seed_family_undercovered",
+                    "low_early_yield",
+                    "missing_execution_targets",
                 ],
                 "cold_start_failure": False,
                 "seed_score": 0.66,
@@ -1475,8 +1475,8 @@ def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(mo
                 "merge_retained_ratio_files": 0.9,
             },
             "coverage_quality_flags": [
-                "missing_required_families",
-                "seed_family_undercovered",
+                "low_early_yield",
+                "missing_execution_targets",
             ],
             "run_details": [
                 {

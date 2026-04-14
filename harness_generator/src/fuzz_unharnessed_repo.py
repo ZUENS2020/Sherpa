@@ -338,6 +338,76 @@ PROFILE_MAX_LEN: Dict[str, int] = {
     "generic": 1024,
 }
 
+# Vulnerability-directed seed guidance — appended when vuln hunting is enabled.
+VULN_SEED_GUIDANCE: Dict[str, str] = {
+    "decoder-binary": (
+        "\nAttack-pattern seeds for binary decoder vulnerabilities:\n"
+        "- Integer overflow: set dimension/length fields to 0xFFFFFFFF, 0x7FFFFFFF, 0x80000000\n"
+        "- Truncated input: valid header + truncated body (1-16 bytes total)\n"
+        "- Corrupt checksums: valid structure with flipped CRC/checksum bytes\n"
+        "- Oversized dimensions: width=65535 height=65535 with minimal pixel data\n"
+        "- Zero-length fields: valid header with length=0 for variable-length sections\n"
+        "- Nested containers: chunks referencing other chunks recursively\n"
+    ),
+    "parser-structure": (
+        "\nAttack-pattern seeds for parser vulnerabilities:\n"
+        "- Deeply nested structures (>100 levels) to trigger stack overflow\n"
+        "- Very long keys/values (>10000 chars) for buffer overflow\n"
+        "- Null bytes embedded in strings for C string handling bugs\n"
+        "- Mixed encodings (UTF-8 BOM + invalid byte sequences)\n"
+        "- Duplicate keys with conflicting types\n"
+    ),
+    "parser-token": (
+        "\nAttack-pattern seeds for tokenizer vulnerabilities:\n"
+        "- Extremely long tokens (>65536 chars) without delimiters\n"
+        "- Null byte mid-token\n"
+        "- Unicode combining characters and zero-width joiners\n"
+    ),
+    "archive-container": (
+        "\nAttack-pattern seeds for archive vulnerabilities:\n"
+        "- Zip bomb: nested archives with high compression ratio\n"
+        "- Path traversal: entries with ../../ prefix in filenames\n"
+        "- Symlink attacks: archive entries pointing to /etc/passwd\n"
+        "- Size overflow: uncompressed_size=0xFFFFFFFF with tiny compressed data\n"
+        "- Overlapping file entries with conflicting metadata\n"
+    ),
+    "network-message": (
+        "\nAttack-pattern seeds for network protocol vulnerabilities:\n"
+        "- Length field overflow: content-length=0xFFFFFFFF with small body\n"
+        "- Partial frames: connection reset mid-message\n"
+        "- Out-of-order sequences: response before request, duplicate sequence numbers\n"
+        "- Null bytes in protocol fields\n"
+    ),
+}
+
+# Vulnerability-directed dictionary tokens — appended when vuln hunting enabled.
+VULN_DICTIONARY_TOKENS: Dict[str, List[str]] = {
+    "decoder-binary": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 (integer overflow trigger)
+        '"\\x7f\\xff\\xff\\xff"',    # max int32
+        '"\\x80\\x00\\x00\\x00"',    # min int32 (sign flip)
+        '"\\x00\\x00\\x00\\x00"',    # zero length
+        '"\\x00\\x01"',              # minimal dimension
+        '"\\xff\\xff"',              # max uint16
+        '"\\x00\\x00\\xff\\xff"',    # mixed zero/max
+    ],
+    "parser-structure": [
+        '"\\x00"',                   # null byte injection
+        '"\\xef\\xbb\\xbf"',        # UTF-8 BOM
+        '"\\xff\\xfe"',             # UTF-16 LE BOM
+    ],
+    "archive-container": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 size field
+        '"../"',                     # path traversal
+        '"../../"',                  # deeper path traversal
+    ],
+    "network-message": [
+        '"\\xff\\xff\\xff\\xff"',    # max uint32 length
+        '"\\x00\\x00\\x00\\x00"',    # zero length
+        '"\\r\\n\\r\\n"',           # HTTP double CRLF
+    ],
+}
+
 # Recognize fuzzer executables by name pattern.
 FUZZ_BIN_PAT = re.compile(r".*(fuzz|_fuzzer|Fuzzer)$", re.IGNORECASE)
 
@@ -1132,9 +1202,10 @@ def _seed_quality_from_run(
         quality_flags.append("low_early_yield")
     if initial_corpus_files >= 16 and final_files <= 12 and int(final_stats.get("cov") or 0) <= max(inited_cov, 1):
         quality_flags.append("high_homogeneity")
+    # Families are advisory (suggested) — flag as info signal, not blocker
     if missing_families:
-        quality_flags.append("missing_required_families")
-    if repo_examples_count == 0 and any(f in (YAML_SEED_FAMILIES | FMT_SEED_FAMILIES) for f in required_families):
+        quality_flags.append("missing_suggested_families")
+    if repo_examples_count == 0:
         quality_flags.append("repo_examples_missing")
     if seed_profile == "archive-container":
         if archive_valid_count < 1:
@@ -1197,8 +1268,7 @@ def _seed_quality_from_run(
         redundancy_penalty += 0.20
     if "low_early_yield" in quality_flags:
         redundancy_penalty += 0.20
-    if "missing_required_families" in quality_flags:
-        redundancy_penalty += 0.15
+    # missing_suggested_families is advisory — no penalty
     redundancy_penalty = max(0.0, min(1.0, redundancy_penalty))
 
     alpha, beta, gamma, eta = 0.40, 0.35, 0.25, 0.20
@@ -1366,12 +1436,16 @@ def _seed_filter_mode() -> str:
 
 
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
+    """Return (suggested, optional) seed families as *hints* for AI seed
+    generation.  These are advisory — the AI may choose different families
+    based on project context.  Non-parser profiles intentionally return
+    empty suggested lists so the AI decides what's appropriate."""
     profile = str(seed_profile or "").strip().lower()
     text = " ".join(p for p in parts if p).lower()
-    required: list[str] = []
+    suggested: list[str] = []
     optional: list[str] = []
     if profile == "parser-format" and _is_fmt_format_target(text):
-        required.extend(
+        suggested.extend(
             [
                 "replacement_fields",
                 "escaped_braces",
@@ -1383,18 +1457,23 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
                 "malformed_replacement_fields",
             ]
         )
-        return required, optional
+        return suggested, optional
     if profile == "parser-structure":
-        required.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
+        suggested.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
         optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
     elif profile == "parser-token":
-        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
         optional.extend(["document_markers", "tags_directives", "flow_structures"])
     elif profile == "parser-format":
-        required.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
+        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
     elif profile == "parser-numeric":
-        required.extend(["delimiter_fragments", "malformed_separators"])
-    if any(tok in text for tok in ("yaml", "yml")):
+        suggested.extend(["delimiter_fragments", "malformed_separators"])
+    # decoder-binary, archive-container, serializer-structured,
+    # document-text, network-message, generic: no mandatory families —
+    # AI decides based on project context.
+
+    # YAML-specific enrichment — only for parser-* profiles
+    if profile.startswith("parser-") and any(tok in text for tok in ("yaml", "yml")):
         for family in [
             "flow_structures",
             "block_scalars",
@@ -1405,9 +1484,9 @@ def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str]
             "unterminated_fragments",
             "malformed_separators",
         ]:
-            if family not in required:
-                required.append(family)
-    return required, [x for x in optional if x not in required]
+            if family not in suggested:
+                suggested.append(family)
+    return suggested, [x for x in optional if x not in suggested]
 
 
 def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
@@ -3320,9 +3399,13 @@ EOF
                 " Include YAML-specific cases: document markers (`---`/`...`), anchors and aliases, block scalars (`|`/`>`), "
                 "flow collections (`[]`/`{}`), tags, directives, malformed indentation, and truncated nested mappings."
             )
+        vuln_hint = ""
+        if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            vuln_hint = VULN_SEED_GUIDANCE.get(seed_profile, "")
         return (
             f"Target type for `{fuzzer_name}` is `{target_type}` and seed_profile is `{seed_profile}`. {common} {extra}"
             + yaml_hint
+            + vuln_hint
         )
 
     def _collect_repo_seed_examples(
@@ -4706,8 +4789,13 @@ EOF
         # 3. Profile-based tokens (lowest priority – generic fill-up)
         # (already collected above)
 
+        # Append vulnerability-directed tokens when vuln hunting is enabled
+        vuln_tokens: list[str] = []
+        if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            vuln_tokens = list(VULN_DICTIONARY_TOKENS.get(seed_profile or "generic", []))
+
         # Merge in priority order
-        tokens: list[str] = harness_tokens + existing_dict_tokens + profile_tokens
+        tokens: list[str] = harness_tokens + vuln_tokens + existing_dict_tokens + profile_tokens
 
         # Deduplicate while preserving order
         seen: set[str] = set()

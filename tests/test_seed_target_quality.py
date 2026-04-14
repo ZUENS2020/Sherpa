@@ -161,7 +161,7 @@ def test_seed_quality_flags_detect_low_retention_and_missing_families():
     )
     flags = set(quality["quality_flags"])
     assert "low_retention" in flags
-    assert "missing_required_families" in flags
+    assert "missing_suggested_families" in flags
     assert "repo_examples_missing" in flags
     assert isinstance(quality.get("seed_score"), float)
     assert 0.0 <= float(quality.get("seed_score") or 0.0) <= 1.0
