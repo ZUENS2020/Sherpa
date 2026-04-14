@@ -63,7 +63,7 @@ def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) 
         "run_timeout_budget_sec_override": "900",
     }
     workflow = {
-        "coverage_quality_flags": ["missing_required_families"],
+        "coverage_quality_flags": ["missing_suggested_families"],
         "run_details": [{"fuzzer": "demo_fuzz"}],
         "decision_trace_count": 5,
         "security_evidence_count": 2,
@@ -85,7 +85,7 @@ def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) 
     assert read_control["run_parallel_fuzzers_override"] == "1"
     assert read_control["run_timeout_budget_sec_override"] == "900"
     assert "coverage_quality_flags" not in read_control
-    assert read_workflow["coverage_quality_flags"] == ["missing_required_families"]
+    assert read_workflow["coverage_quality_flags"] == ["missing_suggested_families"]
     assert read_workflow["run_details"][0]["fuzzer"] == "demo_fuzz"
     assert read_workflow["decision_trace_count"] == 5
     assert read_workflow["security_evidence_count"] == 2

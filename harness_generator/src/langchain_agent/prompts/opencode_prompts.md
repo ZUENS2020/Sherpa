@@ -83,18 +83,15 @@ Security analysis (vulnerability-directed):
 - Locate format string sinks: printf-family calls with non-literal format arguments
 - Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
 - Map trust boundaries: where external/untrusted data first enters internal processing functions
-- For each finding, record in `analysis_context.json.security_evidence.vuln_patterns[]`:
-  - `pattern_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, null_deref_candidate, uaf_candidate
-  - `location`: file:line
-  - `function`: function name where the pattern occurs
-  - `evidence`: concrete description of why this is a risk
+- For each finding, append an entry to `analysis_evidence.security_evidence[]`:
+  - `evidence_id`: stable ID string
+  - `signal_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, authz_bypass_candidate, null_deref_candidate, uaf_candidate
+  - `severity`: low|medium|high
   - `confidence`: 0.0-1.0
-
-Target-type classification:
-- Entries in `fuzz/target_analysis.json` have `target_type: "pending"` — you MUST classify each one.
-- Follow the target-type classification rules in the analysis SKILL.
-- Set `analysis_source` to `opencode-classified` on every classified entry.
-- Write the entire JSON back as a whole file (do NOT use line-level edits on JSON).
+  - `source_path`: source file path
+  - `line`: integer source line (0 allowed when unknown)
+  - `summary`: concrete risk explanation
+- Keep `target_type` and `seed_profile` unchanged in analysis. This stage records evidence and candidate inventory only.
 
 MANDATORY:
 - create `./done`

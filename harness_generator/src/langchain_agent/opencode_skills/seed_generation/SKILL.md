@@ -90,7 +90,7 @@ Use this skill during pre-run seed generation and seed repair cycles.
 - Global filtering defaults to `soft` mode:
   - preserve semantically distinct seeds
   - still reject oversized files and exact-content duplicates
-  - avoid malformed-only growth when required families are missing
+  - avoid malformed-only growth when suggested families are missing
 - For `archive-container`:
   - use real archive samples first (`contrib/oss-fuzz/corpus.zip`, `contrib/oss-fuzz/**`, `test/**`, `tests/**`)
   - avoid hand-crafted magic-only files

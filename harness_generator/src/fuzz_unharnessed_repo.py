@@ -3620,7 +3620,7 @@ EOF
             "rejected_count": rejected,
             "filtered": True,
             "family_limits": family_limits,
-            "required_families": sorted(required_set),
+            "suggested_families": sorted(required_set),
             "imported_corpus_zip_count": imported_zip_count,
             "imported_corpus_zip_rejected": imported_zip_rejected,
         }
@@ -3818,7 +3818,7 @@ EOF
         missing_required = [f for f in required_families if f and f not in covered_families]
         gaps: list[str] = []
         if missing_required:
-            gaps.append("missing required family coverage: " + ", ".join(missing_required[:6]))
+            gaps.append("missing suggested family coverage: " + ", ".join(missing_required[:6]))
         if seed_profile == "parser-structure":
             if not any(tok in names for tok in ("trunc", "invalid", "malformed")):
                 gaps.append("missing malformed/truncated parser cases")
@@ -4365,9 +4365,7 @@ EOF
         )
         previous_cold_start = bool(previous_seed_feedback.get("cold_start_failure") or False)
         previous_early_units_30 = int(previous_seed_feedback.get("early_new_units_30s") or 0)
-        previous_missing_families = list(previous_seed_feedback.get("missing_required_families") or [])
-        if not previous_missing_families:
-            previous_missing_families = list(previous_seed_feedback.get("missing_families") or [])
+        previous_missing_families = list(previous_seed_feedback.get("missing_suggested_families") or [])
         cold_start_recovery_directive = ""
         if previous_cold_start:
             cold_start_recovery_directive = textwrap.dedent(
@@ -4375,7 +4373,7 @@ EOF
                 Cold-start recovery directive (must follow):
                 - Previous run had cold_start_failure=1 and early_new_units_30s={previous_early_units_30}.
                 - Prioritize semantically different, high-signal seeds over random variants.
-                - First fill missing required families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
+                - First fill missing suggested families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
                 - Do not finish until you add seeds that explicitly target those families and likely increase early coverage.
                 """
             ).strip()
@@ -4388,7 +4386,7 @@ EOF
 
             {seed_guidance}
 
-            Required seed families:
+            Suggested seed families:
             {", ".join(required_families) if required_families else "none"}
 
             Optional seed families:
@@ -4427,15 +4425,15 @@ EOF
             - For `archive-container`, keep malformed/truncated seeds <= 30% of the corpus. Prioritize valid archive samples.
             - For `archive-container`, ensure at least one semantically valid archive sample exists in the corpus.
             - Write a concise exploration summary to `{seed_exploration_path.relative_to(self.repo_root)}` before or alongside seed creation.
-            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `required_families`, `missing_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
+            - `{seed_exploration_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `chosen_target_api`, `observed_target_api`, `seed_profile`, `suggested_families`, `missing_suggested_families`, `repo_paths_reviewed`, `sample_inputs_found`, `summary`.
             - Keep `repo_paths_reviewed` concrete and short. It should list the actual repository files or directories inspected for seed design.
             - Keep `sample_inputs_found` concrete. List real repo examples, existing corpus files, or note that none were found.
             - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
-            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
-            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `suggested_families`, `covered_families`, `missing_suggested_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Before finishing, write a seed self-check file to `{seed_check_path.relative_to(self.repo_root)}`.
-            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `required_families`, `covered_families`, `missing_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
-            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If required families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
+            - `{seed_check_path.relative_to(self.repo_root)}` must be plain JSON with these keys only: `seed_profile`, `suggested_families`, `covered_families`, `missing_suggested_families`, `family_counts`, `corpus_files`, `target_corpus_files`, `per_family_target`, `planned_additions`, `summary`.
+            - Use `{seed_check_path.relative_to(self.repo_root)}` to self-check whether the current corpus is sufficient. If suggested families are still missing, or if the corpus is still much smaller than the target size, add more seeds before finishing.
             - Treat `fuzz/observed_target.json` as the execution truth source when present; do not generate seeds only for the originally selected target if the actual harness drifted.
             - Each missing required family should have at least one representative seed after your edits.
             - Do not stop after creating only one tiny seed per family. Build a thicker warm-up corpus with multiple semantically different seeds per required family.
@@ -4626,7 +4624,7 @@ EOF
             "seed_profile": seed_profile,
             "target_type": target_type,
             "seed_profile_source": seed_profile_source,
-            "required_families": required_families,
+            "suggested_families": required_families,
             "optional_families": optional_families,
             "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
@@ -4684,7 +4682,7 @@ EOF
             "target_type": target_type,
             "selected_target": dict(selected_target),
             "observed_target": dict(observed_target),
-            "seed_families_required": required_families,
+            "seed_families_suggested": required_families,
             "seed_families_optional": optional_families,
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
@@ -5055,7 +5053,7 @@ EOF
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
         bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         family_coverage = dict(bootstrap.get("seed_family_coverage") or {})
-        required_families = list(bootstrap.get("seed_families_required") or [])
+        required_families = list(bootstrap.get("seed_families_suggested") or [])
         covered_families = list(family_coverage.get("covered") or [])
 
         # Check corpus file count
@@ -5075,7 +5073,7 @@ EOF
         # Check family coverage
         missing_families = [f for f in required_families if f and f not in set(covered_families)]
         if missing_families:
-            issues.append(f"missing_families: {', '.join(missing_families)}")
+            issues.append(f"missing_suggested_families: {', '.join(missing_families)}")
 
         # Check archive validity
         if seed_profile == "archive-container" and file_count > 0:
@@ -5095,9 +5093,9 @@ EOF
             "seed_profile": seed_profile,
             "corpus_files": file_count,
             "corpus_bytes": total_bytes,
-            "required_families": required_families,
+            "suggested_families": required_families,
             "covered_families": covered_families,
-            "missing_families": missing_families,
+            "missing_suggested_families": missing_families,
             "issues": issues,
             "passed": len(issues) == 0,
         }
@@ -5389,7 +5387,7 @@ EOF
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
         seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
-        required_families = list(seed_bootstrap.get("seed_families_required") or [])
+        required_families = list(seed_bootstrap.get("seed_families_suggested") or [])
         covered_families = list(seed_family_coverage.get("covered") or [])
 
         # Detect new artifacts

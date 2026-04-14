@@ -369,7 +369,7 @@ def test_node_run_aggregates_seed_quality_across_all_fuzzers(tmp_path: Path):
                     "early_new_units_30s": 1,
                     "merge_retained_ratio_files": 0.55,
                     "cold_start_failure": False,
-                    "quality_flags": ["missing_required_families"],
+                    "quality_flags": ["missing_suggested_families"],
                 },
             ),
         ],
@@ -381,7 +381,7 @@ def test_node_run_aggregates_seed_quality_across_all_fuzzers(tmp_path: Path):
     assert sq.get("early_new_units_30s") == 0
     assert sq.get("merge_retained_ratio_files") == 0.21
     assert sq.get("cold_start_failure") is True
-    assert set(out.get("coverage_quality_flags") or []) >= {"low_early_yield", "missing_required_families"}
+    assert set(out.get("coverage_quality_flags") or []) >= {"low_early_yield", "missing_suggested_families"}
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
@@ -1217,7 +1217,7 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
             "coverage_seed_profile": "parser-structure",
             "coverage_seed_quality": {"quality_flags": ["low_early_yield", "high_homogeneity", "target_runtime_mismatch"]},
             "coverage_quality_flags": ["low_early_yield", "high_homogeneity", "target_runtime_mismatch"],
-            "coverage_seed_families_required": ["flow_structures", "anchors_aliases"],
+            "coverage_seed_families_suggested": ["flow_structures", "anchors_aliases"],
             "coverage_seed_families_covered": ["anchors_aliases"],
             "coverage_seed_families_missing": ["flow_structures"],
             "coverage_plateau_streak": 1,
