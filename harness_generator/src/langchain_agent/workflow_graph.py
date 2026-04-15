@@ -22,6 +22,10 @@ from langgraph.graph import END, StateGraph
 from persistent_config import load_config
 
 import workflow_common as _wf_common
+import workflow_observability as _wf_obs
+import workflow_coverage_decision as _wf_coverage_decision
+import workflow_target_scoring as _wf_target_scoring
+import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
 from workflow_context_store import (
     context_dir_for_repo_root,
@@ -499,31 +503,6 @@ def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
     _wf_common.wf_log(state, msg)
 
 
-def _decision_trace_path(state: dict[str, Any]) -> Path | None:
-    repo_root = str(state.get("repo_root") or "").strip()
-    if not repo_root:
-        gen = state.get("generator")
-        if gen is not None:
-            try:
-                repo_root = str(getattr(gen, "repo_root", "") or "").strip()
-            except Exception:
-                repo_root = ""
-    if not repo_root:
-        return None
-    try:
-        return Path(repo_root) / "fuzz" / "decision_trace.jsonl"
-    except Exception:
-        return None
-
-
-def _decision_trace_max_items() -> int:
-    raw = (os.environ.get("SHERPA_DECISION_TRACE_MAX_ITEMS") or "200").strip()
-    try:
-        return max(20, min(int(raw), 2000))
-    except Exception:
-        return 200
-
-
 def _record_decision_trace(
     state: dict[str, Any],
     *,
@@ -537,111 +516,22 @@ def _record_decision_trace(
     retry_count: int = 0,
     decision_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    out = dict(state)
-    traces = list(out.get("decision_traces") or [])
-    existing_count = max(int(out.get("decision_trace_count") or 0), len(traces))
-    trace = {
-        "ts": int(time.time()),
-        "stage": str(stage or "").strip(),
-        "tool": str(tool or "").strip(),
-        "model": str(model or "").strip(),
-        "latency_ms": int(latency_ms or 0),
-        "token_usage": dict(token_usage or {}),
-        "error_kind": str(error_kind or "").strip(),
-        "error_code": str(error_code or "").strip(),
-        "retry_count": int(retry_count or 0),
-        "decision_snapshot": dict(decision_snapshot or {}),
-    }
-    traces.append(trace)
-    max_items = _decision_trace_max_items()
-    if len(traces) > max_items:
-        traces = traces[-max_items:]
-    out["decision_traces"] = traces
-    out["decision_trace_count"] = int(max(existing_count + 1, len(traces)))
-    out["latest_decision_snapshot"] = dict(decision_snapshot or {})
-    trace_path = _decision_trace_path(out)
-    if trace_path is not None:
-        try:
-            trace_path.parent.mkdir(parents=True, exist_ok=True)
-            with trace_path.open("a", encoding="utf-8") as fp:
-                fp.write(json.dumps(trace, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except Exception:
-            pass
-    return out
+    return _wf_obs.record_decision_trace(
+        state,
+        stage=stage,
+        tool=tool,
+        model=model,
+        latency_ms=latency_ms,
+        token_usage=token_usage,
+        error_kind=error_kind,
+        error_code=error_code,
+        retry_count=retry_count,
+        decision_snapshot=decision_snapshot,
+    )
 
 
 def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
-    """Emit a structured ``[wf-metrics]`` JSON line so that the control-plane
-    (main.py) can capture per-fuzzer performance data and expose it via the API.
-    """
-    run_details = list(state.get("run_details") or [])
-    coverage_history = list(state.get("coverage_history") or [])
-
-    # Build per-fuzzer metrics keyed by fuzzer name
-    fuzzers: dict[str, dict[str, Any]] = {}
-    for detail in run_details:
-        name = str(detail.get("fuzzer") or "unknown")
-        fuzzers[name] = {
-            "fuzzer": name,
-            "final_cov": int(detail.get("final_cov") or 0),
-            "final_ft": int(detail.get("final_ft") or 0),
-            "final_execs_per_sec": int(detail.get("final_execs_per_sec") or 0),
-            "final_iteration": int(detail.get("final_iteration") or 0),
-            "final_rss_mb": int(detail.get("final_rss_mb") or 0),
-            "final_corpus_files": int(detail.get("final_corpus_files") or 0),
-            "final_corpus_size_bytes": int(detail.get("final_corpus_size_bytes") or 0),
-            "corpus_files": int(detail.get("corpus_files") or 0),
-            "corpus_size_bytes": int(detail.get("corpus_size_bytes") or 0),
-            "crash_found": bool(detail.get("crash_found")),
-            "rc": int(detail.get("rc") or 0),
-            "run_error_kind": str(detail.get("run_error_kind") or ""),
-            "terminal_reason": str(detail.get("terminal_reason") or ""),
-            "plateau_detected": bool(detail.get("plateau_detected")),
-            "plateau_idle_seconds": int(detail.get("plateau_idle_seconds") or 0),
-            "seed_quality": dict(detail.get("seed_quality") or {}),
-        }
-
-    # Aggregate summary
-    max_cov = max((f["final_cov"] for f in fuzzers.values()), default=0)
-    max_ft = max((f["final_ft"] for f in fuzzers.values()), default=0)
-    total_execs = sum(f["final_execs_per_sec"] for f in fuzzers.values())
-    any_crash = any(f["crash_found"] for f in fuzzers.values())
-
-    payload = {
-        "ts": int(time.time()),
-        "stage": str(state.get("last_step") or ""),
-        "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
-        "coverage_loop_max_rounds": int(state.get("coverage_loop_max_rounds") or 0),
-        "max_cov": max_cov,
-        "max_ft": max_ft,
-        "total_execs_per_sec": total_execs,
-        "crash_found": any_crash,
-        "fuzzers": fuzzers,
-        "coverage_history": coverage_history,
-        "coverage_source_report": dict(state.get("coverage_source_report") or {}),
-        "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
-        "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
-        "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
-        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
-        "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
-        "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
-        "security_evidence_count": int(state.get("security_evidence_count") or 0),
-        "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
-        "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or False),
-        "security_priority_mode": bool(state.get("security_priority_mode") or False),
-        "latest_vuln_decision_snapshot": dict(state.get("latest_vuln_decision_snapshot") or {}),
-        "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
-        "target_score_breakdown_available": bool(state.get("target_score_breakdown_available") or False),
-        "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
-        "decision_trace_count": int(state.get("decision_trace_count") or 0),
-        "latest_decision_snapshot": dict(state.get("latest_decision_snapshot") or {}),
-        "crash_signature_dedup_hit": bool(state.get("crash_signature_dedup_hit") or False),
-    }
-    try:
-        line = json.dumps(payload, separators=(",", ":"), default=str)
-    except Exception:
-        return
-    logger.info("[wf-metrics] {}", line)
+    _wf_obs.emit_fuzz_metrics(state)
 
 
 def _fmt_dt(seconds: float) -> str:
@@ -1689,89 +1579,34 @@ def _is_internal_api_symbol(api: str) -> bool:
 
 
 def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
-    return max(lo, min(hi, float(value)))
+    return _wf_target_scoring.clamp_score(value, lo=lo, hi=hi)
 
 
 def _target_component_coverage_gap(item: dict[str, Any]) -> float:
-    explicit = item.get("coverage_gap")
-    if explicit is not None:
-        try:
-            return _clamp_score(float(explicit))
-        except Exception:
-            pass
-    depth_score = max(0, int(item.get("depth_score") or 0))
-    depth_class = str(item.get("depth_class") or "").strip().lower()
-    target_type = str(item.get("target_type") or "").strip().lower()
-    base = min(7.0, float(depth_score) / 2.0)
-    if depth_class == "deep":
-        base += 2.0
-    elif depth_class == "medium":
-        base += 1.0
-    if target_type in {"parser", "decoder", "archive"}:
-        base += 1.0
-    return _clamp_score(base)
+    return _wf_target_scoring.target_component_coverage_gap(item)
 
 
 def _target_component_complexity(item: dict[str, Any]) -> float:
-    depth_score = max(0, int(item.get("depth_score") or 0))
-    risk_signals = list(item.get("risk_signals") or [])
-    base = min(8.0, float(depth_score) / 3.0)
-    base += min(2.0, 0.4 * float(len(risk_signals)))
-    return _clamp_score(base)
+    return _wf_target_scoring.target_component_complexity(item)
 
 
 def _target_component_api_relevance(item: dict[str, Any]) -> float:
-    runtime_rank = _runtime_viability_rank(str(item.get("runtime_viability") or ""))
-    target_type = str(item.get("target_type") or "").strip().lower()
-    api = str(item.get("api") or "")
-    score = 2.0 + float(runtime_rank) * 2.5
-    if target_type in {"parser", "decoder", "archive"}:
-        score += 1.5
-    if "::" in api or re.search(r"[A-Za-z_][A-Za-z0-9_]*", api):
-        score += 1.0
-    return _clamp_score(score)
+    return _wf_target_scoring.target_component_api_relevance(
+        item,
+        runtime_viability_rank_fn=_runtime_viability_rank,
+    )
 
 
 def _target_component_consumer_order_support(item: dict[str, Any]) -> float:
-    target_type = str(item.get("target_type") or "").strip().lower()
-    rationale = str(item.get("selection_rationale") or "").lower()
-    bias = str(item.get("selection_bias_reason") or "").lower()
-    signals = " ".join(str(x).lower() for x in (item.get("risk_signals") or []))
-    score = 2.0
-    if target_type in {"parser", "archive", "decoder"}:
-        score += 2.0
-    if any(tok in rationale for tok in ("runtime", "entrypoint", "stream", "state")):
-        score += 2.0
-    if any(tok in bias for tok in ("state", "parse", "decode", "deep")):
-        score += 1.5
-    if "state-machine" in signals or "parser-like" in signals:
-        score += 1.5
-    return _clamp_score(score)
+    return _wf_target_scoring.target_component_consumer_order_support(item)
 
 
 def _target_score_breakdown(item: dict[str, Any]) -> dict[str, Any]:
-    weights = _target_scoring_weights()
-    coverage_gap = _target_component_coverage_gap(item)
-    complexity = _target_component_complexity(item)
-    api_relevance = _target_component_api_relevance(item)
-    complexity_depth = complexity
-    consumer_order_support = _target_component_consumer_order_support(item)
-    weighted_total = (
-        coverage_gap * float(weights["coverage_gap"])
-        + complexity * float(weights["complexity"])
-        + api_relevance * float(weights["api_relevance"])
-        + consumer_order_support * float(weights["consumer_order_support"])
+    return _wf_target_scoring.target_score_breakdown(
+        item,
+        weights=_target_scoring_weights(),
+        runtime_viability_rank_fn=_runtime_viability_rank,
     )
-    return {
-        "coverage_gap": round(coverage_gap, 4),
-        "complexity": round(complexity, 4),
-        "complexity_depth": round(complexity_depth, 4),
-        "api_relevance": round(api_relevance, 4),
-        "consumer_order_support": round(consumer_order_support, 4),
-        "recent_yield_penalty": 0.0,
-        "weights": {k: round(float(v), 4) for k, v in weights.items()},
-        "weighted_total": round(weighted_total, 6),
-    }
 
 
 def _load_seed_feedback_by_fuzzer(repo_root: Path) -> dict[str, dict[str, Any]]:
@@ -1797,20 +1632,7 @@ def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[s
     if not wrapper_fuzzer_name:
         return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
     feedback = _load_seed_feedback_by_fuzzer(repo_root).get(wrapper_fuzzer_name) or {}
-    if not feedback:
-        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
-    cold_start = bool(feedback.get("cold_start_failure") or False)
-    seed_score = float(feedback.get("seed_score") or 0.0)
-    early_units_30s = int(feedback.get("early_new_units_30s") or 0)
-    penalty = 0.0
-    reason = ""
-    if cold_start and seed_score < 0.55 and early_units_30s <= 0:
-        penalty = 1.5
-        reason = "cold_start_low_yield"
-    elif seed_score < 0.30:
-        penalty = 0.8
-        reason = "very_low_seed_score"
-    return {"score_penalty": float(penalty), "reason": reason, "seed_feedback": feedback}
+    return _wf_target_scoring.runtime_penalty_from_feedback(feedback)
 
 
 def _target_analysis_lookup_keys(target_name: str, api: str) -> set[str]:
@@ -1942,6 +1764,175 @@ def _lookup_target_security_candidate(
     return {}
 
 
+def _build_selected_target_row(
+    *,
+    repo_root: Path,
+    item: dict[str, Any],
+    security_lookup: dict[str, dict[str, Any]],
+    security_priority_mode: bool,
+    degrade_reason: str,
+    score_weights: dict[str, float],
+) -> dict[str, Any]:
+    target_name = str(item.get("name") or "").strip()
+    api = str(item.get("api") or target_name).strip()
+    target_type = str(item.get("target_type") or "generic").strip().lower()
+    seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
+    required, optional = _seed_families_for_target(seed_profile, target_name, api)
+    runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
+    selection_rationale = str(item.get("selection_rationale") or "").strip()
+    runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
+    if not runtime_viability:
+        runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
+            target_name,
+            api,
+            file_hint=str(item.get("file") or ""),
+        )
+        selection_rationale = selection_rationale or auto_rationale
+        runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
+    security_candidate = _lookup_target_security_candidate(
+        target_name=target_name,
+        api=api,
+        index=security_lookup,
+    )
+    security_scores = _extract_security_scores(item)
+    if not any(float(v) > 0.0 for v in security_scores.values()):
+        security_scores = _extract_security_scores(security_candidate)
+    if not any(float(v) > 0.0 for v in security_scores.values()):
+        security_scores = _compute_security_signal_scores(
+            name=target_name,
+            signature=f"{api} {selection_rationale}",
+            file_hint=str(item.get("file") or security_candidate.get("file") or ""),
+            risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
+        )
+    vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
+    exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
+    reachability_raw = security_candidate.get("reachability_confidence", item.get("reachability_confidence"))
+    security_reason = str(
+        security_candidate.get("security_priority_reason")
+        or item.get("security_priority_reason")
+        or ""
+    ).strip()
+    try:
+        vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
+        exploitability = max(0.0, min(float(exploitability_raw), 1.0))
+        reachability_confidence = max(0.0, min(float(reachability_raw), 1.0))
+    except Exception:
+        vuln_likelihood, exploitability, reachability_confidence, derived_reason = _derive_security_priority(
+            target_type=target_type,
+            runtime_viability=runtime_viability,
+            security_scores=security_scores,
+        )
+        if not security_reason:
+            security_reason = derived_reason
+    if not security_reason:
+        _, _, _, security_reason = _derive_security_priority(
+            target_type=target_type,
+            runtime_viability=runtime_viability,
+            security_scores=security_scores,
+        )
+    scoring_source = {
+        "api": api,
+        "target_type": target_type,
+        "depth_score": int(item.get("depth_score") or 0),
+        "depth_class": str(item.get("depth_class") or ""),
+        "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+        "runtime_viability": runtime_viability,
+        "selection_rationale": selection_rationale,
+        "risk_signals": list(item.get("risk_signals") or []),
+        "coverage_gap": item.get("coverage_gap"),
+    }
+    score_breakdown = _target_score_breakdown(scoring_source)
+    wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
+    runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
+    score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
+    score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
+    score_total = (
+        float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
+        + float(score_weights["exploitability"]) * float(exploitability)
+        + float(score_weights["reachability_confidence"]) * float(reachability_confidence)
+        + float(score_weights["coverage_gap"]) * float(score_breakdown.get("coverage_gap") or 0.0)
+        + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
+        + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
+        + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
+        - float(score_penalty)
+    )
+    adjusted_target_score = max(0.0, float(score_total))
+    internal_api = _is_internal_api_symbol(api)
+    internal_min = _vuln_internal_api_min_score()
+    api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
+    if internal_api:
+        if security_priority_mode and vuln_likelihood >= internal_min:
+            api_surface_exception = {
+                "used": True,
+                "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
+                "evidence_ids": list(security_candidate.get("evidence_ids") or []),
+            }
+        else:
+            adjusted_target_score = max(0.0, adjusted_target_score - 0.75)
+            if not runtime_penalty.get("reason"):
+                runtime_penalty["reason"] = "internal_api_below_vuln_threshold"
+            elif "internal_api_below_vuln_threshold" not in str(runtime_penalty.get("reason") or ""):
+                runtime_penalty["reason"] = (
+                    f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
+                )
+    score_breakdown_fixed = {
+        "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
+        "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
+        "api_relevance": float(score_breakdown.get("api_relevance") or 0.0),
+        "recent_yield_penalty": float(score_breakdown.get("recent_yield_penalty") or 0.0),
+    }
+    return {
+        "target_name": target_name,
+        "name": target_name,
+        "target": target_name,
+        "api": api,
+        "lang": str(item.get("lang") or ""),
+        "target_type": target_type,
+        "seed_profile": seed_profile,
+        "depth_score": int(item.get("depth_score") or 0),
+        "depth_class": str(item.get("depth_class") or ""),
+        "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+        "runtime_viability": runtime_viability,
+        "selection_rationale": selection_rationale,
+        "runtime_replacement_candidates": runtime_replacement_candidates,
+        "seed_families_suggested": required,
+        "seed_families_optional": optional,
+        "wrapper_fuzzer_name": wrapper_fuzzer_name,
+        "score_total": float(adjusted_target_score),
+        "score_breakdown": score_breakdown_fixed,
+        "penalty_reason": str(runtime_penalty.get("reason") or ""),
+        "security_score_breakdown": {
+            "vuln_likelihood": float(vuln_likelihood),
+            "exploitability": float(exploitability),
+            "reachability_confidence": float(reachability_confidence),
+            "coverage_gap_ref": float(score_breakdown.get("coverage_gap") or 0.0),
+            "complexity_depth_ref": float(score_breakdown.get("complexity_depth") or 0.0),
+            "api_relevance_ref": float(score_breakdown.get("api_relevance") or 0.0),
+            "consumer_order_support_ref": float(score_breakdown.get("consumer_order_support") or 0.0),
+            "recent_yield_penalty": float(score_penalty),
+            "weights": {k: float(v) for k, v in score_weights.items()},
+        },
+        "security_priority_mode": bool(security_priority_mode),
+        "degraded_reason": str(degrade_reason),
+        "vuln_likelihood": float(vuln_likelihood),
+        "exploitability": float(exploitability),
+        "reachability_confidence": float(reachability_confidence),
+        "security_priority_reason": security_reason,
+        "security_signals": _top_security_signals(security_scores),
+        "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+        "api_surface_exception": api_surface_exception,
+        "target_score_breakdown": score_breakdown,
+        "target_score": float(adjusted_target_score),
+        "target_score_penalty": float(score_penalty),
+        "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
+        "target_score_breakdown_available": True,
+        "target_scoring_enabled": True,
+        "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+        "vuln_focus_profile": "broad_high_risk",
+        "target_surface_policy": "risk_first",
+    }
+
+
 def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     security_lookup = _load_target_analysis_security_index(repo_root)
     security_priority_mode = bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
@@ -1953,210 +1944,30 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     score_weights = _vuln_score_weights()
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
-        target_name = str(item.get("name") or "").strip()
-        api = str(item.get("api") or target_name).strip()
-        target_type = str(item.get("target_type") or "generic").strip().lower()
-        seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
-        required, optional = _seed_families_for_target(seed_profile, target_name, api)
-        runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
-        selection_rationale = str(item.get("selection_rationale") or "").strip()
-        runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
-        if not runtime_viability:
-            runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
-                target_name,
-                api,
-                file_hint=str(item.get("file") or ""),
-            )
-            selection_rationale = selection_rationale or auto_rationale
-            runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
-        security_candidate = _lookup_target_security_candidate(
-            target_name=target_name,
-            api=api,
-            index=security_lookup,
-        )
-        security_scores = _extract_security_scores(item)
-        if not any(float(v) > 0.0 for v in security_scores.values()):
-            security_scores = _extract_security_scores(security_candidate)
-        if not any(float(v) > 0.0 for v in security_scores.values()):
-            security_scores = _compute_security_signal_scores(
-                name=target_name,
-                signature=f"{api} {selection_rationale}",
-                file_hint=str(item.get("file") or security_candidate.get("file") or ""),
-                risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
-            )
-        vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
-        exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
-        reachability_raw = security_candidate.get("reachability_confidence", item.get("reachability_confidence"))
-        security_reason = str(
-            security_candidate.get("security_priority_reason")
-            or item.get("security_priority_reason")
-            or ""
-        ).strip()
-        try:
-            vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
-            exploitability = max(0.0, min(float(exploitability_raw), 1.0))
-            reachability_confidence = max(0.0, min(float(reachability_raw), 1.0))
-        except Exception:
-            vuln_likelihood, exploitability, reachability_confidence, derived_reason = _derive_security_priority(
-                target_type=target_type,
-                runtime_viability=runtime_viability,
-                security_scores=security_scores,
-            )
-            if not security_reason:
-                security_reason = derived_reason
-        if not security_reason:
-            _, _, _, security_reason = _derive_security_priority(
-                target_type=target_type,
-                runtime_viability=runtime_viability,
-                security_scores=security_scores,
-            )
-        scoring_source = {
-            "api": api,
-            "target_type": target_type,
-            "depth_score": int(item.get("depth_score") or 0),
-            "depth_class": str(item.get("depth_class") or ""),
-            "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
-            "runtime_viability": runtime_viability,
-            "selection_rationale": selection_rationale,
-            "risk_signals": list(item.get("risk_signals") or []),
-            "coverage_gap": item.get("coverage_gap"),
-        }
-        score_breakdown = _target_score_breakdown(scoring_source)
-        wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
-        runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
-        score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
-        score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
-        score_total = (
-            float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
-            + float(score_weights["exploitability"]) * float(exploitability)
-            + float(score_weights["reachability_confidence"]) * float(reachability_confidence)
-            + float(score_weights["coverage_gap"]) * float(score_breakdown.get("coverage_gap") or 0.0)
-            + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
-            + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
-            + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
-            - float(score_penalty)
-        )
-        adjusted_target_score = max(0.0, float(score_total))
-        internal_api = _is_internal_api_symbol(api)
-        internal_min = _vuln_internal_api_min_score()
-        api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
-        if internal_api:
-            if security_priority_mode and vuln_likelihood >= internal_min:
-                api_surface_exception = {
-                    "used": True,
-                    "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
-                    "evidence_ids": list(security_candidate.get("evidence_ids") or []),
-                }
-            else:
-                adjusted_target_score = max(0.0, adjusted_target_score - 0.75)
-                if not runtime_penalty.get("reason"):
-                    runtime_penalty["reason"] = "internal_api_below_vuln_threshold"
-                elif "internal_api_below_vuln_threshold" not in str(runtime_penalty.get("reason") or ""):
-                    runtime_penalty["reason"] = (
-                        f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
-                    )
-        score_breakdown_fixed = {
-            "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
-            "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
-            "api_relevance": float(score_breakdown.get("api_relevance") or 0.0),
-            "recent_yield_penalty": float(score_breakdown.get("recent_yield_penalty") or 0.0),
-        }
         ranked_items.append(
-            {
-                "target_name": target_name,
-                "name": target_name,
-                "target": target_name,
-                "api": api,
-                "lang": str(item.get("lang") or ""),
-                "target_type": target_type,
-                "seed_profile": seed_profile,
-                "depth_score": int(item.get("depth_score") or 0),
-                "depth_class": str(item.get("depth_class") or ""),
-                "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
-                "runtime_viability": runtime_viability,
-                "selection_rationale": selection_rationale,
-                "runtime_replacement_candidates": runtime_replacement_candidates,
-                "seed_families_suggested": required,
-                "seed_families_optional": optional,
-                "wrapper_fuzzer_name": wrapper_fuzzer_name,
-                "score_total": float(adjusted_target_score),
-                "score_breakdown": score_breakdown_fixed,
-                "penalty_reason": str(runtime_penalty.get("reason") or ""),
-                "security_score_breakdown": {
-                    "vuln_likelihood": float(vuln_likelihood),
-                    "exploitability": float(exploitability),
-                    "reachability_confidence": float(reachability_confidence),
-                    "coverage_gap_ref": float(score_breakdown.get("coverage_gap") or 0.0),
-                    "complexity_depth_ref": float(score_breakdown.get("complexity_depth") or 0.0),
-                    "api_relevance_ref": float(score_breakdown.get("api_relevance") or 0.0),
-                    "consumer_order_support_ref": float(score_breakdown.get("consumer_order_support") or 0.0),
-                    "recent_yield_penalty": float(score_penalty),
-                    "weights": {k: float(v) for k, v in score_weights.items()},
-                },
-                "security_priority_mode": bool(security_priority_mode),
-                "degraded_reason": str(degrade_reason),
-                "vuln_likelihood": float(vuln_likelihood),
-                "exploitability": float(exploitability),
-                "reachability_confidence": float(reachability_confidence),
-                "security_priority_reason": security_reason,
-                "security_signals": _top_security_signals(security_scores),
-                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
-                "api_surface_exception": api_surface_exception,
-                "target_score_breakdown": score_breakdown,
-                "target_score": float(adjusted_target_score),
-                "target_score_penalty": float(score_penalty),
-                "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
-                "target_score_breakdown_available": True,
-                "target_scoring_enabled": True,
-                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
-                "vuln_focus_profile": "broad_high_risk",
-                "target_surface_policy": "risk_first",
-            }
-        )
-    if security_priority_mode:
-        # In risk-first mode, ranking is driven by security risk directly.
-        # `score_total` is still emitted for observability/reference, not as the
-        # primary ordering key.
-        ranked_items.sort(
-            key=lambda row: (
-                1
-                if (
-                    _is_internal_api_symbol(str(row.get("api") or ""))
-                    and not bool((row.get("api_surface_exception") or {}).get("used"))
-                )
-                else 0,
-                -float(row.get("vuln_likelihood") or 0.0),
-                -float(row.get("exploitability") or 0.0),
-                -float(row.get("reachability_confidence") or 0.0),
-                -len(list(row.get("security_signals") or [])),
-                -float(row.get("target_score") or 0.0),
-                -int(row.get("depth_score") or 0),
-                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
-                str(row.get("target_name") or ""),
+            _build_selected_target_row(
+                repo_root=repo_root,
+                item=item,
+                security_lookup=security_lookup,
+                security_priority_mode=security_priority_mode,
+                degrade_reason=degrade_reason,
+                score_weights=score_weights,
             )
         )
-    else:
-        ranked_items.sort(
-            key=lambda row: (
-                -float(row.get("target_score") or 0.0),
-                -float(row.get("vuln_likelihood") or 0.0),
-                -float(row.get("exploitability") or 0.0),
-                -float(row.get("reachability_confidence") or 0.0),
-                -int(row.get("depth_score") or 0),
-                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
-                str(row.get("target_name") or ""),
-            )
-        )
-    out: list[dict[str, Any]] = []
+    # In risk-first mode, ranking is driven by security risk directly.
+    # `score_total` is still emitted for observability/reference, not as the
+    # primary ordering key.
+    ranked_items = _wf_target_selection.sort_ranked_items(
+        ranked_items,
+        security_priority_mode=security_priority_mode,
+        is_internal_api_symbol_fn=_is_internal_api_symbol,
+        runtime_viability_rank_fn=_runtime_viability_rank,
+    )
     max_targets = _execution_targets_max()
-    for idx, row in enumerate(ranked_items):
-        row["rank"] = int(idx + 1)
-        row["execution_priority"] = int(idx + 1) if idx < max_targets else 0
-        target_type = str(row.get("target_type") or "").strip().lower()
-        row["must_run"] = bool(
-            idx < max_targets and (idx == 0 or target_type in {"archive", "parser", "decoder"})
-        )
-        out.append(row)
+    out = _wf_target_selection.assign_execution_priority(
+        ranked_items,
+        max_targets=max_targets,
+    )
     return out
 
 
@@ -10502,17 +10313,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         underutilized_execs_threshold = _coverage_underutilized_execs_threshold()
         cold_start_quality_threshold = _cold_start_seed_replan_quality_threshold()
         cold_start_early_units_threshold = _cold_start_seed_replan_early_units_30s_threshold()
-        plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
-        plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
-        requested_replan = bool(
-            plateau_no_gain
-            and plateau_streak >= 2
-            and bool(current_seed_profile)
-        )
         replan_reason = ""
         improve_mode = ""
-        can_in_place = unlimited_rounds or (current_round < max_rounds)
-        can_replan = unlimited_rounds or ((current_round + 1) < max_rounds)
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind_raw = str(state.get("run_error_kind") or "").strip().lower()
@@ -10549,149 +10351,64 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 )
             )
         )
-        seed_quality_issue = bool(
-            any(
-                flag in quality_flags
-                for flag in {
-                    "low_retention",
-                    "low_early_yield",
-                    "high_homogeneity",
-                    "seed_noise_high",
-                    "missing_execution_targets",
-                    # Advisory flags (missing_suggested_families, repo_examples_missing,
-                    # seed_family_undercovered) intentionally excluded — they are
-                    # informational and should not block or trigger replan.
-                }
-            )
-            or cold_start_failure
-            or merge_retained_low
+        decision = _wf_coverage_decision.evaluate_coverage_decision(
+            run_error_kind=run_error_kind,
+            crash_found=bool(state.get("crash_found")),
+            failed=bool(state.get("failed")),
+            recoverable_run_error_kinds=set(_RECOVERABLE_RUN_ERROR_KINDS),
+            plateau_detected=plateau_detected,
+            current_cov=current_cov,
+            prev_cov=prev_cov,
+            current_ft=current_ft,
+            prev_ft=prev_ft,
+            prev_plateau_streak=prev_plateau_streak,
+            current_seed_profile=current_seed_profile,
+            quality_flags=quality_flags,
+            seed_families_missing=seed_families_missing,
+            cold_start_failure=cold_start_failure,
+            seed_generation_degraded=seed_generation_degraded,
+            quality_score=quality_score,
+            cold_start_quality_threshold=cold_start_quality_threshold,
+            early_new_units_30s=early_new_units_30s,
+            cold_start_early_units_threshold=cold_start_early_units_threshold,
+            merge_retained_low=merge_retained_low,
+            configured_parallel_units=configured_parallel_units,
+            parallel_cpu_budget=parallel_cpu_budget,
+            total_execs_per_sec=total_execs_per_sec,
+            underutilized_execs_threshold=underutilized_execs_threshold,
+            current_depth_class=current_depth_class,
+            current_round=current_round,
+            max_rounds=max_rounds,
+            unlimited_rounds=unlimited_rounds,
         )
-        resource_underutilized = bool(
-            not seed_quality_issue
-            and configured_parallel_units < int(parallel_cpu_budget * 0.7)
-            and total_execs_per_sec < underutilized_execs_threshold
+        plateau_no_gain = bool(decision.get("plateau_no_gain") or False)
+        plateau_streak = int(decision.get("plateau_streak") or 0)
+        requested_replan = bool(decision.get("requested_replan") or False)
+        cold_start_seed_replan_triggered = bool(
+            decision.get("cold_start_seed_replan_triggered") or False
         )
-        strategy_mismatch = bool(
-            (not seed_quality_issue)
-            and plateau_detected
-            and total_execs_per_sec > 0
-            and current_cov <= prev_cov
-            and current_ft <= prev_ft
+        degraded_seed_replan_triggered = bool(
+            decision.get("degraded_seed_replan_triggered") or False
         )
-        if seed_quality_issue:
-            parallel_diagnosis_code = "seed_limited_priority"
-            parallel_diagnosis = (
-                "seed quality is the primary bottleneck; prioritize seed replan before parallelism changes"
-            )
-        elif resource_underutilized:
-            parallel_diagnosis_code = "resource_underutilized"
-            parallel_diagnosis = (
-                "exec/s is low while configured parallel units are below cpu budget; "
-                "increase outer or inner workers"
-            )
-        elif strategy_mismatch:
-            parallel_diagnosis_code = "strategy_mismatch"
-            parallel_diagnosis = (
-                "exec/s is healthy but coverage/features are stalled; "
-                "reduce parallelism and prioritize target/seed strategy changes"
-            )
-        else:
-            parallel_diagnosis_code = "balanced"
-            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
+        seed_quality_issue = bool(decision.get("seed_quality_issue") or False)
+        parallel_diagnosis_code = str(decision.get("parallel_diagnosis_code") or "balanced")
+        parallel_diagnosis = str(
+            decision.get("parallel_diagnosis") or "parallelism looks balanced for current coverage signal"
+        )
         quality_degraded = bool(
-            seed_quality_issue
+            decision.get("quality_degraded")
             or list(state.get("coverage_missing_execution_targets") or [])
-            or (requested_replan and plateau_no_gain)
         )
         quality_oracle = "quality_degraded" if quality_degraded else "ok"
-        if seed_quality_issue:
-            coverage_bottleneck_kind = "seed_limited"
-            if cold_start_failure:
-                coverage_bottleneck_reason = "cold_start_failure"
-            elif seed_generation_degraded:
-                coverage_bottleneck_reason = "seed_generation_degraded"
-            elif merge_retained_low:
-                coverage_bottleneck_reason = "merge_retained_low"
-            elif seed_families_missing:
-                coverage_bottleneck_reason = "missing_seed_families"
-            else:
-                coverage_bottleneck_reason = "seed_quality_flags"
-        elif requested_replan or (plateau_no_gain and str(current_depth_class or "").lower() == "shallow"):
-            coverage_bottleneck_kind = "target_limited"
-            coverage_bottleneck_reason = "target_plateau_or_shallow_depth"
-        elif plateau_no_gain:
-            coverage_bottleneck_kind = "harness_limited"
-            coverage_bottleneck_reason = "plateau_without_seed_or_target_signal"
-        else:
-            coverage_bottleneck_kind = "none"
-            coverage_bottleneck_reason = ""
+        coverage_bottleneck_kind = str(decision.get("coverage_bottleneck_kind") or "none")
+        coverage_bottleneck_reason = str(decision.get("coverage_bottleneck_reason") or "")
         auto_stop_policy = _auto_stop_policy()
-        base_should_improve = (
-            (not bool(state.get("crash_found")))
-            and (not bool(state.get("failed")))
-            and (
-                (not run_error_kind)
-                or (run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS)
-            )
-        )
-        should_improve = False
-        replan_required = False
-        if base_should_improve:
-            # Zero-coverage after at least one round indicates a fundamental
-            # problem (broken dict, bad harness, invalid seeds).  Force a
-            # full replan instead of incremental in-place tweaks.
-            if current_cov <= 0 and current_round > 0:
-                # Always force replan on zero coverage — the system must not
-                # stop; it should switch strategy (target, seeds, harness).
-                should_improve = True
-                replan_required = True
-                improve_mode = "replan"
-                replan_reason = "zero_coverage_force_replan"
-            elif cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
-                if can_replan:
-                    should_improve = True
-                    replan_required = True
-                    improve_mode = "seed_replan"
-                    replan_reason = (
-                        "seed_cold_start_failure"
-                        if cold_start_seed_replan_triggered
-                        else "seed_generation_degraded"
-                    )
-                elif can_in_place:
-                    should_improve = True
-                    improve_mode = "in_place"
-                    replan_reason = (
-                        "seed_cold_start_failure_fallback_in_place"
-                        if cold_start_seed_replan_triggered
-                        else "seed_generation_degraded_fallback_in_place"
-                    )
-                else:
-                    round_budget_exhausted = True
-                    stop_reason = "coverage_loop_budget_exhausted"
-            elif seed_quality_issue and can_in_place:
-                should_improve = True
-                improve_mode = "in_place"
-                if cold_start_failure:
-                    replan_reason = "seed_cold_start_failure"
-                elif merge_retained_low:
-                    replan_reason = "seed_merge_retained_low"
-                else:
-                    replan_reason = "seed_quality_issue"
-            elif requested_replan:
-                if can_replan:
-                    should_improve = True
-                    replan_required = True
-                    improve_mode = "replan"
-                    replan_reason = "prefer_deeper_target" if current_depth_class == "shallow" else "stalled_current_target"
-                else:
-                    round_budget_exhausted = True
-                    stop_reason = "coverage_loop_budget_exhausted"
-            elif can_in_place:
-                should_improve = True
-                improve_mode = "in_place"
-            else:
-                round_budget_exhausted = True
-                stop_reason = "coverage_loop_budget_exhausted"
+        should_improve = bool(decision.get("should_improve") or False)
+        replan_required = bool(decision.get("replan_required") or False)
+        improve_mode = str(decision.get("improve_mode") or "")
+        replan_reason = str(decision.get("replan_reason") or "")
+        round_budget_exhausted = bool(decision.get("round_budget_exhausted") or False)
+        stop_reason = str(decision.get("stop_reason") or "")
 
         next_round = current_round + (1 if should_improve else 0)
         reason = "skip coverage loop"
