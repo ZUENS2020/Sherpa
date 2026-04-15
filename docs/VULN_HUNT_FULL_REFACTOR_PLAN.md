@@ -7,7 +7,7 @@
 
 ### 1.1 目标
 - 把 Sherpa 从单线性 `analysis → plan → synthesize → build → run → coverage-analysis` 模式，升级为"持续漏洞挖掘优先"的双引擎系统。
-- 模仿 FuzzingBrain 的 **可疑点生命周期** 和 **多阶段攻击策略**，让 Sherpa 具备"发现可疑点 → 生成攻击输入 → 验证 → 反馈 → 继续发现"的完整闭环。
+- 模仿 FuzzingBrain 的 **可疑点生命周期** 和 **攻击策略菜单**，让 Sherpa 具备"发现可疑点 → 生成攻击输入 → 验证 → 反馈 → 继续发现"的完整闭环。AI 自主选择攻击策略组合，系统只校验输出质量。
 - 主引擎持续发现漏洞候选，验证引擎异步消费并验证，主引擎不中断继续发现下一个候选。
 - 复用现有 fuzz 执行与修复能力，避免推倒重写。
 
@@ -143,12 +143,10 @@ stateDiagram-v2
     analysis --> vuln_hunt : 产出 analysis_context.json
 
     state vuln_hunt {
-        [*] --> phase0 : 静态分析证据直接生成候选
-        phase0 --> phase1 : 按漏洞分类逐类攻击
-        phase1 --> phase2 : LLM 筛 top-k 可疑函数
-        phase2 --> phase3 : 沿调用路径构造攻击
-        phase3 --> phase4 : OpenCode 安全审计
-        phase4 --> [*] : 输出 vuln_candidates.json
+        [*] --> ai_hunt : AI 自主选择策略组合
+        ai_hunt --> validate_output : 产出候选清单
+        validate_output --> ai_hunt : 不合格（带反馈重试，≤2次）
+        validate_output --> [*] : 合格 → vuln_candidates.json
     }
 
     vuln_hunt --> dispatch : 候选写入 DB
@@ -199,17 +197,44 @@ stateDiagram-v2
 
 ## 4. 可疑点生命周期（模仿 FuzzingBrain）
 
-### 4.1 发现阶段
+### 4.1 发现阶段：策略自由 + 输出校验
 
-Sherpa 的 `_node_vuln_hunt` 模仿 FuzzingBrain 的多阶段策略：
+`_node_vuln_hunt` 不强制 AI 按固定阶段执行。AI 接收全部上下文后自主决定使用哪些策略、以什么顺序组合。系统只校验最终输出是否达标。
 
-| 阶段 | FuzzingBrain | Sherpa 对应 |
-|------|-------------|------------|
-| Phase 0 | 静态分析结论直接攻击 | analysis_context.security_evidence 直接生成候选 |
-| Phase 1 | 按漏洞分类逐类攻击 (OOB/UAF/整数溢出/注入...) | 按 `signal_type` 分类，每类生成针对性候选 |
-| Phase 2 | LLM 筛 top-k 可疑函数 | LLM 从 target_analysis 中筛高风险函数 |
-| Phase 3 | 沿调用路径精准构造 | 利用 analysis_context 的调用图信息构造攻击路径 |
-| Phase 4 | Claude Security Agent 深度审计 | OpenCode 安全审计（analysis prompt 已实现 `security_evidence[]` 输出） |
+#### 策略菜单（prompt 中作为建议提供，AI 自由选用）
+
+| 策略 | 说明 | 来源 |
+|------|------|------|
+| 证据直攻 | 从 `security_evidence[]` 中高置信度条目直接生成候选 | FuzzingBrain Phase 0 |
+| 漏洞分类攻击 | 按类型（OOB/UAF/整数溢出/注入…）逐类扫描 | FuzzingBrain Phase 1 |
+| 高危函数筛选 | 从 `target_analysis` 中筛选高风险函数精准攻击 | FuzzingBrain Phase 2 |
+| 调用路径构造 | 沿调用图追踪数据流，构造端到端攻击路径 | FuzzingBrain Phase 3 |
+| 安全审计 | 综合审计（已由 analysis prompt 部分覆盖） | FuzzingBrain Phase 4 |
+
+AI 可以只用一种策略，也可以组合多种，也可以发明新策略。**系统不关心过程，只校验产出。**
+
+#### 输出校验器（硬性，不合格则带反馈重试）
+
+```mermaid
+flowchart TD
+    AI["AI 自由产出候选"] --> V{"输出校验"}
+    V -- "全部通过" --> OK["写入 vuln_candidates.json ✅"]
+    V -- "有不合格项" --> FB["生成校验反馈：\n哪些字段缺失/不具体"]
+    FB --> RETRY{"已重试 2 次？"}
+    RETRY -- "否" --> AI
+    RETRY -- "是" --> DEGRADE["降级：保留合格候选\n丢弃不合格候选\n写入 prompt_render_degraded"]
+```
+
+**校验规则**（每个候选必须满足）：
+
+| 规则 | 检查内容 | 不合格反馈示例 |
+|------|---------|---------------|
+| `evidence_ref` | 必须引用至少一个 `evidence_id` | "候选 X 没有引用任何 evidence，请关联具体代码证据" |
+| `attack_hint_complete` | `attack_hint` 必须含 `trigger_condition` + `key_code_path` + `boundary_values` | "候选 X 的 attack_hint 缺少 boundary_values" |
+| `concrete_path` | `key_code_path` 必须是具体函数名列表（非描述性文字） | "候选 X 的 key_code_path 是描述文字，请改为具体函数名如 ['png_read_row', 'memcpy']" |
+| `concrete_values` | `boundary_values` 必须是具体触发值（非占位符） | "候选 X 的 boundary_values 含占位符 'TBD'，请填入具体值" |
+| `min_candidates` | 总候选数 ≥ 3 | "只产出了 1 个候选，请补充更多可疑点" |
+| `priority_ordered` | 按 `priority` 降序排列 | "候选未按 priority 排序" |
 
 ### 4.2 候选状态机
 
@@ -662,17 +687,24 @@ score_total = 0.45 * vuln_likelihood
 
 ### 10.1 `vuln-hunt` Skill 合同
 
-输入：`analysis_context.json`（含 `security_evidence[]`、调用图、目标分类）
+**设计原则**：策略自由 + 输出严格。AI 自主选择攻击策略组合，系统通过输出校验器保证产出质量。
 
-必须输出：
+**输入**：`analysis_context.json`（含 `security_evidence[]`、调用图、目标分类）+ 策略菜单（建议，非强制）
+
+**必须输出**：
 - `fuzz/vuln_candidates.json`：候选清单，每条含 `attack_hint`
-- `fuzz/vuln_hunt_summary.md`：发现摘要
+- `fuzz/vuln_hunt_summary.md`：发现摘要（含 AI 使用了哪些策略）
 
-输出要求：
+**输出校验（硬性）**：
 - 每个候选必须引用至少一个 `evidence_id`
-- `attack_hint.key_code_path` 必须是具体的函数名列表
-- `attack_hint.boundary_values` 必须是具体的触发值
+- `attack_hint` 必须含 `trigger_condition` + `key_code_path`（具体函数名） + `boundary_values`（具体值）
+- 总候选数 ≥ 3
 - 按 `priority` 降序排列
+
+**重试机制**：
+- 校验不合格时，校验器生成具体反馈（哪个候选哪个字段不达标）
+- 带反馈重新调用 AI（最多 2 次重试）
+- 2 次仍不合格：保留合格候选，丢弃不合格候选，写入 `prompt_render_degraded`
 
 ### 10.2 `plan` 合同
 - 必须声明：风险优先，coverage 仅参考。
@@ -698,7 +730,7 @@ flowchart LR
         PRE["前置工作<br/>评分切换 0.88 / security_evidence<br/>suggested_families / vuln_hint<br/>seed guidance / dict_parse_error fix"]
     end
     subgraph p1["Phase 1"]
-        P1A["1a: 最小闭环<br/>_node_vuln_hunt<br/>+ candidate-first plan"]
+        P1A["1a: 最小闭环<br/>_node_vuln_hunt（策略自由+输出校验）<br/>+ candidate-first plan"]
         P1B["1b: 覆盖率反馈<br/>LLVM profdata<br/>函数级路径提取"]
         P1C["1c: 迭代循环<br/>单候选 5 轮验证<br/>对话上下文维护"]
         P1A --> P1B --> P1C
@@ -718,7 +750,10 @@ flowchart LR
 **目标**：跑通"候选生成 → 目标选择 → fuzz 验证"单趟闭环。
 
 - 在现有 workflow 中新增 `_node_vuln_hunt`：
-  - 输入：`analysis_context.json`
+  - 输入：`analysis_context.json` + 策略菜单（prompt 中提供 5 种策略建议）
+  - AI 自主选择策略组合产出候选
+  - 输出校验器检查每个候选的 `evidence_ref` / `attack_hint` / `concrete_path` 等
+  - 不合格带反馈重试（≤2 次），仍不合格则降级保留合格部分
   - 输出：`fuzz/vuln_candidates.json`（含 `attack_hint`）
 - `_node_plan` 读取 `vuln_candidates.json`，执行 candidate-first 排序。
 - `_node_synthesize` 的 hint 注入 `attack_hint`。
