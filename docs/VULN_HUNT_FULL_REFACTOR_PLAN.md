@@ -683,40 +683,218 @@ score_total = 0.45 * vuln_likelihood
 
 ---
 
-## 10. Prompt/Skill 合同
+## 10. Skill 合同（用 SKILL.md 替代 Prompt 约束）
 
-### 10.1 `vuln-hunt` Skill 合同
+### 10.0 为什么用 Skill 而不是 Prompt
 
-**设计原则**：策略自由 + 输出严格。AI 自主选择攻击策略组合，系统通过输出校验器保证产出质量。
+> 参考：[Agent Skills 规范](https://agentskills.io/specification)、[Anthropic Skill 最佳实践](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices)
 
-**输入**：`analysis_context.json`（含 `security_evidence[]`、调用图、目标分类）+ 策略菜单（建议，非强制）
+| 维度 | Prompt 约束 | Skill 约束 |
+|------|-------------|------------|
+| 加载时机 | 每次请求都在上下文中（浪费 token） | 按需加载：空闲时只占 ~100 token（name + description） |
+| 约束方式 | 自然语言描述规则，AI 可能忽略 | 结构化：frontmatter 声明 + 工作流步骤 + 校验脚本 |
+| 输出控制 | 靠 prompt 中的模板和示例 | 可以挂 `scripts/validate.py` 做机器校验 |
+| 维护 | 修改一个大 prompt 文件 | 每个 skill 独立目录，独立版本 |
+| 扩展性 | prompt 越长质量越差 | 100+ skill 共存不互相干扰 |
+| 工具限制 | 全局设置 | 每个 skill 可声明 `allowed-tools`（只允许只读命令等） |
 
-**必须输出**：
-- `fuzz/vuln_candidates.json`：候选清单，每条含 `attack_hint`
-- `fuzz/vuln_hunt_summary.md`：发现摘要（含 AI 使用了哪些策略）
+**结论**：`vuln-hunt` 的策略菜单和输出校验规则应该写成 SKILL.md，而不是嵌在 prompt 模板里。策略菜单是 skill body 的自然语言部分（AI 自由参考），输出校验是 skill 的 `Required outputs` + `Acceptance checklist`（硬性约束）。
 
-**输出校验（硬性）**：
-- 每个候选必须引用至少一个 `evidence_id`
-- `attack_hint` 必须含 `trigger_condition` + `key_code_path`（具体函数名） + `boundary_values`（具体值）
-- 总候选数 ≥ 3
-- 按 `priority` 降序排列
+### 10.1 `vuln_hunt` Skill 设计
 
-**重试机制**：
-- 校验不合格时，校验器生成具体反馈（哪个候选哪个字段不达标）
-- 带反馈重新调用 AI（最多 2 次重试）
-- 2 次仍不合格：保留合格候选，丢弃不合格候选，写入 `prompt_render_degraded`
+**文件路径**：`opencode_skills/vuln_hunt/SKILL.md`
 
-### 10.2 `plan` 合同
-- 必须声明：风险优先，coverage 仅参考。
-- 输入 `vuln_candidates.json` 时，按 `priority` 选取 top-k 候选。
-- 必须输出候选排序拆解与例外说明。
+**设计原则**：
+- **策略自由**：策略菜单写在 skill body 中作为建议，AI 自主选用
+- **输出严格**：通过 `Required outputs` + `Acceptance checklist` 做硬性约束
+- **渐进加载**：skill body < 500 行，详细参考材料放 `references/` 子目录
+- **校验脚本**：`scripts/validate_candidates.py` 做结构化校验，不依赖 AI 自查
 
-### 10.3 `synthesize` 合同（攻击导向增强）
-- 当有 `attack_hint` 时，harness 设计必须瞄准 `key_code_path`。
-- seed 设计必须包含 `boundary_values` 中的边界条件。
-- 输出 harness 必须包含注释说明瞄准的漏洞类型。
+#### SKILL.md 草案
 
-### 10.4 安全渲染
+```markdown
+---
+name: vuln-hunt
+description: >
+  Discover vulnerability candidates from analysis context using AI-chosen
+  attack strategies. Produces vuln_candidates.json with attack_hint for
+  each candidate. Use in the vuln-hunt stage after analysis.
+compatibility: opencode
+metadata:
+  stage: vuln-hunt
+  owner: sherpa
+---
+
+## What this skill does
+从 analysis_context.json 中发现漏洞候选，为每个候选生成攻击策略提示（attack_hint），
+输出结构化候选清单供下游验证引擎消费。
+
+## When to use this skill
+Use in the dedicated `vuln-hunt` stage, after `analysis` and before `plan`.
+
+## Required inputs
+- `fuzz/analysis_context.json`（含 `security_evidence[]`、调用图、目标分类）
+- `fuzz/target_analysis.json`
+- repository source tree (read-only)
+
+## Required outputs
+- `fuzz/vuln_candidates.json`：候选清单（strict JSON array）
+- `fuzz/vuln_hunt_summary.md`：发现摘要（含使用了哪些策略、为什么选这些候选）
+
+## Strategy menu（建议，AI 自由选用组合）
+
+以下策略供参考，你可以只用一种、组合多种、或发明新策略。系统不关心你的过程，只校验产出。
+
+### 证据直攻
+从 `security_evidence[]` 中置信度 ≥ 0.6 的条目直接生成候选。
+适用于 analysis 阶段已发现明确安全信号的情况。
+
+### 漏洞分类扫描
+按漏洞类型（OOB / UAF / 整数溢出 / 格式化字符串 / 命令注入 / 路径遍历）
+逐类扫描 target_analysis 中的函数，寻找匹配特征。
+
+### 高危函数筛选
+从 target_analysis 中按 vuln_likelihood 排序，取 top-k 函数，
+读源码做代码级分析判断是否有可触发漏洞。
+
+### 调用路径构造
+沿调用图从外部输入入口追踪到危险函数，
+识别数据流中未校验的 trust boundary 跨越。
+
+### 综合审计
+结合以上多种视角做全面审计，适用于代码库较小或候选较少时。
+
+## Candidate schema（每个候选必须符合）
+
+每个候选是一个 JSON 对象，必须包含以下字段：
+
+| 字段 | 类型 | 要求 |
+|------|------|------|
+| `candidate_id` | string | 幂等主键，格式 `<signal_type>_<seq>`（如 `mem_oob_001`） |
+| `target_api` | string | 具体函数名（非文件路径、非描述文字） |
+| `target_file` | string | 源文件路径 |
+| `signal_type` | string | 漏洞分类（如 `mem_oob_candidate`） |
+| `evidence` | array | 至少一条，每条含 `evidence_id` 引用 |
+| `attack_hint` | object | 见下方 attack_hint schema |
+| `vuln_likelihood` | float | 0.0-1.0 |
+| `exploitability` | float | 0.0-1.0 |
+| `reachability_confidence` | float | 0.0-1.0 |
+| `priority` | float | 0.0-1.0，降序排列 |
+
+### attack_hint schema
+
+| 字段 | 类型 | 要求 |
+|------|------|------|
+| `trigger_condition` | string | 触发条件的自然语言描述 |
+| `key_code_path` | array[string] | 具体函数名列表（如 `["png_read_row", "memcpy"]`），不是描述文字 |
+| `boundary_values` | array[string] | 具体触发值（如 `["width=0xFFFFFFFF"]`），不是占位符 |
+| `vuln_category` | string | 漏洞类型（如 `heap-buffer-overflow`） |
+| `sanitizer_hint` | string | 建议 sanitizer（`address` / `memory` / `undefined`） |
+
+## Command policy
+- Allowed: read-only commands (`find`, `rg`, `grep`, `cat`, `head`, `tail`, `ls`).
+- Forbidden: build / execute / mutation commands.
+
+## Acceptance checklist
+- [ ] `fuzz/vuln_candidates.json` is a valid non-empty JSON array
+- [ ] Every candidate has a unique `candidate_id`
+- [ ] Every candidate references at least one `evidence_id` from analysis_context
+- [ ] Every `attack_hint.key_code_path` contains concrete function names (not descriptions)
+- [ ] Every `attack_hint.boundary_values` contains concrete values (not placeholders like "TBD")
+- [ ] Candidates are sorted by `priority` descending
+- [ ] At least 3 candidates (or all available if source has fewer viable targets)
+- [ ] `fuzz/vuln_hunt_summary.md` exists and lists strategies used
+
+## Degraded mode
+- If `security_evidence[]` is empty, continue using target_analysis + source code reading.
+- If fewer than 3 viable candidates found, output all found and note in summary.
+- Record degraded reason in output, do not silently skip.
+
+## Done contract
+- Write `fuzz/vuln_candidates.json` into `./done`.
+```
+
+#### 校验脚本：`scripts/validate_candidates.py`
+
+```python
+"""Machine-verifiable output validator for vuln_hunt skill.
+Called by _node_vuln_hunt after AI produces candidates.
+Returns structured feedback for retry if validation fails."""
+
+def validate(candidates: list[dict], evidence_ids: set[str]) -> dict:
+    errors = []
+    for i, c in enumerate(candidates):
+        cid = c.get("candidate_id", f"candidate[{i}]")
+        # evidence_ref check
+        if not c.get("evidence") or not any(
+            e.get("evidence_id") in evidence_ids for e in c["evidence"]
+        ):
+            errors.append(f"{cid}: 没有引用任何有效的 evidence_id")
+        # attack_hint completeness
+        hint = c.get("attack_hint", {})
+        for field in ("trigger_condition", "key_code_path", "boundary_values"):
+            if not hint.get(field):
+                errors.append(f"{cid}: attack_hint 缺少 {field}")
+        # concrete_path check
+        if hint.get("key_code_path") and any(
+            len(p.split()) > 3 for p in hint["key_code_path"]
+        ):
+            errors.append(f"{cid}: key_code_path 应为函数名列表，不是描述文字")
+        # concrete_values check
+        if hint.get("boundary_values") and any(
+            v.upper() in ("TBD", "TODO", "PLACEHOLDER") for v in hint["boundary_values"]
+        ):
+            errors.append(f"{cid}: boundary_values 含占位符")
+    # min_candidates
+    if len(candidates) < 3:
+        errors.append(f"只有 {len(candidates)} 个候选，至少需要 3 个")
+    # priority_ordered
+    priorities = [c.get("priority", 0) for c in candidates]
+    if priorities != sorted(priorities, reverse=True):
+        errors.append("候选未按 priority 降序排列")
+    return {"valid": len(errors) == 0, "errors": errors}
+```
+
+### 10.2 Skill vs Prompt 在 Sherpa 各阶段的对比
+
+```mermaid
+flowchart LR
+    subgraph PROMPT["现有 Prompt 驱动阶段"]
+        direction TB
+        P1["opencode_prompts.md\n（大模板，所有规则混在一起）"]
+    end
+    subgraph SKILL["Skill 驱动阶段"]
+        direction TB
+        S1["analysis/SKILL.md ✅ 已有"]
+        S2["plan/SKILL.md ✅ 已有"]
+        S3["synthesize/SKILL.md ✅ 已有"]
+        S4["seed_generation/SKILL.md ✅ 已有"]
+        S5["vuln_hunt/SKILL.md 🆕 新增"]
+    end
+
+    P1 -.->|"渐进迁移：\n约束从 prompt 搬到 skill"| SKILL
+
+    style S5 fill:#ffd,stroke:#aa0
+```
+
+**现有模式**：每个阶段已经有 SKILL.md（analysis、plan、synthesize、seed_generation 等），但 `opencode_prompts.md` 仍然包含大量重复约束。
+
+**改进方向**：
+1. **新阶段直接用 skill**：`vuln_hunt` 的约束全部写在 SKILL.md 中，不在 prompt 模板中重复
+2. **校验逻辑放 scripts/**：`validate_candidates.py` 做机器校验，不依赖 AI 自查
+3. **prompt 只做上下文注入**：`opencode_prompts.md` 中 `vuln_hunt` 相关部分只负责注入 `analysis_context` 数据，不重复约束规则
+
+### 10.3 `plan` 合同（已有 SKILL.md，增量更新）
+- 在现有 `plan/SKILL.md` 的 `Required inputs` 中增加 `fuzz/vuln_candidates.json`
+- 在 `Workflow` 中增加：读取 `vuln_candidates.json` 时按 `priority` 选取 top-k
+- 在 `Constraints` 中增加：风险优先，coverage 仅参考
+
+### 10.4 `synthesize` 合同（已有 SKILL.md，增量更新）
+- 在现有 `synthesize/SKILL.md` 的 `Required inputs` 中增加 `attack_hint`（来自候选）
+- 在 `Workflow` 中增加：当有 `attack_hint` 时，harness 设计瞄准 `key_code_path`
+- seed 设计包含 `boundary_values` 中的边界条件
+
+### 10.5 安全渲染
 - 所有节点必须走安全渲染路径。
 - 模板异常只降级，不中断；必须写：`prompt_render_degraded`、`prompt_render_issue`。
 

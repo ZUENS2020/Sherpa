@@ -31,7 +31,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
 2. Read target analysis and identify runtime-viable public entrypoints.
 3. Apply vulnerability-first scoring when selecting targets:
-   - `score_total = 0.40*vuln_likelihood + 0.20*exploitability + 0.15*reachability_confidence + 0.10*coverage_gap + 0.08*complexity_depth + 0.05*api_relevance + 0.02*consumer_order_support - recent_yield_penalty`.
+   - `score_total = 0.45*vuln_likelihood + 0.25*exploitability + 0.18*reachability_confidence + 0.05*coverage_gap + 0.04*complexity_depth + 0.02*api_relevance + 0.01*consumer_order_support - recent_yield_penalty`.
 4. Produce `fuzz/targets.json` as a strict non-empty array.
 5. Produce `fuzz/execution_plan.json` with prioritized execution targets.
 6. Write concise implementation guidance into `fuzz/PLAN.md`.
