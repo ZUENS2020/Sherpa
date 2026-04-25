@@ -54,7 +54,7 @@ RUN set -eux; \
     tarball_url=""; \
     for attempt in 1 2 3; do \
       echo "[npm] resolving ${opencode_pkg} tarball (attempt $attempt/3)"; \
-      tarball_url="$(npm --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball 2>/dev/null | tail -n 1 | tr -d '\"')"; \
+      tarball_url="$(npm --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball --json | tr -d '\"' | tail -n 1)"; \
       if [ -n "$tarball_url" ]; then \
         break; \
       fi; \
