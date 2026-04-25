@@ -1247,6 +1247,47 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert isinstance(out.get("coverage_harness_feedback"), dict)
 
 
+def test_node_coverage_analysis_mentions_attack_hint_boundary_gaps():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "parse_zip_fuzz",
+            "coverage_target_api": "parse_zip",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_quality": {
+                "quality_flags": ["attack_hint_boundary_values_missing"],
+                "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                "attack_hint_coverage_ratio": 0.33,
+            },
+            "coverage_quality_flags": ["attack_hint_boundary_values_missing"],
+            "run_details": [
+                {
+                    "fuzzer": "parse_zip_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 19,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                    "seed_quality": {
+                        "quality_flags": ["attack_hint_boundary_values_missing"],
+                        "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                        "attack_hint_coverage_ratio": 0.33,
+                    },
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert "attack_hint_missing_values=len=0xFFFFFFFF" in out["coverage_improve_reason"]
+    feedback = dict(out.get("coverage_seed_feedback") or {})
+    assert feedback.get("attack_hint_missing_values") == ["len=0xFFFFFFFF"]
+    assert float(feedback.get("attack_hint_coverage_ratio") or 0.0) == 0.33
+
+
 def test_node_coverage_analysis_marks_parallel_resource_underutilized():
     out = workflow_graph._node_coverage_analysis(
         {
@@ -1847,6 +1888,71 @@ def test_node_crash_triage_records_constraint_memory_after_repeat_threshold(tmp_
     assert entry.get("source_stage") == "crash-triage"
 
 
+def test_node_crash_triage_writes_vuln_candidate_for_upstream_bug(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_zip",
+                    "api": "parse_zip",
+                    "wrapper_fuzzer_name": "parse_zip_fuzz",
+                    "attack_hint": {
+                        "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                        "boundary_values": ["len=0xFFFFFFFF"],
+                    },
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_info.md").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 copy_entry_data\n",
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_triage.json").write_text(
+                json.dumps(
+                    {
+                        "label": "upstream_bug",
+                        "confidence": 0.82,
+                        "reason": "sanitizer trace reaches selected parser copy path",
+                        "evidence": ["ERROR: AddressSanitizer: heap-buffer-overflow", "#0 copy_entry_data"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "parse_zip_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-upstream-1",
+        }
+    )
+
+    assert out["crash_triage_label"] == "upstream_bug"
+    candidate = dict(out.get("latest_crash_vuln_candidate") or {})
+    assert candidate["validation_status"] == "likely_bug"
+    assert candidate["target_api"] == "parse_zip"
+    assert candidate["sanitizer"] == "AddressSanitizer"
+    assert candidate["crash_type"] == "heap-buffer-overflow"
+    assert candidate["attack_hint"]["boundary_values"] == ["len=0xFFFFFFFF"]
+    path = Path(str(out.get("vuln_candidates_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc["candidate_count"] == 1
+    assert doc["candidates"][0]["candidate_id"].startswith("crash_sigupstream")
+
+
 def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_path: Path):
     class _Patcher:
         def run_codex_command(self, *_args, **_kwargs):
@@ -1909,6 +2015,86 @@ def test_node_crash_analysis_records_constraint_memory_when_model_returns_false_
     entry = dict((doc.get("entries") or {}).get("sig-constraint-2") or {})
     assert entry.get("classification") == "false_positive"
     assert entry.get("source_stage") == "crash-analysis"
+
+
+def test_node_crash_analysis_writes_real_bug_vuln_candidate(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_zip",
+                    "api": "parse_zip",
+                    "wrapper_fuzzer_name": "parse_zip_fuzz",
+                    "attack_hint": {
+                        "trigger_condition": "declared length exceeds allocated output buffer",
+                        "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                        "boundary_values": ["len=0xFFFFFFFF"],
+                    },
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_info.md").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 copy_entry_data\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "re_run_report.md").write_text(
+        "re-run reproduced crash\nSUMMARY: AddressSanitizer: heap-buffer-overflow\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_triage.json").write_text(
+        json.dumps(
+            {
+                "label": "upstream_bug",
+                "confidence": 0.9,
+                "reason": "trace reaches parser copy path",
+                "evidence": ["#0 copy_entry_data"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "verdict": "real_bug",
+                        "reason": "re-run reproduces sanitizer crash in upstream copy path",
+                        "evidence": ["SUMMARY: AddressSanitizer: heap-buffer-overflow", "#0 copy_entry_data"],
+                        "recommended_action": "stop_report",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "parse_zip_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-real-1",
+            "re_run_ok": True,
+        }
+    )
+
+    assert out["crash_analysis_verdict"] == "real_bug"
+    candidate = dict(out.get("latest_crash_vuln_candidate") or {})
+    assert candidate["validation_status"] == "real_bug"
+    assert candidate["reproduction_status"] == "reproduced"
+    assert candidate["triage_label"] == "upstream_bug"
+    assert candidate["analysis_verdict"] == "real_bug"
+    assert candidate["sanitizer"] == "AddressSanitizer"
+    assert candidate["crash_type"] == "heap-buffer-overflow"
+    assert Path(str(out.get("crash_vuln_report_path") or "")).is_file()
 
 
 def test_constraint_memory_observation_has_m1_alias_fields(tmp_path: Path):

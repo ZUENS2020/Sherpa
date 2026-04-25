@@ -65,6 +65,25 @@ export const childStatusSchema = z.object({
   error: z.number().int().default(0),
 });
 
+export const vulnCandidateSchema = z
+  .object({
+    candidate_id: z.string().optional().default(''),
+    validation_status: z.string().optional().default(''),
+    classification: z.string().optional().default(''),
+    confidence: z.number().optional().default(0),
+    target_api: z.string().optional().default(''),
+    target_name: z.string().optional().default(''),
+    fuzzer: z.string().optional().default(''),
+    sanitizer: z.string().optional().default(''),
+    crash_type: z.string().optional().default(''),
+    triage_label: z.string().optional().default(''),
+    analysis_verdict: z.string().optional().default(''),
+    reproduction_status: z.string().optional().default(''),
+    reason: z.string().optional().default(''),
+  })
+  .passthrough()
+  .default({});
+
 export const taskSummarySchema = z.object({
   job_id: z.string(),
   status: z.string(),
@@ -77,6 +96,11 @@ export const taskSummarySchema = z.object({
   active_child_status: z.string().nullable().optional(),
   error: normalizedErrorSchema.optional(),
   result: z.string().nullable().optional(),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
 });
 
 export const taskListSchema = z.object({
@@ -90,6 +114,13 @@ export const childJobSchema = z.object({
   error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   log: z.string().optional().default(''),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+  vuln_candidates_path: z.string().optional().default(''),
+  crash_vuln_report_path: z.string().optional().default(''),
   updated_at: z.number().optional(),
   started_at: z.number().nullable().optional(),
   finished_at: z.number().nullable().optional(),
@@ -103,6 +134,13 @@ export const taskDetailSchema = z.object({
   result: z.any().optional(),
   children_status: childStatusSchema.optional(),
   children: z.array(childJobSchema).optional().default([]),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+  vuln_candidates_path: z.string().optional().default(''),
+  crash_vuln_report_path: z.string().optional().default(''),
 });
 
 export const systemSchema = z.object({
@@ -119,6 +157,22 @@ export const systemSchema = z.object({
     })
     .default({ total: 0, queued: 0, running: 0, success: 0, error: 0 }),
   active_jobs: z.array(z.any()).optional().default([]),
+  security: z
+    .object({
+      vuln_hunting_enabled: z.boolean().default(false),
+      security_priority_mode: z.boolean().default(false),
+      analysis_vuln_candidate_count: z.number().int().default(0),
+      crash_vuln_candidate_count: z.number().int().default(0),
+      latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+    })
+    .optional()
+    .default({
+      vuln_hunting_enabled: false,
+      security_priority_mode: false,
+      analysis_vuln_candidate_count: 0,
+      crash_vuln_candidate_count: 0,
+      latest_crash_vuln_candidate: {},
+    }),
   workers: z.object({ max: z.number().int().default(0) }).optional(),
 });
 

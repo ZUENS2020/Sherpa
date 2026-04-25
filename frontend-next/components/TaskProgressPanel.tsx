@@ -1,13 +1,30 @@
 'use client';
 
-import { Alert, Button, Card, CardContent, Chip, LinearProgress, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, Card, CardContent, Chip, LinearProgress, Stack, Typography } from '@mui/material';
 import type { TaskDetail } from '@/lib/api/schemas';
+
+type CrashVulnCandidate = {
+  validation_status?: string;
+  target_api?: string;
+  target_name?: string;
+  crash_type?: string;
+  classification?: string;
+  confidence?: number;
+};
 
 function statusColor(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
   if (status === 'success') return 'success';
   if (status === 'error') return 'error';
   if (status === 'running') return 'warning';
   if (status === 'queued') return 'info';
+  return 'default';
+}
+
+function vulnStatusColor(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
+  if (status === 'real_bug') return 'error';
+  if (status === 'likely_bug') return 'warning';
+  if (status === 'false_positive') return 'success';
+  if (status === 'inconclusive') return 'info';
   return 'default';
 }
 
@@ -36,13 +53,44 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
   const failFastReason = activeResult
     ? String(activeResult.fix_build_terminal_reason || '')
     : '';
+  const activeCandidate = ((
+    activeChild?.latest_crash_vuln_candidate && Object.keys(activeChild.latest_crash_vuln_candidate).length > 0
+      ? activeChild.latest_crash_vuln_candidate
+      : detail?.latest_crash_vuln_candidate
+  ) || {}) as CrashVulnCandidate;
+  const crashVulnCount = Number(activeChild?.crash_vuln_candidate_count || detail?.crash_vuln_candidate_count || 0);
+  const analysisVulnCount = Number(activeChild?.vuln_candidate_count || detail?.vuln_candidate_count || 0);
+  const vulnStatus = String(activeCandidate.validation_status || '');
+  const vulnTarget = String(activeCandidate.target_api || activeCandidate.target_name || '');
+  const vulnType = String(activeCandidate.crash_type || activeCandidate.classification || '');
+  const stageText = activeResult
+    ? String(activeResult.last_step || activeResult.coverage_improve_mode || activeResult.crash_analysis_verdict || '')
+    : '';
+  const coverageRound = activeResult
+    ? `${Number(activeResult.coverage_loop_round || 0)}/${Number(activeResult.coverage_loop_max_rounds || 0)}`
+    : '';
+  const targetApi = activeResult
+    ? String(activeResult.coverage_target_api || activeResult.selected_target_api || activeResult.synthesize_selected_target_api || '')
+    : '';
 
   return (
-    <Card variant="outlined">
+    <Card
+      variant="outlined"
+      sx={{
+        height: '100%',
+        background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(247,250,252,0.96))',
+        borderColor: 'rgba(15, 23, 42, 0.08)',
+      }}
+    >
       <CardContent>
-        <Stack spacing={1.5}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between">
-            <Typography variant="h6">任务进度</Typography>
+        <Stack spacing={2}>
+          <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" spacing={1}>
+            <Stack spacing={0.5}>
+              <Typography variant="h6">任务进度</Typography>
+              <Typography variant="body2" color="text.secondary">
+                跟踪当前主任务的阶段、修复节奏和漏洞候选状态。
+              </Typography>
+            </Stack>
             <Stack direction="row" spacing={1} alignItems="center">
               <Chip size="small" color={statusColor(detail?.status || 'unknown')} label={detail?.status || 'unknown'} />
               <Button
@@ -64,6 +112,48 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
           </Typography>
           <LinearProgress variant="determinate" value={percent} />
 
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' },
+              gap: 1.25,
+            }}
+          >
+            {[
+              ['阶段', stageText || 'n/a'],
+              ['Coverage', coverageRound || 'n/a'],
+              ['目标 API', targetApi || 'n/a'],
+              ['Fix Rounds', fixRounds || '0/0'],
+            ].map(([label, value]) => (
+              <Box
+                key={label}
+                sx={{
+                  p: 1.25,
+                  borderRadius: 2,
+                  border: '1px solid rgba(15, 23, 42, 0.08)',
+                  backgroundColor: 'rgba(248, 250, 252, 0.95)',
+                }}
+              >
+                <Typography variant="caption" color="text.secondary">{label}</Typography>
+                <Typography variant="body2" sx={{ mt: 0.5, wordBreak: 'break-word' }}>{value}</Typography>
+              </Box>
+            ))}
+          </Box>
+
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            <Chip
+              size="small"
+              variant="outlined"
+              color={detail?.vuln_hunting_enabled || activeChild?.vuln_hunting_enabled ? 'warning' : 'default'}
+              label={`漏洞导向：${detail?.vuln_hunting_enabled || activeChild?.vuln_hunting_enabled ? '开启' : '未开启'}`}
+            />
+            <Chip size="small" variant="outlined" label={`分析候选：${analysisVulnCount}`} />
+            <Chip size="small" variant="outlined" color={crashVulnCount > 0 ? 'warning' : 'default'} label={`Crash 候选：${crashVulnCount}`} />
+            {vulnStatus ? (
+              <Chip size="small" color={vulnStatusColor(vulnStatus)} label={vulnStatus} />
+            ) : null}
+          </Stack>
+
           <Typography variant="subtitle2">当前活跃子任务</Typography>
           {activeChild ? (
             <Stack spacing={1}>
@@ -83,6 +173,11 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
               {failFastReason ? (
                 <Alert severity="warning">
                   已触发 fail-fast：{failFastReason}
+                </Alert>
+              ) : null}
+              {vulnStatus ? (
+                <Alert severity={vulnStatus === 'real_bug' ? 'error' : 'warning'}>
+                  漏洞候选：{vulnTarget || 'unknown'} | {vulnType || 'unknown'} | confidence={Number(activeCandidate.confidence || 0).toFixed(2)}
                 </Alert>
               ) : null}
             </Stack>

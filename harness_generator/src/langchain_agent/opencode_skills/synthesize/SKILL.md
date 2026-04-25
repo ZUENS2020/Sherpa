@@ -18,6 +18,9 @@ Use this skill in the primary `synthesize` stage after `plan`.
 - `fuzz/targets.json`
 - `fuzz/execution_plan.json` (if present)
 - `fuzz/selected_targets.json` (if present)
+- `fuzz/analysis_context.json` (if present)
+  - consume `analysis_evidence.vuln_candidate_inventory[]` when available
+  - consume `attack_hint.trigger_condition`, `attack_hint.key_code_path`, `attack_hint.boundary_values`, `attack_hint.vuln_category`, `attack_hint.sanitizer_hint`
 - `fuzz/observed_target.json` (if present)
 - MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
   - code navigation: `list_definitions`, `read_definition`, `read_source`, `find_references`
@@ -36,6 +39,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
 ## Workflow
 1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
 2. Read planning artifacts and lock target alignment first.
+3. When vulnerability candidates exist, use the highest-priority `attack_hint` values to shape harness input flow and boundary-case seeds.
 3. Create harness source(s) before scaffold documentation (`harness-first contract`).
 4. Create build glue with runtime artifact discovery and compiler-by-suffix behavior.
 5. Create README/JSON strategy files with consistent selected/final target semantics.
@@ -105,6 +109,8 @@ Compiler-by-suffix rule:
 ## Constraints
 - Multi-target buildability is required when execution plan has multiple targets.
 - Do not leave stale or missing execution target mappings in `fuzz/harness_index.json`.
+- If `attack_hint.key_code_path` is present, prefer harness call flow that reaches those functions instead of generic wrapper paths.
+- If `attack_hint.boundary_values` is present, reflect them in corpus/bootstrap seed strategy and parser field choices.
 - LibFuzzer harness contract is mandatory:
   - do not define custom `main()` in harness source;
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
