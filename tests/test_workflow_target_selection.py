@@ -49,6 +49,46 @@ def test_sort_ranked_items_risk_first_prefers_vuln_metrics() -> None:
     assert sorted_rows[0]["target_name"] == "risk"
 
 
+def test_sort_ranked_items_risk_first_uses_priority_and_evidence_count() -> None:
+    rows = [
+        {
+            "target_name": "low-priority",
+            "api": "risk_api_a",
+            "priority": 0.61,
+            "vuln_likelihood": 0.82,
+            "exploitability": 0.75,
+            "reachability_confidence": 0.70,
+            "evidence_ids": ["EV1"],
+            "security_signals": ["mem_oob_candidate"],
+            "target_score": 5.9,
+            "depth_score": 6,
+            "runtime_viability": "native_high",
+            "api_surface_exception": {"used": True},
+        },
+        {
+            "target_name": "high-priority",
+            "api": "risk_api_b",
+            "priority": 0.93,
+            "vuln_likelihood": 0.82,
+            "exploitability": 0.75,
+            "reachability_confidence": 0.70,
+            "evidence_ids": ["EV1", "EV2", "EV3"],
+            "security_signals": ["mem_oob_candidate"],
+            "target_score": 5.9,
+            "depth_score": 6,
+            "runtime_viability": "native_high",
+            "api_surface_exception": {"used": True},
+        },
+    ]
+    sorted_rows = sel.sort_ranked_items(
+        rows,
+        security_priority_mode=True,
+        is_internal_api_symbol_fn=lambda _: False,
+        runtime_viability_rank_fn=lambda _: 3,
+    )
+    assert sorted_rows[0]["target_name"] == "high-priority"
+
+
 def test_assign_execution_priority_sets_rank_and_must_run() -> None:
     rows = [
         {"target_name": "a", "target_type": "generic"},

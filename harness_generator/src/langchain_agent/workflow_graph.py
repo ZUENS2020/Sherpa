@@ -287,6 +287,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_analysis_reason: str
     crash_analysis_report_path: str
     crash_analysis_json_path: str
+    vuln_candidates_path: str
+    crash_vuln_report_path: str
+    latest_crash_vuln_candidate: dict[str, Any]
+    crash_vuln_candidate_count: int
     re_build_done: bool
     re_build_ok: bool
     re_build_rc: int
@@ -1561,6 +1565,128 @@ def _top_security_signals(
     return [sig for sig, score in pairs if score >= th]
 
 
+def _signal_slug(signal_id: str) -> str:
+    raw = str(signal_id or "").strip().lower()
+    if not raw:
+        return "generic"
+    raw = re.sub(r"_candidate$", "", raw)
+    raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return raw or "generic"
+
+
+def _signal_vuln_category(signal_id: str) -> str:
+    mapping = {
+        "mem_oob_candidate": "heap-buffer-overflow",
+        "integer_overflow_candidate": "integer-overflow",
+        "format_string_candidate": "format-string",
+        "path_traversal_candidate": "path-traversal",
+        "command_injection_candidate": "command-injection",
+        "authz_bypass_candidate": "authorization-bypass",
+        "null_deref_candidate": "null-dereference",
+        "uaf_candidate": "use-after-free",
+    }
+    return mapping.get(str(signal_id or "").strip().lower(), "memory-corruption")
+
+
+def _signal_sanitizer_hint(signal_id: str) -> str:
+    mapping = {
+        "mem_oob_candidate": "address",
+        "integer_overflow_candidate": "undefined",
+        "format_string_candidate": "address",
+        "path_traversal_candidate": "address",
+        "command_injection_candidate": "address",
+        "authz_bypass_candidate": "address",
+        "null_deref_candidate": "address",
+        "uaf_candidate": "address",
+    }
+    return mapping.get(str(signal_id or "").strip().lower(), "address")
+
+
+def _attack_boundary_values(signal_id: str, *, target_type: str, api: str) -> list[str]:
+    signal = str(signal_id or "").strip().lower()
+    target_type_l = str(target_type or "").strip().lower()
+    api_l = str(api or "").strip().lower()
+
+    if signal == "mem_oob_candidate":
+        return ["len=0", "len=1", "len=4096", "offset=len-1", "offset=0xFFFFFFFF"]
+    if signal == "integer_overflow_candidate":
+        return ["count=0x7FFFFFFF", "count=0x80000000", "size=0xFFFFFFFF", "count*stride overflow"]
+    if signal == "format_string_candidate":
+        return ["fmt=%n", "fmt=%999999s", "fmt=%p%p%p", "fmt={{{{{"]
+    if signal == "path_traversal_candidate":
+        return ["path=../etc/passwd", "path=..\\\\windows\\\\win.ini", "path=/tmp/../../secret"]
+    if signal == "command_injection_candidate":
+        return ["arg=;id", "arg=$(id)", "arg=`id`", "arg=&&touch /tmp/pwned"]
+    if signal == "authz_bypass_candidate":
+        return ["role=admin", "token=''", "user_id=-1", "permission=wildcard"]
+    if signal == "null_deref_candidate":
+        return ["ptr=null", "count=0", "header_only=true", "optional_field_missing"]
+    if signal == "uaf_candidate":
+        return ["free_then_use", "double_close", "lifetime=end_before_use", "refcount=0"]
+
+    if target_type_l in {"parser", "decoder", "archive", "document"}:
+        return ["size=0", "size=1", "size=4096", "declared_len=0xFFFFFFFF"]
+    if "parse" in api_l or "decode" in api_l:
+        return ["input=''", "input='\\x00'", "input='A'*4096", "declared_len=actual_len+1"]
+    return ["size=0", "size=1", "size=4096", "count=0xFFFFFFFF"]
+
+
+def _candidate_attack_hint(
+    *,
+    api: str,
+    target_type: str,
+    signal_id: str,
+    source_path: str,
+    security_reason: str,
+) -> dict[str, Any]:
+    signal = str(signal_id or "").strip().lower()
+    api_text = str(api or "").strip() or "target_api"
+    source_text = str(source_path or "").strip()
+    vuln_category = _signal_vuln_category(signal)
+    key_code_path = [api_text]
+    if source_text:
+        source_stem = Path(source_text).stem.strip()
+        if source_stem and source_stem not in {api_text, api_text.split("::")[-1]}:
+            key_code_path.append(source_stem)
+    trigger_condition = {
+        "mem_oob_candidate": f"{api_text} uses attacker-influenced length or offset beyond allocated bounds",
+        "integer_overflow_candidate": f"{api_text} derives buffer or loop sizes from arithmetic that can overflow",
+        "format_string_candidate": f"{api_text} forwards attacker-controlled format content into formatter sinks",
+        "path_traversal_candidate": f"{api_text} consumes file paths without constraining traversal sequences",
+        "command_injection_candidate": f"{api_text} reaches shell or process execution with partially controlled input",
+        "authz_bypass_candidate": f"{api_text} evaluates authorization decisions with bypass-prone state combinations",
+        "null_deref_candidate": f"{api_text} dereferences optional or stateful pointers on malformed input",
+        "uaf_candidate": f"{api_text} may access released state after cleanup or ownership transfer",
+    }.get(signal, f"{api_text} exposes a high-risk path that warrants adversarial input exploration")
+    if security_reason:
+        trigger_condition = f"{trigger_condition}; evidence={security_reason}"
+    return {
+        "trigger_condition": trigger_condition,
+        "key_code_path": key_code_path,
+        "boundary_values": _attack_boundary_values(signal, target_type=target_type, api=api_text),
+        "vuln_category": vuln_category,
+        "sanitizer_hint": _signal_sanitizer_hint(signal),
+    }
+
+
+def _candidate_priority(
+    *,
+    vuln_likelihood: float,
+    exploitability: float,
+    reachability_confidence: float,
+    evidence_count: int,
+    signal_score: float,
+) -> float:
+    raw = (
+        0.50 * max(0.0, min(float(vuln_likelihood), 1.0))
+        + 0.24 * max(0.0, min(float(exploitability), 1.0))
+        + 0.18 * max(0.0, min(float(reachability_confidence), 1.0))
+        + 0.05 * max(0.0, min(float(signal_score), 1.0))
+        + 0.03 * min(max(int(evidence_count), 0), 5) / 5.0
+    )
+    return round(max(0.0, min(raw, 1.0)), 4)
+
+
 def _is_internal_api_symbol(api: str) -> bool:
     low = str(api or "").strip().lower()
     if not low:
@@ -1752,6 +1878,47 @@ def _load_security_evidence_list(
     return normalized, ""
 
 
+def _load_vuln_candidate_inventory(
+    repo_root: Path,
+    analysis_context_path: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Load vulnerability candidates from analysis_context using a strict list-only contract.
+
+    Contract:
+      analysis_context.json.analysis_evidence.vuln_candidate_inventory must be list[object].
+    """
+    path_text = str(analysis_context_path or "").strip()
+    if not path_text:
+        return [], ""
+    ctx_path = Path(path_text)
+    if not ctx_path.is_absolute():
+        ctx_path = repo_root / ctx_path
+    if not ctx_path.is_file():
+        return [], ""
+    try:
+        raw_doc = json.loads(ctx_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return [], f"vuln_candidate_inventory_load_error:{exc}"
+    if not isinstance(raw_doc, dict):
+        return [], "vuln_candidate_inventory_schema_invalid:analysis_context_not_object"
+    analysis_evidence = raw_doc.get("analysis_evidence")
+    if analysis_evidence is None:
+        return [], ""
+    if not isinstance(analysis_evidence, dict):
+        return [], "vuln_candidate_inventory_schema_invalid:analysis_evidence_not_object"
+    inventory = analysis_evidence.get("vuln_candidate_inventory")
+    if inventory is None:
+        return [], ""
+    if not isinstance(inventory, list):
+        return [], "vuln_candidate_inventory_schema_invalid:vuln_candidate_inventory_not_list"
+    normalized: list[dict[str, Any]] = []
+    for item in inventory:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+    return normalized, ""
+
+
 def _lookup_target_security_candidate(
     *,
     target_name: str,
@@ -1812,6 +1979,14 @@ def _build_selected_target_row(
         or item.get("security_priority_reason")
         or ""
     ).strip()
+    evidence_ids = list(
+        dict.fromkeys(
+            list(security_candidate.get("evidence_ids") or [])
+            or list(item.get("evidence_ids") or [])
+        )
+    )
+    evidence_refs = list(security_candidate.get("evidence") or item.get("evidence") or [])
+    signal_type = str(security_candidate.get("signal_type") or item.get("signal_type") or "").strip()
     try:
         vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
         exploitability = max(0.0, min(float(exploitability_raw), 1.0))
@@ -1830,6 +2005,19 @@ def _build_selected_target_row(
             runtime_viability=runtime_viability,
             security_scores=security_scores,
         )
+    if not signal_type:
+        top_signals = _top_security_signals(security_scores, threshold=0.0)
+        signal_type = top_signals[0] if top_signals else "mem_oob_candidate"
+    attack_hint = dict(security_candidate.get("attack_hint") or item.get("attack_hint") or {})
+    if not attack_hint:
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_type,
+            source_path=str(item.get("file") or security_candidate.get("file") or ""),
+            security_reason=security_reason,
+        )
+    signal_score = max(0.0, min(float(security_scores.get(signal_type) or 0.0), 1.0))
     scoring_source = {
         "api": api,
         "target_type": target_type,
@@ -1917,6 +2105,20 @@ def _build_selected_target_row(
         "vuln_likelihood": float(vuln_likelihood),
         "exploitability": float(exploitability),
         "reachability_confidence": float(reachability_confidence),
+        "signal_type": signal_type,
+        "signal_score": float(signal_score),
+        "priority": _candidate_priority(
+            vuln_likelihood=vuln_likelihood,
+            exploitability=exploitability,
+            reachability_confidence=reachability_confidence,
+            evidence_count=max(len(evidence_ids), len(evidence_refs)),
+            signal_score=signal_score,
+        ),
+        "evidence": list(evidence_refs),
+        "evidence_ids": evidence_ids,
+        "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
+        "validation_status": str(security_candidate.get("validation_status") or item.get("validation_status") or "pending"),
+        "attack_hint": attack_hint,
         "security_priority_reason": security_reason,
         "security_signals": _top_security_signals(security_scores),
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
@@ -2893,6 +3095,10 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "suggested_families": list(state.get("coverage_seed_families_suggested") or []),
         "covered_families": list(state.get("coverage_seed_families_covered") or []),
         "missing_suggested_families": list(state.get("coverage_seed_families_missing") or []),
+        "attack_hint_total_count": int(quality.get("attack_hint_total_count") or 0),
+        "attack_hint_covered_count": int(quality.get("attack_hint_covered_count") or 0),
+        "attack_hint_missing_values": list(quality.get("attack_hint_missing_values") or []),
+        "attack_hint_coverage_ratio": float(quality.get("attack_hint_coverage_ratio") or 1.0),
         "quality_flags": list(state.get("coverage_quality_flags") or quality.get("quality_flags") or []),
         "seed_score": float(quality.get("seed_score") or 0.0),
         "seed_score_components": dict(quality.get("seed_score_components") or {}),
@@ -2904,6 +3110,28 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "seed_generation_degraded": bool(state.get("coverage_seed_generation_degraded") or False),
         "corpus_sources": list(state.get("coverage_corpus_sources") or []),
     }
+
+
+def _coverage_attack_hint_feedback_lines(seed_feedback: dict[str, Any]) -> list[str]:
+    missing_values = [
+        str(x).strip()
+        for x in list(seed_feedback.get("attack_hint_missing_values") or [])
+        if str(x).strip()
+    ]
+    if not missing_values:
+        return []
+    ratio = float(seed_feedback.get("attack_hint_coverage_ratio") or 0.0)
+    return [
+        (
+            "- attack_hint_gap: missing boundary-oriented seeds for "
+            + ", ".join(missing_values[:6])
+            + (" ..." if len(missing_values) > 6 else "")
+        ),
+        (
+            "- attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values "
+            f"(coverage_ratio={ratio:.2f}) before broadening generic mutations."
+        ),
+    ]
 
 
 def _aggregate_seed_quality_from_run_details(
@@ -4540,6 +4768,7 @@ def _build_analysis_evidence_index(
     companion_doc: dict[str, Any],
 ) -> dict[str, Any]:
     evidence_counter = 0
+    candidate_counter = 0
     evidence_index: dict[str, dict[str, Any]] = {}
     security_evidence: list[dict[str, Any]] = []
     vuln_candidate_inventory: list[dict[str, Any]] = []
@@ -4549,6 +4778,11 @@ def _build_analysis_evidence_index(
         nonlocal evidence_counter
         evidence_counter += 1
         return f"EV{evidence_counter:04d}"
+
+    def _new_candidate_id(signal_id: str) -> str:
+        nonlocal candidate_counter
+        candidate_counter += 1
+        return f"{_signal_slug(signal_id)}_{candidate_counter:03d}"
 
     def _add_evidence(
         *,
@@ -4638,6 +4872,7 @@ def _build_analysis_evidence_index(
             security_evidence.append(
                 {
                     "evidence_id": sec_ev_id,
+                    "target_api": api,
                     "signal_id": signal_id,
                     "severity": "high" if signal_score >= 0.75 else ("medium" if signal_score >= 0.55 else "low"),
                     "confidence": round(signal_score, 4),
@@ -4646,16 +4881,44 @@ def _build_analysis_evidence_index(
                     "summary": f"`{api}` matched {signal_id} (score={signal_score:.2f})",
                 }
             )
+        primary_signal = security_signals[0] if security_signals else "mem_oob_candidate"
+        evidence_refs = [{"evidence_id": ref} for ref in list(dict.fromkeys(candidate_evidence_ids))]
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type or "generic",
+            signal_id=primary_signal,
+            source_path=file_hint,
+            security_reason=str(item.get("security_priority_reason") or ""),
+        )
+        vuln_likelihood = float(item.get("vuln_likelihood") or 0.0)
+        exploitability = float(item.get("exploitability") or 0.0)
+        reachability_confidence = float(item.get("reachability_confidence") or 0.0)
+        primary_signal_score = float(security_scores.get(primary_signal) or 0.0)
         vuln_candidate_inventory.append(
             {
-                "candidate_id": f"VC-{len(vuln_candidate_inventory) + 1:04d}",
+                "candidate_id": _new_candidate_id(primary_signal),
                 "api": api,
                 "name": str(item.get("name") or api),
                 "file": file_hint,
                 "target_type": target_type or "generic",
-                "vuln_likelihood": float(item.get("vuln_likelihood") or 0.0),
-                "exploitability": float(item.get("exploitability") or 0.0),
-                "reachability_confidence": float(item.get("reachability_confidence") or 0.0),
+                "target_api": api,
+                "target_file": file_hint,
+                "signal_type": primary_signal,
+                "signal_score": round(primary_signal_score, 4),
+                "evidence": evidence_refs,
+                "attack_hint": attack_hint,
+                "candidate_origin": "analysis_context",
+                "validation_status": "pending",
+                "vuln_likelihood": vuln_likelihood,
+                "exploitability": exploitability,
+                "reachability_confidence": reachability_confidence,
+                "priority": _candidate_priority(
+                    vuln_likelihood=vuln_likelihood,
+                    exploitability=exploitability,
+                    reachability_confidence=reachability_confidence,
+                    evidence_count=len(evidence_refs),
+                    signal_score=primary_signal_score,
+                ),
                 "evidence_ids": list(dict.fromkeys(candidate_evidence_ids)),
             }
         )
@@ -5530,6 +5793,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         feedback_lines: list[str] = ["Coverage feedback signals for planning:"]
         if quality_oracle:
             feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        feedback_lines.extend(_coverage_attack_hint_feedback_lines(seed_feedback))
         if seed_feedback:
             feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
         if harness_feedback:
@@ -6015,6 +6279,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             gen.repo_root,
             analysis_context_path,
         )
+        vuln_candidates, vuln_candidates_issue = _load_vuln_candidate_inventory(
+            gen.repo_root,
+            analysis_context_path,
+        )
         if security_issue:
             issue_text = str(security_issue or "").strip()
             if issue_text:
@@ -6023,6 +6291,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 elif issue_text not in prompt_render_issue:
                     prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
             _wf_log(cast(dict[str, Any], state), f"synthesize: security evidence degraded -> {security_issue}")
+        if vuln_candidates_issue:
+            issue_text = str(vuln_candidates_issue or "").strip()
+            if issue_text:
+                if not prompt_render_issue:
+                    prompt_render_issue = issue_text
+                elif issue_text not in prompt_render_issue:
+                    prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
+            _wf_log(cast(dict[str, Any], state), f"synthesize: vuln candidates degraded -> {vuln_candidates_issue}")
         high_conf: list[dict[str, Any]] = []
         for entry in security_evidence:
             try:
@@ -6031,11 +6307,53 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 confidence = 0.0
             if confidence >= 0.5:
                 high_conf.append(entry)
-        if high_conf:
+        high_priority_candidates: list[dict[str, Any]] = []
+        for candidate in vuln_candidates:
+            try:
+                priority = float(candidate.get("priority") or 0.0)
+            except Exception:
+                priority = 0.0
+            if priority <= 0.0:
+                continue
+            high_priority_candidates.append(dict(candidate))
+        high_priority_candidates.sort(
+            key=lambda item: (
+                -float(item.get("priority") or 0.0),
+                -float(item.get("vuln_likelihood") or 0.0),
+                str(item.get("candidate_id") or ""),
+            )
+        )
+        if high_conf or high_priority_candidates:
             vuln_hint_lines = [
                 "\n## Vulnerability-Directed Harness Guidance",
-                "Prioritize exercising these high-risk code paths:",
+                "Prioritize exercising these high-risk code paths and candidate triggers:",
             ]
+            for candidate in high_priority_candidates[:5]:
+                attack_hint = dict(candidate.get("attack_hint") or {})
+                candidate_id = str(candidate.get("candidate_id") or "candidate").strip() or "candidate"
+                target_api = str(candidate.get("target_api") or candidate.get("api") or "unknown_api").strip() or "unknown_api"
+                signal_type = str(candidate.get("signal_type") or "unknown_signal").strip() or "unknown_signal"
+                priority = float(candidate.get("priority") or 0.0)
+                key_code_path = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+                boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+                trigger_condition = str(attack_hint.get("trigger_condition") or "").strip()
+                vuln_category = str(attack_hint.get("vuln_category") or signal_type).strip() or signal_type
+                sanitizer_hint = str(attack_hint.get("sanitizer_hint") or "address").strip() or "address"
+                evidence_refs = [str(item.get("evidence_id") or "").strip() for item in list(candidate.get("evidence") or []) if str(item.get("evidence_id") or "").strip()]
+                location = str(candidate.get("target_file") or candidate.get("file") or "").strip()
+                vuln_hint_lines.append(
+                    f"- {candidate_id}: api={target_api}, signal={signal_type}, category={vuln_category}, priority={priority:.2f}"
+                    + (f" [{location}]" if location else "")
+                )
+                if trigger_condition:
+                    vuln_hint_lines.append(f"  trigger_condition: {trigger_condition}")
+                if key_code_path:
+                    vuln_hint_lines.append(f"  key_code_path: {' -> '.join(key_code_path[:6])}")
+                if boundary_values:
+                    vuln_hint_lines.append(f"  boundary_values: {', '.join(boundary_values[:6])}")
+                vuln_hint_lines.append(f"  sanitizer_hint: {sanitizer_hint}")
+                if evidence_refs:
+                    vuln_hint_lines.append(f"  evidence_refs: {', '.join(evidence_refs[:6])}")
             for entry in high_conf[:8]:
                 signal_id = str(entry.get("signal_id") or "unknown_signal").strip() or "unknown_signal"
                 summary = str(entry.get("summary") or "n/a").strip() or "n/a"
@@ -6049,8 +6367,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             vuln_hint_lines.extend(
                 [
                     "Design the harness to:",
-                    "- Feed attacker-controlled data through these paths",
-                    "- Exercise boundary conditions (max lengths, zero sizes, negative values)",
+                    "- Feed attacker-controlled data through the listed key_code_path sequences",
+                    "- Materialize the listed boundary_values in seed inputs and parser state",
+                    "- Prefer target-specific sanitizer guidance when choosing crash-oriented execution assumptions",
                     "- Test error handling paths (corrupt headers, truncated input, invalid checksums)",
                 ]
             )
@@ -6152,6 +6471,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         ]
         if quality_oracle:
             feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        feedback_lines.extend(_coverage_attack_hint_feedback_lines(seed_feedback))
         if seed_feedback:
             feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
         if harness_feedback:
@@ -10076,6 +10396,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "final_corpus_files": int(seed_quality.get("final_corpus_files") or 0),
                     "quality_flags": list(seed_quality.get("quality_flags") or []),
                     "missing_suggested_families": list(out.get("coverage_seed_families_missing") or []),
+                    "attack_hint_total_count": int(seed_quality.get("attack_hint_total_count") or 0),
+                    "attack_hint_covered_count": int(seed_quality.get("attack_hint_covered_count") or 0),
+                    "attack_hint_missing_values": list(seed_quality.get("attack_hint_missing_values") or []),
+                    "attack_hint_coverage_ratio": float(seed_quality.get("attack_hint_coverage_ratio") or 1.0),
                     "merge_retained_ratio_files": float(seed_quality.get("merge_retained_ratio_files") or 1.0),
                     "merge_retained_ratio_bytes": float(seed_quality.get("merge_retained_ratio_bytes") or 1.0),
                     "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
@@ -10322,6 +10646,18 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
         seed_generation_degraded = bool(state.get("coverage_seed_generation_degraded") or False)
         quality_score = float(seed_feedback.get("seed_score") or seed_quality.get("seed_score") or 0.0)
+        attack_hint_missing_values = list(
+            seed_feedback.get("attack_hint_missing_values")
+            if seed_feedback.get("attack_hint_missing_values") is not None
+            else seed_quality.get("attack_hint_missing_values")
+            or []
+        )
+        attack_hint_coverage_ratio = float(
+            seed_feedback.get("attack_hint_coverage_ratio")
+            if seed_feedback.get("attack_hint_coverage_ratio") is not None
+            else seed_quality.get("attack_hint_coverage_ratio")
+            or 1.0
+        )
         early_new_units_30s = int(
             seed_feedback.get("early_new_units_30s")
             if seed_feedback.get("early_new_units_30s") is not None
@@ -10432,10 +10768,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 reason += "; cold_start_failure=1"
             if seed_generation_degraded:
                 reason += "; seed_generation_degraded=1"
-            if merge_retained_low:
-                reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
-            if parallel_diagnosis_code != "balanced":
-                reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
+        if merge_retained_low:
+            reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
+        if attack_hint_missing_values:
+            reason += f"; attack_hint_missing_values={','.join(attack_hint_missing_values[:4])}"
+        if parallel_diagnosis_code != "balanced":
+            reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
             if coverage_bottleneck_kind != "none":
                 reason += f"; bottleneck={coverage_bottleneck_kind}:{coverage_bottleneck_reason}"
         elif round_budget_exhausted:
@@ -10480,6 +10818,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_suggested": seed_families_suggested,
                 "seed_families_covered": seed_families_covered,
                 "seed_families_missing": seed_families_missing,
+                "attack_hint_coverage_ratio": attack_hint_coverage_ratio,
+                "attack_hint_missing_values": attack_hint_missing_values,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
                 "coverage_bottleneck_kind": coverage_bottleneck_kind,
@@ -11054,6 +11394,186 @@ def _normalize_crash_analysis_verdict(raw: str) -> str:
         return "real_bug"
     return "unknown"
 
+
+def _crash_vuln_status(*, stage: str, classification: str) -> str:
+    stage_l = str(stage or "").strip().lower()
+    cls = str(classification or "").strip().lower()
+    if stage_l == "crash-analysis":
+        if cls == "real_bug":
+            return "real_bug"
+        if cls == "false_positive":
+            return "false_positive"
+        return "inconclusive"
+    if cls == "upstream_bug":
+        return "likely_bug"
+    if cls == "harness_bug":
+        return "false_positive"
+    return "inconclusive"
+
+
+def _crash_vuln_confidence(*, status: str, raw_confidence: float) -> float:
+    status_l = str(status or "").strip().lower()
+    base = max(0.0, min(float(raw_confidence or 0.0), 1.0))
+    floor_by_status = {
+        "real_bug": 0.80,
+        "likely_bug": 0.65,
+        "false_positive": 0.70,
+        "inconclusive": 0.35,
+    }
+    return max(base, float(floor_by_status.get(status_l, 0.35)))
+
+
+def _crash_vuln_sanitizer_signal(*texts: str) -> tuple[str, str]:
+    joined = "\n".join(str(t or "") for t in texts if str(t or "").strip())
+    m = re.search(
+        r"ERROR:\s*(Address|Undefined|Memory|Thread|Leak)Sanitizer:\s*([^\s]+)",
+        joined,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        sanitizer = f"{m.group(1)}Sanitizer"
+        crash_type = str(m.group(2) or "unknown").strip()
+        return sanitizer, crash_type
+    m = re.search(
+        r"SUMMARY:\s*(Address|Undefined|Memory|Thread|Leak)Sanitizer:\s*([^\s]+)",
+        joined,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        sanitizer = f"{m.group(1)}Sanitizer"
+        crash_type = str(m.group(2) or "unknown").strip()
+        return sanitizer, crash_type
+    return "", str("unknown")
+
+
+def _crash_vuln_selected_target(repo_root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    fuzzer = str(state.get("last_fuzzer") or "").strip()
+    selected = _load_selected_targets_doc(repo_root)
+    if fuzzer:
+        for item in selected:
+            if str(item.get("wrapper_fuzzer_name") or "").strip() == fuzzer:
+                return dict(item)
+            if str(item.get("target_name") or item.get("name") or "").strip() == fuzzer:
+                return dict(item)
+    return dict(selected[0]) if selected else {}
+
+
+def _write_crash_vuln_candidate(
+    repo_root: Path,
+    state: dict[str, Any],
+    *,
+    stage: str,
+    classification: str,
+    reason: str,
+    evidence: list[str],
+    confidence: float,
+    triage_label: str = "",
+    analysis_verdict: str = "",
+    info_text: str = "",
+    runtime_text: str = "",
+) -> dict[str, Any]:
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    path = fuzz_dir / "vuln_candidates.json"
+    report_path = repo_root / "crash_vuln_report.md"
+
+    selected_target = _crash_vuln_selected_target(repo_root, state)
+    attack_hint = dict(selected_target.get("attack_hint") or {})
+    sanitizer, crash_type = _crash_vuln_sanitizer_signal(
+        info_text,
+        runtime_text,
+        "\n".join(evidence),
+        str(state.get("crash_stack_type") or ""),
+    )
+    if not sanitizer and str(state.get("crash_stack_type") or "").strip():
+        crash_type = str(state.get("crash_stack_type") or "").strip()
+
+    signature = str(state.get("crash_signature") or state.get("crash_stack_signature") or "").strip()
+    signature_short = re.sub(r"[^A-Za-z0-9]+", "", signature)[:12] or "unknown"
+    status = _crash_vuln_status(stage=stage, classification=classification)
+    candidate = {
+        "candidate_id": f"crash_{signature_short}",
+        "source_stage": stage,
+        "validation_status": status,
+        "classification": classification,
+        "confidence": _crash_vuln_confidence(status=status, raw_confidence=confidence),
+        "reason": str(reason or "").strip(),
+        "evidence": [str(x).strip() for x in list(evidence or []) if str(x).strip()],
+        "target_api": str(
+            selected_target.get("target_api")
+            or selected_target.get("api")
+            or state.get("selected_target_api")
+            or state.get("coverage_target_api")
+            or ""
+        ).strip(),
+        "target_name": str(
+            selected_target.get("target_name")
+            or selected_target.get("name")
+            or state.get("coverage_target_name")
+            or ""
+        ).strip(),
+        "target_file": str(selected_target.get("target_file") or selected_target.get("file") or ""),
+        "fuzzer": str(state.get("last_fuzzer") or ""),
+        "artifact": str(state.get("last_crash_artifact") or ""),
+        "crash_signature": signature,
+        "sanitizer": sanitizer,
+        "crash_type": crash_type,
+        "triage_label": triage_label,
+        "analysis_verdict": analysis_verdict,
+        "reproduction_status": "reproduced" if bool(state.get("re_run_ok") or state.get("crash_repro_ok")) else "observed",
+        "attack_hint": attack_hint,
+        "created_at": int(time.time()),
+    }
+
+    doc: dict[str, Any] = {"schema_version": 1, "candidates": []}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(loaded, dict):
+                doc = loaded
+        except Exception:
+            doc = {"schema_version": 1, "candidates": []}
+    candidates = [dict(x) for x in list(doc.get("candidates") or []) if isinstance(x, dict)]
+    candidates = [x for x in candidates if str(x.get("candidate_id") or "") != candidate["candidate_id"]]
+    candidates.append(candidate)
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    report_lines = [
+        "# Crash Vulnerability Candidate Report",
+        "",
+        f"- candidate_id: {candidate['candidate_id']}",
+        f"- validation_status: {candidate['validation_status']}",
+        f"- classification: {candidate['classification']}",
+        f"- confidence: {float(candidate['confidence']):.2f}",
+        f"- target_api: {candidate['target_api'] or '(unknown)'}",
+        f"- fuzzer: {candidate['fuzzer'] or '(unknown)'}",
+        f"- sanitizer: {candidate['sanitizer'] or '(unknown)'}",
+        f"- crash_type: {candidate['crash_type'] or '(unknown)'}",
+        f"- crash_signature: {candidate['crash_signature'] or '(unknown)'}",
+        "",
+        "## Reason",
+        "",
+        candidate["reason"] or "(none)",
+        "",
+        "## Evidence",
+        "",
+    ]
+    report_lines.extend([f"- {line}" for line in candidate["evidence"]] or ["- (none)"])
+    report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    return {
+        "candidate": candidate,
+        "path": str(path),
+        "report_path": str(report_path),
+        "candidate_count": len(candidates),
+    }
+
+
 def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -11193,6 +11713,19 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         except Exception as exc:
             _wf_log(cast(dict[str, Any], state), f"crash-triage: constraint memory update skipped: {exc}")
 
+    crash_vuln = _write_crash_vuln_candidate(
+        repo_root,
+        cast(dict[str, Any], state),
+        stage="crash-triage",
+        classification=label,
+        confidence=float(confidence),
+        reason=reason,
+        evidence=signal_lines,
+        triage_label=label,
+        info_text=info_text,
+        runtime_text=re_run_text,
+    )
+
     out = {
         **state,
         "last_step": "crash-triage",
@@ -11251,6 +11784,10 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "constraint_memory_count": constraint_count,
         "constraint_memory_path": constraint_path,
         "crash_signature_dedup_hit": bool(int(state.get("same_crash_repeats") or 0) > 0),
+        "vuln_candidates_path": str(crash_vuln.get("path") or ""),
+        "crash_vuln_report_path": str(crash_vuln.get("report_path") or ""),
+        "latest_crash_vuln_candidate": dict(crash_vuln.get("candidate") or {}),
+        "crash_vuln_candidate_count": int(crash_vuln.get("candidate_count") or 0),
         "message": f"crash triage classified as {label}",
     }
     choose_repair_snapshot = {
@@ -11262,6 +11799,7 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "repair_origin_stage": str(out.get("repair_origin_stage") or ""),
         "repair_signature": str(out.get("repair_signature") or ""),
         "constraint_memory_count": int(constraint_count),
+        "vuln_candidate_status": str(dict(crash_vuln.get("candidate") or {}).get("validation_status") or ""),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
     out = _attach_prompt_render_status(out, issue=prompt_render_issue)
@@ -11430,6 +11968,19 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
     restart_reason = "crash_false_positive" if false_positive else ""
     restart_error = reason[:4096] if false_positive else ""
     now_ts = int(time.time())
+    crash_vuln = _write_crash_vuln_candidate(
+        repo_root,
+        cast(dict[str, Any], state),
+        stage="crash-analysis",
+        classification=verdict,
+        confidence=(0.8 if verdict in {"false_positive", "real_bug"} else 0.45),
+        reason=reason,
+        evidence=evidence,
+        triage_label=str(triage_doc.get("label") or state.get("crash_triage_label") or ""),
+        analysis_verdict=verdict,
+        info_text=info_text,
+        runtime_text=re_run_text,
+    )
     out = {
         **state,
         "last_step": "crash-analysis",
@@ -11483,6 +12034,10 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         "constraint_memory_count": constraint_count,
         "constraint_memory_path": constraint_path,
         "crash_signature_dedup_hit": bool(int(state.get("same_crash_repeats") or 0) > 0),
+        "vuln_candidates_path": str(crash_vuln.get("path") or ""),
+        "crash_vuln_report_path": str(crash_vuln.get("report_path") or ""),
+        "latest_crash_vuln_candidate": dict(crash_vuln.get("candidate") or {}),
+        "crash_vuln_candidate_count": int(crash_vuln.get("candidate_count") or 0),
         "message": "crash-analysis false_positive" if false_positive else "crash-analysis stop",
     }
     choose_repair_snapshot = {
@@ -11493,6 +12048,7 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         "repair_origin_stage": str(out.get("repair_origin_stage") or ""),
         "repair_signature": str(out.get("repair_signature") or ""),
         "constraint_memory_count": int(constraint_count),
+        "vuln_candidate_status": str(dict(crash_vuln.get("candidate") or {}).get("validation_status") or ""),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
     out = _attach_prompt_render_status(out, issue=prompt_render_issue)
@@ -12904,6 +13460,10 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "target_surface_policy": str(out.get("target_surface_policy") or ""),
         "security_priority_mode": bool(out.get("security_priority_mode") or False),
         "latest_vuln_decision_snapshot": dict(out.get("latest_vuln_decision_snapshot") or {}),
+        "vuln_candidates_path": str(out.get("vuln_candidates_path") or ""),
+        "crash_vuln_report_path": str(out.get("crash_vuln_report_path") or ""),
+        "latest_crash_vuln_candidate": dict(out.get("latest_crash_vuln_candidate") or {}),
+        "crash_vuln_candidate_count": int(out.get("crash_vuln_candidate_count") or 0),
         "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
         "target_score_breakdown_available": bool(out.get("target_score_breakdown_available") or False),
         "constraint_memory_count": int(out.get("constraint_memory_count") or 0),

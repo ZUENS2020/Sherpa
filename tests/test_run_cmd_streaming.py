@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -474,6 +475,106 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
 
 
+def test_pass_generate_seeds_injects_attack_hint_boundary_guidance(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"parse_zip","api":"parse_zip","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"signal_type":"mem_oob_candidate","evidence_ids":["EV-1","EV-2"],'
+            '"attack_hint":{"trigger_condition":"declared length exceeds allocated output buffer",'
+            '"key_code_path":["parse_zip","copy_entry_data","memcpy"],'
+            '"boundary_values":["len=0","len=4096","len=0xFFFFFFFF"],'
+            '"vuln_category":"heap-buffer-overflow","sanitizer_hint":"address"}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_zip_fuzz.cc"
+    harness.write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return parse_zip(0, 0); }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_zip_fuzz")
+
+    assert "Attack-hint guidance for seed design:" in captured["instructions"]
+    assert "trigger_condition: declared length exceeds allocated output buffer" in captured["instructions"]
+    assert "key_code_path: parse_zip -> copy_entry_data -> memcpy" in captured["instructions"]
+    assert "boundary_values: len=0, len=4096, len=0xFFFFFFFF" in captured["instructions"]
+    assert "sanitizer_hint: address" in captured["instructions"]
+    assert "evidence_ids: EV-1, EV-2" in captured["instructions"]
+    assert "ensure the corpus contains explicit seeds for those values" in captured["instructions"]
+
+
+def test_pass_generate_seeds_prioritizes_previous_attack_hint_gaps(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"parse_zip","api":"parse_zip","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"attack_hint":{"key_code_path":["parse_zip","copy_entry_data","memcpy"],'
+            '"boundary_values":["len=0","len=0xFFFFFFFF"]}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    (gen.fuzz_dir / "seed_feedback.json").write_text(
+        json.dumps(
+            {
+                "by_fuzzer": {
+                    "parse_zip_fuzz": {
+                        "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                        "attack_hint_coverage_ratio": 0.25,
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_zip_fuzz.cc"
+    harness.write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return parse_zip(0, 0); }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_zip_fuzz")
+
+    assert "Current attack-hint boundary coverage:" in captured["instructions"]
+    assert "missing=len=0, len=0xFFFFFFFF" in captured["instructions"]
+    assert "Attack-hint recovery directive (must follow):" in captured["instructions"]
+    assert "Previous run still missed these boundary-oriented values: len=0xFFFFFFFF." in captured["instructions"]
+    assert "Previous attack-hint coverage ratio was 0.25." in captured["instructions"]
+    assert "Keep the seed structure aligned with the selected target's `key_code_path`" in captured["instructions"]
+
+
 def test_pass_generate_seeds_passes_idle_timeout_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     gen = _fake_generator(tmp_path)
     gen.fuzz_dir = tmp_path / "fuzz"
@@ -906,6 +1007,54 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
     assert meta["seed_exploration_path"] == "fuzz/seed_exploration_yaml_parser_parse_fuzz.json"
     assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
     assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
+
+
+def test_pass_generate_seeds_records_attack_hint_in_bootstrap_meta(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"attack_hint":{"trigger_condition":"deep alias nesting expands parser state",'
+            '"key_code_path":["yaml_parser_parse","yaml_parse_node"],'
+            '"boundary_values":["anchors=32","aliases=64"],'
+            '"vuln_category":"stack-exhaustion","sanitizer_hint":"address"}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "sample.yaml").write_text("---\na: 1\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, _instructions: str, **_kwargs):
+            corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
+            (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
+            (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","suggested_families":["document_markers"],"missing_suggested_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                encoding="utf-8",
+            )
+            (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
+                encoding="utf-8",
+            )
+            return "seed-ok"
+
+    orig_which = fur.which
+    monkeypatch.setattr(fur, "which", lambda cmd: None if cmd == "radamsa" else orig_which(cmd))
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("yaml_parser_parse_fuzz")
+
+    meta = gen.last_seed_bootstrap_by_fuzzer["yaml_parser_parse_fuzz"]
+    assert meta["attack_hint"]["trigger_condition"] == "deep alias nesting expands parser state"
+    assert meta["attack_hint"]["boundary_values"] == ["anchors=32", "aliases=64"]
 
 
 def test_collect_repo_seed_examples_filters_source_files_for_generic_targets(tmp_path: Path):

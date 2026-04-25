@@ -198,6 +198,33 @@ def test_seed_quality_score_rewards_early_yield_signal():
     assert float(high.get("seed_score") or 0.0) > float(low.get("seed_score") or 0.0)
 
 
+def test_seed_quality_flags_attack_hint_boundary_values_missing():
+    log = "\n".join(
+        [
+            "#32 INITED cov: 2 ft: 4 corp: 2/32b exec/s: 0 rss: 12Mb",
+            "#64 pulse cov: 2 ft: 4 corp: 2/32b lim: 1000 exec/s: 100 rss: 12Mb",
+        ]
+    )
+    quality = _seed_quality_from_run(
+        log=log,
+        initial_corpus_files=2,
+        initial_corpus_bytes=32,
+        final_stats={"cov": 2, "ft": 4, "corpus_files": 2, "corpus_size_bytes": 32},
+        required_families=["flow_structures"],
+        covered_families=["flow_structures"],
+        repo_examples_count=1,
+        plateau_idle_seconds=60,
+        attack_hint_total_count=3,
+        attack_hint_covered_count=1,
+        attack_hint_missing_values=["len=4096", "len=0xFFFFFFFF"],
+    )
+    flags = set(quality["quality_flags"])
+    assert "attack_hint_boundary_values_missing" in flags
+    assert quality["attack_hint_total_count"] == 3
+    assert quality["attack_hint_covered_count"] == 1
+    assert quality["attack_hint_missing_values"] == ["len=4096", "len=0xFFFFFFFF"]
+
+
 def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:6789")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,.svc")

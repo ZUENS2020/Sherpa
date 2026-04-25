@@ -3,6 +3,12 @@
 import { Alert, Box, Card, CardContent, Chip, Stack, Typography } from '@mui/material';
 import type { SystemStatus } from '@/lib/api/schemas';
 
+type CrashVulnCandidate = {
+  validation_status?: string;
+  target_api?: string;
+  target_name?: string;
+};
+
 function fmtDuration(sec?: number): string {
   if (!Number.isFinite(sec) || (sec as number) < 0) return '--';
   const s = Math.floor(sec as number);
@@ -20,6 +26,10 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
   }
 
   const jobs = data?.jobs;
+  const security = data?.security;
+  const latestCandidate = (security?.latest_crash_vuln_candidate || {}) as CrashVulnCandidate;
+  const latestStatus = String(latestCandidate.validation_status || '');
+  const latestTarget = String(latestCandidate.target_api || latestCandidate.target_name || '');
 
   return (
     <Card variant="outlined">
@@ -40,6 +50,24 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
             <Typography variant="body2">运行中：{jobs?.running ?? 0}</Typography>
             <Typography variant="body2">成功：{jobs?.success ?? 0}</Typography>
             <Typography variant="body2">失败：{jobs?.error ?? 0}</Typography>
+          </Box>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+            <Chip
+              size="small"
+              variant="outlined"
+              color={security?.vuln_hunting_enabled ? 'warning' : 'default'}
+              label={`漏洞导向：${security?.vuln_hunting_enabled ? '开启' : '未开启'}`}
+            />
+            <Chip size="small" variant="outlined" label={`分析候选：${security?.analysis_vuln_candidate_count ?? 0}`} />
+            <Chip
+              size="small"
+              variant="outlined"
+              color={(security?.crash_vuln_candidate_count ?? 0) > 0 ? 'warning' : 'default'}
+              label={`Crash 候选：${security?.crash_vuln_candidate_count ?? 0}`}
+            />
+            {latestStatus ? (
+              <Chip size="small" color={latestStatus === 'real_bug' ? 'error' : 'warning'} label={`${latestStatus}${latestTarget ? ` | ${latestTarget}` : ''}`} />
+            ) : null}
           </Box>
           <Typography variant="caption" color="text.secondary">
             服务时间：{data?.server_time_iso || '--'} | Uptime：{fmtDuration(data?.uptime_sec)}

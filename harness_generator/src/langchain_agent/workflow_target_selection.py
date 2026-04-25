@@ -20,9 +20,11 @@ def sort_ranked_items(
                     and not bool((row.get("api_surface_exception") or {}).get("used"))
                 )
                 else 0,
+                -float(row.get("priority") or 0.0),
                 -float(row.get("vuln_likelihood") or 0.0),
                 -float(row.get("exploitability") or 0.0),
                 -float(row.get("reachability_confidence") or 0.0),
+                -len(list(row.get("evidence_ids") or [])),
                 -len(list(row.get("security_signals") or [])),
                 -float(row.get("target_score") or 0.0),
                 -int(row.get("depth_score") or 0),
@@ -34,6 +36,7 @@ def sort_ranked_items(
         rows.sort(
             key=lambda row: (
                 -float(row.get("target_score") or 0.0),
+                -float(row.get("priority") or 0.0),
                 -float(row.get("vuln_likelihood") or 0.0),
                 -float(row.get("exploitability") or 0.0),
                 -float(row.get("reachability_confidence") or 0.0),

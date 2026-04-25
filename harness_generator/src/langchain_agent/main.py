@@ -2227,6 +2227,10 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 vuln_hunting_enabled=bool(payload.get("vuln_hunting_enabled") or False),
                 security_priority_mode=bool(payload.get("security_priority_mode") or False),
                 latest_vuln_decision_snapshot=dict(payload.get("latest_vuln_decision_snapshot") or {}),
+                vuln_candidates_path=str(payload.get("vuln_candidates_path") or ""),
+                crash_vuln_report_path=str(payload.get("crash_vuln_report_path") or ""),
+                latest_crash_vuln_candidate=dict(payload.get("latest_crash_vuln_candidate") or {}),
+                crash_vuln_candidate_count=int(payload.get("crash_vuln_candidate_count") or 0),
                 target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
                 target_score_breakdown_available=bool(payload.get("target_score_breakdown_available") or False),
                 constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
@@ -3137,6 +3141,13 @@ def _system_status() -> dict:
     avg_coverage = (sum(coverage_values) / float(len(coverage_values))) if coverage_values else None
 
     running_fuzz = sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "running")
+    crash_vuln_candidates = sum(int(j.get("crash_vuln_candidate_count") or 0) for j in fuzz_jobs)
+    latest_crash_vuln_candidate: dict[str, object] = {}
+    for j in sorted(fuzz_jobs, key=lambda item: float(_safe_float(item.get("updated_at")) or 0.0), reverse=True):
+        candidate = j.get("latest_crash_vuln_candidate")
+        if isinstance(candidate, dict) and candidate:
+            latest_crash_vuln_candidate = dict(candidate)
+            break
 
     cgroup_ratio = _safe_float(memory.get("cgroup_usage_ratio"))
     cluster_load_pct = (max(0.0, min(100.0, cgroup_ratio * 100.0)) if cgroup_ratio is not None else None)
@@ -3272,6 +3283,13 @@ def _system_status() -> dict:
             "max": _MAX_WORKERS,
         },
         "active_jobs": active[:8],
+        "security": {
+            "vuln_hunting_enabled": any(bool(j.get("vuln_hunting_enabled")) for j in fuzz_jobs),
+            "security_priority_mode": any(bool(j.get("security_priority_mode")) for j in fuzz_jobs),
+            "analysis_vuln_candidate_count": sum(int(j.get("vuln_candidate_count") or 0) for j in fuzz_jobs),
+            "crash_vuln_candidate_count": int(crash_vuln_candidates),
+            "latest_crash_vuln_candidate": latest_crash_vuln_candidate,
+        },
         "logs": {
             "dir": str(log_dir),
             "exists": log_dir.exists(),
@@ -3934,6 +3952,10 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("vuln_hunting_enabled", False)
     view.setdefault("security_priority_mode", False)
     view.setdefault("latest_vuln_decision_snapshot", {})
+    view.setdefault("vuln_candidates_path", "")
+    view.setdefault("crash_vuln_report_path", "")
+    view.setdefault("latest_crash_vuln_candidate", {})
+    view.setdefault("crash_vuln_candidate_count", 0)
     view.setdefault("target_scoring_enabled", False)
     view.setdefault("target_score_breakdown_available", False)
     view.setdefault("constraint_memory_count", 0)
@@ -4174,6 +4196,10 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
                 "security_priority_mode": bool((active_child or job).get("security_priority_mode", False)),
                 "latest_vuln_decision_snapshot": dict((active_child or job).get("latest_vuln_decision_snapshot") or {}),
+                "vuln_candidates_path": str((active_child or job).get("vuln_candidates_path") or ""),
+                "crash_vuln_report_path": str((active_child or job).get("crash_vuln_report_path") or ""),
+                "latest_crash_vuln_candidate": dict((active_child or job).get("latest_crash_vuln_candidate") or {}),
+                "crash_vuln_candidate_count": int((active_child or job).get("crash_vuln_candidate_count", 0) or 0),
                 "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
                 "target_score_breakdown_available": bool((active_child or job).get("target_score_breakdown_available", False)),
                 "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
@@ -4686,6 +4712,10 @@ def _run_fuzz_job(
                 "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
                 "security_priority_mode": bool(res.get("security_priority_mode") or False),
                 "latest_vuln_decision_snapshot": dict(res.get("latest_vuln_decision_snapshot") or {}),
+                "vuln_candidates_path": str(res.get("vuln_candidates_path") or ""),
+                "crash_vuln_report_path": str(res.get("crash_vuln_report_path") or ""),
+                "latest_crash_vuln_candidate": dict(res.get("latest_crash_vuln_candidate") or {}),
+                "crash_vuln_candidate_count": int(res.get("crash_vuln_candidate_count") or 0),
                 "target_scoring_enabled": bool(res.get("target_scoring_enabled") or False),
                 "target_score_breakdown_available": bool(res.get("target_score_breakdown_available") or False),
                 "decision_trace_count": int(res.get("decision_trace_count") or 0),

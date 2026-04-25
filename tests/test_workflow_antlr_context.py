@@ -226,6 +226,19 @@ def test_node_analysis_writes_analysis_evidence_index(tmp_path: Path, monkeypatc
             continue
         for evidence_id in list(candidate.get("evidence_ids") or []):
             assert str(evidence_id) in indexed_ids
+        assert candidate.get("target_api")
+        assert candidate.get("target_file") is not None
+        assert candidate.get("signal_type")
+        assert isinstance(candidate.get("evidence"), list)
+        assert candidate.get("validation_status") == "pending"
+        assert isinstance(candidate.get("attack_hint"), dict)
+        hint = dict(candidate.get("attack_hint") or {})
+        assert str(hint.get("trigger_condition") or "").strip()
+        assert isinstance(hint.get("key_code_path"), list)
+        assert isinstance(hint.get("boundary_values"), list)
+        assert str(hint.get("vuln_category") or "").strip()
+        assert str(hint.get("sanitizer_hint") or "").strip()
+        assert float(candidate.get("priority") or 0.0) >= 0.0
     assert int(summary.get("security_evidence_count") or 0) >= 0
     assert int(summary.get("vuln_candidate_count") or 0) >= 0
     assert summary.get("security_mode") == "risk_first_v1"
@@ -263,7 +276,24 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
                             "line": 27,
                             "summary": "unchecked memcpy length from attacker-controlled field",
                         }
-                    ]
+                    ],
+                    "vuln_candidate_inventory": [
+                        {
+                            "candidate_id": "mem_oob_001",
+                            "target_api": "parse_zip",
+                            "target_file": "src/demo.c",
+                            "signal_type": "mem_oob_candidate",
+                            "priority": 0.91,
+                            "evidence": [{"evidence_id": "EV-0001"}],
+                            "attack_hint": {
+                                "trigger_condition": "declared length exceeds allocated output buffer",
+                                "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                                "boundary_values": ["len=0", "len=4096", "len=0xFFFFFFFF"],
+                                "vuln_category": "heap-buffer-overflow",
+                                "sanitizer_hint": "address",
+                            },
+                        }
+                    ],
                 }
             }
         )
@@ -319,6 +349,61 @@ def test_node_synthesize_injects_antlr_context_into_additional_context(tmp_path:
     assert "fuzz/selected_targets.json" in captured.get("additional_context", "")
     assert "Vulnerability-Directed Harness Guidance" in captured.get("prompt", "")
     assert "mem_oob_candidate" in captured.get("prompt", "")
+    assert "mem_oob_001" in captured.get("prompt", "")
+    assert "copy_entry_data -> memcpy" in captured.get("prompt", "")
+    assert "len=0xFFFFFFFF" in captured.get("prompt", "")
+    assert "sanitizer_hint: address" in captured.get("prompt", "")
+
+
+def test_node_synthesize_surfaces_attack_hint_gap_as_repair_directive(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"a","api":"a","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            captured["prompt"] = prompt
+            (fuzz_dir / "a_fuzz.cc").write_text(
+                "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long){return 0;}\n",
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build.py").write_text("print('ok')\n", encoding="utf-8")
+            (fuzz_dir / "README.md").write_text("# fuzz\n", encoding="utf-8")
+            (fuzz_dir / "repo_understanding.json").write_text(
+                '{"build_system":"cmake","candidate_library_inputs":["a"],"chosen_target_api":"a","chosen_target_reason":"runtime","rejected_targets":[],"extra_sources":[],"include_dirs":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","constraints":[],"evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            (fuzz_dir / "build_strategy.json").write_text(
+                '{"build_system":"cmake","build_mode":"library_link","library_targets":["demo"],"library_artifacts":[],"include_dirs":[],"extra_sources":[],"fuzzer_entry_strategy":"sanitizer_fuzzer","reason":"test","evidence":["repo"]}\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setenv("SHERPA_SYNTHESIZE_GRACE_SEC", "0")
+
+    out = workflow_graph._node_synthesize(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "coverage_quality_oracle": "quality_degraded",
+            "coverage_seed_feedback": {
+                "attack_hint_missing_values": ["len=0xFFFFFFFF", "count=65535"],
+                "attack_hint_coverage_ratio": 0.25,
+            },
+        }
+    )
+
+    assert out["last_error"] == ""
+    assert "attack_hint_gap: missing boundary-oriented seeds for len=0xFFFFFFFF, count=65535" in captured["prompt"]
+    assert "attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values (coverage_ratio=0.25)" in captured["prompt"]
 
 
 def test_node_synthesize_marks_degraded_when_security_evidence_schema_is_invalid(tmp_path: Path, monkeypatch):
@@ -760,3 +845,41 @@ def test_node_plan_marks_replan_ineffective_when_outputs_do_not_materially_chang
     assert out["coverage_replan_effective"] is False
     assert out["coverage_round_budget_exhausted"] is True
     assert out["coverage_stop_reason"] == "no_material_change"
+
+
+def test_node_plan_surfaces_attack_hint_gap_as_planning_directive(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            captured["prompt"] = prompt
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                '[{"name":"parse_yaml","api":"parse_yaml","lang":"c-cpp","target_type":"parser","seed_profile":"parser-structure"}]\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
+
+    out = workflow_graph._node_plan(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "coverage_quality_oracle": "quality_degraded",
+            "coverage_seed_feedback": {
+                "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                "attack_hint_coverage_ratio": 0.5,
+            },
+        }
+    )
+
+    assert out["last_error"] == ""
+    assert "attack_hint_gap: missing boundary-oriented seeds for len=0xFFFFFFFF" in captured["prompt"]
+    assert "attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values (coverage_ratio=0.50)" in captured["prompt"]

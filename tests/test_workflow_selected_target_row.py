@@ -42,4 +42,11 @@ def test_build_selected_target_row_keeps_contract_shape(tmp_path: Path) -> None:
     assert isinstance(row["security_signals"], list)
     assert isinstance(row["security_signal_scores"], dict)
     assert isinstance(row["api_surface_exception"], dict)
+    assert isinstance(row["attack_hint"], dict)
+    assert row["attack_hint"]["trigger_condition"]
+    assert isinstance(row["attack_hint"]["key_code_path"], list)
+    assert isinstance(row["attack_hint"]["boundary_values"], list)
+    assert row["signal_type"]
+    assert isinstance(row["evidence_ids"], list)
+    assert row["validation_status"] == "pending"
     assert row["target_score_breakdown_available"] is True

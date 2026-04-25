@@ -1126,6 +1126,9 @@ def _seed_quality_from_run(
     archive_min_valid_ratio: float = 0.60,
     archive_malformed_ratio: float = 0.0,
     archive_max_malformed_ratio: float = 0.30,
+    attack_hint_total_count: int = 0,
+    attack_hint_covered_count: int = 0,
+    attack_hint_missing_values: list[str] | None = None,
 ) -> Dict[str, object]:
     events = parse_libfuzzer_progress_events(log)
     inited_cov = 0
@@ -1214,6 +1217,14 @@ def _seed_quality_from_run(
             quality_flags.append("archive_seed_validity_low")
         if archive_malformed_ratio > archive_max_malformed_ratio:
             quality_flags.append("archive_seed_malformed_ratio_high")
+    attack_hint_missing = [str(x).strip() for x in list(attack_hint_missing_values or []) if str(x).strip()]
+    attack_hint_ratio = (
+        float(max(0, attack_hint_covered_count)) / float(max(1, attack_hint_total_count))
+        if attack_hint_total_count > 0
+        else 1.0
+    )
+    if attack_hint_total_count > 0 and attack_hint_missing:
+        quality_flags.append("attack_hint_boundary_values_missing")
 
     required_total = len([x for x in required_families if x])
     covered_required = len([x for x in required_families if x and x in set(covered_families)])
@@ -1306,6 +1317,10 @@ def _seed_quality_from_run(
         "archive_min_valid_ratio": archive_min_valid_ratio,
         "archive_malformed_ratio": archive_malformed_ratio,
         "archive_max_malformed_ratio": archive_max_malformed_ratio,
+        "attack_hint_total_count": int(max(0, attack_hint_total_count)),
+        "attack_hint_covered_count": int(max(0, attack_hint_covered_count)),
+        "attack_hint_missing_values": attack_hint_missing,
+        "attack_hint_coverage_ratio": float(max(0.0, min(1.0, attack_hint_ratio))),
         "seed_score": float(seed_score),
         "seed_score_components": {
             "alpha": alpha,
@@ -1317,6 +1332,7 @@ def _seed_quality_from_run(
             "novelty": float(novelty),
             "redundancy_penalty": float(redundancy_penalty),
             "family_coverage_ratio": float(family_coverage_ratio),
+            "attack_hint_coverage_ratio": float(max(0.0, min(1.0, attack_hint_ratio))),
         },
         "quality_flags": quality_flags,
     }
@@ -3408,6 +3424,105 @@ EOF
             + vuln_hint
         )
 
+    def _seed_attack_hint_guidance(self, selected_target: dict[str, object] | None) -> str:
+        target = dict(selected_target or {})
+        attack_hint = dict(target.get("attack_hint") or {})
+        if not attack_hint:
+            return ""
+        target_api = str(target.get("target_api") or target.get("api") or target.get("target_name") or "").strip()
+        signal_type = str(target.get("signal_type") or "").strip()
+        trigger_condition = str(attack_hint.get("trigger_condition") or "").strip()
+        key_code_path = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+        boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+        vuln_category = str(attack_hint.get("vuln_category") or signal_type or "").strip()
+        sanitizer_hint = str(attack_hint.get("sanitizer_hint") or "").strip()
+        evidence_ids = [str(x).strip() for x in list(target.get("evidence_ids") or []) if str(x).strip()]
+
+        lines = [
+            "Attack-hint guidance for seed design:",
+            f"- target_api: {target_api or '(unknown)'}",
+        ]
+        if signal_type:
+            lines.append(f"- signal_type: {signal_type}")
+        if vuln_category:
+            lines.append(f"- vuln_category: {vuln_category}")
+        if trigger_condition:
+            lines.append(f"- trigger_condition: {trigger_condition}")
+        if key_code_path:
+            lines.append(f"- key_code_path: {' -> '.join(key_code_path[:8])}")
+        if boundary_values:
+            lines.append(f"- boundary_values: {', '.join(boundary_values[:8])}")
+        if sanitizer_hint:
+            lines.append(f"- sanitizer_hint: {sanitizer_hint}")
+        if evidence_ids:
+            lines.append(f"- evidence_ids: {', '.join(evidence_ids[:8])}")
+        lines.extend(
+            [
+                "- Turn the listed boundary_values into concrete seed cases, not just comments.",
+                "- Prefer seed content that reaches the listed key_code_path instead of generic parser wrappers.",
+                "- Keep at least one seed aimed directly at the trigger_condition.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _attack_hint_seed_coverage(
+        self,
+        corpus_dir: Path,
+        selected_target: dict[str, object] | None,
+    ) -> dict[str, object]:
+        target = dict(selected_target or {})
+        attack_hint = dict(target.get("attack_hint") or {})
+        boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+        if not boundary_values:
+            return {
+                "target_api": str(target.get("target_api") or target.get("api") or ""),
+                "covered": [],
+                "missing": [],
+                "coverage_ratio": 1.0,
+                "total": 0,
+                "covered_count": 0,
+            }
+
+        corpus_texts: list[str] = []
+        if corpus_dir.is_dir():
+            for path in sorted(corpus_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                text_parts = [path.name.lower()]
+                try:
+                    data = path.read_bytes()[:512]
+                    text_parts.append(data.decode("utf-8", errors="ignore").lower())
+                    text_parts.append(data.hex().lower())
+                except Exception:
+                    pass
+                corpus_texts.append("\n".join(text_parts))
+        joined = "\n".join(corpus_texts)
+        covered: list[str] = []
+        missing: list[str] = []
+        for raw in boundary_values:
+            token = raw.lower()
+            if "=" in token:
+                _, rhs = token.split("=", 1)
+                candidates = [token, rhs.strip()]
+            else:
+                candidates = [token]
+            hit = any(candidate and candidate in joined for candidate in candidates)
+            if hit:
+                covered.append(raw)
+            else:
+                missing.append(raw)
+        total = len(boundary_values)
+        covered_count = len(covered)
+        ratio = float(covered_count) / float(max(1, total))
+        return {
+            "target_api": str(target.get("target_api") or target.get("api") or ""),
+            "covered": covered,
+            "missing": missing,
+            "coverage_ratio": float(max(0.0, min(1.0, ratio))),
+            "total": int(total),
+            "covered_count": int(covered_count),
+        }
+
     def _collect_repo_seed_examples(
         self,
         seed_profile: str,
@@ -4346,6 +4461,7 @@ EOF
             str(execution_target.get("api") or ""),
         )
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
+        attack_hint_guidance = self._seed_attack_hint_guidance(selected_target)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
         repo_seed_files, repo_meta = self._collect_repo_seed_examples(
             seed_profile,
@@ -4355,6 +4471,7 @@ EOF
         )
         sources = list(repo_meta.get("sources") or [])
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
+        attack_hint_coverage = self._attack_hint_seed_coverage(corpus_dir, selected_target)
         target_corpus_files = max(self._seed_corpus_min_per_target(), len(required_families) * 2)
         per_family_target = 2 if required_families else 1
         previous_seed_feedback = self._seed_feedback_for_fuzzer(fuzzer_name)
@@ -4366,6 +4483,14 @@ EOF
         previous_cold_start = bool(previous_seed_feedback.get("cold_start_failure") or False)
         previous_early_units_30 = int(previous_seed_feedback.get("early_new_units_30s") or 0)
         previous_missing_families = list(previous_seed_feedback.get("missing_suggested_families") or [])
+        previous_attack_hint_missing_values = [
+            str(x).strip()
+            for x in list(previous_seed_feedback.get("attack_hint_missing_values") or [])
+            if str(x).strip()
+        ]
+        previous_attack_hint_coverage_ratio = float(
+            previous_seed_feedback.get("attack_hint_coverage_ratio") or 1.0
+        )
         cold_start_recovery_directive = ""
         if previous_cold_start:
             cold_start_recovery_directive = textwrap.dedent(
@@ -4375,6 +4500,17 @@ EOF
                 - Prioritize semantically different, high-signal seeds over random variants.
                 - First fill missing suggested families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
                 - Do not finish until you add seeds that explicitly target those families and likely increase early coverage.
+                """
+            ).strip()
+        attack_hint_recovery_directive = ""
+        if previous_attack_hint_missing_values:
+            attack_hint_recovery_directive = textwrap.dedent(
+                f"""
+                Attack-hint recovery directive (must follow):
+                - Previous run still missed these boundary-oriented values: {", ".join(previous_attack_hint_missing_values)}.
+                - Previous attack-hint coverage ratio was {previous_attack_hint_coverage_ratio:.2f}.
+                - Add or refine format-valid seeds that explicitly encode those values before adding generic mutation variants.
+                - Keep the seed structure aligned with the selected target's `key_code_path` when representing those values.
                 """
             ).strip()
 
@@ -4400,9 +4536,15 @@ EOF
             - selected seed_profile from `fuzz/selected_targets.json`: {str(selected_target.get("seed_profile") or "(missing)") if selected_target else "(missing)"}
             - active seed_profile for this run: {seed_profile}
 
+            {attack_hint_guidance}
+
             Current seed family coverage:
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
             missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
+
+            Current attack-hint boundary coverage:
+            covered={", ".join(attack_hint_coverage.get("covered") or []) if attack_hint_coverage.get("covered") else "none"}
+            missing={", ".join(attack_hint_coverage.get("missing") or []) if attack_hint_coverage.get("missing") else "none"}
 
             Active seed filter mode:
             - `{_seed_filter_mode()}` (default soft; keep semantic diversity while still removing exact duplicates and oversized files)
@@ -4417,6 +4559,7 @@ EOF
             Previous run seed feedback (if available):
             {previous_seed_feedback_text}
             {cold_start_recovery_directive}
+            {attack_hint_recovery_directive}
 
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
@@ -4445,6 +4588,8 @@ EOF
             - Soft filtering keeps diverse seeds; do not assume near variants will always be removed.
             - If previous feedback shows cold-start failure, low merge retained ratio, or low early yield, prioritize semantically different high-signal seeds over random variants.
             - If previous feedback shows missing families, fill missing families first before adding more variants for already-covered families.
+            - If attack-hint guidance provides boundary_values, ensure the corpus contains explicit seeds for those values or their closest format-valid encodings.
+            - If attack-hint guidance provides key_code_path, bias seed structure toward that path even when other generic families are also available.
             - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
@@ -4479,6 +4624,7 @@ EOF
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+            "=== attack hint coverage ===\n" + json.dumps(attack_hint_coverage, ensure_ascii=False, indent=2),
             "=== previous seed feedback ===\n" + previous_seed_feedback_text,
         ]
         stdout = self.patcher.run_codex_command(
@@ -4630,6 +4776,7 @@ EOF
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
+            "attack_hint_coverage": dict(attack_hint_coverage),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
             "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
             "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
@@ -4682,9 +4829,11 @@ EOF
             "target_type": target_type,
             "selected_target": dict(selected_target),
             "observed_target": dict(observed_target),
+            "attack_hint": dict((selected_target or {}).get("attack_hint") or {}),
             "seed_families_suggested": required_families,
             "seed_families_optional": optional_families,
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "attack_hint_coverage": dict(attack_hint_coverage),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
@@ -5053,6 +5202,7 @@ EOF
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
         bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         family_coverage = dict(bootstrap.get("seed_family_coverage") or {})
+        attack_hint_coverage = dict(bootstrap.get("attack_hint_coverage") or {})
         required_families = list(bootstrap.get("seed_families_suggested") or [])
         covered_families = list(family_coverage.get("covered") or [])
 
@@ -5074,6 +5224,9 @@ EOF
         missing_families = [f for f in required_families if f and f not in set(covered_families)]
         if missing_families:
             issues.append(f"missing_suggested_families: {', '.join(missing_families)}")
+        missing_attack_hint_values = [str(x).strip() for x in list(attack_hint_coverage.get("missing") or []) if str(x).strip()]
+        if missing_attack_hint_values:
+            issues.append(f"attack_hint_boundary_values_missing: {', '.join(missing_attack_hint_values)}")
 
         # Check archive validity
         if seed_profile == "archive-container" and file_count > 0:
@@ -5096,6 +5249,7 @@ EOF
             "suggested_families": required_families,
             "covered_families": covered_families,
             "missing_suggested_families": missing_families,
+            "attack_hint_coverage": attack_hint_coverage,
             "issues": issues,
             "passed": len(issues) == 0,
         }
@@ -5387,6 +5541,7 @@ EOF
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
         seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
+        attack_hint_coverage = dict(seed_bootstrap.get("attack_hint_coverage") or {})
         required_families = list(seed_bootstrap.get("seed_families_suggested") or [])
         covered_families = list(seed_family_coverage.get("covered") or [])
 
@@ -5536,6 +5691,9 @@ EOF
             archive_max_malformed_ratio=float(
                 seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
             ),
+            attack_hint_total_count=int(attack_hint_coverage.get("total") or 0),
+            attack_hint_covered_count=int(attack_hint_coverage.get("covered_count") or 0),
+            attack_hint_missing_values=list(attack_hint_coverage.get("missing") or []),
         )
         if isinstance(seed_quality_data, dict):
             seed_quality_data["merge_retained_ratio_files"] = float(seed_bootstrap.get("merge_retained_ratio_files") or 1.0)
