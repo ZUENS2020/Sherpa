@@ -49,12 +49,12 @@ export default function HomePage() {
   };
 
   return (
-    <Box sx={{ maxWidth: 1600, mx: 'auto', px: 2.5, py: 2.5 }}>
-      <Stack spacing={2}>
-        <Stack>
+    <Box sx={{ maxWidth: 1720, mx: 'auto', px: { xs: 1.5, md: 3 }, py: { xs: 1.5, md: 2.5 } }}>
+      <Stack spacing={2.25}>
+        <Stack spacing={0.75}>
           <Typography variant="h4" fontWeight={700}>Sherpa 控制台</Typography>
           <Typography variant="body2" color="text.secondary">
-            重点视图：任务进度、子任务状态、日志与错误摘要。
+            面向运行中的 fuzz 任务。当前页优先展示阶段、候选、异常信号和详细日志。
           </Typography>
         </Stack>
 
@@ -63,8 +63,8 @@ export default function HomePage() {
           error={system.isError ? (system.error as Error).message : undefined}
         />
 
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
-          <Box sx={{ width: { xs: '100%', md: 360, lg: 420 }, flexShrink: 0 }}>
+        <Stack direction={{ xs: 'column', xl: 'row' }} spacing={2} alignItems="stretch">
+          <Box sx={{ width: { xs: '100%', xl: 380 }, flexShrink: 0 }}>
             <Stack spacing={2}>
               <ConfigPanel />
               <SessionPanel tasks={tasks.data || []} />
@@ -78,13 +78,20 @@ export default function HomePage() {
               {stopTask.isError ? (
                 <Alert severity="error">停止任务失败：{(stopTask.error as Error).message}</Alert>
               ) : null}
-              <TaskProgressPanel
-                detail={detail.data}
-                onStopTask={handleStopTask}
-                stopDisabled={!activeTaskId || !canStopTask}
-                stopLoading={stopTask.isPending}
-              />
-              <LogPanel detail={detail.data} />
+
+              <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems="stretch">
+                <Box sx={{ width: { xs: '100%', lg: 420 }, flexShrink: 0 }}>
+                  <TaskProgressPanel
+                    detail={detail.data}
+                    onStopTask={handleStopTask}
+                    stopDisabled={!activeTaskId || !canStopTask}
+                    stopLoading={stopTask.isPending}
+                  />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <LogPanel detail={detail.data} />
+                </Box>
+              </Stack>
             </Stack>
           </Box>
         </Stack>

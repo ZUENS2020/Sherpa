@@ -1,5 +1,10 @@
 :root {
   color-scheme: light;
+  --sherpa-bg: radial-gradient(circle at top left, rgba(191, 219, 254, 0.35), transparent 28%),
+    radial-gradient(circle at top right, rgba(253, 224, 71, 0.24), transparent 24%),
+    linear-gradient(180deg, #eef4fb 0%, #f8fafc 48%, #edf2f7 100%);
+  --sherpa-grid: rgba(15, 23, 42, 0.05);
+  --sherpa-text: #0f172a;
 }
 
 * {
@@ -14,5 +19,19 @@ body {
 }
 
 body {
-  background: #f5f7fb;
+  background: var(--sherpa-bg);
+  color: var(--sherpa-text);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--sherpa-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--sherpa-grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0));
 }

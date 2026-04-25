@@ -32,7 +32,13 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
   const latestTarget = String(latestCandidate.target_api || latestCandidate.target_name || '');
 
   return (
-    <Card variant="outlined">
+    <Card
+      variant="outlined"
+      sx={{
+        background: 'linear-gradient(135deg, rgba(255,255,255,0.98), rgba(238,244,252,0.96))',
+        borderColor: 'rgba(15, 23, 42, 0.08)',
+      }}
+    >
       <CardContent>
         <Stack spacing={1.5}>
           <Stack direction="row" justifyContent="space-between" alignItems="center">
@@ -69,6 +75,11 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
               <Chip size="small" color={latestStatus === 'real_bug' ? 'error' : 'warning'} label={`${latestStatus}${latestTarget ? ` | ${latestTarget}` : ''}`} />
             ) : null}
           </Box>
+          {latestStatus ? (
+            <Alert severity={latestStatus === 'real_bug' ? 'error' : 'warning'}>
+              最近的 crash 漏洞候选：{latestTarget || 'unknown'}
+            </Alert>
+          ) : null}
           <Typography variant="caption" color="text.secondary">
             服务时间：{data?.server_time_iso || '--'} | Uptime：{fmtDuration(data?.uptime_sec)}
           </Typography>
