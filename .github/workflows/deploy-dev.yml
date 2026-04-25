@@ -33,30 +33,44 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: dev
-
       - name: Resolve deploy target refs
         id: target_ref
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --prune origin dev
-          target_sha="$(git rev-parse origin/dev)"
-          git checkout --detach "${target_sha}"
-          checked_out_sha="$(git rev-parse HEAD)"
+          api_base="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          target_sha="$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${api_base}/branches/dev" | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"]["sha"])')"
+          checked_out_sha="${target_sha}"
           base_sha=""
-          if git rev-parse --verify "${target_sha}^" >/dev/null 2>&1; then
-            base_sha="$(git rev-parse "${target_sha}^")"
-          fi
           echo "target_branch=dev" >> "$GITHUB_OUTPUT"
           echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
           echo "checked_out_sha=${checked_out_sha}" >> "$GITHUB_OUTPUT"
           echo "::notice::target_branch=dev target_sha=${target_sha} checked_out_sha=${checked_out_sha} base_sha=${base_sha}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Materialize source tree
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target_ref.outputs.target_sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_dir="${GITHUB_WORKSPACE}"
+          tmp_tar="$(mktemp /tmp/sherpa-src-XXXXXX.tar.gz)"
+          find "${repo_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${TARGET_SHA}" \
+            -o "${tmp_tar}"
+          tar -xzf "${tmp_tar}" --strip-components=1 -C "${repo_dir}"
+          rm -f "${tmp_tar}"
+          test -f "${repo_dir}/.github/workflows/deploy-dev.yml"
 
       - name: Guard no GHCR push path
         shell: bash
@@ -547,45 +561,10 @@ jobs:
           FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
         run: |
           set -euo pipefail
-          web_changed=false
-          frontend_changed=false
-          change_detection_uncertain=false
-
-          if [[ "${FORCE_REBUILD_ALL}" == "true" ]]; then
-            web_changed=true
-            frontend_changed=true
-          else
-            changed_files=""
-            if [[ -n "${BASE_SHA}" && -n "${TARGET_SHA}" ]]; then
-              if ! changed_files="$(git diff --name-only "${BASE_SHA}" "${TARGET_SHA}")"; then
-                change_detection_uncertain=true
-                changed_files=""
-                echo "::warning::git diff ${BASE_SHA}..${TARGET_SHA} failed; falling back to safe rebuild."
-              fi
-            else
-              change_detection_uncertain=true
-              echo "::warning::No valid target/base commit baseline for change detection; falling back to safe rebuild."
-            fi
-
-            while IFS= read -r file; do
-              [[ -z "$file" ]] && continue
-              case "$file" in
-                docker/Dockerfile.web|docker/requirements.web.txt|harness_generator/*|k8s/*|scripts/*)
-                  web_changed=true
-                  ;;
-              esac
-              case "$file" in
-                docker/Dockerfile.frontend|frontend-next/*|sherpa-frontend/*)
-                  frontend_changed=true
-                  ;;
-              esac
-            done <<< "${changed_files}"
-
-            if [[ "${change_detection_uncertain}" == "true" ]]; then
-              web_changed=true
-              frontend_changed=true
-            fi
-          fi
+          web_changed=true
+          frontend_changed=true
+          change_detection_uncertain=true
+          echo "::notice::Skipping git-based change detection in deploy workflow; rebuilding web and frontend deterministically."
 
           # Dev reset reapplies manifests that default to :latest. If target sha-tag
           # image is absent on node, force rebuild to avoid silently rolling back UI/API.
