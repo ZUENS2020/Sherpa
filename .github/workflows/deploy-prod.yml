@@ -725,16 +725,6 @@ jobs:
                       name: cloudflared-proxy-config
           YAML
 
-      - name: Patch ingress host from secret
-        if: steps.kube_preflight.outputs.reachable == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          host="$(kubectl -n "${NAMESPACE}" get secret cloudflare-public-host -o jsonpath='{.data.host}' | base64 --decode)"
-          kubectl -n "${NAMESPACE}" patch ingress sherpa --type=json \
-            -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
-
-
       - name: Import web image into containerd
         if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted' && steps.rebuild_scope.outputs.web_changed == 'true'
         timeout-minutes: 30
@@ -793,6 +783,15 @@ jobs:
         run: |
           set -euo pipefail
           kubectl apply -k "${OVERLAY}"
+
+      - name: Patch ingress host from secret
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(kubectl -n "${NAMESPACE}" get secret cloudflare-public-host -o jsonpath='{.data.host}' | base64 --decode)"
+          kubectl -n "${NAMESPACE}" patch ingress sherpa --type=json \
+            -p="[{\"op\":\"replace\",\"path\":\"/spec/rules/0/host\",\"value\":\"${host}\"}]"
 
       - name: Pin images and worker image
         if: steps.kube_preflight.outputs.reachable == 'true'
