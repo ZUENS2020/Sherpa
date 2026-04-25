@@ -520,13 +520,6 @@ jobs:
             "${DEV_SHARED_ROOT}/tmp" \
             "${DEV_OUTPUT_DIR}"
 
-      - name: Deploy overlay
-        if: steps.kube_preflight.outputs.reachable == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl apply -k "${OVERLAY}"
-
       - name: Prepare local image refs
         if: steps.kube_preflight.outputs.reachable == 'true'
         id: prep
@@ -853,6 +846,13 @@ jobs:
           import_one "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
           rm -f "${FRONTEND_TAR}"
 
+      - name: Deploy overlay
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -k "${OVERLAY}"
+
       - name: Pin images and worker image
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
@@ -871,17 +871,10 @@ jobs:
             echo "::error::worker image patch mismatch expected=${WEB_IMAGE} actual=${patched_worker_image}"
             exit 1
           fi
-          if [[ "${WEB_CHANGED}" == "true" ]]; then
-            kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
-            echo "::notice::sherpa-web rollout requested image=${WEB_IMAGE}"
-          else
-            echo "::notice::Skip sherpa-web rollout (web_changed=false)"
-          fi
-          if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
-            kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
-          else
-            echo "::notice::Skip sherpa-frontend image pin (frontend_changed=false)"
-          fi
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
+          echo "::notice::sherpa-web rollout requested image=${WEB_IMAGE} (rebuilt=${WEB_CHANGED})"
+          echo "::notice::sherpa-frontend rollout requested image=${FRONTEND_IMAGE} (rebuilt=${FRONTEND_CHANGED})"
 
       - name: Wait for rollout
         if: steps.kube_preflight.outputs.reachable == 'true'
@@ -914,19 +907,26 @@ jobs:
         shell: bash
         env:
           WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
           WEB_CHANGED: ${{ steps.rebuild_scope.outputs.web_changed }}
         run: |
           set -euo pipefail
           worker_cfg_image="$(kubectl -n "${NAMESPACE}" get configmap sherpa-config -o jsonpath='{.data.SHERPA_K8S_WORKER_IMAGE}')"
           web_deploy_image="$(kubectl -n "${NAMESPACE}" get deployment sherpa-web -o jsonpath='{.spec.template.spec.containers[?(@.name=="web")].image}')"
+          frontend_deploy_image="$(kubectl -n "${NAMESPACE}" get deployment sherpa-frontend -o jsonpath='{.spec.template.spec.containers[?(@.name=="frontend")].image}')"
           echo "::notice::consistency worker_cfg_image=${worker_cfg_image}"
           echo "::notice::consistency web_deploy_image=${web_deploy_image}"
+          echo "::notice::consistency frontend_deploy_image=${frontend_deploy_image}"
           if [[ "${worker_cfg_image}" != "${WEB_IMAGE}" ]]; then
             echo "::error::worker configmap image mismatch expected=${WEB_IMAGE} actual=${worker_cfg_image}"
             exit 1
           fi
-          if [[ "${WEB_CHANGED}" == "true" && "${web_deploy_image}" != "${WEB_IMAGE}" ]]; then
+          if [[ "${web_deploy_image}" != "${WEB_IMAGE}" ]]; then
             echo "::error::web deployment image mismatch expected=${WEB_IMAGE} actual=${web_deploy_image}"
+            exit 1
+          fi
+          if [[ "${frontend_deploy_image}" != "${FRONTEND_IMAGE}" ]]; then
+            echo "::error::frontend deployment image mismatch expected=${FRONTEND_IMAGE} actual=${frontend_deploy_image}"
             exit 1
           fi
           latest_worker_pod="$(kubectl -n "${NAMESPACE}" get pods --sort-by=.metadata.creationTimestamp -o custom-columns=NAME:.metadata.name --no-headers | grep '^sherpa-fuzz-' | tail -n 1 || true)"
