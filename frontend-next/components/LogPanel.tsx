@@ -25,6 +25,7 @@ type SignalSection = {
   title: string;
   rows: Array<[string, string]>;
 };
+type SignalRow = [string, string];
 
 function statusTone(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
   if (status === 'success') return 'success';
@@ -40,6 +41,16 @@ function lineColor(level: 'info' | 'warn' | 'error'): string {
   return '#cbd5e1';
 }
 
+function hasSignalValue(row: SignalRow): boolean {
+  const [, value] = row;
+  return Boolean(value);
+}
+
+function hasVisibleSignalValue(row: SignalRow): boolean {
+  const [, value] = row;
+  return Boolean(value) && value !== '0/0' && value !== '0';
+}
+
 export function LogPanel({ detail }: { detail?: TaskDetail }) {
   const logFilter = useUiStore((s) => s.logFilter);
   const logKeyword = useUiStore((s) => s.logKeyword);
@@ -53,7 +64,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
   const [viewMode, setViewMode] = useState<'log' | 'signals'>('log');
   const deferredKeyword = useDeferredValue(logKeyword);
 
-  const children = detail?.children || [];
+  const children = useMemo(() => detail?.children ?? [], [detail?.children]);
   const activeChild =
     children.find((child) => child.status === 'running')
     || children.find((child) => child.status === 'error')
@@ -105,21 +116,21 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
         ['Fail-fast', String(selectedResult?.fix_build_terminal_reason || '')],
         ['Crash verdict', String(selectedResult?.crash_analysis_verdict || selectedResult?.crash_triage_label || '')],
         ['Vuln target', String(selectedChild?.latest_crash_vuln_candidate?.target_api || selectedChild?.latest_crash_vuln_candidate?.target_name || '')],
-      ].filter(([, value]) => value && value !== '0/0'),
+      ].filter(hasVisibleSignalValue),
     [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult],
   );
 
   const signalSections = useMemo<SignalSection[]>(() => {
-    const coverageRows: Array<[string, string]> = [
+    const coverageRows: SignalRow[] = [
       ['阶段', String(selectedResult?.last_step || detail?.status || 'unknown')],
       ['Coverage round', `${Number(selectedResult?.coverage_loop_round || 0)}/${Number(selectedResult?.coverage_loop_max_rounds || 0)}`],
       ['Plateau streak', String(selectedResult?.coverage_plateau_streak || 0)],
       ['Seed profile', String(selectedResult?.coverage_seed_profile || '')],
       ['Improve mode', String(selectedResult?.coverage_improve_mode || '')],
       ['Bottleneck', String(selectedResult?.coverage_bottleneck_kind || '')],
-    ].filter(([, value]) => value && value !== '0/0' && value !== '0');
+    ].filter(hasVisibleSignalValue);
 
-    const crashRows: Array<[string, string]> = [
+    const crashRows: SignalRow[] = [
       ['Crash triage', String(selectedResult?.crash_triage_label || '')],
       ['Crash verdict', String(selectedResult?.crash_analysis_verdict || '')],
       ['Crash reason', String(selectedResult?.crash_analysis_reason || selectedResult?.crash_triage_reason || '')],
@@ -127,25 +138,25 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Crash type', String(selectedChild?.latest_crash_vuln_candidate?.crash_type || '')],
       ['Sanitizer', String(selectedChild?.latest_crash_vuln_candidate?.sanitizer || '')],
       ['Target', String(selectedChild?.latest_crash_vuln_candidate?.target_api || selectedChild?.latest_crash_vuln_candidate?.target_name || '')],
-    ].filter(([, value]) => value);
+    ].filter(hasSignalValue);
 
-    const repairRows: Array<[string, string]> = [
+    const repairRows: SignalRow[] = [
       ['Fix rounds', `${Number(selectedResult?.fix_build_attempts || 0)}/${Number(selectedResult?.max_fix_rounds || 0)}`],
       ['Fail-fast', String(selectedResult?.fix_build_terminal_reason || '')],
       ['Error signature', String(selectedResult?.build_error_signature_after || selectedResult?.build_error_signature_before || '')],
       ['Repair mode', String(selectedResult?.repair_mode ? 'enabled' : '')],
       ['Repair origin', String(selectedResult?.repair_origin_stage || '')],
       ['Repair code', String(selectedResult?.repair_error_code || '')],
-    ].filter(([, value]) => value && value !== '0/0');
+    ].filter(hasVisibleSignalValue);
 
-    const securityRows: Array<[string, string]> = [
+    const securityRows: SignalRow[] = [
       ['漏洞导向', selectedChild?.vuln_hunting_enabled ? 'enabled' : 'disabled'],
       ['分析候选', String(selectedChild?.vuln_candidate_count || 0)],
       ['Crash 候选', String(selectedChild?.crash_vuln_candidate_count || 0)],
       ['候选路径', String(selectedChild?.vuln_candidates_path || '')],
       ['报告路径', String(selectedChild?.crash_vuln_report_path || '')],
       ['复现状态', String(selectedChild?.latest_crash_vuln_candidate?.reproduction_status || '')],
-    ].filter(([, value]) => value);
+    ].filter(hasSignalValue);
 
     return [
       { title: 'Coverage', rows: coverageRows },
