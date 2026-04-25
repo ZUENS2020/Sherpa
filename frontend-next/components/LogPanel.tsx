@@ -120,16 +120,17 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
   }, [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult]);
 
   const signalSections = useMemo<SignalSection[]>(() => {
-    const coverageRows: SignalRow[] = [
+    const coverageRowsSource: SignalRow[] = [
       ['阶段', String(selectedResult?.last_step || detail?.status || 'unknown')],
       ['Coverage round', `${Number(selectedResult?.coverage_loop_round || 0)}/${Number(selectedResult?.coverage_loop_max_rounds || 0)}`],
       ['Plateau streak', String(selectedResult?.coverage_plateau_streak || 0)],
       ['Seed profile', String(selectedResult?.coverage_seed_profile || '')],
       ['Improve mode', String(selectedResult?.coverage_improve_mode || '')],
       ['Bottleneck', String(selectedResult?.coverage_bottleneck_kind || '')],
-    ].filter(hasVisibleSignalValue);
+    ];
+    const coverageRows = coverageRowsSource.filter(hasVisibleSignalValue);
 
-    const crashRows: SignalRow[] = [
+    const crashRowsSource: SignalRow[] = [
       ['Crash triage', String(selectedResult?.crash_triage_label || '')],
       ['Crash verdict', String(selectedResult?.crash_analysis_verdict || '')],
       ['Crash reason', String(selectedResult?.crash_analysis_reason || selectedResult?.crash_triage_reason || '')],
@@ -137,25 +138,28 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Crash type', String(selectedChild?.latest_crash_vuln_candidate?.crash_type || '')],
       ['Sanitizer', String(selectedChild?.latest_crash_vuln_candidate?.sanitizer || '')],
       ['Target', String(selectedChild?.latest_crash_vuln_candidate?.target_api || selectedChild?.latest_crash_vuln_candidate?.target_name || '')],
-    ].filter(hasSignalValue);
+    ];
+    const crashRows = crashRowsSource.filter(hasSignalValue);
 
-    const repairRows: SignalRow[] = [
+    const repairRowsSource: SignalRow[] = [
       ['Fix rounds', `${Number(selectedResult?.fix_build_attempts || 0)}/${Number(selectedResult?.max_fix_rounds || 0)}`],
       ['Fail-fast', String(selectedResult?.fix_build_terminal_reason || '')],
       ['Error signature', String(selectedResult?.build_error_signature_after || selectedResult?.build_error_signature_before || '')],
       ['Repair mode', String(selectedResult?.repair_mode ? 'enabled' : '')],
       ['Repair origin', String(selectedResult?.repair_origin_stage || '')],
       ['Repair code', String(selectedResult?.repair_error_code || '')],
-    ].filter(hasVisibleSignalValue);
+    ];
+    const repairRows = repairRowsSource.filter(hasVisibleSignalValue);
 
-    const securityRows: SignalRow[] = [
+    const securityRowsSource: SignalRow[] = [
       ['漏洞导向', selectedChild?.vuln_hunting_enabled ? 'enabled' : 'disabled'],
       ['分析候选', String(selectedChild?.vuln_candidate_count || 0)],
       ['Crash 候选', String(selectedChild?.crash_vuln_candidate_count || 0)],
       ['候选路径', String(selectedChild?.vuln_candidates_path || '')],
       ['报告路径', String(selectedChild?.crash_vuln_report_path || '')],
       ['复现状态', String(selectedChild?.latest_crash_vuln_candidate?.reproduction_status || '')],
-    ].filter(hasSignalValue);
+    ];
+    const securityRows = securityRowsSource.filter(hasSignalValue);
 
     return [
       { title: 'Coverage', rows: coverageRows },
