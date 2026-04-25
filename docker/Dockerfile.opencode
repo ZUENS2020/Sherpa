@@ -14,6 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Use CN mirrors by default (override with build args if needed).
 ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian"
 ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
+ARG NPM_REGISTRY_CANDIDATES="https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm https://registry.npmjs.org"
 
 # Best-effort: rewrite Debian apt sources to CN mirrors.
 RUN set -e; \
@@ -38,8 +39,8 @@ RUN apt-get update \
 RUN groupadd -g 10001 opencode \
     && useradd -m -d /home/opencode -u 10001 -g 10001 -s /bin/bash opencode
 
+ARG NPM_REGISTRY_CANDIDATES
 RUN set -eux; \
-    npm config set registry "$NPM_CONFIG_REGISTRY"; \
     npm config set fetch-retries "$NPM_CONFIG_FETCH_RETRIES"; \
     npm config set fetch-retry-factor "$NPM_CONFIG_FETCH_RETRY_FACTOR"; \
     npm config set fetch-retry-mintimeout "$NPM_CONFIG_FETCH_RETRY_MINTIMEOUT"; \
@@ -51,19 +52,24 @@ RUN set -eux; \
       arm64|aarch64) opencode_pkg="opencode-linux-arm64" ;; \
       *) echo "Unsupported architecture for OpenCode: $arch" >&2; exit 1 ;; \
     esac; \
+    selected=""; \
     tarball_url=""; \
-    for attempt in 1 2 3; do \
-      echo "[npm] resolving ${opencode_pkg} tarball (attempt $attempt/3)"; \
-      tarball_url="$(npm --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball --json | tr -d '\"' | tail -n 1)"; \
-      if [ -n "$tarball_url" ]; then \
+    for r in $NPM_REGISTRY_CANDIDATES; do \
+      echo "[npm] resolving ${opencode_pkg} via registry: $r"; \
+      candidate="$(npm --registry "$r" --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball 2>/dev/null | tail -n 1 | tr -d '\"')"; \
+      if [ -n "$candidate" ]; then \
+        selected="$r"; \
+        tarball_url="$candidate"; \
+        echo "[npm] selected registry: $selected"; \
         break; \
       fi; \
-      sleep $((attempt * 2)); \
+      echo "[npm] registry $r missing $opencode_pkg, trying next"; \
     done; \
     if [ -z "$tarball_url" ]; then \
-      echo "[npm] failed to resolve tarball for $opencode_pkg"; \
+      echo "[npm] failed to resolve tarball for $opencode_pkg from any candidate registry"; \
       exit 1; \
     fi; \
+    npm config set registry "$selected"; \
     tmp_dir="$(mktemp -d)"; \
     curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
       -fsSL "$tarball_url" -o "${tmp_dir}/opencode.tgz"; \

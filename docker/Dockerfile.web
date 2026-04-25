@@ -183,20 +183,6 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
         fi \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
-            selected=""; \
-            for r in $NPM_REGISTRY_CANDIDATES; do \
-              echo "[npm] probing registry: $r"; \
-              if npm --fetch-timeout=12000 --loglevel=error --registry "$r" view lodash version >/dev/null 2>&1; then \
-                selected="$r"; \
-                echo "[npm] selected registry: $selected"; \
-                break; \
-              fi; \
-            done; \
-            if [ -z "$selected" ]; then \
-              selected="$NPM_CONFIG_REGISTRY"; \
-              echo "[npm] probe failed; fallback registry: $selected"; \
-            fi; \
-            npm config set registry "$selected"; \
             npm config set fetch-retries 5; \
             npm config set fetch-retry-factor 2; \
             npm config set fetch-retry-mintimeout 2000; \
@@ -208,19 +194,24 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
               arm64|aarch64) opencode_pkg="opencode-linux-arm64" ;; \
               *) echo "Unsupported architecture for OpenCode: $arch" >&2; exit 1 ;; \
             esac; \
+            selected=""; \
             tarball_url=""; \
-            for attempt in 1 2 3; do \
-              echo "[npm] resolving ${opencode_pkg} tarball (attempt $attempt/3)"; \
-              tarball_url="$(npm --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball --json | tr -d '\"' | tail -n 1)"; \
-              if [ -n "$tarball_url" ]; then \
+            for r in $NPM_REGISTRY_CANDIDATES; do \
+              echo "[npm] resolving ${opencode_pkg} via registry: $r"; \
+              candidate="$(npm --registry "$r" --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball 2>/dev/null | tail -n 1 | tr -d '\"')"; \
+              if [ -n "$candidate" ]; then \
+                selected="$r"; \
+                tarball_url="$candidate"; \
+                echo "[npm] selected registry: $selected"; \
                 break; \
               fi; \
-              sleep $((attempt * 2)); \
+              echo "[npm] registry $r missing $opencode_pkg, trying next"; \
             done; \
             if [ -z "$tarball_url" ]; then \
-              echo "[npm] failed to resolve tarball for $opencode_pkg"; \
+              echo "[npm] failed to resolve tarball for $opencode_pkg from any candidate registry"; \
               exit 1; \
             fi; \
+            npm config set registry "$selected"; \
             tmp_dir="$(mktemp -d)"; \
             curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
               -fsSL "$tarball_url" -o "${tmp_dir}/opencode.tgz"; \
