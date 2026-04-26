@@ -3152,6 +3152,8 @@ def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[
         frontier_score = float(item.get("frontier_score") or 0.0)
         unique_frontier_functions = int(item.get("unique_frontier_functions") or 0)
         nearby_uncovered_regions = int(item.get("nearby_uncovered_regions") or 0)
+        target_relevance_count = int(item.get("target_relevance_count") or 0)
+        closest_target_distance = int(item.get("closest_target_distance") or 0)
         funcs = [
             str(x).strip()
             for x in list(item.get("covered_functions_sample") or [])
@@ -3160,7 +3162,8 @@ def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[
         line = (
             f"  * {rel}: functions={fn_count}, regions={region_count}, "
             f"frontier_score={frontier_score:.3f}, frontier_functions={unique_frontier_functions}, "
-            f"uncovered_regions_nearby={nearby_uncovered_regions}"
+            f"uncovered_regions_nearby={nearby_uncovered_regions}, "
+            f"target_relevance={target_relevance_count}, target_distance={closest_target_distance}"
         )
         if funcs:
             line += f", sample={', '.join(funcs[:4])}"
@@ -3199,7 +3202,8 @@ def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[
                 for x in list(item.get("input_relpaths") or [])
                 if str(x).strip()
             ]
-            lines.append(f"    - {name}: inputs={len(refs)} [{', '.join(refs[:3])}]")
+            best_distance = int(item.get("best_distance_to_target") or 0)
+            lines.append(f"    - {name}: inputs={len(refs)} [{', '.join(refs[:3])}], best_target_distance={best_distance}")
     pending = int(frontier_summary.get("pending_input_count") or 0)
     failed = int(frontier_summary.get("failed_input_count") or 0)
     if pending > 0 or failed > 0:
@@ -10765,6 +10769,12 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
             repo_root=gen.repo_root,
             fuzzer_name=fuzzer_name,
             replay_binary=replay_binary,
+            target_api=str(
+                state.get("coverage_target_api")
+                or state.get("selected_target_api")
+                or state.get("synthesize_selected_target_api")
+                or ""
+            ).strip(),
         )
         out = {
             **state,

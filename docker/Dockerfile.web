@@ -196,25 +196,34 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             esac; \
             selected=""; \
             tarball_url=""; \
+            tmp_dir="$(mktemp -d)"; \
+            download_ok=""; \
             for r in $NPM_REGISTRY_CANDIDATES; do \
               echo "[npm] resolving ${opencode_pkg} via registry: $r"; \
               candidate="$(npm --registry "$r" --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball 2>/dev/null | tail -n 1 | tr -d '\"')"; \
-              if [ -n "$candidate" ]; then \
+              if [ -z "$candidate" ]; then \
+                echo "[npm] registry $r missing $opencode_pkg, trying next"; \
+                continue; \
+              fi; \
+              echo "[npm] trying download from registry: $r"; \
+              rm -f "${tmp_dir}/opencode.tgz"; \
+              if curl --retry 8 --retry-delay 3 --retry-all-errors --retry-max-time 1800 \
+                --connect-timeout 20 --max-time 900 --speed-time 90 --speed-limit 32768 \
+                -fL "$candidate" -o "${tmp_dir}/opencode.tgz"; then \
                 selected="$r"; \
                 tarball_url="$candidate"; \
+                download_ok="1"; \
                 echo "[npm] selected registry: $selected"; \
                 break; \
               fi; \
-              echo "[npm] registry $r missing $opencode_pkg, trying next"; \
+              echo "[npm] download failed from $r, trying next"; \
             done; \
-            if [ -z "$tarball_url" ]; then \
-              echo "[npm] failed to resolve tarball for $opencode_pkg from any candidate registry"; \
+            if [ -z "$download_ok" ]; then \
+              echo "[npm] failed to download tarball for $opencode_pkg from any candidate registry"; \
+              rm -rf "${tmp_dir}"; \
               exit 1; \
             fi; \
             npm config set registry "$selected"; \
-            tmp_dir="$(mktemp -d)"; \
-            curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 \
-              -fsSL "$tarball_url" -o "${tmp_dir}/opencode.tgz"; \
             tar -xzf "${tmp_dir}/opencode.tgz" -C "${tmp_dir}"; \
             install -m 0755 "${tmp_dir}/package/bin/opencode" /usr/local/bin/opencode; \
             rm -rf "${tmp_dir}"; \

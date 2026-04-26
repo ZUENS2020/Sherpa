@@ -1291,6 +1291,8 @@ def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse
                     "frontier_score": 4.25,
                     "unique_frontier_functions": 2,
                     "nearby_uncovered_regions": 6,
+                    "target_relevance_count": 1,
+                    "closest_target_distance": 0,
                     "covered_functions_sample": ["png_handle_iCCP"],
                     "frontier_functions": [
                         {
@@ -1299,6 +1301,8 @@ def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse
                             "line": 1843,
                             "uncovered_regions_nearby": 6,
                             "region_coverage_ratio": 0.33,
+                            "distance_to_target": 0,
+                            "target_signal": 2,
                         }
                     ],
                 }
@@ -1307,6 +1311,7 @@ def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse
                 {
                     "name": "png_handle_iCCP",
                     "input_relpaths": ["fuzz/corpus/demo_fuzz/frontier.bin"],
+                    "best_distance_to_target": 0,
                 }
             ],
             "pending_input_count": 1,
@@ -1315,8 +1320,10 @@ def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse
     )
     joined = "\n".join(lines)
     assert "frontier_score=4.250" in joined
+    assert "target_relevance=1, target_distance=0" in joined
     assert "png_handle_iCCP (src/pngrutil.c:1843)" in joined
     assert "per_input_frontier_inverse_index" in joined
+    assert "best_target_distance=0" in joined
     assert "pending=1, failed=0" in joined
 
 

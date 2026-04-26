@@ -34,6 +34,8 @@ type FrontierInput = {
   exec_time_us?: number;
   unique_frontier_functions?: number;
   nearby_uncovered_regions?: number;
+  target_relevance_count?: number;
+  closest_target_distance?: number;
   frontier_score?: number;
   covered_functions_sample?: string[];
   frontier_functions?: Array<{
@@ -42,6 +44,8 @@ type FrontierInput = {
     line?: number;
     uncovered_regions_nearby?: number;
     region_coverage_ratio?: number;
+    distance_to_target?: number;
+    target_signal?: number;
   }>;
   rationale?: string;
   repo_file_count?: number;
@@ -50,6 +54,7 @@ type FrontierFunction = {
   name?: string;
   input_count?: number;
   input_relpaths?: string[];
+  best_distance_to_target?: number;
 };
 type FrontierSummary = NonNullable<TaskDetail['fuzz_coverage_frontier_summary']>;
 
@@ -507,6 +512,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                               <Chip size="small" variant="outlined" label={`fn ${Number(input.covered_function_count || 0)}`} />
                               <Chip size="small" variant="outlined" label={`regions ${Number(input.covered_region_count || 0)}`} />
                               <Chip size="small" variant="outlined" label={`frontier ${Number(input.unique_frontier_functions || 0)}/${Number(input.nearby_uncovered_regions || 0)}`} />
+                              <Chip size="small" variant="outlined" label={`target ${Number(input.target_relevance_count || 0)}/${Number(input.closest_target_distance || 0)}`} />
                               <Chip size="small" variant="outlined" label={`score ${Number(input.frontier_score || 0).toFixed(2)}`} />
                               <Chip size="small" variant="outlined" label={`files ${Number(input.repo_file_count || 0)}`} />
                             </Stack>
@@ -514,7 +520,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                               <Stack spacing={0.35} sx={{ mt: 0.75 }}>
                                 {input.frontier_functions.slice(0, 3).map((fn, fnIndex) => (
                                   <Typography key={`${input.input_relpath || 'input'}-fn-${fnIndex}`} variant="caption" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
-                                    {`${fn.name || 'unknown'} (${fn.file || 'n/a'}:${Number(fn.line || 0)}) · uncovered=${Number(fn.uncovered_regions_nearby || 0)} · ratio=${Number(fn.region_coverage_ratio || 0).toFixed(2)}`}
+                                    {`${fn.name || 'unknown'} (${fn.file || 'n/a'}:${Number(fn.line || 0)}) · uncovered=${Number(fn.uncovered_regions_nearby || 0)} · ratio=${Number(fn.region_coverage_ratio || 0).toFixed(2)} · target=${Number(fn.target_signal || 0)}/${Number(fn.distance_to_target || 0)}`}
                                   </Typography>
                                 ))}
                               </Stack>
@@ -552,7 +558,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                               {fn.name || `function-${index + 1}`}
                             </Typography>
                             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
-                              {`${Number(fn.input_count || 0)} inputs`}
+                              {`${Number(fn.input_count || 0)} inputs · dist=${Number(fn.best_distance_to_target || 0)}`}
                               {Array.isArray(fn.input_relpaths) && fn.input_relpaths.length ? ` · ${fn.input_relpaths.join(' · ')}` : ''}
                             </Typography>
                           </Box>

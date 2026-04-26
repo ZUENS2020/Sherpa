@@ -92,6 +92,8 @@ export const frontierInputSchema = z.object({
   exec_time_us: z.number().int().optional().default(0),
   unique_frontier_functions: z.number().int().optional().default(0),
   nearby_uncovered_regions: z.number().int().optional().default(0),
+  target_relevance_count: z.number().int().optional().default(0),
+  closest_target_distance: z.number().int().optional().default(0),
   frontier_score: z.number().optional().default(0),
   covered_functions_sample: z.array(z.string()).optional().default([]),
   frontier_functions: z.array(z.object({
@@ -102,6 +104,8 @@ export const frontierInputSchema = z.object({
     total_region_count: z.number().int().optional().default(0),
     uncovered_regions_nearby: z.number().int().optional().default(0),
     region_coverage_ratio: z.number().optional().default(0),
+    distance_to_target: z.number().int().optional().default(0),
+    target_signal: z.number().int().optional().default(0),
   })).optional().default([]),
   rationale: z.string().optional().default(''),
   repo_file_count: z.number().int().optional().default(0),
@@ -111,6 +115,7 @@ export const frontierFunctionSchema = z.object({
   name: z.string().optional().default(''),
   input_count: z.number().int().optional().default(0),
   input_relpaths: z.array(z.string()).optional().default([]),
+  best_distance_to_target: z.number().int().optional().default(0),
 });
 
 export const frontierSummarySchema = z.object({

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -56,6 +57,11 @@ def _frontier_weights() -> dict[str, float]:
         except Exception:
             pass
     return weights
+
+
+def _tokenize_identifier(text: str) -> set[str]:
+    parts = [part.strip().lower() for part in re.split(r"[^A-Za-z0-9]+", text or "") if part.strip()]
+    return {part for part in parts if len(part) >= 3}
 
 
 @dataclass
@@ -127,6 +133,57 @@ def _repo_source_file(path: str, repo_root: Path) -> bool:
 def _load_json_doc(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return dict(doc) if isinstance(doc, dict) else {}
+    except Exception:
+        return {}
+
+
+def _frontier_focus(repo_root: Path, target_api: str = "") -> dict[str, Any]:
+    focus: dict[str, Any] = {
+        "target_api": str(target_api or "").strip(),
+        "target_tokens": set(_tokenize_identifier(target_api)),
+        "focus_function_names": set(),
+        "focus_tokens": set(_tokenize_identifier(target_api)),
+    }
+    analysis_path = repo_root / "fuzz" / "analysis_context.json"
+    doc = _load_json_doc(analysis_path)
+    analysis_evidence = dict(doc.get("analysis_evidence") or {})
+    candidates = list(analysis_evidence.get("vuln_candidate_inventory") or [])
+    callgraph_summary = list(analysis_evidence.get("callgraph_summary") or [])
+
+    target_api_lower = str(target_api or "").strip().lower()
+    for item in candidates[:80]:
+        if not isinstance(item, dict):
+            continue
+        item_target_api = str(item.get("target_api") or item.get("api") or "").strip()
+        if target_api_lower and item_target_api.lower() != target_api_lower:
+            continue
+        focus["focus_function_names"].add(item_target_api)
+        attack_hint = dict(item.get("attack_hint") or {})
+        for step in list(attack_hint.get("key_code_path") or []):
+            step_text = str(step or "").strip()
+            if not step_text:
+                continue
+            focus["focus_function_names"].add(step_text)
+            focus["focus_tokens"].update(_tokenize_identifier(step_text))
+
+    for item in callgraph_summary[:80]:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("edge") or "").strip()
+        if target_api_lower and target_api_lower not in summary.lower():
+            continue
+        focus["focus_tokens"].update(_tokenize_identifier(summary))
+
+    focus["focus_function_names"] = {
+        str(name).strip()
+        for name in set(focus["focus_function_names"])
+        if str(name).strip()
+    }
+    focus["focus_tokens"] = {str(token).strip().lower() for token in set(focus["focus_tokens"]) if str(token).strip()}
+    return focus
     try:
         doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return dict(doc) if isinstance(doc, dict) else {}
@@ -207,7 +264,7 @@ def _region_line(region: Any) -> int:
     return 0
 
 
-def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[str, Any]:
+def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path, *, focus: dict[str, Any] | None = None) -> dict[str, Any]:
     covered_functions: list[str] = []
     uncovered_functions: list[str] = []
     covered_region_count = 0
@@ -215,6 +272,19 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[s
     repo_files_seen: set[str] = set()
     frontier_functions: list[dict[str, Any]] = []
     partial_threshold = _frontier_partial_threshold()
+    focus = dict(focus or {})
+    target_api = str(focus.get("target_api") or "").strip()
+    target_api_lower = target_api.lower()
+    focus_names = {
+        str(name).strip()
+        for name in set(focus.get("focus_function_names") or set())
+        if str(name).strip()
+    }
+    focus_tokens = {
+        str(token).strip().lower()
+        for token in set(focus.get("focus_tokens") or set())
+        if str(token).strip()
+    }
 
     for unit in list(export_doc.get("data") or []):
         file_map: dict[str, bool] = {}
@@ -258,6 +328,18 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[s
             covered_fn_regions = max(0, total_fn_regions - uncovered_fn_regions)
             ratio = float(covered_fn_regions) / float(total_fn_regions) if total_fn_regions > 0 else 1.0
             if count > 0 and total_fn_regions > 0 and ratio < partial_threshold and uncovered_fn_regions > 0:
+                joined_text = " ".join([name, *(allowed_files or filenames)]).lower()
+                target_signal = 0
+                if target_api_lower and target_api_lower in joined_text:
+                    target_signal += 2
+                token_hits = sum(1 for token in focus_tokens if token and token in joined_text)
+                target_signal += token_hits
+                if name in focus_names:
+                    distance_to_target = 0
+                elif target_signal > 0:
+                    distance_to_target = 1
+                else:
+                    distance_to_target = 2
                 frontier_functions.append(
                     {
                         "name": name,
@@ -267,6 +349,8 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[s
                         "total_region_count": total_fn_regions,
                         "uncovered_regions_nearby": uncovered_fn_regions,
                         "region_coverage_ratio": round(ratio, 4),
+                        "distance_to_target": int(distance_to_target),
+                        "target_signal": int(target_signal),
                     }
                 )
 
@@ -274,12 +358,16 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[s
     uncovered_functions = sorted(set(uncovered_functions))
     frontier_functions.sort(
         key=lambda item: (
+            int(item.get("distance_to_target") or 99),
+            -int(item.get("target_signal") or 0),
             -int(item.get("uncovered_regions_nearby") or 0),
             float(item.get("region_coverage_ratio") or 1.0),
             str(item.get("name") or ""),
         )
     )
     nearby_uncovered_regions = sum(int(item.get("uncovered_regions_nearby") or 0) for item in frontier_functions)
+    closest_target_distance = min((int(item.get("distance_to_target") or 99) for item in frontier_functions), default=99)
+    target_relevance_count = sum(1 for item in frontier_functions if int(item.get("target_signal") or 0) > 0)
     return {
         "covered_function_count": len(covered_functions),
         "covered_region_count": int(covered_region_count),
@@ -290,6 +378,8 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path) -> dict[s
         "frontier_functions": frontier_functions[:8],
         "unique_frontier_functions": len(frontier_functions),
         "nearby_uncovered_regions": int(nearby_uncovered_regions),
+        "closest_target_distance": int(closest_target_distance if closest_target_distance != 99 else 0),
+        "target_relevance_count": int(target_relevance_count),
     }
 
 
@@ -302,6 +392,7 @@ def _export_input_coverage(
     llvm_profdata: str,
     llvm_cov: str,
     timeout_sec: int,
+    focus: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile_pattern = work_dir / "profile-%p.profraw"
     for stale in work_dir.glob("profile-*.profraw"):
@@ -371,7 +462,7 @@ def _export_input_coverage(
             "exit_code": int(run_proc.returncode or 0),
         }
 
-    summary = _summarize_export_doc(export_doc, repo_root)
+    summary = _summarize_export_doc(export_doc, repo_root, focus=focus)
     return {
         "replay_status": "ok",
         "replay_error": "",
@@ -389,6 +480,7 @@ def _build_frontier_summary(
     binary_hash: str,
     pending_inputs: int,
     failed_inputs: int,
+    focus: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     ok_inputs = [
         dict(item)
@@ -401,6 +493,8 @@ def _build_frontier_summary(
         return (
             float(weights["alpha"]) * float(item.get("unique_frontier_functions") or 0)
             + float(weights["beta"]) * float(item.get("nearby_uncovered_regions") or 0)
+            + 0.75 * float(item.get("target_relevance_count") or 0)
+            - 0.5 * float(item.get("closest_target_distance") or 0)
             - float(weights["delta"]) * float(item.get("exec_time_us") or 0)
             - float(weights["epsilon"]) * float(item.get("size_bytes") or 0)
         )
@@ -436,12 +530,15 @@ def _build_frontier_summary(
                 "exec_time_us": int(item.get("exec_time_us") or 0),
                 "unique_frontier_functions": int(item.get("unique_frontier_functions") or 0),
                 "nearby_uncovered_regions": int(item.get("nearby_uncovered_regions") or 0),
+                "target_relevance_count": int(item.get("target_relevance_count") or 0),
+                "closest_target_distance": int(item.get("closest_target_distance") or 0),
                 "frontier_score": float(item.get("frontier_score") or 0.0),
                 "covered_functions_sample": fn_sample[:8],
                 "frontier_functions": list(item.get("frontier_functions") or [])[:5],
                 "rationale": (
                     f"partial frontier via {int(item.get('unique_frontier_functions') or 0)} functions"
                     f" with {int(item.get('nearby_uncovered_regions') or 0)} uncovered regions nearby"
+                    f"; target_relevance={int(item.get('target_relevance_count') or 0)}"
                 ),
                 "repo_file_count": int(item.get("repo_file_count") or 0),
             }
@@ -452,6 +549,15 @@ def _build_frontier_summary(
             "name": name,
             "input_count": len(input_relpaths),
             "input_relpaths": input_relpaths[:4],
+            "best_distance_to_target": min(
+                (
+                    int(fn.get("distance_to_target") or 99)
+                    for item in ok_inputs
+                    for fn in list(item.get("frontier_functions") or [])
+                    if isinstance(fn, dict) and str(fn.get("name") or "") == name
+                ),
+                default=99,
+            ),
         }
         for name, input_relpaths in sorted(
             function_to_inputs.items(),
@@ -497,6 +603,7 @@ def collect_per_input_frontier(
     repo_root: Path,
     fuzzer_name: str,
     replay_binary: Path,
+    target_api: str = "",
 ) -> CoverageReplayResult:
     started = time.perf_counter()
     coverage_dir = repo_root / "fuzz" / "coverage" / "per_input" / fuzzer_name
@@ -556,6 +663,7 @@ def collect_per_input_frontier(
         )
 
     binary_hash = _hash_file(replay_binary, "sha256")
+    focus = _frontier_focus(repo_root, target_api=target_api)
     previous_manifest = _load_json_doc(manifest_path)
     previous_inputs = {
         str(item.get("input_relpath") or ""): dict(item)
@@ -619,6 +727,7 @@ def collect_per_input_frontier(
                 llvm_profdata=llvm_profdata,
                 llvm_cov=llvm_cov,
                 timeout_sec=timeout_sec,
+                focus=focus,
             )
         except subprocess.TimeoutExpired:
             replay_doc = {
@@ -663,6 +772,7 @@ def collect_per_input_frontier(
         binary_hash=binary_hash,
         pending_inputs=pending_inputs,
         failed_inputs=failed_inputs,
+        focus=focus,
     )
     manifest_doc = {
         "version": _MANIFEST_VERSION,
