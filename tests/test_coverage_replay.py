@@ -75,6 +75,38 @@ def test_summarize_export_doc_extracts_frontier_functions(tmp_path: Path) -> Non
     assert summary["frontier_functions"][0]["uncovered_regions_nearby"] == 2
 
 
+def test_frontier_focus_uses_analysis_context_for_target_relevance(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "analysis_context.json").write_text(
+        json.dumps(
+            {
+                "analysis_evidence": {
+                    "vuln_candidate_inventory": [
+                        {
+                            "target_api": "parse_zip",
+                            "attack_hint": {
+                                "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                            },
+                        }
+                    ],
+                    "callgraph_summary": [
+                        {"summary": "entry -> parse_zip -> copy_entry_data"},
+                    ],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    focus = coverage_replay._frontier_focus(repo_root, "parse_zip")
+    assert "parse_zip" in focus["focus_function_names"]
+    assert "copy_entry_data" in focus["focus_function_names"]
+    assert "parse" in focus["focus_tokens"] or "parse_zip" in focus["focus_function_names"]
+
+
 def test_build_frontier_summary_prefers_partial_frontier_signal(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -95,6 +127,8 @@ def test_build_frontier_summary_prefers_partial_frontier_signal(tmp_path: Path) 
                 "replay_status": "ok",
                 "unique_frontier_functions": 0,
                 "nearby_uncovered_regions": 0,
+                "target_relevance_count": 0,
+                "closest_target_distance": 2,
                 "frontier_functions": [],
             },
             {
@@ -108,6 +142,8 @@ def test_build_frontier_summary_prefers_partial_frontier_signal(tmp_path: Path) 
                 "replay_status": "ok",
                 "unique_frontier_functions": 2,
                 "nearby_uncovered_regions": 6,
+                "target_relevance_count": 1,
+                "closest_target_distance": 0,
                 "frontier_functions": [
                     {
                         "name": "png_handle_iCCP",
@@ -124,9 +160,12 @@ def test_build_frontier_summary_prefers_partial_frontier_signal(tmp_path: Path) 
         binary_hash="sha256:demo",
         pending_inputs=0,
         failed_inputs=0,
+        focus={"target_api": "parse_zip", "focus_function_names": {"png_handle_iCCP"}, "focus_tokens": {"png", "iccp"}},
     )
     assert summary["top_inputs"][0]["input_relpath"].endswith("frontier.bin")
     assert summary["top_inputs"][0]["frontier_score"] > summary["top_inputs"][1]["frontier_score"]
+    assert summary["top_inputs"][0]["target_relevance_count"] >= 1
+    assert summary["top_frontier_functions"][0]["best_distance_to_target"] >= 0
     assert frontier_doc["function_to_inputs"]["fn_frontier"] == ["fuzz/corpus/demo_fuzz/frontier.bin"]
 
 
