@@ -2215,12 +2215,29 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_crash_found=bool(payload.get("crash_found")),
                 fuzz_coverage_history=payload.get("coverage_history") or [],
                 fuzz_coverage_source_report=payload.get("coverage_source_report") or {},
+                fuzz_coverage_per_input_manifest_path=str(payload.get("coverage_per_input_manifest_path") or ""),
+                fuzz_coverage_frontier_path=str(payload.get("coverage_frontier_path") or ""),
+                fuzz_coverage_frontier_summary=payload.get("coverage_frontier_summary") or {},
+                fuzz_coverage_replay_runtime_sec=float(payload.get("coverage_replay_runtime_sec") or 0.0),
+                fuzz_coverage_replay_binary_hash=str(payload.get("coverage_replay_binary_hash") or ""),
                 fuzz_coverage_loop_round=int(payload.get("coverage_loop_round") or 0),
                 fuzz_coverage_loop_max_rounds=int(payload.get("coverage_loop_max_rounds") or 0),
                 fuzz_coverage_plateau_streak=int(payload.get("coverage_plateau_streak") or 0),
                 fuzz_coverage_seed_profile=str(payload.get("coverage_seed_profile") or ""),
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
                 fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
+                fuzz_coverage_replay_binary_dir=str(payload.get("coverage_replay_binary_dir") or ""),
+                fuzz_coverage_replay_binary_count=int(payload.get("coverage_replay_binary_count") or 0),
+                fuzz_coverage_replay_stage_success=bool(payload.get("coverage_replay_stage_success") or False),
+                fuzz_coverage_replay_error=str(payload.get("coverage_replay_error") or ""),
+                fuzz_coverage_replay_manifest_fresh_for_current_binary=bool(
+                    payload.get("coverage_replay_manifest_fresh_for_current_binary") or False
+                ),
+                fuzz_coverage_replay_queue_drained=bool(payload.get("coverage_replay_queue_drained") or False),
+                fuzz_coverage_replay_pending_inputs=int(payload.get("coverage_replay_pending_inputs") or 0),
+                fuzz_coverage_replay_failed_inputs=int(payload.get("coverage_replay_failed_inputs") or 0),
+                fuzz_coverage_replay_processed_inputs=int(payload.get("coverage_replay_processed_inputs") or 0),
+                fuzz_coverage_replay_total_inputs=int(payload.get("coverage_replay_total_inputs") or 0),
                 analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
                 security_evidence_count=int(payload.get("security_evidence_count") or 0),
                 vuln_candidate_count=int(payload.get("vuln_candidate_count") or 0),
@@ -3940,12 +3957,27 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_crash_found", False)
     view.setdefault("fuzz_coverage_history", [])
     view.setdefault("fuzz_coverage_source_report", {})
+    view.setdefault("fuzz_coverage_per_input_manifest_path", "")
+    view.setdefault("fuzz_coverage_frontier_path", "")
+    view.setdefault("fuzz_coverage_frontier_summary", {})
+    view.setdefault("fuzz_coverage_replay_runtime_sec", 0.0)
+    view.setdefault("fuzz_coverage_replay_binary_hash", "")
     view.setdefault("fuzz_coverage_loop_round", 0)
     view.setdefault("fuzz_coverage_loop_max_rounds", 0)
     view.setdefault("fuzz_coverage_plateau_streak", 0)
     view.setdefault("fuzz_coverage_seed_profile", "")
     view.setdefault("fuzz_coverage_quality_flags", [])
     view.setdefault("fuzz_coverage_bottleneck_kind", "")
+    view.setdefault("fuzz_coverage_replay_binary_dir", "")
+    view.setdefault("fuzz_coverage_replay_binary_count", 0)
+    view.setdefault("fuzz_coverage_replay_stage_success", False)
+    view.setdefault("fuzz_coverage_replay_error", "")
+    view.setdefault("fuzz_coverage_replay_manifest_fresh_for_current_binary", False)
+    view.setdefault("fuzz_coverage_replay_queue_drained", False)
+    view.setdefault("fuzz_coverage_replay_pending_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_failed_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_processed_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_total_inputs", 0)
     view.setdefault("analysis_evidence_count", 0)
     view.setdefault("security_evidence_count", 0)
     view.setdefault("vuln_candidate_count", 0)
@@ -4190,6 +4222,23 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
+                "fuzz_coverage_per_input_manifest_path": (active_child or job).get("fuzz_coverage_per_input_manifest_path", ""),
+                "fuzz_coverage_frontier_path": (active_child or job).get("fuzz_coverage_frontier_path", ""),
+                "fuzz_coverage_frontier_summary": (active_child or job).get("fuzz_coverage_frontier_summary", {}),
+                "fuzz_coverage_replay_runtime_sec": (active_child or job).get("fuzz_coverage_replay_runtime_sec", 0.0),
+                "fuzz_coverage_replay_binary_hash": (active_child or job).get("fuzz_coverage_replay_binary_hash", ""),
+                "fuzz_coverage_replay_binary_dir": (active_child or job).get("fuzz_coverage_replay_binary_dir", ""),
+                "fuzz_coverage_replay_binary_count": (active_child or job).get("fuzz_coverage_replay_binary_count", 0),
+                "fuzz_coverage_replay_stage_success": (active_child or job).get("fuzz_coverage_replay_stage_success", False),
+                "fuzz_coverage_replay_error": (active_child or job).get("fuzz_coverage_replay_error", ""),
+                "fuzz_coverage_replay_manifest_fresh_for_current_binary": (
+                    active_child or job
+                ).get("fuzz_coverage_replay_manifest_fresh_for_current_binary", False),
+                "fuzz_coverage_replay_queue_drained": (active_child or job).get("fuzz_coverage_replay_queue_drained", False),
+                "fuzz_coverage_replay_pending_inputs": (active_child or job).get("fuzz_coverage_replay_pending_inputs", 0),
+                "fuzz_coverage_replay_failed_inputs": (active_child or job).get("fuzz_coverage_replay_failed_inputs", 0),
+                "fuzz_coverage_replay_processed_inputs": (active_child or job).get("fuzz_coverage_replay_processed_inputs", 0),
+                "fuzz_coverage_replay_total_inputs": (active_child or job).get("fuzz_coverage_replay_total_inputs", 0),
                 "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
                 "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
                 "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),

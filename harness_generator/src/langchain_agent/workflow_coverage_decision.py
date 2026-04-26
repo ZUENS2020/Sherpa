@@ -30,6 +30,10 @@ def evaluate_coverage_decision(
     total_execs_per_sec: int,
     underutilized_execs_threshold: int,
     current_depth_class: str,
+    coverage_replay_stage_success: bool,
+    coverage_replay_manifest_fresh: bool,
+    coverage_replay_queue_drained: bool,
+    coverage_frontier_input_count: int,
     current_round: int,
     max_rounds: int,
     unlimited_rounds: bool,
@@ -116,6 +120,12 @@ def evaluate_coverage_decision(
         or requested_replan
     )
     quality_oracle = "quality_degraded" if quality_degraded else "ok"
+    replay_frontier_ready = bool(
+        coverage_replay_stage_success
+        and coverage_replay_manifest_fresh
+        and coverage_replay_queue_drained
+    )
+
     if seed_quality_issue:
         coverage_bottleneck_kind = "seed_limited"
         if cold_start_failure:
@@ -131,9 +141,12 @@ def evaluate_coverage_decision(
     elif requested_replan or (plateau_no_gain and str(current_depth_class or "").lower() == "shallow"):
         coverage_bottleneck_kind = "target_limited"
         coverage_bottleneck_reason = "target_plateau_or_shallow_depth"
-    elif plateau_no_gain:
+    elif plateau_no_gain and replay_frontier_ready and int(coverage_frontier_input_count or 0) <= 0:
         coverage_bottleneck_kind = "harness_limited"
         coverage_bottleneck_reason = "plateau_without_seed_or_target_signal"
+    elif plateau_no_gain and not replay_frontier_ready:
+        coverage_bottleneck_kind = "none"
+        coverage_bottleneck_reason = "replay_frontier_not_ready"
     else:
         coverage_bottleneck_kind = "none"
         coverage_bottleneck_reason = ""
@@ -220,6 +233,7 @@ def evaluate_coverage_decision(
         "parallel_diagnosis": parallel_diagnosis,
         "quality_degraded": quality_degraded,
         "quality_oracle": quality_oracle,
+        "coverage_replay_frontier_ready": replay_frontier_ready,
         "coverage_bottleneck_kind": coverage_bottleneck_kind,
         "coverage_bottleneck_reason": coverage_bottleneck_reason,
         "should_improve": should_improve,

@@ -27,6 +27,7 @@ import workflow_coverage_decision as _wf_coverage_decision
 import workflow_target_scoring as _wf_target_scoring
 import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
+from coverage_replay import collect_per_input_frontier
 from workflow_context_store import (
     context_dir_for_repo_root,
     merge_result_into_contexts,
@@ -153,6 +154,21 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_repo_examples_filtered: bool
     coverage_repo_examples_rejected_count: int
     coverage_repo_examples_accepted_count: int
+    coverage_per_input_manifest_path: str
+    coverage_frontier_path: str
+    coverage_frontier_summary: dict[str, Any]
+    coverage_replay_runtime_sec: float
+    coverage_replay_binary_hash: str
+    coverage_replay_binary_dir: str
+    coverage_replay_binary_count: int
+    coverage_replay_stage_success: bool
+    coverage_replay_error: str
+    coverage_replay_manifest_fresh_for_current_binary: bool
+    coverage_replay_queue_drained: bool
+    coverage_replay_pending_inputs: int
+    coverage_replay_failed_inputs: int
+    coverage_replay_processed_inputs: int
+    coverage_replay_total_inputs: int
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
     coverage_exhausted_targets: list[str]
@@ -896,7 +912,7 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
         return "fix-harness"
     if restart_stage in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
-    if restart_stage in {"coverage-analysis", "improve-harness"}:
+    if restart_stage in {"per-input-replay", "coverage-analysis", "improve-harness"}:
         return "coverage"
     last_step = str(state.get("last_step") or "").strip().lower()
     if last_step == "build":
@@ -905,7 +921,7 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
         return "fix-harness"
     if last_step in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
-    if last_step in {"coverage-analysis", "improve-harness"}:
+    if last_step in {"per-input-replay", "coverage-analysis", "improve-harness"}:
         return "coverage"
     if bool(state.get("crash_found")):
         return "crash"
@@ -3118,6 +3134,135 @@ def _coverage_attack_hint_feedback_lines(seed_feedback: dict[str, Any]) -> list[
         for x in list(seed_feedback.get("attack_hint_missing_values") or [])
         if str(x).strip()
     ]
+
+
+def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[str]:
+    top_inputs = [
+        dict(item)
+        for item in list(frontier_summary.get("top_inputs") or [])
+        if isinstance(item, dict)
+    ]
+    if not top_inputs:
+        return []
+    lines = ["- per_input_frontier: strongest replayed inputs so far:"]
+    for item in top_inputs[:3]:
+        rel = str(item.get("input_relpath") or "").strip() or "(unknown)"
+        fn_count = int(item.get("covered_function_count") or 0)
+        region_count = int(item.get("covered_region_count") or 0)
+        frontier_score = float(item.get("frontier_score") or 0.0)
+        unique_frontier_functions = int(item.get("unique_frontier_functions") or 0)
+        nearby_uncovered_regions = int(item.get("nearby_uncovered_regions") or 0)
+        funcs = [
+            str(x).strip()
+            for x in list(item.get("covered_functions_sample") or [])
+            if str(x).strip()
+        ]
+        line = (
+            f"  * {rel}: functions={fn_count}, regions={region_count}, "
+            f"frontier_score={frontier_score:.3f}, frontier_functions={unique_frontier_functions}, "
+            f"uncovered_regions_nearby={nearby_uncovered_regions}"
+        )
+        if funcs:
+            line += f", sample={', '.join(funcs[:4])}"
+        lines.append(line)
+        frontier_functions = [
+            dict(fn)
+            for fn in list(item.get("frontier_functions") or [])
+            if isinstance(fn, dict)
+        ]
+        for fn in frontier_functions[:3]:
+            fn_name = str(fn.get("name") or "").strip()
+            if not fn_name:
+                continue
+            fn_file = str(fn.get("file") or "").strip()
+            fn_line = int(fn.get("line") or 0)
+            fn_uncovered = int(fn.get("uncovered_regions_nearby") or 0)
+            fn_ratio = float(fn.get("region_coverage_ratio") or 0.0)
+            lines.append(
+                "    - "
+                f"{fn_name} ({fn_file}:{fn_line}) uncovered_regions={fn_uncovered}, "
+                f"coverage_ratio={fn_ratio:.2f}"
+            )
+    top_frontier_functions = [
+        dict(item)
+        for item in list(frontier_summary.get("top_frontier_functions") or [])
+        if isinstance(item, dict)
+    ]
+    if top_frontier_functions:
+        lines.append("- per_input_frontier_inverse_index:")
+        for item in top_frontier_functions[:5]:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            refs = [
+                str(x).strip()
+                for x in list(item.get("input_relpaths") or [])
+                if str(x).strip()
+            ]
+            lines.append(f"    - {name}: inputs={len(refs)} [{', '.join(refs[:3])}]")
+    pending = int(frontier_summary.get("pending_input_count") or 0)
+    failed = int(frontier_summary.get("failed_input_count") or 0)
+    if pending > 0 or failed > 0:
+        lines.append(f"- per_input_frontier_status: pending={pending}, failed={failed}")
+    return lines
+
+
+def _replay_out_dir(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "out" / "replay"
+
+
+def _materialize_replay_binaries(repo_root: Path, bin_paths: list[Path]) -> list[Path]:
+    replay_dir = _replay_out_dir(repo_root)
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    source_by_name = {
+        p.name: p
+        for p in bin_paths
+        if p.is_file() and p.parent == (repo_root / "fuzz" / "out")
+    }
+    for stale in replay_dir.iterdir():
+        if stale.is_file() and stale.name not in source_by_name:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    created: list[Path] = []
+    for name, src in sorted(source_by_name.items()):
+        dest = replay_dir / name
+        try:
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+        except OSError:
+            pass
+        try:
+            rel_src = os.path.relpath(src, replay_dir)
+            os.symlink(rel_src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+            try:
+                mode = src.stat().st_mode
+                os.chmod(dest, mode)
+            except OSError:
+                pass
+        created.append(dest)
+    return created
+
+
+def _resolve_per_input_replay_binary(repo_root: Path, fuzzer_name: str) -> Path | None:
+    replay_dir = _replay_out_dir(repo_root)
+    fuzz_out = repo_root / "fuzz" / "out"
+    candidates = [
+        replay_dir / fuzzer_name,
+        replay_dir / f"{fuzzer_name}.exe",
+        fuzz_out / f"{fuzzer_name}_replay",
+        fuzz_out / f"{fuzzer_name}-replay",
+        fuzz_out / f"{fuzzer_name}.replay",
+        fuzz_out / fuzzer_name,
+    ]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
+    return None
     if not missing_values:
         return []
     ratio = float(seed_feedback.get("attack_hint_coverage_ratio") or 0.0)
@@ -3221,6 +3366,9 @@ def _build_harness_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "harness_index_path": str(state.get("harness_index_path") or ""),
         "selected_target_api": str(state.get("selected_target_api") or ""),
         "coverage_target_api": str(state.get("coverage_target_api") or ""),
+        "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+        "coverage_replay_error": str(state.get("coverage_replay_error") or ""),
         "missing_execution_targets": list(state.get("coverage_missing_execution_targets") or []),
         "built_targets": list(state.get("built_targets") or []),
         "missing_targets": list(state.get("missing_targets") or []),
@@ -5284,6 +5432,23 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
             "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
             "coverage_target_score_breakdown": dict(state.get("coverage_target_score_breakdown") or {}),
+            "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+            "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+            "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+            "coverage_replay_runtime_sec": float(state.get("coverage_replay_runtime_sec") or 0.0),
+            "coverage_replay_binary_hash": str(state.get("coverage_replay_binary_hash") or ""),
+            "coverage_replay_binary_dir": str(state.get("coverage_replay_binary_dir") or ""),
+            "coverage_replay_binary_count": int(state.get("coverage_replay_binary_count") or 0),
+            "coverage_replay_stage_success": bool(state.get("coverage_replay_stage_success") or False),
+            "coverage_replay_error": str(state.get("coverage_replay_error") or ""),
+            "coverage_replay_manifest_fresh_for_current_binary": bool(
+                state.get("coverage_replay_manifest_fresh_for_current_binary") or False
+            ),
+            "coverage_replay_queue_drained": bool(state.get("coverage_replay_queue_drained") or False),
+            "coverage_replay_pending_inputs": int(state.get("coverage_replay_pending_inputs") or 0),
+            "coverage_replay_failed_inputs": int(state.get("coverage_replay_failed_inputs") or 0),
+            "coverage_replay_processed_inputs": int(state.get("coverage_replay_processed_inputs") or 0),
+            "coverage_replay_total_inputs": int(state.get("coverage_replay_total_inputs") or 0),
             "analysis_done": bool(state.get("analysis_done") or False),
             "analysis_degraded": bool(state.get("analysis_degraded") or False),
             "analysis_error": str(state.get("analysis_error") or ""),
@@ -5325,6 +5490,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         "synthesize",
         "build",
         "run",
+        "per-input-replay",
         "crash-triage",
         "fix-harness",
         "coverage-analysis",
@@ -7822,6 +7988,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             binaries=final_bins,
             target_build_matrix=target_build_matrix,
         )
+        replay_bins = _materialize_replay_binaries(gen.repo_root, final_bins)
         if cache_path:
             next_state["build_template_cache_path"] = cache_path
         next_state["built_targets"] = sorted(built_names)
@@ -7832,6 +7999,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         ]
         next_state["target_build_matrix"] = target_build_matrix
         next_state["build_gate_reason"] = "ok"
+        next_state["coverage_replay_binary_dir"] = str(_replay_out_dir(gen.repo_root))
+        next_state["coverage_replay_binary_count"] = int(len(replay_bins))
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         next_state = _clear_error_markers_on_success(next_state)
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -10548,6 +10717,100 @@ def _max_cov_from_run_details(run_details: list[dict[str, Any]]) -> int:
     return max(covs) if covs else 0
 
 
+def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "per-input-replay")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> per-input-replay")
+    try:
+        run_details = list(state.get("run_details") or [])
+        fuzzer_name = ""
+        if run_details:
+            fuzzer_name = str(run_details[0].get("fuzzer") or "").strip()
+        if not fuzzer_name:
+            fuzzer_name = str(state.get("last_fuzzer") or state.get("coverage_target_name") or "").strip()
+
+        replay_binary = _resolve_per_input_replay_binary(gen.repo_root, fuzzer_name) if fuzzer_name else None
+        if not fuzzer_name or replay_binary is None:
+            out = {
+                **state,
+                "last_step": "per-input-replay",
+                "last_error": "",
+                "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+                "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+                "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+                "coverage_replay_runtime_sec": 0.0,
+                "coverage_replay_binary_hash": "",
+                "coverage_replay_stage_success": False,
+                "coverage_replay_error": "replay_binary_missing" if fuzzer_name else "replay_target_missing",
+                "coverage_replay_manifest_fresh_for_current_binary": False,
+                "coverage_replay_queue_drained": False,
+                "coverage_replay_pending_inputs": 0,
+                "coverage_replay_failed_inputs": 0,
+                "coverage_replay_processed_inputs": 0,
+                "coverage_replay_total_inputs": 0,
+                "message": "per-input replay skipped",
+            }
+            _wf_log(
+                cast(dict[str, Any], out),
+                f"<- per-input-replay skip reason={out['coverage_replay_error']} dt={_fmt_dt(time.perf_counter()-t0)}",
+            )
+            return out
+
+        replay = collect_per_input_frontier(
+            repo_root=gen.repo_root,
+            fuzzer_name=fuzzer_name,
+            replay_binary=replay_binary,
+        )
+        out = {
+            **state,
+            "last_step": "per-input-replay",
+            "last_error": "",
+            "coverage_per_input_manifest_path": replay.manifest_path,
+            "coverage_frontier_path": replay.frontier_path,
+            "coverage_frontier_summary": dict(replay.frontier_summary or {}),
+            "coverage_replay_runtime_sec": float(replay.runtime_sec),
+            "coverage_replay_binary_hash": str(replay.binary_hash or ""),
+            "coverage_replay_stage_success": bool(replay.stage_success),
+            "coverage_replay_error": str(replay.stage_error or ""),
+            "coverage_replay_manifest_fresh_for_current_binary": bool(
+                replay.manifest_fresh_for_current_binary
+            ),
+            "coverage_replay_queue_drained": bool(replay.replay_queue_drained),
+            "coverage_replay_pending_inputs": int(replay.pending_inputs),
+            "coverage_replay_failed_inputs": int(replay.failed_inputs),
+            "coverage_replay_processed_inputs": int(replay.processed_inputs),
+            "coverage_replay_total_inputs": int(replay.total_inputs),
+            "message": "per-input replay completed",
+        }
+        _wf_log(
+            cast(dict[str, Any], out),
+            (
+                "<- per-input-replay ok"
+                f" stage_success={int(replay.stage_success)}"
+                f" pending={int(replay.pending_inputs)}"
+                f" failed={int(replay.failed_inputs)}"
+                f" dt={_fmt_dt(time.perf_counter()-t0)}"
+            ),
+        )
+        return out
+    except Exception as e:
+        out = {
+            **state,
+            "last_step": "per-input-replay",
+            "last_error": "",
+            "coverage_replay_stage_success": False,
+            "coverage_replay_error": f"replay_stage_error:{type(e).__name__}",
+            "message": "per-input replay failed",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- per-input-replay err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+
 def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     state, stop_now = _enter_step(state, "coverage-analysis")
     if stop_now:
@@ -10609,6 +10872,16 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
         seed_quality = dict(state.get("coverage_seed_quality") or {})
         seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
+        frontier_summary = dict(state.get("coverage_frontier_summary") or {})
+        coverage_frontier_input_count = int(frontier_summary.get("top_input_count") or 0)
+        coverage_replay_stage_success = bool(state.get("coverage_replay_stage_success") or False)
+        coverage_replay_manifest_fresh = bool(
+            state.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        )
+        coverage_replay_queue_drained = bool(state.get("coverage_replay_queue_drained") or False)
+        coverage_replay_pending_inputs = int(state.get("coverage_replay_pending_inputs") or 0)
+        coverage_replay_failed_inputs = int(state.get("coverage_replay_failed_inputs") or 0)
+        coverage_replay_error = str(state.get("coverage_replay_error") or "")
         quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
         seed_families_suggested = list(state.get("coverage_seed_families_suggested") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
@@ -10713,6 +10986,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             total_execs_per_sec=total_execs_per_sec,
             underutilized_execs_threshold=underutilized_execs_threshold,
             current_depth_class=current_depth_class,
+            coverage_replay_stage_success=coverage_replay_stage_success,
+            coverage_replay_manifest_fresh=coverage_replay_manifest_fresh,
+            coverage_replay_queue_drained=coverage_replay_queue_drained,
+            coverage_frontier_input_count=coverage_frontier_input_count,
             current_round=current_round,
             max_rounds=max_rounds,
             unlimited_rounds=unlimited_rounds,
@@ -10772,6 +11049,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
         if attack_hint_missing_values:
             reason += f"; attack_hint_missing_values={','.join(attack_hint_missing_values[:4])}"
+        if coverage_replay_error:
+            reason += f"; per_input_replay={coverage_replay_error}"
+        elif coverage_replay_pending_inputs > 0:
+            reason += f"; per_input_replay_pending={coverage_replay_pending_inputs}"
         if parallel_diagnosis_code != "balanced":
             reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
             if coverage_bottleneck_kind != "none":
@@ -10822,6 +11103,13 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "attack_hint_missing_values": attack_hint_missing_values,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
+                "coverage_frontier_summary": frontier_summary,
+                "coverage_replay_stage_success": coverage_replay_stage_success,
+                "coverage_replay_manifest_fresh_for_current_binary": coverage_replay_manifest_fresh,
+                "coverage_replay_queue_drained": coverage_replay_queue_drained,
+                "coverage_replay_pending_inputs": coverage_replay_pending_inputs,
+                "coverage_replay_failed_inputs": coverage_replay_failed_inputs,
+                "coverage_replay_error": coverage_replay_error,
                 "coverage_bottleneck_kind": coverage_bottleneck_kind,
                 "coverage_bottleneck_reason": coverage_bottleneck_reason,
                 "parallel_diagnosis_code": parallel_diagnosis_code,
@@ -10897,6 +11185,19 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
+            "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+            "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+            "coverage_frontier_summary": frontier_summary,
+            "coverage_replay_runtime_sec": float(state.get("coverage_replay_runtime_sec") or 0.0),
+            "coverage_replay_binary_hash": str(state.get("coverage_replay_binary_hash") or ""),
+            "coverage_replay_stage_success": coverage_replay_stage_success,
+            "coverage_replay_error": coverage_replay_error,
+            "coverage_replay_manifest_fresh_for_current_binary": coverage_replay_manifest_fresh,
+            "coverage_replay_queue_drained": coverage_replay_queue_drained,
+            "coverage_replay_pending_inputs": coverage_replay_pending_inputs,
+            "coverage_replay_failed_inputs": coverage_replay_failed_inputs,
+            "coverage_replay_processed_inputs": int(state.get("coverage_replay_processed_inputs") or 0),
+            "coverage_replay_total_inputs": int(state.get("coverage_replay_total_inputs") or 0),
             "coverage_run_error_kind_effective": run_error_kind,
             "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
             "degraded_seed_replan_triggered": degraded_seed_replan_triggered,
@@ -10987,6 +11288,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     f"cov={h_entry.get('max_cov')}, ft={h_entry.get('max_ft')}, "
                     f"plateau={h_entry.get('plateau_detected')}"
                 )
+            feedback_lines.extend(_coverage_frontier_feedback_lines(frontier_summary))
             out["coverage_feedback_for_plan"] = "\n".join(feedback_lines)
 
         _wf_log(
@@ -11109,6 +11411,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             )
 
         # Append fine-grained source coverage feedback if available
+        frontier_summary = dict(state.get("coverage_frontier_summary") or {})
+        frontier_lines = _coverage_frontier_feedback_lines(frontier_summary)
+        if frontier_lines:
+            hint += "\n--- Per-Input Frontier ---\n"
+            hint += "\n".join(frontier_lines) + "\n"
+            frontier_path = str(state.get("coverage_frontier_path") or "").strip()
+            if frontier_path:
+                hint += f"- Full frontier summary: {frontier_path}\n"
+
         source_report = dict(state.get("coverage_source_report") or {})
         uncovered_fns = list(state.get("coverage_uncovered_functions") or [])
         if source_report or uncovered_fns:
@@ -12874,18 +13185,28 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     err = dict(state.get("error") or {})
     terminal_reason = str(state.get("run_terminal_reason") or err.get("code") or "").strip().lower()
     # Coverage plateau is a coverage signal, not a hard run failure.
-    # Let coverage-analysis decide in_place vs replan.
+    # Replay the corpus first so coverage-analysis can classify it.
     if terminal_reason == "coverage_plateau":
-        return "coverage-analysis"
+        return "per-input-replay"
     run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or str(
         state.get("run_error_kind") or err.get("code") or ""
     ).strip().lower()
     if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
-        return "coverage-analysis"
+        return "per-input-replay"
     if run_error_kind in _FATAL_RUN_ERROR_KINDS:
         return "plan"
     if run_error_kind:
         return "plan"
+    return "per-input-replay"
+
+
+def _route_after_per_input_replay_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
+        return "stop"
+    if str(state.get("last_error") or err.get("message") or "").strip():
+        return "stop"
     return "coverage-analysis"
 
 
@@ -13080,6 +13401,8 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_fix_build_state(state)
     if last_step == "run":
         return _route_after_run_state(state)
+    if last_step == "per-input-replay":
+        return _route_after_per_input_replay_state(state)
     if last_step == "fix_crash":
         return _route_after_fix_crash_state(state)
     if last_step == "crash-triage":
@@ -13113,6 +13436,7 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         "synthesize",
         "build",
         "run",
+        "per-input-replay",
         "crash-triage",
         "coverage-analysis",
         "improve-harness",
@@ -13146,6 +13470,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
+    graph.add_node("per-input-replay", _node_per_input_replay)
     graph.add_node("coverage-analysis", _node_coverage_analysis)
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
@@ -13184,6 +13509,10 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
 
+    def _route_after_per_input_replay(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_per_input_replay_state(state)
+        return _apply_stage_stop_guard(state, "per-input-replay", nxt)
+
     def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_crash_triage_state(state)
         return _apply_stage_stop_guard(state, "crash-triage", nxt)
@@ -13217,6 +13546,7 @@ def build_fuzz_workflow() -> StateGraph:
             "synthesize": "synthesize",
             "build": "build",
             "run": "run",
+            "per-input-replay": "per-input-replay",
             "crash-triage": "crash-triage",
             "coverage-analysis": "coverage-analysis",
             "improve-harness": "improve-harness",
@@ -13238,11 +13568,16 @@ def build_fuzz_workflow() -> StateGraph:
         "run",
         _route_after_run,
         {
-            "coverage-analysis": "coverage-analysis",
+            "per-input-replay": "per-input-replay",
             "crash-triage": "crash-triage",
             "plan": "plan",
             "stop": END,
         },
+    )
+    graph.add_conditional_edges(
+        "per-input-replay",
+        _route_after_per_input_replay,
+        {"coverage-analysis": "coverage-analysis", "stop": END},
     )
     graph.add_conditional_edges(
         "crash-triage",
@@ -13448,6 +13783,23 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
+        "coverage_per_input_manifest_path": str(out.get("coverage_per_input_manifest_path") or ""),
+        "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),
+        "coverage_replay_runtime_sec": float(out.get("coverage_replay_runtime_sec") or 0.0),
+        "coverage_replay_binary_hash": str(out.get("coverage_replay_binary_hash") or ""),
+        "coverage_replay_binary_dir": str(out.get("coverage_replay_binary_dir") or ""),
+        "coverage_replay_binary_count": int(out.get("coverage_replay_binary_count") or 0),
+        "coverage_replay_stage_success": bool(out.get("coverage_replay_stage_success") or False),
+        "coverage_replay_error": str(out.get("coverage_replay_error") or ""),
+        "coverage_replay_manifest_fresh_for_current_binary": bool(
+            out.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        ),
+        "coverage_replay_queue_drained": bool(out.get("coverage_replay_queue_drained") or False),
+        "coverage_replay_pending_inputs": int(out.get("coverage_replay_pending_inputs") or 0),
+        "coverage_replay_failed_inputs": int(out.get("coverage_replay_failed_inputs") or 0),
+        "coverage_replay_processed_inputs": int(out.get("coverage_replay_processed_inputs") or 0),
+        "coverage_replay_total_inputs": int(out.get("coverage_replay_total_inputs") or 0),
         "cold_start_seed_replan_triggered": bool(out.get("cold_start_seed_replan_triggered") or False),
         "degraded_seed_replan_triggered": bool(out.get("degraded_seed_replan_triggered") or False),
         "cold_start_trigger_snapshot": dict(out.get("cold_start_trigger_snapshot") or {}),

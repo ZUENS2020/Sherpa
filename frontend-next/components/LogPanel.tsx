@@ -26,6 +26,32 @@ type SignalSection = {
   rows: Array<[string, string]>;
 };
 type SignalRow = [string, string];
+type FrontierInput = {
+  input_relpath?: string;
+  size_bytes?: number;
+  covered_function_count?: number;
+  covered_region_count?: number;
+  exec_time_us?: number;
+  unique_frontier_functions?: number;
+  nearby_uncovered_regions?: number;
+  frontier_score?: number;
+  covered_functions_sample?: string[];
+  frontier_functions?: Array<{
+    name?: string;
+    file?: string;
+    line?: number;
+    uncovered_regions_nearby?: number;
+    region_coverage_ratio?: number;
+  }>;
+  rationale?: string;
+  repo_file_count?: number;
+};
+type FrontierFunction = {
+  name?: string;
+  input_count?: number;
+  input_relpaths?: string[];
+};
+type FrontierSummary = NonNullable<TaskDetail['fuzz_coverage_frontier_summary']>;
 
 function statusTone(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
   if (status === 'success') return 'success';
@@ -49,6 +75,12 @@ function hasSignalValue(row: SignalRow): boolean {
 function hasVisibleSignalValue(row: SignalRow): boolean {
   const [, value] = row;
   return Boolean(value) && value !== '0/0' && value !== '0';
+}
+
+function formatMicros(micros: number): string {
+  if (!Number.isFinite(micros) || micros <= 0) return '0ms';
+  if (micros >= 1000) return `${(micros / 1000).toFixed(1)}ms`;
+  return `${Math.round(micros)}us`;
 }
 
 export function LogPanel({ detail }: { detail?: TaskDetail }) {
@@ -103,6 +135,32 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
     return { total: lines.length, warn, error };
   }, [selectedChild?.log]);
 
+  const frontierSummary = useMemo<FrontierSummary>(() => {
+    return selectedChild?.fuzz_coverage_frontier_summary
+      || detail?.fuzz_coverage_frontier_summary
+      || {
+        top_inputs: [],
+        top_frontier_functions: [],
+        top_input_count: 0,
+        top_frontier_function_count: 0,
+        covered_function_union_sample: [],
+      };
+  }, [detail?.fuzz_coverage_frontier_summary, selectedChild?.fuzz_coverage_frontier_summary]);
+
+  const frontierTopInputs = useMemo<FrontierInput[]>(() => {
+    const items = Array.isArray(frontierSummary?.top_inputs) ? frontierSummary.top_inputs : [];
+    return items
+      .filter((item): item is FrontierInput => Boolean(item && typeof item === 'object'))
+      .slice(0, 5);
+  }, [frontierSummary]);
+
+  const frontierTopFunctions = useMemo<FrontierFunction[]>(() => {
+    const items = Array.isArray(frontierSummary?.top_frontier_functions) ? frontierSummary.top_frontier_functions : [];
+    return items
+      .filter((item): item is FrontierFunction => Boolean(item && typeof item === 'object'))
+      .slice(0, 8);
+  }, [frontierSummary]);
+
   const signalRows = useMemo(() => {
     const rows: SignalRow[] = [
       ['阶段', String(selectedResult?.last_step || detail?.status || 'unknown')],
@@ -111,13 +169,16 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Crash 候选', String(selectedChild?.crash_vuln_candidate_count || 0)],
       ['Coverage round', `${Number(selectedResult?.coverage_loop_round || 0)}/${Number(selectedResult?.coverage_loop_max_rounds || 0)}`],
       ['Seed profile', String(selectedResult?.coverage_seed_profile || '')],
+      ['Replay binaries', String(selectedChild?.fuzz_coverage_replay_binary_count || 0)],
+      ['Replay queue', `${Number(selectedChild?.fuzz_coverage_replay_pending_inputs || 0)} pending / ${Number(selectedChild?.fuzz_coverage_replay_failed_inputs || 0)} failed`],
+      ['Replay progress', `${Number(selectedChild?.fuzz_coverage_replay_processed_inputs || 0)}/${Number(selectedChild?.fuzz_coverage_replay_total_inputs || 0)}`],
       ['Error signature', String(selectedResult?.build_error_signature_after || selectedResult?.build_error_signature_before || '')],
       ['Fail-fast', String(selectedResult?.fix_build_terminal_reason || '')],
       ['Crash verdict', String(selectedResult?.crash_analysis_verdict || selectedResult?.crash_triage_label || '')],
       ['Vuln target', String(selectedChild?.latest_crash_vuln_candidate?.target_api || selectedChild?.latest_crash_vuln_candidate?.target_name || '')],
     ];
     return rows.filter(hasVisibleSignalValue);
-  }, [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult]);
+  }, [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.fuzz_coverage_replay_binary_count, selectedChild?.fuzz_coverage_replay_failed_inputs, selectedChild?.fuzz_coverage_replay_pending_inputs, selectedChild?.fuzz_coverage_replay_processed_inputs, selectedChild?.fuzz_coverage_replay_total_inputs, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult]);
 
   const signalSections = useMemo<SignalSection[]>(() => {
     const coverageRowsSource: SignalRow[] = [
@@ -127,6 +188,10 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Seed profile', String(selectedResult?.coverage_seed_profile || '')],
       ['Improve mode', String(selectedResult?.coverage_improve_mode || '')],
       ['Bottleneck', String(selectedResult?.coverage_bottleneck_kind || '')],
+      ['Frontier inputs', String(selectedChild?.fuzz_coverage_frontier_summary?.top_input_count || 0)],
+      ['Frontier functions', String(selectedChild?.fuzz_coverage_frontier_summary?.top_frontier_function_count || 0)],
+      ['Replay queue', `${Number(selectedChild?.fuzz_coverage_replay_pending_inputs || 0)} pending / ${Number(selectedChild?.fuzz_coverage_replay_failed_inputs || 0)} failed`],
+      ['Replay progress', `${Number(selectedChild?.fuzz_coverage_replay_processed_inputs || 0)}/${Number(selectedChild?.fuzz_coverage_replay_total_inputs || 0)}`],
     ];
     const coverageRows = coverageRowsSource.filter(hasVisibleSignalValue);
 
@@ -148,6 +213,8 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Repair mode', String(selectedResult?.repair_mode ? 'enabled' : '')],
       ['Repair origin', String(selectedResult?.repair_origin_stage || '')],
       ['Repair code', String(selectedResult?.repair_error_code || '')],
+      ['Replay stage', selectedChild?.fuzz_coverage_replay_stage_success ? 'ready' : String(selectedChild?.fuzz_coverage_replay_error || '')],
+      ['Replay runtime', `${Number(selectedChild?.fuzz_coverage_replay_runtime_sec || 0).toFixed(2)}s`],
     ];
     const repairRows = repairRowsSource.filter(hasVisibleSignalValue);
 
@@ -158,6 +225,10 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['候选路径', String(selectedChild?.vuln_candidates_path || '')],
       ['报告路径', String(selectedChild?.crash_vuln_report_path || '')],
       ['复现状态', String(selectedChild?.latest_crash_vuln_candidate?.reproduction_status || '')],
+      ['Replay binaries', String(selectedChild?.fuzz_coverage_replay_binary_count || 0)],
+      ['Replay dir', String(selectedChild?.fuzz_coverage_replay_binary_dir || '')],
+      ['Frontier path', String(selectedChild?.fuzz_coverage_frontier_path || '')],
+      ['Manifest path', String(selectedChild?.fuzz_coverage_per_input_manifest_path || '')],
     ];
     const securityRows = securityRowsSource.filter(hasSignalValue);
 
@@ -402,6 +473,94 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                       </Box>
                     ))}
                   </Box>
+
+                  {frontierTopInputs.length ? (
+                    <Box
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        border: '1px solid rgba(15, 23, 42, 0.08)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                      }}
+                    >
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>Frontier Top Inputs</Typography>
+                      <Stack spacing={1}>
+                        {frontierTopInputs.map((input, index) => (
+                          <Box
+                            key={`${input.input_relpath || 'input'}-${index}`}
+                            sx={{
+                              p: 1.25,
+                              borderRadius: 2,
+                              border: '1px solid rgba(15, 23, 42, 0.08)',
+                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                            }}
+                          >
+                            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={0.75}>
+                              <Typography variant="caption" sx={{ wordBreak: 'break-word', fontWeight: 600 }}>
+                                {input.input_relpath || `input-${index + 1}`}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {formatMicros(Number(input.exec_time_us || 0))}
+                              </Typography>
+                            </Stack>
+                            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 0.75 }}>
+                              <Chip size="small" variant="outlined" label={`fn ${Number(input.covered_function_count || 0)}`} />
+                              <Chip size="small" variant="outlined" label={`regions ${Number(input.covered_region_count || 0)}`} />
+                              <Chip size="small" variant="outlined" label={`frontier ${Number(input.unique_frontier_functions || 0)}/${Number(input.nearby_uncovered_regions || 0)}`} />
+                              <Chip size="small" variant="outlined" label={`score ${Number(input.frontier_score || 0).toFixed(2)}`} />
+                              <Chip size="small" variant="outlined" label={`files ${Number(input.repo_file_count || 0)}`} />
+                            </Stack>
+                            {Array.isArray(input.frontier_functions) && input.frontier_functions.length ? (
+                              <Stack spacing={0.35} sx={{ mt: 0.75 }}>
+                                {input.frontier_functions.slice(0, 3).map((fn, fnIndex) => (
+                                  <Typography key={`${input.input_relpath || 'input'}-fn-${fnIndex}`} variant="caption" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
+                                    {`${fn.name || 'unknown'} (${fn.file || 'n/a'}:${Number(fn.line || 0)}) · uncovered=${Number(fn.uncovered_regions_nearby || 0)} · ratio=${Number(fn.region_coverage_ratio || 0).toFixed(2)}`}
+                                  </Typography>
+                                ))}
+                              </Stack>
+                            ) : null}
+                            {Array.isArray(input.covered_functions_sample) && input.covered_functions_sample.length ? (
+                              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: 'block', wordBreak: 'break-word' }}>
+                                {input.covered_functions_sample.slice(0, 6).join(' · ')}
+                              </Typography>
+                            ) : null}
+                            {input.rationale ? (
+                              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: 'block', wordBreak: 'break-word' }}>
+                                {input.rationale}
+                              </Typography>
+                            ) : null}
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ) : null}
+
+                  {frontierTopFunctions.length ? (
+                    <Box
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        border: '1px solid rgba(15, 23, 42, 0.08)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                      }}
+                    >
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>Function to Inputs</Typography>
+                      <Stack spacing={0.9}>
+                        {frontierTopFunctions.map((fn, index) => (
+                          <Box key={`${fn.name || 'fn'}-${index}`} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '180px 1fr' }, gap: 1 }}>
+                            <Typography variant="caption" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
+                              {fn.name || `function-${index + 1}`}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
+                              {`${Number(fn.input_count || 0)} inputs`}
+                              {Array.isArray(fn.input_relpaths) && fn.input_relpaths.length ? ` · ${fn.input_relpaths.join(' · ')}` : ''}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ) : null}
+
                   <Box
                     sx={{
                       borderRadius: 2,
@@ -418,7 +577,10 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                     {JSON.stringify(
                       {
                         result: selectedResult || {},
+                        frontier_summary: frontierSummary || {},
                         latest_crash_vuln_candidate: selectedChild?.latest_crash_vuln_candidate || {},
+                        coverage_frontier_path: selectedChild?.fuzz_coverage_frontier_path || '',
+                        coverage_per_input_manifest_path: selectedChild?.fuzz_coverage_per_input_manifest_path || '',
                         vuln_candidates_path: selectedChild?.vuln_candidates_path || '',
                         crash_vuln_report_path: selectedChild?.crash_vuln_report_path || '',
                       },
