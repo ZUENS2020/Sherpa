@@ -883,3 +883,112 @@ def test_node_plan_surfaces_attack_hint_gap_as_planning_directive(tmp_path: Path
     assert out["last_error"] == ""
     assert "attack_hint_gap: missing boundary-oriented seeds for len=0xFFFFFFFF" in captured["prompt"]
     assert "attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values (coverage_ratio=0.50)" in captured["prompt"]
+
+
+def test_node_plan_hydrates_analysis_context_from_companion_artifacts(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    antlr_ctx = fuzz_dir / "antlr_plan_context.json"
+    antlr_ctx.write_text(
+        json.dumps(
+            {
+                "entrypoint_candidates": [
+                    {"name": "mg_dns_parse", "file": "src/dns.c", "target_type": "parser", "seed_profile": "parser-format"}
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    target_ctx = fuzz_dir / "target_analysis.json"
+    target_ctx.write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    {
+                        "name": "mg_dns_parse",
+                        "api": "mg_dns_parse",
+                        "file": "src/dns.c",
+                        "target_type": "parser",
+                        "seed_profile": "parser-format",
+                        "depth_score": 7,
+                        "security_signals": ["mem_oob_candidate"],
+                        "vuln_likelihood": 0.8,
+                        "exploitability": 0.6,
+                        "reachability_confidence": 0.7,
+                    }
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    companion_root = tmp_path / "_k8s_jobs" / "job-plan-companion" / "promefuzz"
+    companion_root.mkdir(parents=True, exist_ok=True)
+    (companion_root / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "idle",
+                "analysis_backend": "promefuzz-mcp",
+                "repo_root": str(tmp_path),
+                "candidate_count": 3,
+                "rag_ok": True,
+                "mcp_ready": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (companion_root / "preprocess.json").write_text(
+        json.dumps(
+            {
+                "consumer_patterns": [
+                    {"pattern": "dns packet -> mg_dns_parse", "api": "mg_dns_parse"},
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (companion_root / "coverage_hints.json").write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    {"name": "mg_dns_parse", "source": "heuristic", "score": 7, "seed_profile": "parser-format"},
+                ],
+                "semantic_evidence": [
+                    {"snippet": "dns parser entry", "source_path": "src/dns.c", "score": 0.9},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            captured["prompt"] = prompt
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                '[{"name":"mg_dns_parse","api":"mg_dns_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setattr(workflow_graph, "_prepare_antlr_assist_context", lambda _repo_root: (str(antlr_ctx), "antlr ok"))
+    monkeypatch.setattr(workflow_graph, "_prepare_target_analysis_context", lambda _repo_root: (str(target_ctx), "target ok"))
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
+    monkeypatch.setenv("SHERPA_JOB_ID", "job-plan-companion")
+    monkeypatch.setenv("SHERPA_OUTPUT_DIR", str(tmp_path))
+
+    out = workflow_graph._node_plan({"generator": gen, "codex_hint": ""})
+
+    assert out["last_error"] == ""
+    assert Path(str(out.get("analysis_context_path") or "")).is_file()
+    assert int(out.get("analysis_evidence_count") or 0) > 0
+    assert "Unified analysis context is available at `fuzz/analysis_context.json`" in captured["prompt"]

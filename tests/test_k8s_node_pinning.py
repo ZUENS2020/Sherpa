@@ -151,6 +151,19 @@ def test_k8s_stage_wait_timeout_run_applies_seed_retry_multiplier(monkeypatch: p
     assert timeout == 6000
 
 
+def test_k8s_stage_wait_timeout_analysis_uses_dedicated_floor(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SHERPA_K8S_STAGE_TIMEOUT_GRACE_SEC", "180")
+    monkeypatch.setenv("SHERPA_K8S_ANALYSIS_TIMEOUT_SEC", "10800")
+
+    timeout = web_main._k8s_stage_wait_timeout_sec(
+        stage="analysis",
+        total_time_budget_sec=0,
+        run_time_budget_sec=0,
+    )
+
+    assert timeout == 10800
+
+
 def test_normalize_resume_step_preserves_stop_signal():
     assert web_main._normalize_resume_step("stop") == "stop"
     assert web_main._normalize_resume_step("STOP") == "stop"
