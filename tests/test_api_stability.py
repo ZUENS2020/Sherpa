@@ -664,6 +664,61 @@ def test_list_tasks_exposes_vuln_hunting_fields_from_active_child():
     assert detail["children"][0]["security_priority_mode"] is True
 
 
+def test_list_tasks_exposes_frontier_and_replay_fields_from_active_child():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="running",
+        fuzz_coverage_per_input_manifest_path="/tmp/repo/fuzz/coverage/per_input/demo_fuzz/manifest.json",
+        fuzz_coverage_frontier_path="/tmp/repo/fuzz/coverage/per_input/demo_fuzz/frontier.json",
+        fuzz_coverage_frontier_summary={
+            "top_input_count": 2,
+            "top_frontier_function_count": 3,
+            "top_inputs": [
+                {
+                    "input_relpath": "fuzz/corpus/demo_fuzz/a.bin",
+                    "covered_function_count": 12,
+                    "covered_region_count": 34,
+                    "exec_time_us": 1200,
+                    "covered_functions_sample": ["png_read_info"],
+                    "repo_file_count": 1,
+                }
+            ],
+            "top_frontier_functions": [
+                {
+                    "name": "png_read_info",
+                    "input_count": 1,
+                    "input_relpaths": ["fuzz/corpus/demo_fuzz/a.bin"],
+                }
+            ],
+        },
+        fuzz_coverage_replay_runtime_sec=4.25,
+        fuzz_coverage_replay_binary_hash="sha256:demo",
+        fuzz_coverage_replay_binary_count=1,
+        fuzz_coverage_replay_stage_success=True,
+        fuzz_coverage_replay_queue_drained=True,
+        fuzz_coverage_replay_pending_inputs=0,
+        fuzz_coverage_replay_failed_inputs=1,
+        fuzz_coverage_replay_processed_inputs=2,
+        fuzz_coverage_replay_total_inputs=3,
+    )
+    web_main._job_update(task_id, children=[child_id], status="running")
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+        detail = client.get(f"/api/task/{task_id}").json()
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["fuzz_coverage_frontier_summary"]["top_input_count"] == 2
+    assert listing[0]["fuzz_coverage_replay_processed_inputs"] == 2
+    assert listing[0]["fuzz_coverage_replay_total_inputs"] == 3
+    assert detail["children"][0]["fuzz_coverage_frontier_path"].endswith("frontier.json")
+    assert detail["children"][0]["fuzz_coverage_per_input_manifest_path"].endswith("manifest.json")
+    assert detail["children"][0]["fuzz_coverage_frontier_summary"]["top_frontier_functions"][0]["name"] == "png_read_info"
+    assert detail["children"][0]["fuzz_coverage_replay_binary_hash"] == "sha256:demo"
+
+
 def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     web_main._create_job("fuzz", "https://github.com/example/repo.git")
     web_main._create_job("task", "batch")

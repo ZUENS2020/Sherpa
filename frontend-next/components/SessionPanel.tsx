@@ -29,6 +29,12 @@ export function SessionPanel({ tasks }: { tasks: TaskSummary[] }) {
             {activeTask ? (
               <Chip size="small" color={activeTask.status === 'ERROR' ? 'error' : activeTask.status === 'RUNNING' ? 'warning' : 'default'} label={`${activeTask.status} · ${activeTask.repo || 'batch'}`} />
             ) : null}
+            {activeTask ? (
+              <Chip size="small" variant="outlined" label={`Frontier ${Number(activeTask.fuzz_coverage_frontier_summary?.top_input_count || 0)}/${Number(activeTask.fuzz_coverage_frontier_summary?.top_frontier_function_count || 0)}`} />
+            ) : null}
+            {activeTask ? (
+              <Chip size="small" variant="outlined" label={`Replay ${Number(activeTask.fuzz_coverage_replay_processed_inputs || 0)}/${Number(activeTask.fuzz_coverage_replay_total_inputs || 0)}`} />
+            ) : null}
           </Stack>
           <FormControl fullWidth size="small">
             <InputLabel id="session-select-label">选择任务</InputLabel>
@@ -40,7 +46,7 @@ export function SessionPanel({ tasks }: { tasks: TaskSummary[] }) {
             >
               {tasks.map((task) => (
                 <MenuItem key={task.job_id} value={task.job_id}>
-                  #{shortId(task.job_id)} | {task.status} | {task.repo || 'batch'} | crash={task.crash_vuln_candidate_count || 0}
+                  #{shortId(task.job_id)} | {task.status} | {task.repo || 'batch'} | frontier={Number(task.fuzz_coverage_frontier_summary?.top_input_count || 0)} | replay={Number(task.fuzz_coverage_replay_processed_inputs || 0)}/{Number(task.fuzz_coverage_replay_total_inputs || 0)} | crash={task.crash_vuln_candidate_count || 0}
                 </MenuItem>
               ))}
             </Select>

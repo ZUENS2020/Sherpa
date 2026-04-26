@@ -144,11 +144,28 @@ def emit_fuzz_metrics(state: dict[str, Any]) -> None:
         "fuzzers": fuzzers,
         "coverage_history": coverage_history,
         "coverage_source_report": dict(state.get("coverage_source_report") or {}),
+        "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+        "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
         "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
         "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
         "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
         "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
+        "coverage_replay_runtime_sec": float(state.get("coverage_replay_runtime_sec") or 0.0),
+        "coverage_replay_binary_hash": str(state.get("coverage_replay_binary_hash") or ""),
+        "coverage_replay_binary_dir": str(state.get("coverage_replay_binary_dir") or ""),
+        "coverage_replay_binary_count": int(state.get("coverage_replay_binary_count") or 0),
+        "coverage_replay_stage_success": bool(state.get("coverage_replay_stage_success") or False),
+        "coverage_replay_error": str(state.get("coverage_replay_error") or ""),
+        "coverage_replay_manifest_fresh_for_current_binary": bool(
+            state.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        ),
+        "coverage_replay_queue_drained": bool(state.get("coverage_replay_queue_drained") or False),
+        "coverage_replay_pending_inputs": int(state.get("coverage_replay_pending_inputs") or 0),
+        "coverage_replay_failed_inputs": int(state.get("coverage_replay_failed_inputs") or 0),
+        "coverage_replay_processed_inputs": int(state.get("coverage_replay_processed_inputs") or 0),
+        "coverage_replay_total_inputs": int(state.get("coverage_replay_total_inputs") or 0),
         "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
         "security_evidence_count": int(state.get("security_evidence_count") or 0),
         "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
@@ -167,4 +184,3 @@ def emit_fuzz_metrics(state: dict[str, Any]) -> None:
     except Exception:
         return
     logger.info("[wf-metrics] {}", line)
-

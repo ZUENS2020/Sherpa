@@ -806,21 +806,21 @@ def test_node_run_marks_seed_rejected_for_no_interesting_with_zero_cov_and_tiny_
     assert "inputs were likely rejected" in out["last_error"]
 
 
-def test_route_after_run_routes_recoverable_run_errors_to_coverage_analysis():
+def test_route_after_run_routes_recoverable_run_errors_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_seed_rejected_to_coverage_analysis():
+def test_route_after_run_routes_seed_rejected_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_seed_rejected", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+def test_route_after_run_routes_coverage_plateau_to_per_input_replay_even_with_run_error_kind():
     route = workflow_graph._route_after_run_state(
         {
             "run_terminal_reason": "coverage_plateau",
@@ -829,10 +829,10 @@ def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_
             "crash_found": False,
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+def test_route_after_run_routes_coverage_plateau_to_per_input_replay_even_with_run_error_kind_duplicate():
     route = workflow_graph._route_after_run_state(
         {
             "run_terminal_reason": "coverage_plateau",
@@ -841,7 +841,7 @@ def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_
             "crash_found": False,
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_route_after_run_routes_crash_to_repro_stage():
@@ -851,28 +851,61 @@ def test_route_after_run_routes_crash_to_repro_stage():
     assert route == "crash-triage"
 
 
-def test_route_after_run_routes_clean_result_to_coverage_analysis():
+def test_materialize_replay_binaries_writes_replay_dir_without_polluting_primary_discovery(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("bin", encoding="utf-8")
+    primary.chmod(0o755)
+
+    replay_bins = workflow_graph._materialize_replay_binaries(repo_root, [primary])
+    assert len(replay_bins) == 1
+    replay_bin = replay_bins[0]
+    assert replay_bin.parent == repo_root / "fuzz" / "out" / "replay"
+    assert replay_bin.name == "demo_fuzz"
+    assert replay_bin.exists()
+
+
+def test_resolve_per_input_replay_binary_prefers_replay_dir(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    replay_out = fuzz_out / "replay"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    replay_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    replay = replay_out / "demo_fuzz"
+    primary.write_text("primary", encoding="utf-8")
+    replay.write_text("replay", encoding="utf-8")
+    primary.chmod(0o755)
+    replay.chmod(0o755)
+
+    resolved = workflow_graph._resolve_per_input_replay_binary(repo_root, "demo_fuzz")
+    assert resolved == replay
+
+
+def test_route_after_run_routes_clean_result_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_idle_timeout_to_coverage_analysis():
+def test_route_after_run_routes_idle_timeout_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
+def test_route_after_run_routes_resource_exhaustion_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_coverage_analysis():
+def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {
             "run_error_kind": "nonzero_exit_without_crash",
@@ -884,7 +917,7 @@ def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_coverage_
             ],
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_route_after_run_routes_fatal_error_to_plan():
@@ -1220,7 +1253,7 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
             "coverage_seed_families_suggested": ["flow_structures", "anchors_aliases"],
             "coverage_seed_families_covered": ["anchors_aliases"],
             "coverage_seed_families_missing": ["flow_structures"],
-            "coverage_plateau_streak": 1,
+            "coverage_plateau_streak": 0,
             "coverage_last_max_cov": 5,
             "coverage_last_ft": 19,
             "run_details": [
@@ -1245,6 +1278,46 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert out["coverage_quality_oracle"] == "quality_degraded"
     assert isinstance(out.get("coverage_seed_feedback"), dict)
     assert isinstance(out.get("coverage_harness_feedback"), dict)
+
+
+def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse_index() -> None:
+    lines = workflow_graph._coverage_frontier_feedback_lines(
+        {
+            "top_inputs": [
+                {
+                    "input_relpath": "fuzz/corpus/demo_fuzz/frontier.bin",
+                    "covered_function_count": 8,
+                    "covered_region_count": 12,
+                    "frontier_score": 4.25,
+                    "unique_frontier_functions": 2,
+                    "nearby_uncovered_regions": 6,
+                    "covered_functions_sample": ["png_handle_iCCP"],
+                    "frontier_functions": [
+                        {
+                            "name": "png_handle_iCCP",
+                            "file": "src/pngrutil.c",
+                            "line": 1843,
+                            "uncovered_regions_nearby": 6,
+                            "region_coverage_ratio": 0.33,
+                        }
+                    ],
+                }
+            ],
+            "top_frontier_functions": [
+                {
+                    "name": "png_handle_iCCP",
+                    "input_relpaths": ["fuzz/corpus/demo_fuzz/frontier.bin"],
+                }
+            ],
+            "pending_input_count": 1,
+            "failed_input_count": 0,
+        }
+    )
+    joined = "\n".join(lines)
+    assert "frontier_score=4.250" in joined
+    assert "png_handle_iCCP (src/pngrutil.c:1843)" in joined
+    assert "per_input_frontier_inverse_index" in joined
+    assert "pending=1, failed=0" in joined
 
 
 def test_node_coverage_analysis_mentions_attack_hint_boundary_gaps():
@@ -1358,7 +1431,7 @@ def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
             "coverage_history": [],
             "coverage_target_name": "yaml_parser_parse_fuzz",
             "coverage_seed_profile": "parser-structure",
-            "coverage_plateau_streak": 1,
+            "coverage_plateau_streak": 0,
             "coverage_last_max_cov": 7,
             "coverage_last_ft": 28,
             "run_parallel_engine": "fork",
@@ -1414,6 +1487,72 @@ def test_node_coverage_analysis_sets_seed_limited_bottleneck_on_cold_start():
     )
     assert out["coverage_bottleneck_kind"] == "seed_limited"
     assert out["coverage_bottleneck_reason"] == "cold_start_failure"
+
+
+def test_node_coverage_analysis_blocks_harness_limited_until_replay_frontier_ready():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 0,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "coverage_replay_stage_success": False,
+            "coverage_replay_manifest_fresh_for_current_binary": False,
+            "coverage_replay_queue_drained": False,
+            "coverage_frontier_summary": {"top_input_count": 0},
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "none"
+    assert out["coverage_bottleneck_reason"] == "replay_frontier_not_ready"
+
+
+def test_node_coverage_analysis_marks_harness_limited_when_replay_frontier_ready_and_empty():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 0,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "coverage_replay_stage_success": True,
+            "coverage_replay_manifest_fresh_for_current_binary": True,
+            "coverage_replay_queue_drained": True,
+            "coverage_frontier_summary": {"top_input_count": 0},
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "harness_limited"
+    assert out["coverage_bottleneck_reason"] == "plateau_without_seed_or_target_signal"
 
 
 def test_node_coverage_analysis_cold_start_triggers_seed_replan(monkeypatch):
@@ -2285,7 +2424,7 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert out["run_error_kind"] == "run_timeout"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
@@ -2315,7 +2454,7 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
@@ -2365,7 +2504,7 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
     )
 
     assert result["workflow_last_step"] == "run"
-    assert result["workflow_recommended_next"] == "coverage-analysis"
+    assert result["workflow_recommended_next"] == "per-input-replay"
     assert result["repair_mode"] is True
     assert result["repair_origin_stage"] == "fix-harness"
     assert result["repair_error_kind"] == "harness_bug"

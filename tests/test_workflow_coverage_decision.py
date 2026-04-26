@@ -40,6 +40,10 @@ def _base_kwargs() -> dict:
         "total_execs_per_sec": 2000,
         "underutilized_execs_threshold": 1500,
         "current_depth_class": "medium",
+        "coverage_replay_stage_success": True,
+        "coverage_replay_manifest_fresh": True,
+        "coverage_replay_queue_drained": True,
+        "coverage_frontier_input_count": 0,
         "current_round": 2,
         "max_rounds": 10,
         "unlimited_rounds": False,
@@ -90,3 +94,33 @@ def test_budget_exhausted_sets_stop_reason() -> None:
     assert out["should_improve"] is False
     assert out["round_budget_exhausted"] is True
     assert out["stop_reason"] == "coverage_loop_budget_exhausted"
+
+
+def test_harness_limited_requires_replay_gates() -> None:
+    kwargs = _base_kwargs()
+    kwargs.update(
+        {
+            "prev_plateau_streak": 0,
+            "coverage_replay_stage_success": False,
+            "coverage_replay_manifest_fresh": False,
+            "coverage_replay_queue_drained": False,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["coverage_bottleneck_kind"] == "none"
+    assert out["coverage_bottleneck_reason"] == "replay_frontier_not_ready"
+    assert out["coverage_replay_frontier_ready"] is False
+
+    kwargs.update(
+        {
+            "prev_plateau_streak": 0,
+            "coverage_replay_stage_success": True,
+            "coverage_replay_manifest_fresh": True,
+            "coverage_replay_queue_drained": True,
+            "coverage_frontier_input_count": 0,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["coverage_bottleneck_kind"] == "harness_limited"
+    assert out["coverage_bottleneck_reason"] == "plateau_without_seed_or_target_signal"
+    assert out["coverage_replay_frontier_ready"] is True

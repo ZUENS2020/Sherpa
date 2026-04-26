@@ -72,6 +72,14 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
   const targetApi = activeResult
     ? String(activeResult.coverage_target_api || activeResult.selected_target_api || activeResult.synthesize_selected_target_api || '')
     : '';
+  const replayBinaryCount = Number(activeChild?.fuzz_coverage_replay_binary_count || detail?.fuzz_coverage_replay_binary_count || 0);
+  const replayPending = Number(activeChild?.fuzz_coverage_replay_pending_inputs || detail?.fuzz_coverage_replay_pending_inputs || 0);
+  const replayFailed = Number(activeChild?.fuzz_coverage_replay_failed_inputs || detail?.fuzz_coverage_replay_failed_inputs || 0);
+  const replayProcessed = Number(activeChild?.fuzz_coverage_replay_processed_inputs || detail?.fuzz_coverage_replay_processed_inputs || 0);
+  const replayTotal = Number(activeChild?.fuzz_coverage_replay_total_inputs || detail?.fuzz_coverage_replay_total_inputs || 0);
+  const replayReady = Boolean(activeChild?.fuzz_coverage_replay_stage_success || detail?.fuzz_coverage_replay_stage_success);
+  const frontierInputCount = Number(activeChild?.fuzz_coverage_frontier_summary?.top_input_count || detail?.fuzz_coverage_frontier_summary?.top_input_count || 0);
+  const frontierFunctionCount = Number(activeChild?.fuzz_coverage_frontier_summary?.top_frontier_function_count || detail?.fuzz_coverage_frontier_summary?.top_frontier_function_count || 0);
 
   return (
     <Card
@@ -124,6 +132,9 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
               ['Coverage', coverageRound || 'n/a'],
               ['目标 API', targetApi || 'n/a'],
               ['Fix Rounds', fixRounds || '0/0'],
+              ['Replay', `${replayBinaryCount} bins · ${replayProcessed}/${replayTotal}`],
+              ['Replay Queue', `${replayPending}/${replayFailed}`],
+              ['Frontier', `${frontierInputCount} inputs · ${frontierFunctionCount} fns`],
             ].map(([label, value]) => (
               <Box
                 key={label}
@@ -149,6 +160,8 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
             />
             <Chip size="small" variant="outlined" label={`分析候选：${analysisVulnCount}`} />
             <Chip size="small" variant="outlined" color={crashVulnCount > 0 ? 'warning' : 'default'} label={`Crash 候选：${crashVulnCount}`} />
+            <Chip size="small" variant="outlined" color={replayReady ? 'success' : 'default'} label={`Replay：${replayBinaryCount}`} />
+            <Chip size="small" variant="outlined" label={`Frontier：${frontierInputCount}/${frontierFunctionCount}`} />
             {vulnStatus ? (
               <Chip size="small" color={vulnStatusColor(vulnStatus)} label={vulnStatus} />
             ) : null}
