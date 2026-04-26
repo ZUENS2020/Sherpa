@@ -155,15 +155,15 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
   const frontierTopInputs = useMemo<FrontierInput[]>(() => {
     const items = Array.isArray(frontierSummary?.top_inputs) ? frontierSummary.top_inputs : [];
     return items
-      .filter((item): item is FrontierInput => Boolean(item && typeof item === 'object'))
-      .slice(0, 5);
+      .filter((item) => Boolean(item && typeof item === 'object'))
+      .slice(0, 5) as FrontierInput[];
   }, [frontierSummary]);
 
   const frontierTopFunctions = useMemo<FrontierFunction[]>(() => {
     const items = Array.isArray(frontierSummary?.top_frontier_functions) ? frontierSummary.top_frontier_functions : [];
     return items
-      .filter((item): item is FrontierFunction => Boolean(item && typeof item === 'object'))
-      .slice(0, 8);
+      .filter((item) => Boolean(item && typeof item === 'object'))
+      .slice(0, 8) as FrontierFunction[];
   }, [frontierSummary]);
 
   const signalRows = useMemo(() => {
