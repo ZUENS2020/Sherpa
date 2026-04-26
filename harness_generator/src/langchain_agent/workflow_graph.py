@@ -3134,6 +3134,20 @@ def _coverage_attack_hint_feedback_lines(seed_feedback: dict[str, Any]) -> list[
         for x in list(seed_feedback.get("attack_hint_missing_values") or [])
         if str(x).strip()
     ]
+    if not missing_values:
+        return []
+    ratio = float(seed_feedback.get("attack_hint_coverage_ratio") or 0.0)
+    return [
+        (
+            "- attack_hint_gap: missing boundary-oriented seeds for "
+            + ", ".join(missing_values[:6])
+            + (" ..." if len(missing_values) > 6 else "")
+        ),
+        (
+            "- attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values "
+            f"(coverage_ratio={ratio:.2f}) before broadening generic mutations."
+        ),
+    ]
 
 
 def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[str]:
@@ -3267,20 +3281,6 @@ def _resolve_per_input_replay_binary(repo_root: Path, fuzzer_name: str) -> Path 
         if candidate.is_file() and os.access(str(candidate), os.X_OK):
             return candidate
     return None
-    if not missing_values:
-        return []
-    ratio = float(seed_feedback.get("attack_hint_coverage_ratio") or 0.0)
-    return [
-        (
-            "- attack_hint_gap: missing boundary-oriented seeds for "
-            + ", ".join(missing_values[:6])
-            + (" ..." if len(missing_values) > 6 else "")
-        ),
-        (
-            "- attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values "
-            f"(coverage_ratio={ratio:.2f}) before broadening generic mutations."
-        ),
-    ]
 
 
 def _aggregate_seed_quality_from_run_details(
