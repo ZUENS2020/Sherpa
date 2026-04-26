@@ -4912,6 +4912,60 @@ def _read_json_doc(path_text: str) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _materialize_analysis_context_from_companion(
+    *,
+    repo_root: Path,
+    antlr_context_path: str,
+    antlr_context_summary: str,
+    target_analysis_path: str,
+    target_analysis_summary: str,
+) -> tuple[str, int, int, int, str]:
+    companion_doc, companion_summary = _collect_analysis_companion_context()
+    artifacts = dict(companion_doc.get("artifacts") or {})
+    found_artifacts = sum(
+        1
+        for name in ("status.json", "preprocess.json", "coverage_hints.json")
+        if isinstance(artifacts.get(name), dict) and bool((artifacts.get(name) or {}).get("exists"))
+    )
+    if found_artifacts <= 0:
+        return "", 0, 0, 0, companion_summary
+
+    antlr_doc = _read_json_doc(antlr_context_path)
+    target_doc = _read_json_doc(target_analysis_path)
+    evidence_doc = _build_analysis_evidence_index(
+        repo_root=repo_root,
+        antlr_doc=antlr_doc,
+        target_doc=target_doc,
+        companion_doc=companion_doc,
+    )
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    analysis_doc = {
+        "mode": "companion-fallback-analysis",
+        "generated_at": int(time.time()),
+        "repo_root": str(repo_root),
+        "antlr_context_path": antlr_context_path,
+        "antlr_context_summary": antlr_context_summary,
+        "target_analysis_path": target_analysis_path,
+        "target_analysis_summary": target_analysis_summary,
+        "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+        "vuln_focus_profile": "broad_high_risk",
+        "target_surface_policy": "risk_first",
+        "companion": companion_doc,
+        "analysis_evidence": evidence_doc,
+    }
+    analysis_path = fuzz_dir / "analysis_context.json"
+    analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    summary = dict(evidence_doc.get("summary") or {})
+    return (
+        str(analysis_path),
+        int(summary.get("evidence_count") or 0),
+        int(summary.get("security_evidence_count") or 0),
+        int(summary.get("vuln_candidate_count") or 0),
+        companion_summary,
+    )
+
+
 def _build_analysis_evidence_index(
     *,
     repo_root: Path,
@@ -5843,10 +5897,35 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
     analysis_context_path = str(state.get("analysis_context_path") or "").strip()
     analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
+    security_evidence_count = int(state.get("security_evidence_count") or 0)
+    vuln_candidate_count = int(state.get("vuln_candidate_count") or 0)
     if not antlr_context_path and not antlr_context_summary:
         antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
     if not target_analysis_path and not target_analysis_summary:
         target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+    if not analysis_context_path:
+        try:
+            (
+                analysis_context_path,
+                analysis_evidence_count,
+                security_evidence_count,
+                vuln_candidate_count,
+                companion_summary,
+            ) = _materialize_analysis_context_from_companion(
+                repo_root=gen.repo_root,
+                antlr_context_path=antlr_context_path,
+                antlr_context_summary=antlr_context_summary,
+                target_analysis_path=target_analysis_path,
+                target_analysis_summary=target_analysis_summary,
+            )
+            if analysis_context_path:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "plan: hydrated analysis_context.json from companion artifacts"
+                    + (f" ({companion_summary})" if companion_summary else ""),
+                )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"plan: companion analysis hydration skipped: {exc}")
     if antlr_context_summary:
         antlr_note = (
             "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
@@ -6255,8 +6334,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_summary": target_analysis_summary,
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
-            "security_evidence_count": int(state.get("security_evidence_count") or 0),
-            "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+            "security_evidence_count": security_evidence_count,
+            "vuln_candidate_count": vuln_candidate_count,
             "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or _vuln_hunting_enabled()),
             "vuln_focus_profile": str(state.get("vuln_focus_profile") or "broad_high_risk"),
             "target_surface_policy": str(state.get("target_surface_policy") or "risk_first"),

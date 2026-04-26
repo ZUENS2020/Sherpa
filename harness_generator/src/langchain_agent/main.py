@@ -771,6 +771,14 @@ def _k8s_analysis_companion_timeout_sec() -> int:
         return 180
 
 
+def _k8s_analysis_stage_timeout_floor_sec() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_TIMEOUT_SEC") or "10800").strip()
+    try:
+        return max(300, min(int(raw), 86400))
+    except (ValueError, TypeError):
+        return 10800
+
+
 def _k8s_analysis_require_rag_ready() -> bool:
     raw = (os.environ.get("SHERPA_K8S_ANALYSIS_REQUIRE_RAG_READY", "1") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -1629,6 +1637,8 @@ def _k8s_stage_wait_timeout_sec(
     run_unlimited_round_budget = max(300, run_unlimited_round_budget)
 
     total_base = total_time_budget_sec if total_time_budget_sec > 0 else 7200
+    if stage == "analysis":
+        return max(300, total_base + grace_default, _k8s_analysis_stage_timeout_floor_sec())
     if stage != "run":
         return max(300, total_base + grace_default)
 
