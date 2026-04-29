@@ -144,6 +144,8 @@ def emit_fuzz_metrics(state: dict[str, Any]) -> None:
         "fuzzers": fuzzers,
         "coverage_history": coverage_history,
         "coverage_source_report": dict(state.get("coverage_source_report") or {}),
+        "coverage_run_feedback_path": str(state.get("coverage_run_feedback_path") or ""),
+        "coverage_run_feedback_summary": dict(state.get("coverage_run_feedback_summary") or {}),
         "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
         "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
         "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),

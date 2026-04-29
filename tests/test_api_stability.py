@@ -702,6 +702,12 @@ def test_list_tasks_exposes_frontier_and_replay_fields_from_active_child():
         fuzz_coverage_replay_failed_inputs=1,
         fuzz_coverage_replay_processed_inputs=2,
         fuzz_coverage_replay_total_inputs=3,
+        fuzz_coverage_run_feedback_path="/tmp/repo/fuzz/run_feedback.json",
+        fuzz_coverage_run_feedback_summary={
+            "function_gap_count": 3,
+            "path_frontier_count": 2,
+            "top_function_gaps": [{"name": "png_read_info", "file": "pngrutil.c"}],
+        },
     )
     web_main._job_update(task_id, children=[child_id], status="running")
 
@@ -717,6 +723,8 @@ def test_list_tasks_exposes_frontier_and_replay_fields_from_active_child():
     assert detail["children"][0]["fuzz_coverage_per_input_manifest_path"].endswith("manifest.json")
     assert detail["children"][0]["fuzz_coverage_frontier_summary"]["top_frontier_functions"][0]["name"] == "png_read_info"
     assert detail["children"][0]["fuzz_coverage_replay_binary_hash"] == "sha256:demo"
+    assert detail["children"][0]["fuzz_coverage_run_feedback_path"].endswith("run_feedback.json")
+    assert detail["children"][0]["fuzz_coverage_run_feedback_summary"]["function_gap_count"] == 3
 
 
 def test_list_tasks_applies_limit_and_filters_non_task_jobs():

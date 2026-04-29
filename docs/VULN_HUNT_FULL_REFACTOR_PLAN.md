@@ -648,9 +648,9 @@ score_total = 0.45 * vuln_likelihood
 | 现有阶段 | 升级内容 |
 |----------|---------|
 | `analysis` | 安全审计输出 `security_evidence[]`（✅ 已实现） |
-| 新增 `vuln-hunt` | analysis 之后，产出候选清单 + 攻击策略（Phase 1a） |
-| `plan` | 从 coverage-first 改为 candidate-first，读 `vuln_candidates.json`（candidate-first 声明 ✅ 已实现，读 candidates 待 Phase 1a） |
-| `synthesize` | hint 注入漏洞路径（✅ 已实现 `vuln_hint_lines`），完整 `attack_hint` 契约待 Phase 1a |
+| `analysis` 扩展 | analysis 结束后落盘 `vuln_candidates.json` 候选工件（✅ 已实现） |
+| `plan` | 从 coverage-first 改为 candidate-first，显式读取 `vuln_candidates.json`（✅ 已实现） |
+| `synthesize` | hint 注入漏洞路径（✅ 已实现 `vuln_hint_lines` + `attack_hint` 候选透传） |
 | `seed_generation` | 注入 `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS`（✅ 已实现） |
 | `run` | 运行后提取细粒度覆盖率数据（新增） |
 | `coverage_analysis` | 增加代码路径级反馈输出（新增） |
@@ -672,7 +672,7 @@ score_total = 0.45 * vuln_likelihood
 
 | 文件 | 作用 | 产出阶段 |
 |------|------|---------|
-| `fuzz/vuln_candidates.json` | 候选清单（含 attack_hint） | `_node_vuln_hunt` |
+| `fuzz/vuln_candidates.json` | 候选清单（含 attack_hint） | `analysis` / `crash-triage` / `crash-analysis` |
 | `fuzz/validation_results.json` | 验证结果记录 | `_node_coverage_analysis` |
 | `fuzz/coverage_feedback.json` | 细粒度覆盖率反馈 | `_node_run` 后处理 |
 | `fuzz/signature_clusters.json` | 签名去重库 | `_node_crash_triage` |
@@ -738,7 +738,7 @@ Use in the dedicated `vuln-hunt` stage, after `analysis` and before `plan`.
 - repository source tree (read-only)
 
 ## Required outputs
-- `fuzz/vuln_candidates.json`：候选清单（strict JSON array）
+- `fuzz/vuln_candidates.json`：候选清单文档（strict JSON object，含 `candidates[]`）
 - `fuzz/vuln_hunt_summary.md`：发现摘要（含使用了哪些策略、为什么选这些候选）
 
 ## Strategy menu（建议，AI 自由选用组合）
@@ -796,7 +796,7 @@ Use in the dedicated `vuln-hunt` stage, after `analysis` and before `plan`.
 - Forbidden: build / execute / mutation commands.
 
 ## Acceptance checklist
-- [ ] `fuzz/vuln_candidates.json` is a valid non-empty JSON array
+- [ ] `fuzz/vuln_candidates.json` is a valid JSON object with non-empty `candidates[]`
 - [ ] Every candidate has a unique `candidate_id`
 - [ ] Every candidate references at least one `evidence_id` from analysis_context
 - [ ] Every `attack_hint.key_code_path` contains concrete function names (not descriptions)
@@ -923,18 +923,16 @@ flowchart LR
     P1C --> P2A --> P3A
 ```
 
-### Phase 1a：最小可验证闭环（优先）
+### Phase 1a：最小可验证闭环（已完成）
 
 **目标**：跑通"候选生成 → 目标选择 → fuzz 验证"单趟闭环。
 
-- 在现有 workflow 中新增 `_node_vuln_hunt`：
-  - 输入：`analysis_context.json` + 策略菜单（prompt 中提供 5 种策略建议）
-  - AI 自主选择策略组合产出候选
-  - 输出校验器检查每个候选的 `evidence_ref` / `attack_hint` / `concrete_path` 等
-  - 不合格带反馈重试（≤2 次），仍不合格则降级保留合格部分
-  - 输出：`fuzz/vuln_candidates.json`（含 `attack_hint`）
-- `_node_plan` 读取 `vuln_candidates.json`，执行 candidate-first 排序。
-- `_node_synthesize` 的 hint 注入 `attack_hint`。
+- 已按最小闭环落地：
+  - `analysis` 基于 `analysis_context.json.analysis_evidence.vuln_candidate_inventory` 生成 `fuzz/vuln_candidates.json`
+  - `plan` 显式读取 `fuzz/vuln_candidates.json`，执行 candidate-first 排序
+  - `selected_targets.json` 保留 `vuln_candidate_id`、`vuln_candidate_priority`、`attack_hint`
+  - `synthesize` 继续沿用漏洞 hint 注入
+- 当前仍未做独立 `_node_vuln_hunt`；现阶段先复用 analysis 产出候选，减少状态机复杂度。
 - 不引入新队列抽象，不改变 k8s Job 调度模型。
 - 保持单任务线性主链。
 
@@ -1055,10 +1053,13 @@ SHERPA_VULN_COOLING_HOURS=24
 | dict_parse_error 立即 exhaust target | 前置：Bug 修复 | ✅ 已完成 |
 | 降级传播到 decision snapshot | 前置：可观测性 | ✅ 已完成 |
 | plan prompt candidate-first 排序声明 | 前置：排序策略 | ✅ 已完成 |
+| analysis 落盘 `fuzz/vuln_candidates.json` | Phase 1a | ✅ 已完成 |
+| plan 显式消费 `fuzz/vuln_candidates.json` | Phase 1a | ✅ 已完成 |
+| selected target 透出 `vuln_candidate_id` / `attack_hint` | Phase 1a | ✅ 已完成 |
 
-**当前状态**：所有前置工作已完成，评分、数据源、种子引导、可观测性基础就绪。
+**当前状态**：前置工作与 Phase 1a 最小闭环已完成，当前是“analysis 产候选 + plan candidate-first + synthesize attack hint”的可运行版本。
 
-**下一步**：Phase 1a — 实现 `_node_vuln_hunt` 节点（候选生成 + `attack_hint` 完整契约 + `vuln_candidates.json` 产出）。
+**下一步**：Phase 1b — 细粒度覆盖率反馈与验证闭环；如仍需更强自主性，再引入独立 `_node_vuln_hunt`。
 
 ---
 

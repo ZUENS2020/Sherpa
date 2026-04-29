@@ -60,6 +60,7 @@ Goal:
 
 Required outputs:
 - `fuzz/analysis_context.json`
+- `fuzz/vuln_candidates.json`
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
 - `fuzz/analysis_context.json.analysis_evidence.security_evidence`
@@ -77,6 +78,9 @@ Constraints:
 - For each vulnerability hypothesis, include:
   - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
   - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
+- Also write `fuzz/vuln_candidates.json` as the machine-readable vulnerability candidate worklist:
+  - top-level `schema_version`, `updated_at`, `candidate_count`, `candidates`
+  - each candidate includes `candidate_id`, `source_stage=analysis`, `validation_status=pending`, `target_api`, `target_name`, `target_type`, `signal_type`, `vuln_likelihood`, `exploitability`, `reachability_confidence`, `priority`, `evidence_ids`, and `attack_hint`.
 
 Security analysis (vulnerability-directed):
 - Identify unsafe memory operations: unchecked memcpy/memmove/strcpy, raw pointer arithmetic, manual buffer management without bounds validation

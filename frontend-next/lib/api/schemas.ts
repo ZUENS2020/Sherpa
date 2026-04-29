@@ -132,6 +132,57 @@ export const frontierSummarySchema = z.object({
   covered_function_union_sample: z.array(z.string()).optional().default([]),
 });
 
+export const runFeedbackFunctionGapSchema = z.object({
+  name: z.string().optional().default(''),
+  file: z.string().optional().default(''),
+  line: z.number().int().optional().default(0),
+  kind: z.string().optional().default(''),
+  execution_count: z.number().int().optional().default(0),
+  region_coverage_ratio: z.number().optional().default(0),
+});
+
+export const runFeedbackFrontierFunctionSchema = z.object({
+  name: z.string().optional().default(''),
+  file: z.string().optional().default(''),
+  line: z.number().int().optional().default(0),
+  uncovered_regions_nearby: z.number().int().optional().default(0),
+  region_coverage_ratio: z.number().optional().default(0),
+});
+
+export const runFeedbackPathFrontierSchema = z.object({
+  input_relpath: z.string().optional().default(''),
+  frontier_score: z.number().optional().default(0),
+  covered_function_count: z.number().int().optional().default(0),
+  covered_region_count: z.number().int().optional().default(0),
+  covered_functions_sample: z.array(z.string()).optional().default([]),
+  frontier_functions: z.array(runFeedbackFrontierFunctionSchema).optional().default([]),
+});
+
+export const runFeedbackTopFileSchema = z.object({
+  path: z.string().optional().default(''),
+  issue_count: z.number().int().optional().default(0),
+  functions: z.array(z.object({
+    name: z.string().optional().default(''),
+    line: z.number().int().optional().default(0),
+    kind: z.string().optional().default(''),
+  })).optional().default([]),
+});
+
+export const runFeedbackSummarySchema = z.object({
+  repo_root: z.string().optional().default(''),
+  generated_at: z.number().int().optional().default(0),
+  function_gap_count: z.number().int().optional().default(0),
+  path_frontier_count: z.number().int().optional().default(0),
+  frontier_function_count: z.number().int().optional().default(0),
+  top_function_gaps: z.array(runFeedbackFunctionGapSchema).optional().default([]),
+  top_path_frontiers: z.array(runFeedbackPathFrontierSchema).optional().default([]),
+  top_frontier_functions: z.array(frontierFunctionSchema).optional().default([]),
+  top_files: z.array(runFeedbackTopFileSchema).optional().default([]),
+  coverage_pct: z.number().optional().default(0),
+  covered_functions: z.number().int().optional().default(0),
+  total_functions: z.number().int().optional().default(0),
+});
+
 export const taskSummarySchema = z.object({
   job_id: z.string(),
   status: z.string(),
@@ -152,6 +203,8 @@ export const taskSummarySchema = z.object({
   fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
   fuzz_coverage_frontier_path: z.string().optional().default(''),
   fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
   fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
   fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
   fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
@@ -187,6 +240,8 @@ export const childJobSchema = z.object({
   fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
   fuzz_coverage_frontier_path: z.string().optional().default(''),
   fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
   fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
   fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
   fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
@@ -222,6 +277,8 @@ export const taskDetailSchema = z.object({
   fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
   fuzz_coverage_frontier_path: z.string().optional().default(''),
   fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
   fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
   fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
   fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
