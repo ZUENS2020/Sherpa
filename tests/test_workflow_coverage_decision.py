@@ -81,6 +81,27 @@ def test_seed_quality_issue_prefers_in_place() -> None:
     assert out["replan_required"] is False
 
 
+def test_persistent_low_yield_target_forces_replan() -> None:
+    kwargs = _base_kwargs()
+    kwargs.update(
+        {
+            "quality_flags": ["low_early_yield"],
+            "prev_plateau_streak": 2,
+            "current_cov": 10,
+            "prev_cov": 10,
+            "current_ft": 20,
+            "prev_ft": 20,
+            "total_execs_per_sec": 1800,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["persistent_low_yield_target"] is True
+    assert out["should_improve"] is True
+    assert out["replan_required"] is True
+    assert out["improve_mode"] == "replan"
+    assert out["replan_reason"] == "persistent_low_yield_target"
+
+
 def test_budget_exhausted_sets_stop_reason() -> None:
     kwargs = _base_kwargs()
     kwargs.update(

@@ -57,6 +57,7 @@ type FrontierFunction = {
   best_distance_to_target?: number;
 };
 type FrontierSummary = NonNullable<TaskDetail['fuzz_coverage_frontier_summary']>;
+type RunFeedbackSummary = NonNullable<TaskDetail['fuzz_coverage_run_feedback_summary']>;
 
 function statusTone(status: string): 'default' | 'warning' | 'success' | 'error' | 'info' {
   if (status === 'success') return 'success';
@@ -166,6 +167,27 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       .slice(0, 8) as FrontierFunction[];
   }, [frontierSummary]);
 
+  const runFeedbackSummary = useMemo<RunFeedbackSummary>(() => {
+    return selectedChild?.fuzz_coverage_run_feedback_summary
+      || detail?.fuzz_coverage_run_feedback_summary
+      || {
+        top_function_gaps: [],
+        top_path_frontiers: [],
+        top_frontier_functions: [],
+        top_files: [],
+      };
+  }, [detail?.fuzz_coverage_run_feedback_summary, selectedChild?.fuzz_coverage_run_feedback_summary]);
+
+  const topFunctionGaps = useMemo(() => {
+    const items = Array.isArray(runFeedbackSummary?.top_function_gaps) ? runFeedbackSummary.top_function_gaps : [];
+    return items.filter((item) => Boolean(item && typeof item === 'object')).slice(0, 6) as Array<Record<string, unknown>>;
+  }, [runFeedbackSummary]);
+
+  const topPathFrontiers = useMemo(() => {
+    const items = Array.isArray(runFeedbackSummary?.top_path_frontiers) ? runFeedbackSummary.top_path_frontiers : [];
+    return items.filter((item) => Boolean(item && typeof item === 'object')).slice(0, 4) as Array<Record<string, unknown>>;
+  }, [runFeedbackSummary]);
+
   const signalRows = useMemo(() => {
     const rows: SignalRow[] = [
       ['阶段', String(selectedResult?.last_step || detail?.status || 'unknown')],
@@ -175,6 +197,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Coverage round', `${Number(selectedResult?.coverage_loop_round || 0)}/${Number(selectedResult?.coverage_loop_max_rounds || 0)}`],
       ['Seed profile', String(selectedResult?.coverage_seed_profile || '')],
       ['Replay binaries', String(selectedChild?.fuzz_coverage_replay_binary_count || 0)],
+      ['Run feedback', `${Number(selectedChild?.fuzz_coverage_run_feedback_summary?.function_gap_count || 0)} gaps / ${Number(selectedChild?.fuzz_coverage_run_feedback_summary?.path_frontier_count || 0)} paths`],
       ['Replay queue', `${Number(selectedChild?.fuzz_coverage_replay_pending_inputs || 0)} pending / ${Number(selectedChild?.fuzz_coverage_replay_failed_inputs || 0)} failed`],
       ['Replay progress', `${Number(selectedChild?.fuzz_coverage_replay_processed_inputs || 0)}/${Number(selectedChild?.fuzz_coverage_replay_total_inputs || 0)}`],
       ['Error signature', String(selectedResult?.build_error_signature_after || selectedResult?.build_error_signature_before || '')],
@@ -183,7 +206,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Vuln target', String(selectedChild?.latest_crash_vuln_candidate?.target_api || selectedChild?.latest_crash_vuln_candidate?.target_name || '')],
     ];
     return rows.filter(hasVisibleSignalValue);
-  }, [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.fuzz_coverage_replay_binary_count, selectedChild?.fuzz_coverage_replay_failed_inputs, selectedChild?.fuzz_coverage_replay_pending_inputs, selectedChild?.fuzz_coverage_replay_processed_inputs, selectedChild?.fuzz_coverage_replay_total_inputs, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult]);
+  }, [detail?.status, selectedChild?.crash_vuln_candidate_count, selectedChild?.fuzz_coverage_replay_binary_count, selectedChild?.fuzz_coverage_replay_failed_inputs, selectedChild?.fuzz_coverage_replay_pending_inputs, selectedChild?.fuzz_coverage_replay_processed_inputs, selectedChild?.fuzz_coverage_replay_total_inputs, selectedChild?.fuzz_coverage_run_feedback_summary, selectedChild?.latest_crash_vuln_candidate, selectedChild?.vuln_candidate_count, selectedChild?.vuln_hunting_enabled, selectedResult]);
 
   const signalSections = useMemo<SignalSection[]>(() => {
     const coverageRowsSource: SignalRow[] = [
@@ -195,6 +218,8 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Bottleneck', String(selectedResult?.coverage_bottleneck_kind || '')],
       ['Frontier inputs', String(selectedChild?.fuzz_coverage_frontier_summary?.top_input_count || 0)],
       ['Frontier functions', String(selectedChild?.fuzz_coverage_frontier_summary?.top_frontier_function_count || 0)],
+      ['Function gaps', String(selectedChild?.fuzz_coverage_run_feedback_summary?.function_gap_count || 0)],
+      ['Path frontiers', String(selectedChild?.fuzz_coverage_run_feedback_summary?.path_frontier_count || 0)],
       ['Replay queue', `${Number(selectedChild?.fuzz_coverage_replay_pending_inputs || 0)} pending / ${Number(selectedChild?.fuzz_coverage_replay_failed_inputs || 0)} failed`],
       ['Replay progress', `${Number(selectedChild?.fuzz_coverage_replay_processed_inputs || 0)}/${Number(selectedChild?.fuzz_coverage_replay_total_inputs || 0)}`],
     ];
@@ -233,6 +258,7 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       ['Replay binaries', String(selectedChild?.fuzz_coverage_replay_binary_count || 0)],
       ['Replay dir', String(selectedChild?.fuzz_coverage_replay_binary_dir || '')],
       ['Frontier path', String(selectedChild?.fuzz_coverage_frontier_path || '')],
+      ['Run feedback path', String(selectedChild?.fuzz_coverage_run_feedback_path || '')],
       ['Manifest path', String(selectedChild?.fuzz_coverage_per_input_manifest_path || '')],
     ];
     const securityRows = securityRowsSource.filter(hasSignalValue);
@@ -533,6 +559,84 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                             {input.rationale ? (
                               <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, display: 'block', wordBreak: 'break-word' }}>
                                 {input.rationale}
+                              </Typography>
+                            ) : null}
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ) : null}
+
+                  {topFunctionGaps.length ? (
+                    <Box
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        border: '1px solid rgba(15, 23, 42, 0.08)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                      }}
+                    >
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>Top Function Gaps</Typography>
+                      <Stack spacing={0.75}>
+                        {topFunctionGaps.map((item, index) => (
+                          <Box
+                            key={`${String(item.name || 'gap')}-${index}`}
+                            sx={{
+                              p: 1.1,
+                              borderRadius: 2,
+                              border: '1px solid rgba(15, 23, 42, 0.08)',
+                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                            }}
+                          >
+                            <Typography variant="caption" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
+                              {String(item.name || 'unknown')}
+                            </Typography>
+                            <Typography variant="caption" display="block" color="text.secondary">
+                              {String(item.kind || 'n/a')} · cov {Number(item.region_coverage_ratio || 0).toFixed(2)} · exec {Number(item.execution_count || 0)}
+                            </Typography>
+                            <Typography variant="caption" display="block" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
+                              {String(item.file || '')}{Number(item.line || 0) > 0 ? `:${Number(item.line || 0)}` : ''}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Box>
+                  ) : null}
+
+                  {topPathFrontiers.length ? (
+                    <Box
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        border: '1px solid rgba(15, 23, 42, 0.08)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                      }}
+                    >
+                      <Typography variant="subtitle2" sx={{ mb: 1 }}>Top Path Frontiers</Typography>
+                      <Stack spacing={0.75}>
+                        {topPathFrontiers.map((item, index) => (
+                          <Box
+                            key={`${String(item.input_relpath || 'path')}-${index}`}
+                            sx={{
+                              p: 1.1,
+                              borderRadius: 2,
+                              border: '1px solid rgba(15, 23, 42, 0.08)',
+                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                            }}
+                          >
+                            <Typography variant="caption" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
+                              {String(item.input_relpath || `input-${index + 1}`)}
+                            </Typography>
+                            <Typography variant="caption" display="block" color="text.secondary">
+                              score {Number(item.frontier_score || 0).toFixed(2)} · fn {Number(item.covered_function_count || 0)} · regions {Number(item.covered_region_count || 0)}
+                            </Typography>
+                            {Array.isArray(item.frontier_functions) && item.frontier_functions.length ? (
+                              <Typography variant="caption" display="block" color="text.secondary" sx={{ wordBreak: 'break-word' }}>
+                                {item.frontier_functions
+                                  .slice(0, 3)
+                                  .map((fn) => String((fn as Record<string, unknown>).name || ''))
+                                  .filter(Boolean)
+                                  .join(', ')}
                               </Typography>
                             ) : null}
                           </Box>

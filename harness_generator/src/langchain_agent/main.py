@@ -2225,6 +2225,8 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_crash_found=bool(payload.get("crash_found")),
                 fuzz_coverage_history=payload.get("coverage_history") or [],
                 fuzz_coverage_source_report=payload.get("coverage_source_report") or {},
+                fuzz_coverage_run_feedback_path=str(payload.get("coverage_run_feedback_path") or ""),
+                fuzz_coverage_run_feedback_summary=payload.get("coverage_run_feedback_summary") or {},
                 fuzz_coverage_per_input_manifest_path=str(payload.get("coverage_per_input_manifest_path") or ""),
                 fuzz_coverage_frontier_path=str(payload.get("coverage_frontier_path") or ""),
                 fuzz_coverage_frontier_summary=payload.get("coverage_frontier_summary") or {},
@@ -3967,6 +3969,8 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_crash_found", False)
     view.setdefault("fuzz_coverage_history", [])
     view.setdefault("fuzz_coverage_source_report", {})
+    view.setdefault("fuzz_coverage_run_feedback_path", "")
+    view.setdefault("fuzz_coverage_run_feedback_summary", {})
     view.setdefault("fuzz_coverage_per_input_manifest_path", "")
     view.setdefault("fuzz_coverage_frontier_path", "")
     view.setdefault("fuzz_coverage_frontier_summary", {})
@@ -4232,6 +4236,8 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
+                "fuzz_coverage_run_feedback_path": (active_child or job).get("fuzz_coverage_run_feedback_path", ""),
+                "fuzz_coverage_run_feedback_summary": (active_child or job).get("fuzz_coverage_run_feedback_summary", {}),
                 "fuzz_coverage_per_input_manifest_path": (active_child or job).get("fuzz_coverage_per_input_manifest_path", ""),
                 "fuzz_coverage_frontier_path": (active_child or job).get("fuzz_coverage_frontier_path", ""),
                 "fuzz_coverage_frontier_summary": (active_child or job).get("fuzz_coverage_frontier_summary", {}),

@@ -45,6 +45,11 @@ def evaluate_coverage_decision(
         and plateau_streak >= 2
         and bool(current_seed_profile)
     )
+    persistent_low_yield_target = bool(
+        plateau_no_gain
+        and plateau_streak >= 3
+        and total_execs_per_sec > 0
+    )
 
     can_in_place = unlimited_rounds or (current_round < max_rounds)
     can_replan = unlimited_rounds or ((current_round + 1) < max_rounds)
@@ -193,15 +198,24 @@ def evaluate_coverage_decision(
             else:
                 round_budget_exhausted = True
                 stop_reason = "coverage_loop_budget_exhausted"
-        elif seed_quality_issue and can_in_place:
-            should_improve = True
-            improve_mode = "in_place"
-            if cold_start_failure:
-                replan_reason = "seed_cold_start_failure"
-            elif merge_retained_low:
-                replan_reason = "seed_merge_retained_low"
+        elif seed_quality_issue:
+            if persistent_low_yield_target and can_replan:
+                should_improve = True
+                replan_required = True
+                improve_mode = "replan"
+                replan_reason = "persistent_low_yield_target"
+            elif can_in_place:
+                should_improve = True
+                improve_mode = "in_place"
+                if cold_start_failure:
+                    replan_reason = "seed_cold_start_failure"
+                elif merge_retained_low:
+                    replan_reason = "seed_merge_retained_low"
+                else:
+                    replan_reason = "seed_quality_issue"
             else:
-                replan_reason = "seed_quality_issue"
+                round_budget_exhausted = True
+                stop_reason = "coverage_loop_budget_exhausted"
         elif requested_replan:
             if can_replan:
                 should_improve = True
@@ -226,6 +240,7 @@ def evaluate_coverage_decision(
         "plateau_no_gain": plateau_no_gain,
         "plateau_streak": plateau_streak,
         "requested_replan": requested_replan,
+        "persistent_low_yield_target": persistent_low_yield_target,
         "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
         "degraded_seed_replan_triggered": degraded_seed_replan_triggered,
         "seed_quality_issue": seed_quality_issue,

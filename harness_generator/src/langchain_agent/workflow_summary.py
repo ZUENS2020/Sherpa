@@ -149,6 +149,8 @@ def _build_fuzz_performance(run_details: list[dict[str, Any]], out: dict[str, An
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "coverage_source_report": dict(out.get("coverage_source_report") or {}),
+        "coverage_run_feedback_path": str(out.get("coverage_run_feedback_path") or ""),
+        "coverage_run_feedback_summary": dict(out.get("coverage_run_feedback_summary") or {}),
         "coverage_per_input_manifest_path": str(out.get("coverage_per_input_manifest_path") or ""),
         "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
         "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),

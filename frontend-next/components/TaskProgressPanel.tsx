@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import { Alert, Box, Button, Card, CardContent, Chip, LinearProgress, Stack, Typography } from '@mui/material';
 import type { TaskDetail } from '@/lib/api/schemas';
 
@@ -80,6 +81,17 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
   const replayReady = Boolean(activeChild?.fuzz_coverage_replay_stage_success || detail?.fuzz_coverage_replay_stage_success);
   const frontierInputCount = Number(activeChild?.fuzz_coverage_frontier_summary?.top_input_count || detail?.fuzz_coverage_frontier_summary?.top_input_count || 0);
   const frontierFunctionCount = Number(activeChild?.fuzz_coverage_frontier_summary?.top_frontier_function_count || detail?.fuzz_coverage_frontier_summary?.top_frontier_function_count || 0);
+  const runFeedback = (activeChild?.fuzz_coverage_run_feedback_summary
+    || detail?.fuzz_coverage_run_feedback_summary
+    || {}) as Record<string, unknown>;
+  const functionGapCount = Number(runFeedback['function_gap_count'] || 0);
+  const pathFrontierCount = Number(runFeedback['path_frontier_count'] || 0);
+  const topFunctionGaps = Array.isArray(runFeedback['top_function_gaps'])
+    ? (runFeedback['top_function_gaps'] as Array<Record<string, unknown>>).slice(0, 3)
+    : [];
+  const topPathFrontiers = Array.isArray(runFeedback['top_path_frontiers'])
+    ? (runFeedback['top_path_frontiers'] as Array<Record<string, unknown>>).slice(0, 2)
+    : [];
 
   return (
     <Card
@@ -135,6 +147,7 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
               ['Replay', `${replayBinaryCount} bins · ${replayProcessed}/${replayTotal}`],
               ['Replay Queue', `${replayPending}/${replayFailed}`],
               ['Frontier', `${frontierInputCount} inputs · ${frontierFunctionCount} fns`],
+              ['Run Feedback', `${functionGapCount} gaps · ${pathFrontierCount} paths`],
             ].map(([label, value]) => (
               <Box
                 key={label}
@@ -162,6 +175,7 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
             <Chip size="small" variant="outlined" color={crashVulnCount > 0 ? 'warning' : 'default'} label={`Crash 候选：${crashVulnCount}`} />
             <Chip size="small" variant="outlined" color={replayReady ? 'success' : 'default'} label={`Replay：${replayBinaryCount}`} />
             <Chip size="small" variant="outlined" label={`Frontier：${frontierInputCount}/${frontierFunctionCount}`} />
+            <Chip size="small" variant="outlined" label={`Run Feedback：${functionGapCount}/${pathFrontierCount}`} />
             {vulnStatus ? (
               <Chip size="small" color={vulnStatusColor(vulnStatus)} label={vulnStatus} />
             ) : null}
@@ -192,6 +206,57 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
                 <Alert severity={vulnStatus === 'real_bug' ? 'error' : 'warning'}>
                   漏洞候选：{vulnTarget || 'unknown'} | {vulnType || 'unknown'} | confidence={Number(activeCandidate.confidence || 0).toFixed(2)}
                 </Alert>
+              ) : null}
+              {topFunctionGaps.length ? (
+                <Box
+                  sx={{
+                    p: 1.25,
+                    borderRadius: 2,
+                    border: '1px solid rgba(15, 23, 42, 0.08)',
+                    backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                  }}
+                >
+                  <Typography variant="subtitle2" sx={{ mb: 0.75 }}>函数缺口</Typography>
+                  <Stack spacing={0.5}>
+                    {topFunctionGaps.map((item, index) => {
+                      const name = String(item.name || '');
+                      const file = String(item.file || '');
+                      const line = Number(item.line || 0);
+                      const kind = String(item.kind || '');
+                      const ratio = Number(item.region_coverage_ratio || 0);
+                      return (
+                        <Typography key={`${name}-${index}`} variant="caption" sx={{ wordBreak: 'break-word' }}>
+                          {name || 'unknown'} · {kind || 'n/a'} · {ratio.toFixed(2)} · {file ? `${file}${line > 0 ? `:${line}` : ''}` : 'no-file'}
+                        </Typography>
+                      );
+                    })}
+                  </Stack>
+                </Box>
+              ) : null}
+              {topPathFrontiers.length ? (
+                <Box
+                  sx={{
+                    p: 1.25,
+                    borderRadius: 2,
+                    border: '1px solid rgba(15, 23, 42, 0.08)',
+                    backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                  }}
+                >
+                  <Typography variant="subtitle2" sx={{ mb: 0.75 }}>路径前沿</Typography>
+                  <Stack spacing={0.5}>
+                    {topPathFrontiers.map((item, index) => {
+                      const relpath = String(item.input_relpath || '');
+                      const score = Number(item.frontier_score || 0);
+                      const fns = Number(item.covered_function_count || 0);
+                      const regions = Number(item.covered_region_count || 0);
+                      return (
+                        <Typography key={`${relpath}-${index}`} variant="caption" sx={{ wordBreak: 'break-word' }}>
+                          {relpath || `input-${index + 1}`} · score {score.toFixed(2)} · fn {fns} · regions {regions}
+                        </Typography>
+                      );
+                    })}
+                  </Stack>
+                </Box>
               ) : null}
             </Stack>
           ) : (

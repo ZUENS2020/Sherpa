@@ -5125,11 +5125,13 @@ EOF
                 except (ValueError, IndexError):
                     pass
 
-        # Generate uncovered function list using llvm-cov export
+        # Generate uncovered / partially covered function details using llvm-cov export
+        uncovered_function_details: list[Dict[str, object]] = []
+        partial_function_details: list[Dict[str, object]] = []
         export_cmd = [
             llvm_cov, "export", str(bin_path),
             f"-instr-profile={profdata_path}",
-            "-format=text", "-summary-only",
+            "-format=text",
         ]
         try:
             rc, export_out, _ = self._run_cmd(export_cmd, cwd=self.repo_root, timeout=60)
@@ -5137,9 +5139,51 @@ EOF
                 try:
                     export_data = json.loads(export_out)
                     for file_data in export_data.get("data", []):
-                        for fn in file_data.get("functions", []):
-                            if fn.get("count", 0) == 0:
-                                uncovered_functions.append(fn.get("name", ""))
+                        if not isinstance(file_data, dict):
+                            continue
+                        function_sets = []
+                        root_functions = file_data.get("functions")
+                        if isinstance(root_functions, list):
+                            function_sets.append(("", root_functions))
+                        for file_item in file_data.get("files", []):
+                            if not isinstance(file_item, dict):
+                                continue
+                            file_name = str(file_item.get("filename") or "")
+                            functions = file_item.get("functions")
+                            if isinstance(functions, list):
+                                function_sets.append((file_name, functions))
+                        for file_name, functions in function_sets:
+                            for fn in functions:
+                                if not isinstance(fn, dict):
+                                    continue
+                                name = str(fn.get("name", "") or "")
+                                count = int(fn.get("count", 0) or 0)
+                                regions = fn.get("regions") if isinstance(fn.get("regions"), list) else []
+                                region_total = max(len(regions), 1)
+                                region_hit = 0
+                                line = 0
+                                for region in regions:
+                                    if isinstance(region, list) and len(region) >= 5:
+                                        try:
+                                            if int(region[4] or 0) > 0:
+                                                region_hit += 1
+                                            if not line:
+                                                line = int(region[0] or 0)
+                                        except Exception:
+                                            pass
+                                coverage_ratio = float(region_hit) / float(region_total)
+                                detail: Dict[str, object] = {
+                                    "name": name,
+                                    "file": file_name,
+                                    "line": int(line),
+                                    "execution_count": int(count),
+                                    "region_coverage_ratio": round(coverage_ratio, 4),
+                                }
+                                if count == 0:
+                                    uncovered_functions.append(name)
+                                    uncovered_function_details.append(detail)
+                                elif coverage_ratio < 1.0:
+                                    partial_function_details.append(detail)
                 except (json.JSONDecodeError, KeyError):
                     pass
         except Exception:
@@ -5156,6 +5200,8 @@ EOF
             "covered_functions": covered_functions,
             "coverage_pct": round(coverage_pct, 1),
             "uncovered_functions": uncovered_functions[:20],  # top 20
+            "uncovered_function_details": uncovered_function_details[:20],
+            "partial_function_details": partial_function_details[:20],
             "report_path": str(report_path),
         }
         print(f"[*] Source coverage: {covered_functions}/{total_functions} functions "
