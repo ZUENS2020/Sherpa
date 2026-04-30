@@ -134,3 +134,58 @@ def test_selected_targets_consume_vuln_candidate_worklist(tmp_path: Path) -> Non
     assert rows[0]["vuln_candidate_priority"] == 0.91
     assert rows[0]["attack_hint"]["trigger_condition"] == "row bytes overflow allocation"
     assert rows[0]["security_priority_mode"] is True
+
+
+def test_write_analysis_vuln_candidates_does_not_promote_weak_file_signal_to_high_score(
+    tmp_path: Path,
+) -> None:
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True)
+    analysis_context = fuzz_dir / "analysis_context.json"
+    analysis_context.write_text(
+        json.dumps(
+            {
+                "analysis_evidence": {
+                    "security_evidence": [],
+                    "vuln_candidate_inventory": [
+                        {
+                            "candidate_id": "cand_png_callback",
+                            "api": "readpng2_end_callback",
+                            "file": "contrib/gregbook/readpng2.c",
+                            "target_type": "decoder",
+                            "vuln_likelihood": 0.63,
+                            "exploitability": 0.18,
+                            "reachability_confidence": 0.62,
+                            "evidence_ids": [],
+                            "security_signal_scores": {
+                                "mem_oob_candidate": 0.0,
+                                "integer_overflow_candidate": 0.63,
+                                "format_string_candidate": 0.0,
+                                "path_traversal_candidate": 0.0,
+                                "command_injection_candidate": 0.0,
+                                "authz_bypass_candidate": 0.0,
+                                "null_deref_candidate": 0.0,
+                                "uaf_candidate": 0.0,
+                            },
+                            "risk_signal_source_breakdown": {
+                                "regex": [],
+                                "semantic": [],
+                                "weak_file": ["integer_overflow_candidate"],
+                            },
+                        }
+                    ],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = workflow_graph._write_analysis_vuln_candidates(tmp_path, str(analysis_context))
+    doc = json.loads((fuzz_dir / "vuln_candidates.json").read_text(encoding="utf-8"))
+
+    assert result["candidate_count"] == 1
+    candidate = doc["candidates"][0]
+    assert candidate["candidate_id"] == "cand_png_callback"
+    assert candidate["security_signal_scores"]["integer_overflow_candidate"] == 0.63
+    assert candidate["risk_signal_source_breakdown"]["weak_file"] == ["integer_overflow_candidate"]

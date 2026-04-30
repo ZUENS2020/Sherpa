@@ -1466,7 +1466,14 @@ def _security_signal_ids() -> tuple[str, ...]:
 def _security_signal_patterns() -> dict[str, str]:
     return {
         "mem_oob_candidate": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|\[[^\]]+\]|pointer|offset|index|bounds?)",
-        "integer_overflow_candidate": r"(overflow|underflow|size_t|ssize_t|uint|int\d+_t|length|len|count|capacity|shift|multiply|\*)",
+        "integer_overflow_candidate": (
+            r"(overflow|underflow|wrap(?:around)?|truncat|narrow(?:ing)?|"
+            r"(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)"
+            r"\s*(?:[\*\+\-]|<<)|"
+            r"(?:[\*\+\-]|<<)\s*(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)|"
+            r"(?:size_t|ssize_t|uint(?:8|16|32|64)?_t|int(?:8|16|32|64)?_t)\s*\)|"
+            r"(?:alloc|malloc|calloc|realloc)[^;\n]{0,80}(?:width|height|stride|rowbytes|rowsize|size|len|length|capacity))"
+        ),
         "format_string_candidate": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)",
         "path_traversal_candidate": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)",
         "command_injection_candidate": r"(system\(|popen\(|exec\(|spawn\(|shell|command)",
@@ -1486,15 +1493,27 @@ def _compute_security_signal_scores(
     signature: str,
     file_hint: str,
     risk_signals: list[str] | None = None,
+    risk_signal_source_breakdown: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     text = f"{name}\n{signature}\n{file_hint}".lower()
     scores = _empty_security_scores()
     signals = {str(x).strip().lower() for x in list(risk_signals or []) if str(x).strip()}
+    source_breakdown: dict[str, set[str]] = {}
+    for source_name, values in dict(risk_signal_source_breakdown or {}).items():
+        if not isinstance(values, list):
+            continue
+        source_breakdown[str(source_name).strip().lower()] = {
+            str(x).strip().lower() for x in values if str(x).strip()
+        }
     for signal_id, pattern in _security_signal_patterns().items():
         if re.search(pattern, text, re.IGNORECASE):
             scores[signal_id] = max(scores[signal_id], 0.62)
-        if signal_id in signals:
+        if signal_id in source_breakdown.get("regex", set()) or signal_id in source_breakdown.get("semantic", set()):
             scores[signal_id] = max(scores[signal_id], 0.78)
+        elif signal_id in source_breakdown.get("weak_file", set()) or signal_id in source_breakdown.get("file", set()):
+            scores[signal_id] = max(scores[signal_id], 0.44)
+        elif signal_id in signals:
+            scores[signal_id] = max(scores[signal_id], 0.68)
     if "bounds" in signals:
         scores["mem_oob_candidate"] = max(scores["mem_oob_candidate"], 0.68)
         scores["integer_overflow_candidate"] = max(scores["integer_overflow_candidate"], 0.56)
@@ -1703,6 +1722,23 @@ def _candidate_priority(
         + 0.03 * min(max(int(evidence_count), 0), 5) / 5.0
     )
     return round(max(0.0, min(raw, 1.0)), 4)
+
+
+def _execution_depth_bias(*, api: str, target_name: str, target_type: str, selection_rationale: str) -> tuple[float, float]:
+    text = f"{api}\n{target_name}\n{selection_rationale}".lower()
+    callback_penalty = 0.0
+    execution_bias = 0.0
+    if any(tok in text for tok in ("callback", "_cb", "_init", "cleanup", "helper")):
+        callback_penalty += 0.22
+        execution_bias -= 0.12
+    if any(tok in text for tok in ("end_callback", "info_callback", "init", "cleanup")):
+        callback_penalty += 0.13
+        execution_bias -= 0.08
+    if any(tok in text for tok in ("decode", "process", "transform", "inflate", "parse", "row", "image")):
+        execution_bias += 0.18
+    if str(target_type or "").strip().lower() in {"decoder", "parser", "archive"}:
+        execution_bias += 0.05
+    return round(execution_bias, 4), round(callback_penalty, 4)
 
 
 def _is_internal_api_symbol(api: str) -> bool:
@@ -2110,6 +2146,8 @@ def _normalize_analysis_vuln_candidate(
             security_reason=reason,
         )
     candidate_id = str(item.get("candidate_id") or "").strip() or _vuln_candidate_id(api or name, idx)
+    risk_signal_source_breakdown = dict(item.get("risk_signal_source_breakdown") or {})
+    security_signal_scores = dict(item.get("security_signal_scores") or {})
     return {
         "candidate_id": candidate_id,
         "source_stage": "analysis",
@@ -2138,6 +2176,8 @@ def _normalize_analysis_vuln_candidate(
         "evidence_ids": evidence_ids,
         "evidence": evidence_refs,
         "attack_hint": attack_hint,
+        "security_signal_scores": {k: float(v) for k, v in security_signal_scores.items()},
+        "risk_signal_source_breakdown": risk_signal_source_breakdown,
         "created_at": int(item.get("created_at") or time.time()),
         "updated_at": int(time.time()),
     }
@@ -2242,6 +2282,11 @@ def _build_selected_target_row(
             signature=f"{api} {selection_rationale}",
             file_hint=str(item.get("file") or security_candidate.get("file") or ""),
             risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(
+                item.get("risk_signal_source_breakdown")
+                or security_candidate.get("risk_signal_source_breakdown")
+                or {}
+            ),
         )
     vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
     exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
@@ -2302,6 +2347,12 @@ def _build_selected_target_row(
         "coverage_gap": item.get("coverage_gap"),
     }
     score_breakdown = _target_score_breakdown(scoring_source)
+    execution_depth_bias, callback_penalty = _execution_depth_bias(
+        api=api,
+        target_name=target_name,
+        target_type=target_type,
+        selection_rationale=selection_rationale,
+    )
     wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
     runtime_penalty = _target_runtime_penalty(
         repo_root,
@@ -2319,6 +2370,8 @@ def _build_selected_target_row(
         + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
         + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
         + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
+        + float(execution_depth_bias)
+        - float(callback_penalty)
         - float(score_penalty)
     )
     adjusted_target_score = max(0.0, float(score_total))
@@ -2363,6 +2416,11 @@ def _build_selected_target_row(
         "seed_families_suggested": required,
         "seed_families_optional": optional,
         "wrapper_fuzzer_name": wrapper_fuzzer_name,
+        "risk_signal_source_breakdown": dict(
+            item.get("risk_signal_source_breakdown")
+            or security_candidate.get("risk_signal_source_breakdown")
+            or {}
+        ),
         "score_total": float(adjusted_target_score),
         "score_breakdown": score_breakdown_fixed,
         "penalty_reason": str(runtime_penalty.get("reason") or ""),
@@ -2401,6 +2459,8 @@ def _build_selected_target_row(
         "security_priority_reason": security_reason,
         "security_signals": _top_security_signals(security_scores),
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+        "execution_depth_bias": float(execution_depth_bias),
+        "callback_penalty": float(callback_penalty),
         "api_surface_exception": api_surface_exception,
         "target_score_breakdown": score_breakdown,
         "target_score": float(adjusted_target_score),
@@ -3641,6 +3701,41 @@ def _write_run_feedback_artifact(
     }
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"path": str(path), "summary": summary}
+
+
+def _resolve_current_coverage_binary(repo_root: Path, state: FuzzWorkflowRuntimeState) -> Path | None:
+    fuzz_out = repo_root / "fuzz" / "out"
+    if not fuzz_out.is_dir():
+        return None
+
+    candidate_names: list[str] = []
+    for detail in list(state.get("run_details") or []):
+        name = str(detail.get("fuzzer") or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+    for raw in (
+        state.get("last_fuzzer"),
+        state.get("coverage_target_name"),
+        state.get("selected_target_name"),
+    ):
+        name = str(raw or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+
+    seen: set[str] = set()
+    for name in candidate_names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        candidate = fuzz_out / name
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
+
+    bins = sorted(
+        p for p in fuzz_out.glob("*")
+        if p.is_file() and os.access(str(p), os.X_OK)
+    )
+    return bins[0] if bins else None
 
 
 def _replay_out_dir(repo_root: Path) -> Path:
@@ -5075,10 +5170,13 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 continue
             signature = f"{name}({' '.join(str(m.group(2) or '').split())})"[:240]
             line_no = text[: m.start()].count("\n") + 1
-            risk_signals = [rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)]
-            for rule_id in semgrep_hits.get(rel, []):
-                if rule_id not in risk_signals:
-                    risk_signals.append(rule_id)
+            regex_signals = [
+                rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)
+            ]
+            weak_file_signals = [
+                rule_id for rule_id in semgrep_hits.get(rel, []) if rule_id not in regex_signals
+            ]
+            risk_signals = list(regex_signals)
             candidate_functions.append(
                 {
                     "name": name,
@@ -5088,6 +5186,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     "target_type": "pending",
                     "seed_profile": "pending",
                     "risk_signals": risk_signals,
+                    "risk_signal_source_breakdown": {
+                        "regex": list(regex_signals),
+                        "weak_file": list(weak_file_signals),
+                    },
                     "security_signals": [],
                     "security_signal_scores": _empty_security_scores(),
                     "vuln_likelihood": 0.0,
@@ -5125,6 +5227,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             signature=str(item.get("signature") or ""),
             file_hint=str(item.get("file") or ""),
             risk_signals=list(item.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(item.get("risk_signal_source_breakdown") or {}),
         )
         vuln_likelihood, exploitability, reachability_confidence, security_reason = _derive_security_priority(
             target_type=str(item.get("target_type") or "generic"),
@@ -5183,6 +5286,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "target_type": str(item.get("target_type") or "generic"),
                 "seed_profile": str(item.get("seed_profile") or "generic"),
                 "risk_signals": risk,
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
                 "file": str(item.get("file") or ""),
                 "depth_score": int(item.get("depth_score") or 0),
                 "depth_class": str(item.get("depth_class") or "shallow"),
@@ -5544,6 +5648,8 @@ def _build_analysis_evidence_index(
                     signal_score=primary_signal_score,
                 ),
                 "evidence_ids": list(dict.fromkeys(candidate_evidence_ids)),
+                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
             }
         )
 
@@ -6630,6 +6736,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         new_depth_class = str(primary_target.get("depth_class") or "")
         new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
         selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
+        runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
         seed_families_suggested = list(selected_primary.get("seed_families_suggested") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
@@ -6859,6 +6966,39 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "top_vuln_candidate": str(selected_primary.get("target") or new_target_name or ""),
             "security_score_breakdown": security_breakdown,
             "api_surface_exception_used": bool(api_surface_exception.get("used") or False),
+            "tie_break_reason": (
+                "higher_execution_depth_bias"
+                if float(selected_primary.get("execution_depth_bias") or 0.0)
+                > float(runner_up.get("execution_depth_bias") or 0.0)
+                else (
+                    "lower_callback_penalty"
+                    if float(selected_primary.get("callback_penalty") or 0.0)
+                    < float(runner_up.get("callback_penalty") or 0.0)
+                    else "higher_security_priority"
+                )
+            ),
+            "selection_delta_vs_runner_up": {
+                "score_total": round(
+                    float(selected_primary.get("score_total") or selected_primary.get("target_score") or 0.0)
+                    - float(runner_up.get("score_total") or runner_up.get("target_score") or 0.0),
+                    4,
+                ),
+                "execution_depth_bias": round(
+                    float(selected_primary.get("execution_depth_bias") or 0.0)
+                    - float(runner_up.get("execution_depth_bias") or 0.0),
+                    4,
+                ),
+                "callback_penalty": round(
+                    float(selected_primary.get("callback_penalty") or 0.0)
+                    - float(runner_up.get("callback_penalty") or 0.0),
+                    4,
+                ),
+                "priority": round(
+                    float(selected_primary.get("priority") or 0.0)
+                    - float(runner_up.get("priority") or 0.0),
+                    4,
+                ),
+            },
         }
         out["latest_vuln_decision_snapshot"] = {
             "kind": "choose_target",
@@ -6868,6 +7008,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "top_vuln_candidate": str(choose_target_snapshot.get("top_vuln_candidate") or ""),
             "security_score_breakdown": security_breakdown,
             "api_surface_exception_used": bool(choose_target_snapshot.get("api_surface_exception_used") or False),
+            "tie_break_reason": str(choose_target_snapshot.get("tie_break_reason") or ""),
+            "selection_delta_vs_runner_up": dict(choose_target_snapshot.get("selection_delta_vs_runner_up") or {}),
         }
         out = _record_decision_trace(
             out,
@@ -11749,14 +11891,10 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         # Collect source coverage report (llvm-cov) for improve feedback
         source_report: dict[str, Any] | None = None
         try:
-            fuzz_out = analysis_repo_root / "fuzz" / "out"
-            if gen is not None and fuzz_out.is_dir():
-                bins = sorted(fuzz_out.glob("*"))
-                for b in bins:
-                    if b.is_file() and os.access(str(b), os.X_OK):
-                        source_report = gen.collect_source_coverage(b)
-                        if source_report:
-                            break
+            if gen is not None:
+                current_bin = _resolve_current_coverage_binary(analysis_repo_root, cast(FuzzWorkflowRuntimeState, state))
+                if current_bin is not None:
+                    source_report = gen.collect_source_coverage(current_bin)
         except Exception:
             pass
         if source_report:
