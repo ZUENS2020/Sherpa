@@ -107,6 +107,33 @@ class _DeterministicParallelGenerator(_FakeRunGenerator):
         self.terminate_calls.append(reason)
 
 
+class _CoverageBindingGenerator:
+    def __init__(self, tmp_path: Path) -> None:
+        self.repo_root = tmp_path
+        self.fuzz_out_dir = tmp_path / "fuzz" / "out"
+        self.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+        self.collect_calls: list[str] = []
+
+    def collect_source_coverage(self, bin_path: Path) -> dict[str, object]:
+        self.collect_calls.append(bin_path.name)
+        return {
+            "coverage_pct": 61.5,
+            "covered_functions": 8,
+            "total_functions": 13,
+            "uncovered_functions": ["decode_row"],
+            "uncovered_function_details": [
+                {
+                    "name": "decode_row",
+                    "file": "pngread.c",
+                    "line": 101,
+                    "execution_count": 0,
+                    "region_coverage_ratio": 0.0,
+                }
+            ],
+            "partial_function_details": [],
+        }
+
+
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
     gen = _FakeRunGenerator(
         tmp_path,
@@ -163,6 +190,45 @@ def test_node_run_accepts_sanitizer_log_crash_without_native_artifact(tmp_path: 
     assert out["run_rc"] == 76
     assert out["crash_evidence"] == "sanitizer_log"
     assert out["last_crash_artifact"] == str(artifact)
+
+
+def test_node_coverage_analysis_binds_source_coverage_to_current_fuzzer(tmp_path: Path):
+    gen = _CoverageBindingGenerator(tmp_path)
+    first_bin = gen.fuzz_out_dir / "aaa_fuzz"
+    target_bin = gen.fuzz_out_dir / "target_fuzz"
+    for path in (first_bin, target_bin):
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "generator": gen,
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "target_fuzz",
+            "coverage_target_api": "readpng2_decode_data",
+            "coverage_seed_profile": "png-structured",
+            "run_details": [
+                {
+                    "fuzzer": "target_fuzz",
+                    "final_cov": 13,
+                    "final_ft": 27,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert gen.collect_calls == ["target_fuzz"]
+    assert out["coverage_source_report"]["coverage_pct"] == 61.5
+    assert out["coverage_uncovered_functions"] == ["decode_row"]
+    assert out["coverage_run_feedback_summary"]["function_gap_count"] == 1
+    assert out["coverage_run_feedback_summary"]["top_function_gaps"][0]["name"] == "decode_row"
 
 
 def test_node_run_writes_repro_context_on_crash(tmp_path: Path):
@@ -1837,6 +1903,79 @@ def test_build_selected_targets_doc_risk_ranks_above_reference_score(
     # reference-heavy target, but must not drive the ranking in risk-first mode.
     assert float(selected[0]["score_total"]) <= float(selected[1]["score_total"])
     assert selected[0]["security_priority_mode"] is True
+
+
+def test_build_selected_targets_doc_breaks_libpng_style_callback_ties(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "readpng2_end_callback",
+                    "api": "readpng2_end_callback",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 3,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "risk_signals": ["integer_overflow_candidate"],
+                    "risk_signal_source_breakdown": {"regex": ["integer_overflow_candidate"], "weak_file": []},
+                    "security_signal_scores": {
+                        "mem_oob_candidate": 0.0,
+                        "integer_overflow_candidate": 0.63,
+                        "format_string_candidate": 0.0,
+                        "path_traversal_candidate": 0.0,
+                        "command_injection_candidate": 0.0,
+                        "authz_bypass_candidate": 0.0,
+                        "null_deref_candidate": 0.0,
+                        "uaf_candidate": 0.0,
+                    },
+                    "vuln_likelihood": 0.63,
+                    "exploitability": 0.18,
+                    "reachability_confidence": 0.62,
+                },
+                {
+                    "name": "readpng2_decode_row",
+                    "api": "readpng2_decode_row",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 3,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "risk_signals": ["integer_overflow_candidate"],
+                    "risk_signal_source_breakdown": {"regex": ["integer_overflow_candidate"], "weak_file": []},
+                    "security_signal_scores": {
+                        "mem_oob_candidate": 0.0,
+                        "integer_overflow_candidate": 0.63,
+                        "format_string_candidate": 0.0,
+                        "path_traversal_candidate": 0.0,
+                        "command_injection_candidate": 0.0,
+                        "authz_bypass_candidate": 0.0,
+                        "null_deref_candidate": 0.0,
+                        "uaf_candidate": 0.0,
+                    },
+                    "vuln_likelihood": 0.63,
+                    "exploitability": 0.18,
+                    "reachability_confidence": 0.62,
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    assert [row["target"] for row in selected] == ["readpng2_decode_row", "readpng2_end_callback"]
+    assert float(selected[0]["score_total"]) > float(selected[1]["score_total"])
+    assert float(selected[0]["callback_penalty"]) < float(selected[1]["callback_penalty"])
+    assert float(selected[0]["execution_depth_bias"]) > float(selected[1]["execution_depth_bias"])
 
 
 def test_build_selected_targets_doc_internal_api_threshold_contract(

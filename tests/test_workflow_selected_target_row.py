@@ -114,3 +114,44 @@ def test_build_selected_target_row_penalizes_exhausted_and_oom_target(tmp_path: 
     assert "coverage_exhausted_target" in reason
     assert "persistent_low_yield_target" in reason
     assert "recent_oom_killed" in reason
+
+
+def test_build_selected_target_row_exposes_signal_sources_and_callback_penalty(tmp_path: Path) -> None:
+    row = workflow_graph._build_selected_target_row(
+        repo_root=tmp_path,
+        item={
+            "name": "readpng2_end_callback",
+            "api": "readpng2_end_callback",
+            "target_type": "decoder",
+            "seed_profile": "decoder-binary",
+            "lang": "c",
+            "depth_score": 3,
+            "depth_class": "medium",
+            "selection_bias_reason": "+read",
+            "selection_rationale": "callback wrapper",
+            "risk_signals": ["integer_overflow_candidate"],
+            "risk_signal_source_breakdown": {
+                "regex": ["integer_overflow_candidate"],
+                "weak_file": [],
+            },
+            "security_signal_scores": {
+                "mem_oob_candidate": 0.0,
+                "integer_overflow_candidate": 0.63,
+                "format_string_candidate": 0.0,
+                "path_traversal_candidate": 0.0,
+                "command_injection_candidate": 0.0,
+                "authz_bypass_candidate": 0.0,
+                "null_deref_candidate": 0.0,
+                "uaf_candidate": 0.0,
+            },
+            "coverage_gap": 2.5,
+        },
+        security_lookup={},
+        security_priority_mode=True,
+        degrade_reason="",
+        score_weights=workflow_graph._vuln_score_weights(),
+    )
+
+    assert isinstance(row["risk_signal_source_breakdown"], dict)
+    assert float(row["callback_penalty"]) > 0.0
+    assert float(row["execution_depth_bias"]) < 0.0
