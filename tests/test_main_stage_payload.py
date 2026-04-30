@@ -161,6 +161,7 @@ def test_finalize_stage_result_non_dict_keeps_minimal_record() -> None:
 
 
 def test_next_stage_from_result_normalizes_and_handles_non_dict() -> None:
+    assert web_main._next_stage_from_result({"workflow_recommended_next": "per-input-replay"}) == "per-input-replay"
     assert web_main._next_stage_from_result({"workflow_recommended_next": "coverage-analysis"}) == "coverage-analysis"
     assert web_main._next_stage_from_result({"workflow_recommended_next": "coverage_analysis"}) == "analysis"
     assert web_main._next_stage_from_result({"workflow_recommended_next": ""}) == ""
