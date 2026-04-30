@@ -412,3 +412,69 @@ def test_run_fuzz_job_reuses_analysis_context_on_reentry(
     ]
     assert len(reused_entries) == 1
     assert str(latest_job.get("status") or "") == "success"
+
+
+def test_run_fuzz_job_preserves_per_input_replay_stage_transition(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    request = web_main.fuzz_model(
+        code_url="https://github.com/example/repo.git",
+        max_tokens=0,
+        total_duration=-1,
+        single_duration=-1,
+    )
+    cfg = web_main.WebPersistentConfig()
+
+    latest_job: dict[str, object] = {}
+
+    def _fake_job_update(_job_id: str, **kwargs):
+        latest_job.update(kwargs)
+
+    monkeypatch.setattr(web_main, "_job_update", _fake_job_update)
+    monkeypatch.setattr(web_main, "_job_log_path", lambda _job_id: tmp_path / "job.log")
+    monkeypatch.setattr(web_main, "_is_cancel_requested", lambda _job_id: False)
+    monkeypatch.setattr(web_main, "_resolve_job_docker_policy", lambda _request, _cfg: (False, ""))
+    monkeypatch.setattr(web_main, "_executor_mode", lambda: "k8s_job")
+    monkeypatch.setattr(web_main, "_k8s_stage_wait_timeout_sec", lambda **_kwargs: 30)
+    monkeypatch.setattr(web_main, "_k8s_node_can_run_job", lambda _node: (True, "node_ready"))
+    monkeypatch.setattr(web_main, "_k8s_analysis_companion_enabled", lambda: False)
+
+    dispatched_stages: list[str] = []
+
+    def _fake_execute_k8s_job(*, payload, **_kwargs):
+        stage = str(payload.get("stop_after_step") or "")
+        dispatched_stages.append(stage)
+        next_step = {
+            "analysis": "plan",
+            "plan": "synthesize",
+            "synthesize": "build",
+            "build": "run",
+            "run": "per-input-replay",
+            "per-input-replay": "coverage-analysis",
+            "coverage-analysis": "stop",
+        }[stage]
+        return (
+            {
+                "repo_root": str(repo_root),
+                "workflow_recommended_next": next_step,
+            },
+            "node-a",
+        )
+
+    monkeypatch.setattr(web_main, "_execute_k8s_job", _fake_execute_k8s_job)
+
+    web_main._run_fuzz_job("job-per-input-replay-1", request, cfg, resumed=False, trigger="new")
+
+    assert dispatched_stages == [
+        "analysis",
+        "plan",
+        "synthesize",
+        "build",
+        "run",
+        "per-input-replay",
+        "coverage-analysis",
+    ]
+    assert str(latest_job.get("status") or "") == "success"
