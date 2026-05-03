@@ -24,6 +24,10 @@ Constraints:
 - `lang` must be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`.
 - `target_type` must be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`.
 - `seed_profile` must be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`.
+- `targets.json` is an advisory candidate list. The system may normalize `seed_profile`, `target_name`, and related metadata before execution.
+- `fuzz/selected_targets.json` is the normalized system result and must be treated as the execution truth source.
+- Empty `seed_families_suggested` is valid and means "no required advisory family guidance for this target".
+- `workflow_context` is system-owned state, not a free-form suggestion sink.
 - Keep runtime-viable/public entrypoints first.
 - Internal/private API handling:
   - allow internal/private API only when `vuln_likelihood >= 0.75`.
@@ -97,6 +101,7 @@ Security analysis (vulnerability-directed):
   - `line`: integer source line (0 allowed when unknown)
   - `summary`: concrete risk explanation
 - Keep `target_type` and `seed_profile` unchanged in analysis. This stage records evidence and candidate inventory only.
+- Do not treat analysis output as execution truth. Any target or seed observations here are advisory until the system normalizes them in planning.
 
 MANDATORY:
 - create `./done`

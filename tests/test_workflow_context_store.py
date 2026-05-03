@@ -108,3 +108,24 @@ def test_context_store_rejects_generator_key() -> None:
     assert "generator" not in merged_control
     assert "generator" not in merged_workflow
     assert merged_workflow["coverage_should_improve"] is True
+
+
+def test_merge_result_into_contexts_normalizes_target_identity_and_seed_profile() -> None:
+    merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "coverage_target_name": "",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "image",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_families_suggested": [],
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_control == {}
+    assert merged_workflow["coverage_target_name"] == "png_read_image"
+    assert merged_workflow["coverage_target_api"] == "png_read_image"
+    assert merged_workflow["coverage_target_type"] == "image"
+    assert merged_workflow["coverage_seed_profile"] == "decoder-binary"
+    assert merged_workflow["coverage_seed_families_suggested"] == []

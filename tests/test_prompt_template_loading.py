@@ -61,6 +61,9 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "score_total = 0.45*vuln_likelihood" in out
     assert "`security_score_breakdown`" in out
     assert "`api_surface_exception`" in out
+    assert "normalized system result" in out
+    assert "Empty `seed_families_suggested` is valid" in out
+    assert "`workflow_context` is system-owned state" in out
 
 
 def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
@@ -81,6 +84,7 @@ def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
     assert legacy_security_path not in out
     assert "MUST classify each one" not in out
     assert "Keep `target_type` and `seed_profile` unchanged in analysis." in out
+    assert "Do not treat analysis output as execution truth." in out
 
 
 def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
