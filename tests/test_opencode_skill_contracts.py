@@ -144,11 +144,15 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
     assert "crash_triage.json" in plan_repair_fix_harness
+    assert "repo-root" in plan_repair_fix_harness
+    assert "crash_analysis_not_available_yet" in plan_repair_fix_harness
     assert "repair_error_digest" in plan_repair_fix_harness
     assert "strategy change" in plan_repair_fix_harness.lower()
     assert "crash_info.md" in synth_repair_fix_harness
     assert "crash_analysis.md" in synth_repair_fix_harness
     assert "crash_triage.json" in synth_repair_fix_harness
+    assert "repo-root" in synth_repair_fix_harness
+    assert "crash_analysis_not_available_yet" in synth_repair_fix_harness
     assert "LLVMFuzzerTestOneInput" in synth_repair_fix_harness
     assert "fopen(argv[1], ...)" in synth_repair_fix_harness
     assert "doc-only/no-op patches are invalid" in synth_repair_fix_harness

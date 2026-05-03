@@ -9,6 +9,7 @@ def sort_ranked_items(
     security_priority_mode: bool,
     is_internal_api_symbol_fn: Callable[[str], bool],
     runtime_viability_rank_fn: Callable[[str], int],
+    prefer_deeper: bool = False,
 ) -> list[dict[str, Any]]:
     rows = list(ranked_items)
     if security_priority_mode:
@@ -20,10 +21,15 @@ def sort_ranked_items(
                     and not bool((row.get("api_surface_exception") or {}).get("used"))
                 )
                 else 0,
-                -float(row.get("priority") or 0.0),
+                -float(row.get("effective_priority") or row.get("priority") or 0.0),
                 -float(row.get("vuln_likelihood") or 0.0),
                 -float(row.get("exploitability") or 0.0),
                 -float(row.get("reachability_confidence") or 0.0),
+                (
+                    -float(row.get("execution_depth_bias") or 0.0)
+                    if prefer_deeper
+                    else 0.0
+                ),
                 -len(list(row.get("evidence_ids") or [])),
                 -len(list(row.get("security_signals") or [])),
                 -float(row.get("execution_depth_bias") or 0.0),

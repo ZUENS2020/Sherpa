@@ -89,6 +89,53 @@ def test_sort_ranked_items_risk_first_uses_priority_and_evidence_count() -> None
     assert sorted_rows[0]["target_name"] == "high-priority"
 
 
+def test_sort_ranked_items_risk_first_demotes_low_yield_target() -> None:
+    rows = [
+        {
+            "target_name": "stuck_decode",
+            "api": "readpng2_decode_data",
+            "priority": 0.92,
+            "effective_priority": 0.18,
+            "vuln_likelihood": 0.92,
+            "exploitability": 0.88,
+            "reachability_confidence": 0.84,
+            "evidence_ids": ["EV1", "EV2"],
+            "security_signals": ["integer_overflow_candidate"],
+            "target_score": 0.61,
+            "depth_score": 22,
+            "runtime_viability": "native_high",
+            "execution_depth_bias": 0.05,
+            "api_surface_exception": {"used": True},
+            "penalty_reason": "persistent_low_yield_target",
+        },
+        {
+            "target_name": "fresh_init",
+            "api": "readpng2_init",
+            "priority": 0.41,
+            "effective_priority": 0.41,
+            "vuln_likelihood": 0.40,
+            "exploitability": 0.33,
+            "reachability_confidence": 0.52,
+            "evidence_ids": ["EV3"],
+            "security_signals": ["null_deref_candidate"],
+            "target_score": 0.30,
+            "depth_score": 18,
+            "runtime_viability": "native_high",
+            "execution_depth_bias": 0.06,
+            "api_surface_exception": {"used": True},
+            "penalty_reason": "",
+        },
+    ]
+    sorted_rows = sel.sort_ranked_items(
+        rows,
+        security_priority_mode=True,
+        is_internal_api_symbol_fn=lambda _: False,
+        runtime_viability_rank_fn=lambda _: 3,
+        prefer_deeper=True,
+    )
+    assert sorted_rows[0]["target_name"] == "fresh_init"
+
+
 def test_sort_ranked_items_risk_first_breaks_ties_with_execution_depth_and_callback_penalty() -> None:
     rows = [
         {
@@ -126,7 +173,6 @@ def test_sort_ranked_items_risk_first_breaks_ties_with_execution_depth_and_callb
             "target_score_penalty": 0.0,
         },
     ]
-
     sorted_rows = sel.sort_ranked_items(
         rows,
         security_priority_mode=True,

@@ -47,3 +47,4 @@ frontend-next/coverage/
 
 /.claude/worktrees
 references/afc-crs-all-you-need-is-a-fuzzing-brain/
+fuzz/run_feedback.json
