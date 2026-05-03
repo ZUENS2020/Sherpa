@@ -788,6 +788,38 @@ def _trim_feedback_text(text: str) -> str:
     return out
 
 
+def _build_fix_harness_crash_context(
+    repo_root: Path,
+    *,
+    include_contents: bool,
+) -> tuple[str, list[str]]:
+    crash_info = repo_root / "crash_info.md"
+    crash_analysis = repo_root / "crash_analysis.md"
+    triage_json = repo_root / "crash_triage.json"
+    known_issues: list[str] = []
+    lines = [
+        "Repo-root crash evidence for fix-harness repair:",
+        f"- crash_info_path: {crash_info}",
+        f"- crash_triage_json_path: {triage_json}",
+        f"- crash_analysis_path: {crash_analysis}",
+        "- Do not guess `fuzz/crash_*` paths; these artifacts live at repo root unless an explicit path says otherwise.",
+    ]
+    info_text = crash_info.read_text(encoding="utf-8", errors="replace") if crash_info.is_file() else ""
+    triage_text = triage_json.read_text(encoding="utf-8", errors="replace") if triage_json.is_file() else ""
+    analysis_text = crash_analysis.read_text(encoding="utf-8", errors="replace") if crash_analysis.is_file() else ""
+    if not crash_analysis.is_file():
+        known_issues.append("crash_analysis_not_available_yet")
+        lines.append("- crash_analysis_status: unavailable during crash-triage repair path; rely on crash_info.md and crash_triage.json first.")
+    if include_contents:
+        if info_text:
+            lines.append("=== repo-root crash_info.md ===\n" + _trim_feedback_text(info_text))
+        if triage_text:
+            lines.append("=== repo-root crash_triage.json ===\n" + _trim_feedback_text(triage_text))
+        if analysis_text:
+            lines.append("=== repo-root crash_analysis.md ===\n" + _trim_feedback_text(analysis_text))
+    return "\n".join(lines).strip(), known_issues
+
+
 def _write_stage_feedback(
     repo_root: Path,
     *,
@@ -1777,6 +1809,79 @@ def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[s
     return _wf_target_scoring.runtime_penalty_from_feedback(feedback)
 
 
+def _selection_target_key(name: str) -> str:
+    return str(name or "").strip().lower()
+
+
+def _execution_depth_bias(
+    *,
+    target_name: str,
+    api: str,
+    target_type: str,
+    depth_class: str,
+    depth_score: int,
+    selection_rationale: str,
+) -> dict[str, Any]:
+    text = " ".join(
+        [
+            str(target_name or ""),
+            str(api or ""),
+            str(selection_rationale or ""),
+        ]
+    ).lower()
+    callback_penalty = 0.0
+    wrapper_penalty = 0.0
+    if any(token in text for token in ("callback", "init", "cleanup", "helper", "check_sig", "sig")):
+        callback_penalty = 0.12
+    if any(token in text for token in ("helper", "wrapper", "adapter")):
+        wrapper_penalty = max(wrapper_penalty, 0.08)
+    deep_bonus = 0.0
+    if any(
+        token in text
+        for token in ("decode", "parse", "read", "load", "stream", "row", "image", "chunk", "process", "transform")
+    ):
+        deep_bonus += 0.08
+    if str(target_type or "").strip().lower() in {"parser", "decoder", "archive"}:
+        deep_bonus += 0.04
+    depth_class_l = str(depth_class or "").strip().lower()
+    if depth_class_l == "deep":
+        deep_bonus += 0.05
+    elif depth_class_l == "medium":
+        deep_bonus += 0.02
+    if int(depth_score or 0) >= 18:
+        deep_bonus += 0.03
+    execution_bias = round(deep_bonus - callback_penalty - wrapper_penalty, 4)
+    return {
+        "execution_depth_bias": execution_bias,
+        "callback_penalty": round(callback_penalty, 4),
+        "wrapper_penalty": round(wrapper_penalty, 4),
+    }
+
+
+def _apply_selected_target_filters(
+    ranked_items: list[dict[str, Any]],
+    *,
+    exclude_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = list(ranked_items)
+    excluded = {
+        _selection_target_key(name)
+        for name in list(exclude_names or [])
+        if _selection_target_key(name)
+    }
+    if not excluded:
+        return rows
+    filtered = [
+        row
+        for row in rows
+        if _selection_target_key(
+            str(row.get("target_name") or row.get("target") or row.get("name") or "")
+        )
+        not in excluded
+    ]
+    return filtered or rows
+
+
 def _target_analysis_lookup_keys(target_name: str, api: str) -> set[str]:
     keys: set[str] = set()
     for raw in (target_name, api):
@@ -2079,6 +2184,45 @@ def _build_selected_target_row(
                 runtime_penalty["reason"] = (
                     f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
                 )
+    execution_bias = _execution_depth_bias(
+        target_name=target_name,
+        api=api,
+        target_type=target_type,
+        depth_class=str(item.get("depth_class") or ""),
+        depth_score=int(item.get("depth_score") or 0),
+        selection_rationale=selection_rationale,
+    )
+    priority_base = _candidate_priority(
+        vuln_likelihood=vuln_likelihood,
+        exploitability=exploitability,
+        reachability_confidence=reachability_confidence,
+        evidence_count=max(len(evidence_ids), len(evidence_refs)),
+        signal_score=signal_score,
+    )
+    priority_penalty = min(0.95, max(0.0, score_penalty) * 0.55)
+    penalty_reason = str(runtime_penalty.get("reason") or "")
+    if any(
+        token in penalty_reason
+        for token in (
+            "persistent_low_yield_target",
+            "coverage_exhausted_target",
+            "cold_start_low_yield",
+            "very_low_seed_score",
+        )
+    ):
+        priority_penalty = max(priority_penalty, 0.5)
+    effective_priority = round(
+        max(
+            0.0,
+            min(
+                1.0,
+                float(priority_base)
+                - float(priority_penalty)
+                + float(execution_bias.get("execution_depth_bias") or 0.0),
+            ),
+        ),
+        4,
+    )
     score_breakdown_fixed = {
         "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
         "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
@@ -2123,13 +2267,11 @@ def _build_selected_target_row(
         "reachability_confidence": float(reachability_confidence),
         "signal_type": signal_type,
         "signal_score": float(signal_score),
-        "priority": _candidate_priority(
-            vuln_likelihood=vuln_likelihood,
-            exploitability=exploitability,
-            reachability_confidence=reachability_confidence,
-            evidence_count=max(len(evidence_ids), len(evidence_refs)),
-            signal_score=signal_score,
-        ),
+        "priority": float(priority_base),
+        "effective_priority": float(effective_priority),
+        "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
+        "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
+        "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
         "evidence": list(evidence_refs),
         "evidence_ids": evidence_ids,
         "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
@@ -2151,7 +2293,12 @@ def _build_selected_target_row(
     }
 
 
-def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
+def _build_selected_targets_doc(
+    repo_root: Path,
+    *,
+    exclude_names: list[str] | None = None,
+    prefer_deeper: bool = False,
+) -> list[dict[str, Any]]:
     security_lookup = _load_target_analysis_security_index(repo_root)
     security_priority_mode = bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
     degrade_reason = ""
@@ -2180,6 +2327,11 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
         security_priority_mode=security_priority_mode,
         is_internal_api_symbol_fn=_is_internal_api_symbol,
         runtime_viability_rank_fn=_runtime_viability_rank,
+        prefer_deeper=prefer_deeper,
+    )
+    ranked_items = _apply_selected_target_filters(
+        ranked_items,
+        exclude_names=exclude_names,
     )
     max_targets = _execution_targets_max()
     out = _wf_target_selection.assign_execution_priority(
@@ -2189,10 +2341,19 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _write_selected_targets_doc(repo_root: Path) -> tuple[str, list[dict[str, Any]]]:
+def _write_selected_targets_doc(
+    repo_root: Path,
+    *,
+    exclude_names: list[str] | None = None,
+    prefer_deeper: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
     path = _selected_targets_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    doc = _build_selected_targets_doc(repo_root)
+    doc = _build_selected_targets_doc(
+        repo_root,
+        exclude_names=exclude_names,
+        prefer_deeper=prefer_deeper,
+    )
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(path), doc
 
@@ -6033,6 +6194,17 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     indent=2,
                 )
             )
+        if repair_origin_stage == "fix-harness":
+            crash_ctx, crash_known_issues = _build_fix_harness_crash_context(
+                gen.repo_root,
+                include_contents=True,
+            )
+            if crash_ctx:
+                repair_blocks.append(crash_ctx)
+            if crash_known_issues:
+                prompt_render_issue = "; ".join(
+                    x for x in [prompt_render_issue, *crash_known_issues] if str(x).strip()
+                )
         repair_hint = "\n\n".join(part for part in repair_blocks if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
     seed_feedback = dict(state.get("coverage_seed_feedback") or {})
@@ -6088,6 +6260,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 render_known_issues.append("missing repair_error_digest.signature")
             if not str(digest.get("error_kind") or "").strip():
                 render_known_issues.append("missing repair_error_digest.error_kind")
+            if repair_origin_stage == "fix-harness":
+                _, crash_known_issues = _build_fix_harness_crash_context(
+                    gen.repo_root,
+                    include_contents=False,
+                )
+                render_known_issues.extend(crash_known_issues)
         if hint:
             prompt, render_issue = _render_opencode_prompt_safe(
                 plan_template_name,
@@ -6196,17 +6374,47 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         selected_targets_path = ""
         execution_plan_path = ""
         try:
-            selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
+            selected_targets_path, selected_targets_doc = _write_selected_targets_doc(
+                gen.repo_root,
+                exclude_names=_attempted if _attempted else None,
+                prefer_deeper=_is_replan,
+            )
             execution_plan_path, _ = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
         except Exception:
             selected_targets_doc = []
-        new_target_name = str(primary_target.get("name") or "")
-        new_target_api = str(primary_target.get("api") or new_target_name)
-        new_seed_profile = str(primary_target.get("seed_profile") or "")
-        new_depth_score = int(primary_target.get("depth_score") or 0)
-        new_depth_class = str(primary_target.get("depth_class") or "")
-        new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
-        selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
+        selected_primary = selected_targets_doc[0] if selected_targets_doc else dict(primary_target)
+        new_target_name = str(
+            selected_primary.get("target_name")
+            or selected_primary.get("target")
+            or selected_primary.get("name")
+            or primary_target.get("name")
+            or ""
+        )
+        new_target_api = str(
+            selected_primary.get("api")
+            or primary_target.get("api")
+            or new_target_name
+        )
+        new_seed_profile = str(
+            selected_primary.get("seed_profile")
+            or primary_target.get("seed_profile")
+            or ""
+        )
+        new_depth_score = int(
+            selected_primary.get("depth_score")
+            or primary_target.get("depth_score")
+            or 0
+        )
+        new_depth_class = str(
+            selected_primary.get("depth_class")
+            or primary_target.get("depth_class")
+            or ""
+        )
+        new_selection_bias_reason = str(
+            selected_primary.get("selection_bias_reason")
+            or primary_target.get("selection_bias_reason")
+            or ""
+        )
         seed_families_suggested = list(selected_primary.get("seed_families_suggested") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
@@ -6415,6 +6623,34 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         out = _clear_error_markers_on_success(out)
         security_breakdown = dict(selected_primary.get("security_score_breakdown") or {})
         api_surface_exception = dict(selected_primary.get("api_surface_exception") or {})
+        runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
+        selection_delta_vs_runner_up = (
+            round(
+                float(selected_primary.get("score_total") or selected_primary.get("target_score") or 0.0)
+                - float(runner_up.get("score_total") or runner_up.get("target_score") or 0.0),
+                6,
+            )
+            if runner_up
+            else None
+        )
+        tie_break_reason_parts: list[str] = []
+        if str(selected_primary.get("penalty_reason") or ""):
+            tie_break_reason_parts.append(
+                f"penalty={selected_primary.get('penalty_reason')}"
+            )
+        if float(selected_primary.get("effective_priority") or 0.0) != float(
+            selected_primary.get("priority") or 0.0
+        ):
+            tie_break_reason_parts.append("effective_priority_adjusted")
+        if float(selected_primary.get("execution_depth_bias") or 0.0) > 0.0:
+            tie_break_reason_parts.append("deeper_path_bias")
+        if float(selected_primary.get("callback_penalty") or 0.0) > 0.0:
+            tie_break_reason_parts.append("shallow_callback_penalty")
+        tie_break_reason = (
+            ",".join(tie_break_reason_parts)
+            if tie_break_reason_parts
+            else "risk_first_default"
+        )
         choose_target_snapshot = {
             "kind": "choose_target",
             "selected_target": str(selected_primary.get("target") or new_target_name or ""),
@@ -6436,6 +6672,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "top_vuln_candidate": str(selected_primary.get("target") or new_target_name or ""),
             "security_score_breakdown": security_breakdown,
             "api_surface_exception_used": bool(api_surface_exception.get("used") or False),
+            "tie_break_reason": tie_break_reason,
+            "selection_delta_vs_runner_up": selection_delta_vs_runner_up,
         }
         out["latest_vuln_decision_snapshot"] = {
             "kind": "choose_target",
@@ -6444,6 +6682,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "security_priority_mode": bool(security_priority_mode),
             "top_vuln_candidate": str(choose_target_snapshot.get("top_vuln_candidate") or ""),
             "security_score_breakdown": security_breakdown,
+            "tie_break_reason": tie_break_reason,
+            "selection_delta_vs_runner_up": selection_delta_vs_runner_up,
             "api_surface_exception_used": bool(choose_target_snapshot.get("api_surface_exception_used") or False),
         }
         out = _record_decision_trace(
@@ -7132,6 +7372,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             targets = (gen.repo_root / "fuzz" / "targets.json")
             ctx = ""
             try:
+                if repair_mode and repair_origin_stage == "fix-harness":
+                    crash_ctx, crash_known_issues = _build_fix_harness_crash_context(
+                        gen.repo_root,
+                        include_contents=True,
+                    )
+                    if crash_ctx:
+                        ctx += crash_ctx + "\n\n"
+                    for issue in crash_known_issues:
+                        _remember_prompt_render_issue(issue)
                 if plan.is_file():
                     ctx += "=== fuzz/PLAN.md ===\n" + plan.read_text(encoding="utf-8", errors="replace") + "\n\n"
                 if targets.is_file():

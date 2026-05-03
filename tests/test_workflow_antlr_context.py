@@ -847,6 +847,95 @@ def test_node_plan_marks_replan_ineffective_when_outputs_do_not_materially_chang
     assert out["coverage_stop_reason"] == "no_material_change"
 
 
+def test_node_plan_replan_excludes_attempted_target_from_selected_targets_and_execution_plan(
+    tmp_path: Path, monkeypatch
+):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+
+    class _Patcher:
+        def run_codex_command(self, _prompt: str, **kwargs):
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "readpng2_decode",
+                            "api": "readpng2_decode_data",
+                            "lang": "c-cpp",
+                            "target_type": "decoder",
+                            "seed_profile": "parser-structure",
+                            "depth_score": 22,
+                            "depth_class": "deep",
+                            "runtime_viability": "high",
+                            "vuln_likelihood": 0.95,
+                            "exploitability": 0.90,
+                            "reachability_confidence": 0.90,
+                        },
+                        {
+                            "name": "readpng2_init",
+                            "api": "readpng2_init",
+                            "lang": "c-cpp",
+                            "target_type": "decoder",
+                            "seed_profile": "parser-structure",
+                            "depth_score": 18,
+                            "depth_class": "deep",
+                            "runtime_viability": "high",
+                            "vuln_likelihood": 0.40,
+                            "exploitability": 0.35,
+                            "reachability_confidence": 0.55,
+                        },
+                        {
+                            "name": "readpng_init",
+                            "api": "readpng_init",
+                            "lang": "c-cpp",
+                            "target_type": "decoder",
+                            "seed_profile": "parser-structure",
+                            "depth_score": 16,
+                            "depth_class": "medium",
+                            "runtime_viability": "high",
+                            "vuln_likelihood": 0.35,
+                            "exploitability": 0.30,
+                            "reachability_confidence": 0.50,
+                        },
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
+
+    out = workflow_graph._node_plan(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+            "coverage_attempted_targets": ["readpng2_decode"],
+            "coverage_target_name": "readpng2_decode",
+            "coverage_target_api": "readpng2_decode_data",
+            "coverage_target_depth_score": 22,
+            "coverage_target_depth_class": "deep",
+        }
+    )
+
+    assert out["last_error"] == ""
+    selected_doc = json.loads((fuzz_dir / "selected_targets.json").read_text(encoding="utf-8"))
+    assert selected_doc[0]["target"] == "readpng2_init"
+    execution_doc = json.loads((fuzz_dir / "execution_plan.json").read_text(encoding="utf-8"))
+    assert execution_doc["execution_targets"][0]["target_name"] == "readpng2_init"
+    assert out["coverage_target_name"] == "readpng2_init"
+    assert out["selected_target_api"] == "readpng2_init"
+    assert out["latest_vuln_decision_snapshot"]["selected_target"] == "readpng2_init"
+
+
 def test_node_plan_surfaces_attack_hint_gap_as_planning_directive(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -992,3 +1081,111 @@ def test_node_plan_hydrates_analysis_context_from_companion_artifacts(tmp_path: 
     assert Path(str(out.get("analysis_context_path") or "")).is_file()
     assert int(out.get("analysis_evidence_count") or 0) > 0
     assert "Unified analysis context is available at `fuzz/analysis_context.json`" in captured["prompt"]
+
+
+def test_node_plan_fix_harness_injects_repo_root_crash_evidence(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "crash_info.md").write_text("asan trace line\n", encoding="utf-8")
+    (tmp_path / "crash_triage.json").write_text('{"label":"harness_bug","reason":"bad glue"}\n', encoding="utf-8")
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            captured["prompt"] = prompt
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                '[{"name":"png_parse","api":"png_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
+
+    out = workflow_graph._node_plan(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "repair_mode": True,
+            "repair_origin_stage": "fix-harness",
+            "repair_error_digest": {"error_kind": "harness_bug", "error_code": "triage_bug", "signature": "sig"},
+        }
+    )
+
+    assert out["last_error"] == ""
+    assert out["prompt_render_degraded"] is True
+    assert "crash_analysis_not_available_yet" in out["prompt_render_issue"]
+    assert f"crash_info_path: {tmp_path / 'crash_info.md'}" in captured["prompt"]
+    assert f"crash_triage_json_path: {tmp_path / 'crash_triage.json'}" in captured["prompt"]
+    assert "Do not guess `fuzz/crash_*` paths" in captured["prompt"]
+    assert "asan trace line" in captured["prompt"]
+
+
+def test_node_synthesize_fix_harness_injects_repo_root_crash_evidence(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "crash_info.md").write_text("asan trace line\n", encoding="utf-8")
+    (tmp_path / "crash_triage.json").write_text('{"label":"harness_bug","reason":"bad glue"}\n', encoding="utf-8")
+    (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (fuzz_dir / "targets.json").write_text(
+        '[{"name":"png_parse","api":"png_parse","lang":"c-cpp","target_type":"parser","seed_profile":"parser-format"}]\n',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "execution_plan.json").write_text(
+        '{"schema_version":1,"targets":[{"target_name":"png_parse","expected_fuzzer_name":"png_parse_fuzz","chosen_target_api":"png_parse"}]}\n',
+        encoding="utf-8",
+    )
+    (fuzz_dir / "harness_index.json").write_text('{"schema_version":1,"entries":[]}\n', encoding="utf-8")
+    (fuzz_dir / "README.md").write_text("# readme\n", encoding="utf-8")
+    (fuzz_dir / "repo_understanding.json").write_text('{"chosen_target_api":"png_parse","build_system":"cmake"}\n', encoding="utf-8")
+    (fuzz_dir / "build_strategy.json").write_text('{"build_system":"cmake"}\n', encoding="utf-8")
+    (fuzz_dir / "build_runtime_facts.json").write_text('{"compiler":"clang"}\n', encoding="utf-8")
+    harness = fuzz_dir / "png_parse_fuzz.c"
+    harness.write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            captured.setdefault("prompt", prompt)
+            captured.setdefault("ctx", str(kwargs.get("additional_context") or ""))
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_synthesize_harness=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_validate_execution_plan_harness_consistency", lambda *args, **kwargs: (True, "", {}))
+    monkeypatch.setattr(workflow_graph, "_write_harness_index_doc", lambda *args, **kwargs: (str(fuzz_dir / "harness_index.json"), {"entries": []}))
+    monkeypatch.setattr(workflow_graph, "_validate_build_repair_contract", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(workflow_graph, "_validate_harness_source_contract", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(workflow_graph, "_analyze_harness_target_alignment", lambda _repo_root: {"drifted": False})
+    monkeypatch.setattr(workflow_graph, "_readme_drift_status", lambda *args, **kwargs: {"complete": True, "missing": [], "relation": "", "reason": ""})
+    monkeypatch.setattr(workflow_graph, "_remaining_time_budget_sec", lambda *args, **kwargs: 60)
+    monkeypatch.setattr(workflow_graph, "_synthesize_opencode_attempts", lambda: 1)
+    monkeypatch.setattr(workflow_graph, "_opencode_cli_retries", lambda: 0)
+    monkeypatch.setattr(workflow_graph, "_synthesize_opencode_idle_timeout_sec", lambda: 30)
+    monkeypatch.setattr(workflow_graph, "_synthesize_activity_watch_paths", lambda: [])
+
+    out = workflow_graph._node_synthesize(
+        {
+            "generator": gen,
+            "codex_hint": "repair hint",
+            "repair_mode": True,
+            "repair_origin_stage": "fix-harness",
+            "repair_error_digest": {"error_kind": "harness_bug", "error_code": "triage_bug", "signature": "sig"},
+        }
+    )
+
+    assert "missing required scaffold items" in str(out.get("last_error") or "")
+    assert out["prompt_render_degraded"] is True
+    assert "crash_analysis_not_available_yet" in out["prompt_render_issue"]
+    assert f"crash_info_path: {tmp_path / 'crash_info.md'}" in captured["ctx"]
+    assert f"crash_triage_json_path: {tmp_path / 'crash_triage.json'}" in captured["ctx"]
+    assert "Do not guess `fuzz/crash_*` paths" in captured["ctx"]
+    assert "asan trace line" in captured["ctx"]

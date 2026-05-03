@@ -221,7 +221,7 @@ Goal:
 - keep `fuzz/execution_plan.json` aligned with reproducible harness-fix strategy
 
 Fix-harness planning focus:
-- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- consume repo-root `crash_info.md`, repo-root `crash_triage.json`, optional repo-root `crash_analysis.md`, and `repair_error_digest` first
 - output explicit strategy changes versus the latest failed cycle (must be material)
 - prioritize fixes under `fuzz/` harness/build glue, not documentation
 - prefer public/stable APIs and avoid internal/private symbols by default
@@ -232,6 +232,8 @@ Constraints:
 - Read-only exploration commands are allowed.
 - Query MCP evidence first when available (code-navigation first, preprocessor second, semantic evidence third).
 - If MCP is unavailable, continue in degraded mode and explicitly state it in `fuzz/PLAN.md`.
+- Treat repo-root crash artifact paths as authoritative; do not guess `fuzz/crash_*` paths.
+- If `crash_analysis.md` is unavailable on this crash-triage repair path, continue in degraded mode and record `crash_analysis_not_available_yet` in `Known Issues`.
 - when diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - doc-only or no-op repair plans are invalid
 
@@ -436,13 +438,15 @@ Required outputs:
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 Fix-harness constraints:
-- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- consume repo-root `crash_info.md`, repo-root `crash_triage.json`, optional repo-root `crash_analysis.md`, and `repair_error_digest` first
 - include at least one material strategy change relative to previous failed attempt
 - apply concrete edits in offending `fuzz/` harness/build glue files (doc-only/no-op is invalid)
 - preserve libFuzzer entry contract: no custom `main()`, use `LLVMFuzzerTestOneInput` (or language-equivalent only)
 - forbid argv/file-driven harness entry logic (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - prefer public/stable APIs; internal/private APIs require `api_surface_exception` with non-empty evidence
 - if diagnostics include `non_public_api_usage`, replace offending symbols first
+- Treat repo-root crash artifact paths as authoritative; do not guess `fuzz/crash_*` paths.
+- If `crash_analysis.md` is unavailable on this crash-triage repair path, continue in degraded mode and document `crash_analysis_not_available_yet`.
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - query MCP evidence first when available; if unavailable, continue in degraded mode and document it

@@ -133,6 +133,8 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "crash_info.md" in fix_harness_repair
     assert "crash_analysis.md" in fix_harness_repair
     assert "crash_triage.json" in fix_harness_repair
+    assert "repo-root" in fix_harness_repair
+    assert "crash_analysis_not_available_yet" in fix_harness_repair
     assert "fix-harness-diag" in fix_harness_repair
     assert "MCP is unavailable, continue in degraded mode" in build_repair
     assert "Query MCP evidence first" in coverage_repair
@@ -198,6 +200,8 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "crash_info.md" in synth_fix_harness_repair
     assert "crash_analysis.md" in synth_fix_harness_repair
     assert "crash_triage.json" in synth_fix_harness_repair
+    assert "repo-root" in synth_fix_harness_repair
+    assert "crash_analysis_not_available_yet" in synth_fix_harness_repair
     assert "fix-harness-fail" in synth_fix_harness_repair
     assert "doc-only/no-op is invalid" in synth_fix_harness_repair
     assert "LLVMFuzzerTestOneInput" in synth_fix_harness_repair
