@@ -288,6 +288,21 @@ def test_fmt_seed_families_replace_generic_parser_format():
     assert optional == []
 
 
+def test_decoder_binary_seed_families_are_format_bounded_and_advisory():
+    required, optional = _seed_families_for_target(
+        "decoder-binary",
+        "png_read_image",
+        "libpng IHDR IDAT chunk decoder",
+    )
+    assert required == []
+    assert "magic_headers" in optional
+    assert "chunk_layout" in optional
+    assert "png_signature" in optional
+    assert "png_chunk_order" in optional
+    assert "document_markers" not in optional
+    assert "block_scalars" not in optional
+
+
 def test_infer_target_type_keeps_inflate_on_archive_side():
     assert _infer_target_type("inflateBack9", "stream inflate decoder") == "archive"
 

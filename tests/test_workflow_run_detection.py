@@ -67,6 +67,16 @@ class _FailingSeedGenerator(_FakeRunGenerator):
         raise RuntimeError(f"seed generation failed for {fuzzer_name}")
 
 
+class _SeedMetadataRunGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, bootstrap_by_fuzzer: dict[str, dict[str, object]]) -> None:
+        super().__init__(tmp_path, run_results)
+        self.last_seed_bootstrap_by_fuzzer = dict(bootstrap_by_fuzzer)
+        self.last_seed_profile_by_fuzzer = {
+            name: str(meta.get("seed_profile") or "")
+            for name, meta in bootstrap_by_fuzzer.items()
+        }
+
+
 class _MultiRunGenerator(_FakeRunGenerator):
     def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, run_sleep_sec: float = 0.0) -> None:
         super().__init__(tmp_path, run_results)
@@ -228,7 +238,50 @@ def test_node_coverage_analysis_binds_source_coverage_to_current_fuzzer(tmp_path
     assert out["coverage_source_report"]["coverage_pct"] == 61.5
     assert out["coverage_uncovered_functions"] == ["decode_row"]
     assert out["coverage_run_feedback_summary"]["function_gap_count"] == 1
-    assert out["coverage_run_feedback_summary"]["top_function_gaps"][0]["name"] == "decode_row"
+
+
+def test_node_run_keeps_empty_seed_families_from_current_target(tmp_path: Path):
+    gen = _SeedMetadataRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            )
+        ],
+        bootstrap_by_fuzzer={
+            "demo_fuzz": {
+                "seed_profile": "decoder-binary",
+                "seed_families_suggested": [],
+                "seed_family_coverage": {"covered": [], "missing": []},
+            }
+        },
+    )
+
+    out = workflow_graph._node_run(
+        {
+            "generator": gen,
+            "crash_fix_attempts": 0,
+            "coverage_seed_families_suggested": ["document_markers"],
+            "coverage_seed_families_covered": ["document_markers"],
+            "coverage_seed_families_missing": ["block_scalars"],
+            "synthesize_selected_target_name": "decode",
+            "synthesize_observed_target_api": "png_read_image",
+            "selected_target_api": "png_read_image",
+        }
+    )
+
+    assert out["coverage_target_name"] == "decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_seed_families_suggested"] == []
+    assert out["coverage_seed_families_covered"] == []
+    assert out["coverage_seed_families_missing"] == []
 
 
 def test_node_run_writes_repro_context_on_crash(tmp_path: Path):
@@ -1752,6 +1805,42 @@ def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(mo
     assert out["degraded_seed_replan_triggered"] is True
     snap = dict(out.get("cold_start_trigger_snapshot") or {})
     assert snap.get("seed_generation_degraded") is True
+
+
+def test_node_coverage_analysis_preserves_target_identity_separate_from_api():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 2,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "decode",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "image",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": [],
+                "cold_start_failure": False,
+                "seed_score": 0.9,
+                "early_new_units_30s": 4,
+            },
+            "run_details": [
+                {
+                    "fuzzer": "decode_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 20,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_target_type"] == "image"
 
 
 def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path):

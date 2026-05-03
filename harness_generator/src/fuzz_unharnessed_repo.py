@@ -70,6 +70,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from seed_families import (
+    is_fmt_format_target as _shared_is_fmt_format_target,
+    seed_families_for_target as _shared_seed_families_for_target,
+)
 
 try:
     from git import Repo, exc as git_exc  # type: ignore
@@ -1370,11 +1374,7 @@ def _infer_target_type(*parts: str) -> str:
 
 
 def _is_fmt_format_target(*parts: str) -> bool:
-    text = " ".join(p for p in parts if p).lower()
-    return bool(
-        "fmt" in text
-        and any(tok in text for tok in ("format", "format_to", "vformat", "println", "print", "replacement field", "specifier"))
-    )
+    return _shared_is_fmt_format_target(*parts)
 
 
 def _looks_textual_seed(path: Path) -> bool:
@@ -1452,57 +1452,7 @@ def _seed_filter_mode() -> str:
 
 
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
-    """Return (suggested, optional) seed families as *hints* for AI seed
-    generation.  These are advisory — the AI may choose different families
-    based on project context.  Non-parser profiles intentionally return
-    empty suggested lists so the AI decides what's appropriate."""
-    profile = str(seed_profile or "").strip().lower()
-    text = " ".join(p for p in parts if p).lower()
-    suggested: list[str] = []
-    optional: list[str] = []
-    if profile == "parser-format" and _is_fmt_format_target(text):
-        suggested.extend(
-            [
-                "replacement_fields",
-                "escaped_braces",
-                "positional_arguments",
-                "format_specifiers",
-                "width_precision",
-                "fill_align",
-                "type_conversions",
-                "malformed_replacement_fields",
-            ]
-        )
-        return suggested, optional
-    if profile == "parser-structure":
-        suggested.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
-        optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
-    elif profile == "parser-token":
-        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
-        optional.extend(["document_markers", "tags_directives", "flow_structures"])
-    elif profile == "parser-format":
-        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
-    elif profile == "parser-numeric":
-        suggested.extend(["delimiter_fragments", "malformed_separators"])
-    # decoder-binary, archive-container, serializer-structured,
-    # document-text, network-message, generic: no mandatory families —
-    # AI decides based on project context.
-
-    # YAML-specific enrichment — only for parser-* profiles
-    if profile.startswith("parser-") and any(tok in text for tok in ("yaml", "yml")):
-        for family in [
-            "flow_structures",
-            "block_scalars",
-            "anchors_aliases",
-            "tags_directives",
-            "document_markers",
-            "delimiter_fragments",
-            "unterminated_fragments",
-            "malformed_separators",
-        ]:
-            if family not in suggested:
-                suggested.append(family)
-    return suggested, [x for x in optional if x not in suggested]
+    return _shared_seed_families_for_target(seed_profile, *parts)
 
 
 def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:

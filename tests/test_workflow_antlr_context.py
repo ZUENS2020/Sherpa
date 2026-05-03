@@ -976,6 +976,59 @@ def test_node_plan_surfaces_attack_hint_gap_as_planning_directive(tmp_path: Path
     assert "attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values (coverage_ratio=0.50)" in captured["prompt"]
 
 
+def test_node_plan_resets_seed_families_when_new_target_has_none(tmp_path: Path, monkeypatch):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+
+    class _Patcher:
+        def run_codex_command(self, prompt: str, **kwargs):
+            (fuzz_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            (fuzz_dir / "targets.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "decode",
+                            "api": "png_read_image",
+                            "lang": "c-cpp",
+                            "target_type": "image",
+                            "seed_profile": "decoder-binary",
+                            "depth_score": 5,
+                            "depth_class": "medium",
+                        }
+                    ],
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher(), _pass_plan_targets=lambda timeout: None)
+    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
+    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
+    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "0")
+
+    out = workflow_graph._node_plan(
+        {
+            "generator": gen,
+            "codex_hint": "",
+            "coverage_seed_families_suggested": ["document_markers", "block_scalars"],
+            "coverage_seed_families_covered": ["document_markers"],
+            "coverage_seed_families_missing": ["block_scalars"],
+            "coverage_seed_profile": "parser-structure",
+            "coverage_target_name": "readpng_init",
+            "coverage_target_api": "readpng_init",
+        }
+    )
+
+    assert out["coverage_target_name"] == "decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_seed_profile"] == "decoder-binary"
+    assert out["coverage_seed_families_suggested"] == []
+    assert out["coverage_seed_families_covered"] == []
+    assert out["coverage_seed_families_missing"] == []
+
+
 def test_node_plan_hydrates_analysis_context_from_companion_artifacts(tmp_path: Path, monkeypatch):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

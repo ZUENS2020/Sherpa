@@ -40,6 +40,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 
 ## Constraints
 - In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
+- Treat `fuzz/targets.json` as advisory candidate input. The coordinator will normalize target identity, seed profile, and execution metadata before writing `fuzz/selected_targets.json`.
 - `api` must describe an API identifier, not a harness path.
 - Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
@@ -53,6 +54,8 @@ Use this skill in the `plan` stage for initial planning or re-planning.
   - Keep `expected_fuzzer_name` consistent with `fuzz/harness_index.json` and harness filename stem.
 - Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
 - `fuzz/selected_targets.json` must include `security_score_breakdown`.
+- `fuzz/selected_targets.json` is the normalized execution truth source. Keep target identity stable and API-centric.
+- Empty `seed_families_suggested` is valid when no specific advisory family guidance is justified.
 - Internal/private API selection requires explicit `api_surface_exception`:
   - allow only when `vuln_likelihood >= 0.75`
   - include non-empty `reason` and `evidence_ids`.

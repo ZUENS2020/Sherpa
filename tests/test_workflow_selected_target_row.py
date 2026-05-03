@@ -155,3 +155,25 @@ def test_build_selected_target_row_exposes_signal_sources_and_callback_penalty(t
     assert isinstance(row["risk_signal_source_breakdown"], dict)
     assert float(row["callback_penalty"]) > 0.0
     assert float(row["execution_depth_bias"]) < 0.0
+
+
+def test_build_selected_target_row_normalizes_parser_seed_profile_for_decoder(tmp_path: Path) -> None:
+    row = workflow_graph._build_selected_target_row(
+        repo_root=tmp_path,
+        item={
+            "name": "readpng_init",
+            "api": "readpng_init",
+            "target_type": "decoder",
+            "seed_profile": "parser-structure",
+            "lang": "c",
+            "depth_score": 7,
+            "depth_class": "medium",
+        },
+        security_lookup={},
+        security_priority_mode=True,
+        degrade_reason="",
+        score_weights=workflow_graph._vuln_score_weights(),
+    )
+
+    assert row["seed_profile"] == "decoder-binary"
+    assert row["seed_families_suggested"] == []

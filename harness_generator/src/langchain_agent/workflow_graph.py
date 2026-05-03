@@ -24,10 +24,12 @@ from persistent_config import load_config
 import workflow_common as _wf_common
 import workflow_observability as _wf_obs
 import workflow_coverage_decision as _wf_coverage_decision
+import workflow_normalization as _wf_norm
 import workflow_target_scoring as _wf_target_scoring
 import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
 from coverage_replay import collect_per_input_frontier
+from seed_families import seed_families_for_target as _seed_families_for_target
 from workflow_context_store import (
     context_dir_for_repo_root,
     merge_result_into_contexts,
@@ -41,7 +43,6 @@ from fuzz_unharnessed_repo import (
     HarnessGeneratorError,
     NonOssFuzzHarnessGenerator,
     RepoSpec,
-    _seed_families_for_target,
     extract_crash_stack_signature,
     snapshot_repo_text,
     write_patch_from_snapshot,
@@ -1171,23 +1172,26 @@ def _infer_target_lang_from_repo(repo_root: Path, *, file_hint: str = "") -> str
 
 
 def _infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
-    text = f"{name}\n{context}".lower()
-    if target_type == "parser":
-        if any(tok in text for tok in ("arg_id", "argument id", "positional", "named argument", "named arg", "number", "numeric")):
-            return "parser-numeric"
-        if any(tok in text for tok in ("format", "replacement field", "specifier", "brace", "printf", "fmt")):
-            return "parser-format"
-        if any(tok in text for tok in ("token", "lexer", "lex", "scan", "scanner", "read_", "readline", "read line")):
-            return "parser-token"
-        return "parser-structure"
-    mapping = {
-        "decoder": "decoder-binary",
-        "archive": "archive-container",
-        "serializer": "serializer-structured",
-        "document": "document-text",
-        "network": "network-message",
-    }
-    return mapping.get(target_type, "generic")
+    return _wf_norm.infer_seed_profile(
+        name,
+        context,
+        target_type=str(target_type or "").strip().lower(),
+    )
+
+
+def _normalize_seed_profile(
+    seed_profile: str,
+    *,
+    target_type: str,
+    name: str,
+    context: str,
+) -> str:
+    return _wf_norm.normalize_seed_profile(
+        seed_profile,
+        target_type=str(target_type or "").strip().lower(),
+        name=name,
+        context=context,
+    )
 
 
 def _score_target_depth(
@@ -2340,10 +2344,16 @@ def _build_selected_target_row(
     degrade_reason: str,
     score_weights: dict[str, float],
 ) -> dict[str, Any]:
-    target_name = str(item.get("name") or "").strip()
+    item = _wf_norm.normalize_target_row(item)
+    target_name = str(item.get("target_name") or item.get("name") or "").strip()
     api = str(item.get("api") or target_name).strip()
     target_type = str(item.get("target_type") or "generic").strip().lower()
-    seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
+    seed_profile = _normalize_seed_profile(
+        str(item.get("seed_profile") or "generic"),
+        target_type=target_type,
+        name=target_name,
+        context=api,
+    )
     required, optional = _seed_families_for_target(seed_profile, target_name, api)
     runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
     selection_rationale = str(item.get("selection_rationale") or "").strip()
@@ -3182,7 +3192,12 @@ def _build_fallback_targets_doc(
                 "api": name,
                 "lang": lang,
                 "target_type": target_type,
-                "seed_profile": _raw_sp if _raw_sp and _raw_sp != "pending" else _infer_seed_profile(name, file_hint, target_type=target_type),
+                "seed_profile": _normalize_seed_profile(
+                    _raw_sp,
+                    target_type=target_type,
+                    name=name,
+                    context=file_hint,
+                ),
                 "depth_score": depth_score,
                 "depth_class": depth_class,
                 "selection_bias_reason": selection_bias_reason,
@@ -6898,10 +6913,20 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             or primary_target.get("api")
             or new_target_name
         )
-        new_seed_profile = str(
-            selected_primary.get("seed_profile")
-            or primary_target.get("seed_profile")
-            or ""
+        new_target_type = str(
+            selected_primary.get("target_type")
+            or primary_target.get("target_type")
+            or "generic"
+        ).strip().lower()
+        new_seed_profile = _normalize_seed_profile(
+            str(
+                selected_primary.get("seed_profile")
+                or primary_target.get("seed_profile")
+                or ""
+            ),
+            target_type=new_target_type,
+            name=new_target_name,
+            context=new_target_api,
         )
         new_depth_score = int(
             selected_primary.get("depth_score")
@@ -7063,13 +7088,14 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             # gets a fresh set of attempts.
             "continuous_loop_count": 0,
             "coverage_target_name": new_target_name or prev_target_name,
-            "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
+            "coverage_target_api": new_target_api,
+            "coverage_target_type": new_target_type,
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
             "selected_target_runtime_viability": selected_runtime_viability or str(state.get("selected_target_runtime_viability") or ""),
-            "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
-            "coverage_seed_families_suggested": seed_families_suggested or list(state.get("coverage_seed_families_suggested") or []),
-            "coverage_seed_families_covered": list(state.get("coverage_seed_families_covered") or []),
-            "coverage_seed_families_missing": list(state.get("coverage_seed_families_missing") or seed_families_suggested),
+            "coverage_seed_profile": new_seed_profile,
+            "coverage_seed_families_suggested": list(seed_families_suggested),
+            "coverage_seed_families_covered": [],
+            "coverage_seed_families_missing": list(seed_families_suggested),
             "coverage_seed_quality": dict(state.get("coverage_seed_quality") or {}),
             "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
             "coverage_target_depth_score": new_depth_score,
@@ -8160,7 +8186,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_relation": str(readme_alignment.get("relation") or ""),
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
-            "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
+            "coverage_target_name": str(target_alignment.get("expected_target_name") or selected_target_name or state.get("coverage_target_name") or ""),
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
             "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
@@ -11204,7 +11230,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         seed_bootstrap_all = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
 
-        def _first_seed_meta_list(*path: str) -> list[str]:
+        def _first_seed_meta_list(*path: str) -> tuple[bool, list[str]]:
             for meta in seed_bootstrap_all.values():
                 if not isinstance(meta, dict):
                     continue
@@ -11218,10 +11244,12 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not ok:
                     continue
                 if isinstance(cur, (list, tuple, set)):
-                    out_vals = [str(v).strip() for v in cur if str(v).strip()]
-                    if out_vals:
-                        return out_vals
-            return []
+                    return True, [str(v).strip() for v in cur if str(v).strip()]
+            return False, []
+
+        families_suggested_found, families_suggested_values = _first_seed_meta_list("seed_families_suggested")
+        families_covered_found, families_covered_values = _first_seed_meta_list("seed_family_coverage", "covered")
+        families_missing_found, families_missing_values = _first_seed_meta_list("seed_family_coverage", "missing")
 
         crash_signature = ""
         same_crash_repeats = 0
@@ -11282,7 +11310,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
-                str(state.get("synthesize_observed_target_api") or "").strip()
+                str(state.get("synthesize_selected_target_name") or "").strip()
                 or last_fuzzer
                 or next(
                     (
@@ -11297,19 +11325,23 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 str(state.get("synthesize_observed_target_api") or "").strip()
                 or str(state.get("selected_target_api") or "").strip()
             ),
+            "coverage_target_type": str(state.get("coverage_target_type") or ""),
             "coverage_seed_profile": last_seed_profile,
             "coverage_seed_quality": aggregated_seed_quality,
             "coverage_seed_families_suggested": list(
-                _first_seed_meta_list("seed_families_suggested")
-                or list(state.get("coverage_seed_families_suggested") or [])
+                families_suggested_values
+                if families_suggested_found
+                else list(state.get("coverage_seed_families_suggested") or [])
             ),
             "coverage_seed_families_covered": list(
-                _first_seed_meta_list("seed_family_coverage", "covered")
-                or list(state.get("coverage_seed_families_covered") or [])
+                families_covered_values
+                if families_covered_found
+                else list(state.get("coverage_seed_families_covered") or [])
             ),
             "coverage_seed_families_missing": list(
-                _first_seed_meta_list("seed_family_coverage", "missing")
-                or list(state.get("coverage_seed_families_missing") or [])
+                families_missing_values
+                if families_missing_found
+                else list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
                 sorted(aggregated_quality_flags)
@@ -11711,7 +11743,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         history = list(state.get("coverage_history") or [])
         current_cov = _max_cov_from_run_details(run_details)
         current_ft = 0
-        current_target_name = ""
+        current_target_name = str(state.get("coverage_target_name") or "")
         current_target_api = str(state.get("coverage_target_api") or "")
         selected_target_score_breakdown: dict[str, Any] = {}
         try:
@@ -11739,7 +11771,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 current_ft = max(int(detail.get("final_ft") or 0) for detail in run_details)
             except Exception:
                 current_ft = 0
-            current_target_name = current_target_api or str(run_details[0].get("fuzzer") or "")
+            if not current_target_name:
+                current_target_name = str(run_details[0].get("fuzzer") or "")
         plateau_detected = any(bool(detail.get("plateau_detected")) for detail in run_details)
         plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
         prev_cov = max(0, int(state.get("coverage_last_max_cov") or 0))
@@ -12030,7 +12063,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_improve_reason": reason,
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
-            "coverage_target_api": current_target_api or current_target_name or str(state.get("coverage_target_api") or ""),
+            "coverage_target_api": current_target_api or str(state.get("coverage_target_api") or ""),
+            "coverage_target_type": str(state.get("coverage_target_type") or ""),
             "coverage_seed_profile": current_seed_profile,
             "coverage_seed_quality": seed_quality,
             "coverage_seed_families_suggested": seed_families_suggested,
