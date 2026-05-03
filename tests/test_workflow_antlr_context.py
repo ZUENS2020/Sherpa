@@ -130,6 +130,8 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert isinstance(out.get("latest_vuln_decision_snapshot"), dict)
     assert out.get("latest_vuln_decision_snapshot", {}).get("kind") == "choose_target"
     assert "security_score_breakdown" in out.get("latest_vuln_decision_snapshot", {})
+    assert "tie_break_reason" in out.get("latest_vuln_decision_snapshot", {})
+    assert "selection_delta_vs_runner_up" in out.get("latest_vuln_decision_snapshot", {})
     assert int(out.get("decision_trace_count") or 0) >= 1
     assert isinstance(out.get("latest_decision_snapshot"), dict)
     trace_path = tmp_path / "fuzz" / "decision_trace.jsonl"

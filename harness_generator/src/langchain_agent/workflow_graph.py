@@ -171,6 +171,8 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_replay_total_inputs: int
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
+    coverage_run_feedback_path: str
+    coverage_run_feedback_summary: dict[str, Any]
     coverage_exhausted_targets: list[str]
     coverage_attempted_targets: list[str]
     coverage_feedback_for_plan: str
@@ -1496,7 +1498,14 @@ def _security_signal_ids() -> tuple[str, ...]:
 def _security_signal_patterns() -> dict[str, str]:
     return {
         "mem_oob_candidate": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|\[[^\]]+\]|pointer|offset|index|bounds?)",
-        "integer_overflow_candidate": r"(overflow|underflow|size_t|ssize_t|uint|int\d+_t|length|len|count|capacity|shift|multiply|\*)",
+        "integer_overflow_candidate": (
+            r"(overflow|underflow|wrap(?:around)?|truncat|narrow(?:ing)?|"
+            r"(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)"
+            r"\s*(?:[\*\+\-]|<<)|"
+            r"(?:[\*\+\-]|<<)\s*(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)|"
+            r"(?:size_t|ssize_t|uint(?:8|16|32|64)?_t|int(?:8|16|32|64)?_t)\s*\)|"
+            r"(?:alloc|malloc|calloc|realloc)[^;\n]{0,80}(?:width|height|stride|rowbytes|rowsize|size|len|length|capacity))"
+        ),
         "format_string_candidate": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)",
         "path_traversal_candidate": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)",
         "command_injection_candidate": r"(system\(|popen\(|exec\(|spawn\(|shell|command)",
@@ -1516,15 +1525,27 @@ def _compute_security_signal_scores(
     signature: str,
     file_hint: str,
     risk_signals: list[str] | None = None,
+    risk_signal_source_breakdown: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     text = f"{name}\n{signature}\n{file_hint}".lower()
     scores = _empty_security_scores()
     signals = {str(x).strip().lower() for x in list(risk_signals or []) if str(x).strip()}
+    source_breakdown: dict[str, set[str]] = {}
+    for source_name, values in dict(risk_signal_source_breakdown or {}).items():
+        if not isinstance(values, list):
+            continue
+        source_breakdown[str(source_name).strip().lower()] = {
+            str(x).strip().lower() for x in values if str(x).strip()
+        }
     for signal_id, pattern in _security_signal_patterns().items():
         if re.search(pattern, text, re.IGNORECASE):
             scores[signal_id] = max(scores[signal_id], 0.62)
-        if signal_id in signals:
+        if signal_id in source_breakdown.get("regex", set()) or signal_id in source_breakdown.get("semantic", set()):
             scores[signal_id] = max(scores[signal_id], 0.78)
+        elif signal_id in source_breakdown.get("weak_file", set()) or signal_id in source_breakdown.get("file", set()):
+            scores[signal_id] = max(scores[signal_id], 0.44)
+        elif signal_id in signals:
+            scores[signal_id] = max(scores[signal_id], 0.68)
     if "bounds" in signals:
         scores["mem_oob_candidate"] = max(scores["mem_oob_candidate"], 0.68)
         scores["integer_overflow_candidate"] = max(scores["integer_overflow_candidate"], 0.56)
@@ -1802,11 +1823,97 @@ def _load_seed_feedback_by_fuzzer(repo_root: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[str, Any]:
-    if not wrapper_fuzzer_name:
-        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
+def _load_target_runtime_cooldown_index(repo_root: Path) -> dict[str, Any]:
+    context_dir = context_dir_for_repo_root(repo_root)
+    control_doc, workflow_doc = read_context_docs(context_dir, job_id="")
+    control = strip_meta(control_doc)
+    workflow = strip_meta(workflow_doc)
+    exhausted_targets: set[str] = set()
+    raw_exhausted = list(workflow.get("coverage_exhausted_targets") or [])
+    for item in raw_exhausted:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name:
+            exhausted_targets.update(_target_analysis_lookup_keys(name, name))
+
+    low_yield_targets: set[str] = set()
+    plateau_counts: dict[str, int] = {}
+    for entry in list(workflow.get("coverage_history") or [])[-8:]:
+        if not isinstance(entry, dict):
+            continue
+        target_api = str(entry.get("target_api") or entry.get("target_name") or "").strip()
+        if not target_api:
+            continue
+        plateau_no_gain = bool(
+            entry.get("plateau_detected")
+            and int(entry.get("max_cov") or 0) <= int(entry.get("prev_cov") or 0)
+            and int(entry.get("max_ft") or 0) <= int(entry.get("prev_ft") or 0)
+        )
+        if plateau_no_gain:
+            plateau_counts[target_api] = plateau_counts.get(target_api, 0) + 1
+    for target_api, count in plateau_counts.items():
+        if count >= 2:
+            low_yield_targets.update(_target_analysis_lookup_keys(target_api, target_api))
+
+    oom_fuzzers: set[str] = set()
+    timeout_fuzzers: set[str] = set()
+    last_fuzzer = str(workflow.get("last_fuzzer") or control.get("last_fuzzer") or "").strip()
+    run_error_kind = str(
+        workflow.get("coverage_run_error_kind_effective")
+        or workflow.get("run_error_kind")
+        or workflow.get("error_code")
+        or ""
+    ).strip().lower()
+    if last_fuzzer:
+        if run_error_kind == "oom_killed":
+            oom_fuzzers.add(last_fuzzer)
+        elif run_error_kind in {"k8s_job_timeout", "timeout", "run_timeout", "run_idle_timeout"}:
+            timeout_fuzzers.add(last_fuzzer)
+
+    return {
+        "exhausted_targets": exhausted_targets,
+        "low_yield_targets": low_yield_targets,
+        "oom_fuzzers": oom_fuzzers,
+        "timeout_fuzzers": timeout_fuzzers,
+    }
+
+
+def _target_runtime_penalty(
+    repo_root: Path,
+    wrapper_fuzzer_name: str,
+    *,
+    target_name: str = "",
+    api: str = "",
+) -> dict[str, Any]:
     feedback = _load_seed_feedback_by_fuzzer(repo_root).get(wrapper_fuzzer_name) or {}
-    return _wf_target_scoring.runtime_penalty_from_feedback(feedback)
+    base = _wf_target_scoring.runtime_penalty_from_feedback(feedback)
+    penalty = float(base.get("score_penalty") or 0.0)
+    reasons: list[str] = []
+    if str(base.get("reason") or "").strip():
+        reasons.append(str(base.get("reason") or "").strip())
+
+    cooldown = _load_target_runtime_cooldown_index(repo_root)
+    lookup_keys = _target_analysis_lookup_keys(target_name or wrapper_fuzzer_name, api or target_name or wrapper_fuzzer_name)
+    if lookup_keys & set(cooldown.get("exhausted_targets") or set()):
+        penalty += 1.2
+        reasons.append("coverage_exhausted_target")
+    if lookup_keys & set(cooldown.get("low_yield_targets") or set()):
+        penalty += 0.9
+        reasons.append("persistent_low_yield_target")
+    if wrapper_fuzzer_name and wrapper_fuzzer_name in set(cooldown.get("oom_fuzzers") or set()):
+        penalty += 2.5
+        reasons.append("recent_oom_killed")
+    elif wrapper_fuzzer_name and wrapper_fuzzer_name in set(cooldown.get("timeout_fuzzers") or set()):
+        penalty += 1.4
+        reasons.append("recent_timeout")
+
+    return {
+        "score_penalty": round(min(max(penalty, 0.0), 4.5), 4),
+        "reason": ";".join(dict.fromkeys(x for x in reasons if x)),
+        "seed_feedback": dict(feedback),
+    }
 
 
 def _selection_target_key(name: str) -> str:
@@ -1954,6 +2061,23 @@ def _load_target_analysis_security_index(repo_root: Path) -> dict[str, dict[str,
             merged = dict(out.get(key) or {})
             merged.update(item)
             out[key] = merged
+    vuln_doc = _load_vuln_candidates_doc(repo_root)
+    for item in list(vuln_doc.get("candidates") or []):
+        if not isinstance(item, dict):
+            continue
+        api = str(item.get("target_api") or item.get("api") or "").strip()
+        name = str(item.get("target_name") or item.get("name") or api).strip()
+        if not (api or name):
+            continue
+        normalized = dict(item)
+        normalized.setdefault("api", api)
+        normalized.setdefault("name", name)
+        normalized.setdefault("file", str(item.get("target_file") or item.get("file") or ""))
+        normalized.setdefault("candidate_origin", str(item.get("candidate_origin") or item.get("source_stage") or "vuln_candidates"))
+        for key in _target_analysis_lookup_keys(name, api):
+            merged = dict(out.get(key) or {})
+            merged.update(normalized)
+            out[key] = merged
     return out
 
 
@@ -2040,6 +2164,161 @@ def _load_vuln_candidate_inventory(
     return normalized, ""
 
 
+def _vuln_candidates_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "vuln_candidates.json"
+
+
+def _load_vuln_candidates_doc(repo_root: Path) -> dict[str, Any]:
+    path = _vuln_candidates_path(repo_root)
+    if not path.is_file():
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    candidates = [dict(x) for x in list(raw.get("candidates") or []) if isinstance(x, dict)]
+    return {
+        "schema_version": int(raw.get("schema_version") or 1),
+        "updated_at": int(raw.get("updated_at") or 0),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+
+
+def _vuln_candidate_id(value: str, idx: int) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return f"analysis_{slug or 'candidate'}_{idx + 1}"
+
+
+def _bounded_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except Exception:
+        return float(default)
+
+
+def _normalize_analysis_vuln_candidate(
+    item: dict[str, Any],
+    *,
+    idx: int,
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    api = str(item.get("api") or item.get("target_api") or item.get("name") or "").strip()
+    name = str(item.get("name") or item.get("target_name") or api).strip()
+    target_type = str(item.get("target_type") or "generic").strip().lower()
+    evidence_ids = [
+        str(x).strip()
+        for x in list(item.get("evidence_ids") or [])
+        if str(x).strip()
+    ]
+    evidence_refs = [dict(evidence_by_id[x]) for x in evidence_ids if x in evidence_by_id]
+    signal_type = str(item.get("signal_type") or item.get("signal_id") or "").strip()
+    if not signal_type and evidence_refs:
+        signal_type = str(evidence_refs[0].get("signal_id") or "").strip()
+    if not signal_type:
+        signal_type = "mem_oob_candidate"
+    vuln_likelihood = _bounded_float(item.get("vuln_likelihood"), 0.0)
+    exploitability = _bounded_float(item.get("exploitability"), 0.0)
+    reachability = _bounded_float(item.get("reachability_confidence"), 0.0)
+    signal_score = max(_bounded_float(item.get("signal_score"), 0.0), vuln_likelihood)
+    reason = str(item.get("security_priority_reason") or item.get("summary") or "").strip()
+    attack_hint = dict(item.get("attack_hint") or {})
+    if not attack_hint:
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_type,
+            source_path=str(item.get("file") or item.get("target_file") or ""),
+            security_reason=reason,
+        )
+    candidate_id = str(item.get("candidate_id") or "").strip() or _vuln_candidate_id(api or name, idx)
+    risk_signal_source_breakdown = dict(item.get("risk_signal_source_breakdown") or {})
+    security_signal_scores = dict(item.get("security_signal_scores") or {})
+    return {
+        "candidate_id": candidate_id,
+        "source_stage": "analysis",
+        "candidate_origin": "analysis_context",
+        "validation_status": str(item.get("validation_status") or "pending"),
+        "target_api": api,
+        "api": api,
+        "target_name": name,
+        "name": name,
+        "target_file": str(item.get("file") or item.get("target_file") or ""),
+        "file": str(item.get("file") or item.get("target_file") or ""),
+        "target_type": target_type,
+        "signal_type": signal_type,
+        "signal_score": round(max(0.0, min(signal_score, 1.0)), 4),
+        "vuln_likelihood": round(vuln_likelihood, 4),
+        "exploitability": round(exploitability, 4),
+        "reachability_confidence": round(reachability, 4),
+        "priority": _candidate_priority(
+            vuln_likelihood=vuln_likelihood,
+            exploitability=exploitability,
+            reachability_confidence=reachability,
+            evidence_count=len(evidence_ids),
+            signal_score=signal_score,
+        ),
+        "security_priority_reason": reason,
+        "evidence_ids": evidence_ids,
+        "evidence": evidence_refs,
+        "attack_hint": attack_hint,
+        "security_signal_scores": {k: float(v) for k, v in security_signal_scores.items()},
+        "risk_signal_source_breakdown": risk_signal_source_breakdown,
+        "created_at": int(item.get("created_at") or time.time()),
+        "updated_at": int(time.time()),
+    }
+
+
+def _write_analysis_vuln_candidates(repo_root: Path, analysis_context_path: str) -> dict[str, Any]:
+    evidence, evidence_issue = _load_security_evidence_list(repo_root, analysis_context_path)
+    inventory, inventory_issue = _load_vuln_candidate_inventory(repo_root, analysis_context_path)
+    path = _vuln_candidates_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_doc = _load_vuln_candidates_doc(repo_root)
+    evidence_by_id = {
+        str(item.get("evidence_id") or "").strip(): dict(item)
+        for item in evidence
+        if str(item.get("evidence_id") or "").strip()
+    }
+    existing_candidates = [
+        dict(x)
+        for x in list(existing_doc.get("candidates") or [])
+        if isinstance(x, dict) and str(x.get("source_stage") or "") != "analysis"
+    ]
+    topk = max(1, int(_vuln_topk()))
+    analysis_candidates = [
+        _normalize_analysis_vuln_candidate(item, idx=idx, evidence_by_id=evidence_by_id)
+        for idx, item in enumerate(inventory[:topk])
+        if isinstance(item, dict)
+    ]
+    by_id: dict[str, dict[str, Any]] = {}
+    for candidate in existing_candidates + analysis_candidates:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if candidate_id:
+            by_id[candidate_id] = candidate
+    candidates = sorted(
+        by_id.values(),
+        key=lambda x: (
+            -float(x.get("priority") or 0.0),
+            -float(x.get("vuln_likelihood") or 0.0),
+            str(x.get("candidate_id") or ""),
+        ),
+    )
+    issue = ";".join(x for x in (evidence_issue, inventory_issue) if x)
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "candidate_count": len(candidates),
+        "analysis_candidate_count": len(analysis_candidates),
+        "degraded_reason": issue,
+        "candidates": candidates,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "candidate_count": len(candidates), "analysis_candidate_count": len(analysis_candidates), "issue": issue}
+
+
 def _lookup_target_security_candidate(
     *,
     target_name: str,
@@ -2091,6 +2370,11 @@ def _build_selected_target_row(
             signature=f"{api} {selection_rationale}",
             file_hint=str(item.get("file") or security_candidate.get("file") or ""),
             risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(
+                item.get("risk_signal_source_breakdown")
+                or security_candidate.get("risk_signal_source_breakdown")
+                or {}
+            ),
         )
     vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
     exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
@@ -2152,7 +2436,20 @@ def _build_selected_target_row(
     }
     score_breakdown = _target_score_breakdown(scoring_source)
     wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
-    runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
+    runtime_penalty = _target_runtime_penalty(
+        repo_root,
+        wrapper_fuzzer_name,
+        target_name=target_name,
+        api=api,
+    )
+    execution_bias = _execution_depth_bias(
+        target_name=target_name,
+        api=api,
+        target_type=target_type,
+        depth_class=str(item.get("depth_class") or ""),
+        depth_score=int(item.get("depth_score") or 0),
+        selection_rationale=selection_rationale,
+    )
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
     score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
     score_total = (
@@ -2163,6 +2460,7 @@ def _build_selected_target_row(
         + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
         + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
         + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
+        + float(execution_bias.get("execution_depth_bias") or 0.0)
         - float(score_penalty)
     )
     adjusted_target_score = max(0.0, float(score_total))
@@ -2184,14 +2482,6 @@ def _build_selected_target_row(
                 runtime_penalty["reason"] = (
                     f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
                 )
-    execution_bias = _execution_depth_bias(
-        target_name=target_name,
-        api=api,
-        target_type=target_type,
-        depth_class=str(item.get("depth_class") or ""),
-        depth_score=int(item.get("depth_score") or 0),
-        selection_rationale=selection_rationale,
-    )
     priority_base = _candidate_priority(
         vuln_likelihood=vuln_likelihood,
         exploitability=exploitability,
@@ -2246,6 +2536,11 @@ def _build_selected_target_row(
         "seed_families_suggested": required,
         "seed_families_optional": optional,
         "wrapper_fuzzer_name": wrapper_fuzzer_name,
+        "risk_signal_source_breakdown": dict(
+            item.get("risk_signal_source_breakdown")
+            or security_candidate.get("risk_signal_source_breakdown")
+            or {}
+        ),
         "score_total": float(adjusted_target_score),
         "score_breakdown": score_breakdown_fixed,
         "penalty_reason": str(runtime_penalty.get("reason") or ""),
@@ -2274,6 +2569,8 @@ def _build_selected_target_row(
         "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
         "evidence": list(evidence_refs),
         "evidence_ids": evidence_ids,
+        "vuln_candidate_id": str(security_candidate.get("candidate_id") or item.get("candidate_id") or ""),
+        "vuln_candidate_priority": float(security_candidate.get("priority") or item.get("priority") or 0.0),
         "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
         "validation_status": str(security_candidate.get("validation_status") or item.get("validation_status") or "pending"),
         "attack_hint": attack_hint,
@@ -3384,6 +3681,196 @@ def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[
     if pending > 0 or failed > 0:
         lines.append(f"- per_input_frontier_status: pending={pending}, failed={failed}")
     return lines
+
+
+def _build_run_feedback_summary(
+    *,
+    repo_root: Path,
+    source_report: dict[str, Any],
+    frontier_summary: dict[str, Any],
+) -> dict[str, Any]:
+    function_gaps: list[dict[str, Any]] = []
+    for item in list(source_report.get("uncovered_function_details") or []):
+        if not isinstance(item, dict):
+            continue
+        function_gaps.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "kind": "uncovered",
+                "execution_count": int(item.get("execution_count") or 0),
+                "region_coverage_ratio": float(item.get("region_coverage_ratio") or 0.0),
+            }
+        )
+    for item in list(source_report.get("partial_function_details") or []):
+        if not isinstance(item, dict):
+            continue
+        function_gaps.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "kind": "partial",
+                "execution_count": int(item.get("execution_count") or 0),
+                "region_coverage_ratio": float(item.get("region_coverage_ratio") or 0.0),
+            }
+        )
+    function_gaps = [x for x in function_gaps if x["name"]]
+    function_gaps.sort(
+        key=lambda x: (
+            0 if str(x.get("kind") or "") == "uncovered" else 1,
+            float(x.get("region_coverage_ratio") or 0.0),
+            str(x.get("name") or ""),
+        )
+    )
+
+    path_frontiers: list[dict[str, Any]] = []
+    for item in list(frontier_summary.get("top_inputs") or []):
+        if not isinstance(item, dict):
+            continue
+        path_frontiers.append(
+            {
+                "input_relpath": str(item.get("input_relpath") or "").strip(),
+                "frontier_score": float(item.get("frontier_score") or 0.0),
+                "covered_function_count": int(item.get("covered_function_count") or 0),
+                "covered_region_count": int(item.get("covered_region_count") or 0),
+                "covered_functions_sample": [
+                    str(x).strip()
+                    for x in list(item.get("covered_functions_sample") or [])
+                    if str(x).strip()
+                ][:5],
+                "frontier_functions": [
+                    {
+                        "name": str(fn.get("name") or "").strip(),
+                        "file": str(fn.get("file") or "").strip(),
+                        "line": int(fn.get("line") or 0),
+                        "uncovered_regions_nearby": int(fn.get("uncovered_regions_nearby") or 0),
+                        "region_coverage_ratio": float(fn.get("region_coverage_ratio") or 0.0),
+                    }
+                    for fn in list(item.get("frontier_functions") or [])
+                    if isinstance(fn, dict) and str(fn.get("name") or "").strip()
+                ][:5],
+            }
+        )
+    path_frontiers = [x for x in path_frontiers if x["input_relpath"]]
+
+    top_frontier_functions = []
+    for item in list(frontier_summary.get("top_frontier_functions") or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        top_frontier_functions.append(
+            {
+                "name": name,
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "input_count": int(item.get("input_count") or len(list(item.get("input_relpaths") or []))),
+                "best_distance_to_target": int(item.get("best_distance_to_target") or 0),
+                "input_relpaths": [
+                    str(x).strip()
+                    for x in list(item.get("input_relpaths") or [])
+                    if str(x).strip()
+                ][:5],
+            }
+        )
+
+    files_index: dict[str, dict[str, Any]] = {}
+    for item in function_gaps[:20]:
+        file_path = str(item.get("file") or "").strip()
+        if not file_path:
+            continue
+        bucket = files_index.setdefault(file_path, {"path": file_path, "issue_count": 0, "functions": []})
+        bucket["issue_count"] = int(bucket.get("issue_count") or 0) + 1
+        bucket["functions"].append({"name": item["name"], "line": item["line"], "kind": item["kind"]})
+    for item in top_frontier_functions[:20]:
+        file_path = str(item.get("file") or "").strip()
+        if not file_path:
+            continue
+        bucket = files_index.setdefault(file_path, {"path": file_path, "issue_count": 0, "functions": []})
+        bucket["issue_count"] = int(bucket.get("issue_count") or 0) + 1
+        bucket["functions"].append({"name": item["name"], "line": item["line"], "kind": "frontier"})
+    top_files = sorted(
+        files_index.values(),
+        key=lambda x: (-int(x.get("issue_count") or 0), str(x.get("path") or "")),
+    )[:10]
+
+    return {
+        "repo_root": str(repo_root),
+        "generated_at": int(time.time()),
+        "function_gap_count": len(function_gaps),
+        "path_frontier_count": len(path_frontiers),
+        "frontier_function_count": len(top_frontier_functions),
+        "top_function_gaps": function_gaps[:12],
+        "top_path_frontiers": path_frontiers[:8],
+        "top_frontier_functions": top_frontier_functions[:12],
+        "top_files": top_files,
+        "coverage_pct": float(source_report.get("coverage_pct") or 0.0),
+        "covered_functions": int(source_report.get("covered_functions") or 0),
+        "total_functions": int(source_report.get("total_functions") or 0),
+    }
+
+
+def _write_run_feedback_artifact(
+    *,
+    repo_root: Path,
+    source_report: dict[str, Any],
+    frontier_summary: dict[str, Any],
+) -> dict[str, Any]:
+    summary = _build_run_feedback_summary(
+        repo_root=repo_root,
+        source_report=source_report,
+        frontier_summary=frontier_summary,
+    )
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    path = fuzz_dir / "run_feedback.json"
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "summary": summary,
+        "source_report": dict(source_report or {}),
+        "frontier_summary": dict(frontier_summary or {}),
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "summary": summary}
+
+
+def _resolve_current_coverage_binary(repo_root: Path, state: FuzzWorkflowRuntimeState) -> Path | None:
+    fuzz_out = repo_root / "fuzz" / "out"
+    if not fuzz_out.is_dir():
+        return None
+
+    candidate_names: list[str] = []
+    for detail in list(state.get("run_details") or []):
+        name = str(detail.get("fuzzer") or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+    for raw in (
+        state.get("last_fuzzer"),
+        state.get("coverage_target_name"),
+        state.get("selected_target_name"),
+    ):
+        name = str(raw or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+
+    seen: set[str] = set()
+    for name in candidate_names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        candidate = fuzz_out / name
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
+
+    bins = sorted(
+        p for p in fuzz_out.glob("*")
+        if p.is_file() and os.access(str(p), os.X_OK)
+    )
+    return bins[0] if bins else None
 
 
 def _replay_out_dir(repo_root: Path) -> Path:
@@ -4818,10 +5305,13 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 continue
             signature = f"{name}({' '.join(str(m.group(2) or '').split())})"[:240]
             line_no = text[: m.start()].count("\n") + 1
-            risk_signals = [rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)]
-            for rule_id in semgrep_hits.get(rel, []):
-                if rule_id not in risk_signals:
-                    risk_signals.append(rule_id)
+            regex_signals = [
+                rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)
+            ]
+            weak_file_signals = [
+                rule_id for rule_id in semgrep_hits.get(rel, []) if rule_id not in regex_signals
+            ]
+            risk_signals = list(regex_signals)
             candidate_functions.append(
                 {
                     "name": name,
@@ -4831,6 +5321,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     "target_type": "pending",
                     "seed_profile": "pending",
                     "risk_signals": risk_signals,
+                    "risk_signal_source_breakdown": {
+                        "regex": list(regex_signals),
+                        "weak_file": list(weak_file_signals),
+                    },
                     "security_signals": [],
                     "security_signal_scores": _empty_security_scores(),
                     "vuln_likelihood": 0.0,
@@ -4868,6 +5362,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             signature=str(item.get("signature") or ""),
             file_hint=str(item.get("file") or ""),
             risk_signals=list(item.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(item.get("risk_signal_source_breakdown") or {}),
         )
         vuln_likelihood, exploitability, reachability_confidence, security_reason = _derive_security_priority(
             target_type=str(item.get("target_type") or "generic"),
@@ -4926,6 +5421,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "target_type": str(item.get("target_type") or "generic"),
                 "seed_profile": str(item.get("seed_profile") or "generic"),
                 "risk_signals": risk,
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
                 "file": str(item.get("file") or ""),
                 "depth_score": int(item.get("depth_score") or 0),
                 "depth_class": str(item.get("depth_class") or "shallow"),
@@ -5287,6 +5783,8 @@ def _build_analysis_evidence_index(
                     signal_score=primary_signal_score,
                 ),
                 "evidence_ids": list(dict.fromkeys(candidate_evidence_ids)),
+                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
             }
         )
 
@@ -5904,6 +6402,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             analysis_context_path = str(analysis_path)
             analysis_report_path = str(analysis_path)
+            vuln_candidates_doc = _write_analysis_vuln_candidates(gen.repo_root, analysis_context_path)
 
             if _has_codex_key():
                 analysis_lines: list[str] = [
@@ -5970,7 +6469,11 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "analysis_context_path": analysis_context_path,
                 "analysis_evidence_count": analysis_evidence_count,
                 "security_evidence_count": int((evidence_doc.get("summary") or {}).get("security_evidence_count") or 0),
-                "vuln_candidate_count": int((evidence_doc.get("summary") or {}).get("vuln_candidate_count") or 0),
+                "vuln_candidate_count": max(
+                    int((evidence_doc.get("summary") or {}).get("vuln_candidate_count") or 0),
+                    int(vuln_candidates_doc.get("candidate_count") or 0),
+                ),
+                "vuln_candidates_path": str(vuln_candidates_doc.get("path") or ""),
                 "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
                 "vuln_focus_profile": "broad_high_risk",
                 "target_surface_policy": "risk_first",
@@ -6415,6 +6918,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             or primary_target.get("selection_bias_reason")
             or ""
         )
+        runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
         seed_families_suggested = list(selected_primary.get("seed_families_suggested") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
@@ -6625,13 +7129,30 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         api_surface_exception = dict(selected_primary.get("api_surface_exception") or {})
         runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
         selection_delta_vs_runner_up = (
-            round(
-                float(selected_primary.get("score_total") or selected_primary.get("target_score") or 0.0)
-                - float(runner_up.get("score_total") or runner_up.get("target_score") or 0.0),
-                6,
-            )
+            {
+                "score_total": round(
+                    float(selected_primary.get("score_total") or selected_primary.get("target_score") or 0.0)
+                    - float(runner_up.get("score_total") or runner_up.get("target_score") or 0.0),
+                    4,
+                ),
+                "execution_depth_bias": round(
+                    float(selected_primary.get("execution_depth_bias") or 0.0)
+                    - float(runner_up.get("execution_depth_bias") or 0.0),
+                    4,
+                ),
+                "callback_penalty": round(
+                    float(selected_primary.get("callback_penalty") or 0.0)
+                    - float(runner_up.get("callback_penalty") or 0.0),
+                    4,
+                ),
+                "priority": round(
+                    float(selected_primary.get("effective_priority") or selected_primary.get("priority") or 0.0)
+                    - float(runner_up.get("effective_priority") or runner_up.get("priority") or 0.0),
+                    4,
+                ),
+            }
             if runner_up
-            else None
+            else {}
         )
         tie_break_reason_parts: list[str] = []
         if str(selected_primary.get("penalty_reason") or ""):
@@ -6646,11 +7167,25 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             tie_break_reason_parts.append("deeper_path_bias")
         if float(selected_primary.get("callback_penalty") or 0.0) > 0.0:
             tie_break_reason_parts.append("shallow_callback_penalty")
-        tie_break_reason = (
-            ",".join(tie_break_reason_parts)
-            if tie_break_reason_parts
-            else "risk_first_default"
-        )
+        if runner_up:
+            if float(selected_primary.get("execution_depth_bias") or 0.0) > float(
+                runner_up.get("execution_depth_bias") or 0.0
+            ):
+                tie_break_reason = "higher_execution_depth_bias"
+            elif float(selected_primary.get("callback_penalty") or 0.0) < float(
+                runner_up.get("callback_penalty") or 0.0
+            ):
+                tie_break_reason = "lower_callback_penalty"
+            elif tie_break_reason_parts:
+                tie_break_reason = ",".join(tie_break_reason_parts)
+            else:
+                tie_break_reason = "higher_security_priority"
+        else:
+            tie_break_reason = (
+                ",".join(tie_break_reason_parts)
+                if tie_break_reason_parts
+                else "risk_first_default"
+            )
         choose_target_snapshot = {
             "kind": "choose_target",
             "selected_target": str(selected_primary.get("target") or new_target_name or ""),
@@ -6682,9 +7217,9 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "security_priority_mode": bool(security_priority_mode),
             "top_vuln_candidate": str(choose_target_snapshot.get("top_vuln_candidate") or ""),
             "security_score_breakdown": security_breakdown,
-            "tie_break_reason": tie_break_reason,
-            "selection_delta_vs_runner_up": selection_delta_vs_runner_up,
             "api_surface_exception_used": bool(choose_target_snapshot.get("api_surface_exception_used") or False),
+            "tie_break_reason": str(choose_target_snapshot.get("tie_break_reason") or ""),
+            "selection_delta_vs_runner_up": dict(choose_target_snapshot.get("selection_delta_vs_runner_up") or {}),
         }
         out = _record_decision_trace(
             out,
@@ -11150,12 +11685,18 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
 
 
 def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
     state, stop_now = _enter_step(state, "coverage-analysis")
     if stop_now:
         return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> coverage-analysis")
     try:
+        analysis_repo_root = (
+            Path(str(state.get("repo_root") or "").strip())
+            if str(state.get("repo_root") or "").strip()
+            else getattr(gen, "repo_root", Path.cwd())
+        )
         max_rounds = max(
             0,
             int(
@@ -11174,7 +11715,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_target_api = str(state.get("coverage_target_api") or "")
         selected_target_score_breakdown: dict[str, Any] = {}
         try:
-            for item in _load_selected_targets_doc(gen.repo_root):
+            for item in _load_selected_targets_doc(analysis_repo_root):
                 item_api = str(item.get("api") or "").strip()
                 item_name = str(item.get("target_name") or item.get("name") or "").strip()
                 if current_target_api and item_api and item_api == current_target_api:
@@ -11569,19 +12110,22 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         # Collect source coverage report (llvm-cov) for improve feedback
         source_report: dict[str, Any] | None = None
         try:
-            fuzz_out = gen.repo_root / "fuzz" / "out"
-            if fuzz_out.is_dir():
-                bins = sorted(fuzz_out.glob("*"))
-                for b in bins:
-                    if b.is_file() and os.access(str(b), os.X_OK):
-                        source_report = gen.collect_source_coverage(b)
-                        if source_report:
-                            break
+            if gen is not None:
+                current_bin = _resolve_current_coverage_binary(analysis_repo_root, cast(FuzzWorkflowRuntimeState, state))
+                if current_bin is not None:
+                    source_report = gen.collect_source_coverage(current_bin)
         except Exception:
             pass
         if source_report:
             out["coverage_source_report"] = source_report
             out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
+        run_feedback_artifact = _write_run_feedback_artifact(
+            repo_root=analysis_repo_root,
+            source_report=dict(source_report or {}),
+            frontier_summary=frontier_summary,
+        )
+        out["coverage_run_feedback_path"] = str(run_feedback_artifact.get("path") or "")
+        out["coverage_run_feedback_summary"] = dict(run_feedback_artifact.get("summary") or {})
 
         # Track exhausted targets for coverage-guided replan.
         # Each entry is either a plain target name (legacy) or a dict
@@ -11627,6 +12171,21 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     f"plateau={h_entry.get('plateau_detected')}"
                 )
             feedback_lines.extend(_coverage_frontier_feedback_lines(frontier_summary))
+            feedback_summary = dict(out.get("coverage_run_feedback_summary") or {})
+            top_function_gaps = [
+                dict(item)
+                for item in list(feedback_summary.get("top_function_gaps") or [])
+                if isinstance(item, dict)
+            ]
+            if top_function_gaps:
+                feedback_lines.append("- top_function_gaps:")
+                for item in top_function_gaps[:5]:
+                    feedback_lines.append(
+                        "  - "
+                        f"{str(item.get('name') or '').strip()} "
+                        f"({str(item.get('file') or '').strip()}:{int(item.get('line') or 0)}) "
+                        f"kind={str(item.get('kind') or 'unknown')}"
+                    )
             out["coverage_feedback_for_plan"] = "\n".join(feedback_lines)
 
         _wf_log(
@@ -11777,6 +12336,30 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             report_path = source_report.get("report_path")
             if report_path:
                 hint += f"- Full coverage report: {report_path}\n"
+        run_feedback_summary = dict(state.get("coverage_run_feedback_summary") or {})
+        if run_feedback_summary:
+            hint += "\n--- Run Feedback Summary ---\n"
+            for item in list(run_feedback_summary.get("top_function_gaps") or [])[:5]:
+                if not isinstance(item, dict):
+                    continue
+                hint += (
+                    f"- function_gap: {str(item.get('name') or '').strip()} "
+                    f"({str(item.get('file') or '').strip()}:{int(item.get('line') or 0)}) "
+                    f"kind={str(item.get('kind') or 'unknown')}, "
+                    f"ratio={float(item.get('region_coverage_ratio') or 0.0):.2f}\n"
+                )
+            for item in list(run_feedback_summary.get("top_path_frontiers") or [])[:3]:
+                if not isinstance(item, dict):
+                    continue
+                hint += (
+                    f"- path_frontier: {str(item.get('input_relpath') or '').strip()} "
+                    f"score={float(item.get('frontier_score') or 0.0):.2f}, "
+                    f"functions={int(item.get('covered_function_count') or 0)}, "
+                    f"regions={int(item.get('covered_region_count') or 0)}\n"
+                )
+            run_feedback_path = str(state.get("coverage_run_feedback_path") or "").strip()
+            if run_feedback_path:
+                hint += f"- Full run feedback: {run_feedback_path}\n"
 
         opencode_applied = False
         if improve_mode == "in_place":

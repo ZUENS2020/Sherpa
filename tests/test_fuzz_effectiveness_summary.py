@@ -113,6 +113,34 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
             "coverage_seed_counts_filtered": {"repo_examples": 1, "ai": 2, "radamsa": 1, "total": 4},
             "coverage_seed_noise_rejected_count": 5,
             "coverage_seed_family_coverage": {"covered": ["replacement_fields"], "missing": ["width_precision"]},
+            "coverage_source_report": {
+                "coverage_pct": 61.5,
+                "covered_functions": 8,
+                "total_functions": 13,
+                "uncovered_function_details": [
+                    {
+                        "name": "decode_row",
+                        "file": "pngread.c",
+                        "line": 101,
+                        "execution_count": 0,
+                        "region_coverage_ratio": 0.0,
+                    }
+                ],
+                "partial_function_details": [],
+            },
+            "coverage_run_feedback_path": str(repo_root / "fuzz" / "run_feedback.json"),
+            "coverage_run_feedback_summary": {
+                "function_gap_count": 1,
+                "path_frontier_count": 2,
+                "frontier_function_count": 3,
+                "top_function_gaps": [{"name": "decode_row", "file": "pngread.c", "line": 101, "kind": "uncovered"}],
+                "top_path_frontiers": [{"input_relpath": "corpus/demo_fuzz/seed1", "frontier_score": 0.7}],
+            },
+            "coverage_frontier_path": str(repo_root / "fuzz" / "frontier.json"),
+            "coverage_frontier_summary": {
+                "top_input_count": 2,
+                "top_inputs": [{"input_relpath": "corpus/demo_fuzz/seed1", "frontier_score": 0.7}],
+            },
             "synthesize_selected_target_name": "parse_replacement_field_then_tail",
             "synthesize_selected_target_api": "parse_replacement_field_then_tail",
             "synthesize_observed_target_api": "fmt::println",
@@ -152,6 +180,11 @@ def test_write_run_summary_emits_fuzz_effectiveness_artifacts(tmp_path: Path) ->
     assert effectiveness["status"] == "ok"
     assert effectiveness["fuzz_inventory"]["fuzzer_count"] == 1
     assert effectiveness["run_details"][0]["final_cov"] == 123
+    assert effectiveness["coverage_source_report"]["coverage_pct"] == 61.5
+    assert effectiveness["coverage_run_feedback_summary"]["function_gap_count"] == 1
+    assert effectiveness["coverage_run_feedback_summary"]["top_function_gaps"][0]["name"] == "decode_row"
+    assert effectiveness["coverage_frontier_summary"]["top_input_count"] == 2
+    assert effectiveness["coverage_run_feedback_path"].endswith("fuzz/run_feedback.json")
 
 
 def test_write_run_summary_marks_run_resource_exhaustion_as_error(tmp_path: Path) -> None:

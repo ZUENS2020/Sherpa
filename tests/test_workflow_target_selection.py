@@ -136,6 +136,52 @@ def test_sort_ranked_items_risk_first_demotes_low_yield_target() -> None:
     assert sorted_rows[0]["target_name"] == "fresh_init"
 
 
+def test_sort_ranked_items_risk_first_breaks_ties_with_execution_depth_and_callback_penalty() -> None:
+    rows = [
+        {
+            "target_name": "readpng2_end_callback",
+            "api": "readpng2_end_callback",
+            "priority": 0.91,
+            "vuln_likelihood": 0.78,
+            "exploitability": 0.18,
+            "reachability_confidence": 0.62,
+            "evidence_ids": ["EV1", "EV2"],
+            "security_signals": ["integer_overflow_candidate"],
+            "target_score": 0.82,
+            "depth_score": 3,
+            "runtime_viability": "medium",
+            "api_surface_exception": {"used": True},
+            "execution_depth_bias": -0.2,
+            "callback_penalty": 0.35,
+            "target_score_penalty": 0.0,
+        },
+        {
+            "target_name": "readpng2_decode_row",
+            "api": "readpng2_decode_row",
+            "priority": 0.91,
+            "vuln_likelihood": 0.78,
+            "exploitability": 0.18,
+            "reachability_confidence": 0.62,
+            "evidence_ids": ["EV1", "EV2"],
+            "security_signals": ["integer_overflow_candidate"],
+            "target_score": 0.82,
+            "depth_score": 3,
+            "runtime_viability": "medium",
+            "api_surface_exception": {"used": True},
+            "execution_depth_bias": 0.35,
+            "callback_penalty": 0.0,
+            "target_score_penalty": 0.0,
+        },
+    ]
+    sorted_rows = sel.sort_ranked_items(
+        rows,
+        security_priority_mode=True,
+        is_internal_api_symbol_fn=lambda _: False,
+        runtime_viability_rank_fn=lambda _: 3,
+    )
+    assert sorted_rows[0]["target_name"] == "readpng2_decode_row"
+
+
 def test_assign_execution_priority_sets_rank_and_must_run() -> None:
     rows = [
         {"target_name": "a", "target_type": "generic"},

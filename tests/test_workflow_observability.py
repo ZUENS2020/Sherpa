@@ -85,5 +85,9 @@ def test_emit_fuzz_metrics_does_not_raise() -> None:
                 }
             ],
             "coverage_history": [],
+            "coverage_run_feedback_summary": {
+                "function_gap_count": 2,
+                "path_frontier_count": 1,
+            },
         }
     )
