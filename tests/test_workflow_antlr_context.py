@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import concurrent.futures
 import sys
 import threading
 import time
@@ -16,6 +17,40 @@ for p in (APP_DIR, SRC_DIR):
         sys.path.insert(0, str(p))
 
 import workflow_graph
+
+
+def test_collect_target_analysis_parser_timeout_does_not_wait_for_executor_shutdown(
+    tmp_path: Path,
+    monkeypatch,
+):
+    calls: list[bool] = []
+
+    class _Future:
+        def result(self, timeout=None):
+            raise concurrent.futures.TimeoutError()
+
+    class _Executor:
+        def __init__(self, max_workers=None):
+            self.max_workers = max_workers
+
+        def submit(self, _fn):
+            return _Future()
+
+        def shutdown(self, wait=True, **_kwargs):
+            calls.append(bool(wait))
+
+    (tmp_path / "demo.c").write_text(
+        "int parse_png(const char *data) { return data ? 1 : 0; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow_graph.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _Executor)
+
+    doc = workflow_graph._collect_target_analysis_context(tmp_path)
+
+    assert doc.get("enabled") is True
+    assert calls
+    assert calls == [False]
 
 
 def test_collect_target_analysis_context_prefers_runtime_fmt_targets(tmp_path: Path):
