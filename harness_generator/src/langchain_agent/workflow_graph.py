@@ -1273,6 +1273,11 @@ def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") 
     if any(tok in text for tok in ("test/fuzzing", "/fuzz", "fuzzing", "oss-fuzz")):
         score += 4
         reasons.append("existing-fuzz-infra")
+    if _is_test_or_demo_helper_target(name=name, api=context, file_hint=file_hint):
+        score -= 8
+        reasons.append("test-demo-helper")
+        if "png" in text:
+            replacements.extend(["png_read_image", "png_process_data", "png_read_info"])
     if any(tok in text for tok in ("println", "logger.info(", "format_to", "vformat", "fmt::format", "fmt::print", "fmt::println")):
         score += 5
         reasons.append("public-runtime-api")
@@ -1305,6 +1310,38 @@ def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") 
             deduped.append(item)
     rationale = ", ".join(reasons[:5]) or "neutral-runtime-signal"
     return viability, rationale, deduped
+
+
+def _is_test_or_demo_helper_target(*, name: str, api: str, file_hint: str = "") -> bool:
+    text = f"{name}\n{api}\n{file_hint}".lower()
+    basename = Path(str(file_hint or "")).name.lower()
+    symbol = str(name or api or "").strip().lower()
+    public_like_symbol = symbol.startswith(("png_", "xml", "yaml_", "json_", "sqlite3_"))
+    helper_name = (
+        str(name or "").lower().startswith(("test_", "do_test"))
+        or str(api or "").lower().startswith(("test_", "do_test"))
+        or str(name or "").lower() in {"testonefile", "test_one_file"}
+        or str(api or "").lower() in {"testonefile", "test_one_file"}
+    )
+    test_file = any(
+        token in text
+        for token in (
+            "/contrib/libtests/",
+            "contrib/libtests/",
+            "/tests/",
+            "tests/",
+            "/test/",
+            "test/",
+            "/contrib/gregbook/",
+            "contrib/gregbook/",
+            "/contrib/examples/",
+            "contrib/examples/",
+            "/examples/",
+            "examples/",
+        )
+    )
+    demo_file = any(token in basename for token in ("test", "demo", "example"))
+    return bool((helper_name and (test_file or demo_file)) or ((test_file or demo_file) and not public_like_symbol))
 
 
 def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
@@ -2400,6 +2437,34 @@ def _build_selected_target_row(
         api=api,
         index=security_lookup,
     )
+    source_hint = str(item.get("file") or security_candidate.get("file") or "")
+    advisory_origin_target_name = ""
+    advisory_origin_api = ""
+    runtime_replacement_reason = ""
+    if _is_test_or_demo_helper_target(name=target_name, api=api, file_hint=source_hint):
+        if not runtime_replacement_candidates:
+            _, _, runtime_replacement_candidates = _runtime_viability_details(
+                target_name,
+                api,
+                file_hint=source_hint,
+            )
+        public_replacements = [
+            str(x).strip()
+            for x in runtime_replacement_candidates
+            if str(x).strip() and not _is_internal_api_symbol(str(x))
+        ]
+        if public_replacements:
+            advisory_origin_target_name = target_name
+            advisory_origin_api = api
+            target_name = public_replacements[0]
+            api = public_replacements[0]
+            runtime_viability = "high"
+            runtime_replacement_reason = "test_demo_helper_public_surrogate"
+            selection_rationale = (
+                f"{selection_rationale};public-validation-surrogate"
+                if selection_rationale
+                else "public-validation-surrogate"
+            )
     security_scores = _extract_security_scores(item)
     if not any(float(v) > 0.0 for v in security_scores.values()):
         security_scores = _extract_security_scores(security_candidate)
@@ -2407,7 +2472,7 @@ def _build_selected_target_row(
         security_scores = _compute_security_signal_scores(
             name=target_name,
             signature=f"{api} {selection_rationale}",
-            file_hint=str(item.get("file") or security_candidate.get("file") or ""),
+            file_hint=source_hint,
             risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
             risk_signal_source_breakdown=dict(
                 item.get("risk_signal_source_breakdown")
@@ -2474,7 +2539,7 @@ def _build_selected_target_row(
         api=api,
         target_type=target_type,
         signal_id=signal_type,
-        source_path=str(item.get("file") or security_candidate.get("file") or ""),
+        source_path=source_hint,
         security_reason=security_reason,
     )
     if not attack_hint:
@@ -2601,6 +2666,9 @@ def _build_selected_target_row(
         "runtime_viability": runtime_viability,
         "selection_rationale": selection_rationale,
         "runtime_replacement_candidates": runtime_replacement_candidates,
+        "runtime_replacement_reason": runtime_replacement_reason,
+        "advisory_origin_target_name": advisory_origin_target_name,
+        "advisory_origin_api": advisory_origin_api,
         "seed_families_suggested": required,
         "seed_families_optional": optional,
         "wrapper_fuzzer_name": wrapper_fuzzer_name,

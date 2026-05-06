@@ -207,6 +207,128 @@ def test_build_selected_target_row_accepts_string_attack_hint(tmp_path: Path) ->
     assert row["attack_hint"]["vuln_category"]
 
 
+def test_build_selected_target_row_replaces_test_helper_with_public_surrogate(tmp_path: Path) -> None:
+    row = workflow_graph._build_selected_target_row(
+        repo_root=tmp_path,
+        item={
+            "name": "test_one_file",
+            "api": "test_one_file",
+            "file": "contrib/libtests/pngimage.c",
+            "target_type": "image",
+            "seed_profile": "decoder-binary",
+            "lang": "c",
+            "vuln_likelihood": 0.9,
+            "exploitability": 0.7,
+            "reachability_confidence": 0.62,
+            "security_signal_scores": {
+                "integer_overflow_candidate": 0.78,
+            },
+        },
+        security_lookup={},
+        security_priority_mode=True,
+        degrade_reason="",
+        score_weights=workflow_graph._vuln_score_weights(),
+    )
+
+    assert row["target_name"] == "png_read_image"
+    assert row["api"] == "png_read_image"
+    assert row["advisory_origin_target_name"] == "test_one_file"
+    assert row["advisory_origin_api"] == "test_one_file"
+    assert row["runtime_replacement_reason"] == "test_demo_helper_public_surrogate"
+    assert row["runtime_viability"] == "high"
+
+
+def test_selected_targets_use_analysis_file_hint_for_public_surrogate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "test_one_file",
+                    "api": "test_one_file",
+                    "lang": "c",
+                    "target_type": "image",
+                    "seed_profile": "decoder-binary",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "vuln_candidates.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "name": "test_one_file",
+                        "target_api": "test_one_file",
+                        "signature": "test_one_file(struct display *dp, const char *filename)",
+                        "target_file": "contrib/libtests/pngimage.c",
+                        "security_signal_scores": {"integer_overflow_candidate": 0.78},
+                        "vuln_likelihood": 0.9,
+                        "exploitability": 0.7,
+                        "reachability_confidence": 0.62,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+
+    assert selected[0]["target_name"] == "png_read_image"
+    assert selected[0]["advisory_origin_target_name"] == "test_one_file"
+    assert selected[0]["runtime_replacement_reason"] == "test_demo_helper_public_surrogate"
+
+
+def test_selected_targets_replace_example_helper_with_public_surrogate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "readpng2_init",
+                    "api": "readpng2_init",
+                    "lang": "c",
+                    "target_type": "image",
+                    "seed_profile": "decoder-binary",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "vuln_candidates.json").write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "name": "readpng2_init",
+                        "target_api": "readpng2_init",
+                        "target_file": "contrib/gregbook/rpng2-x.c",
+                        "security_signal_scores": {"integer_overflow_candidate": 0.78},
+                        "vuln_likelihood": 0.86,
+                        "exploitability": 0.64,
+                        "reachability_confidence": 0.60,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+
+    assert selected[0]["target_name"] == "png_read_image"
+    assert selected[0]["advisory_origin_target_name"] == "readpng2_init"
+    assert selected[0]["runtime_replacement_reason"] == "test_demo_helper_public_surrogate"
+
+
 def test_selected_targets_preserve_agent_risk_breakdown_over_exact_candidate_match(tmp_path: Path) -> None:
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True)
