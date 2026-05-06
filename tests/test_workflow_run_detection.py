@@ -406,7 +406,8 @@ def test_node_run_writes_seed_feedback_json(tmp_path: Path):
     assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
 
 
-def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path):
+def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _FailingSeedGenerator(
         tmp_path,
         run_results=[
@@ -504,6 +505,7 @@ def test_node_run_aggregates_seed_quality_across_all_fuzzers(tmp_path: Path):
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -546,7 +548,43 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["message"] == "workflow stopped (time budget exceeded)"
 
 
-def test_node_run_default_generates_ai_seeds(tmp_path: Path):
+def test_node_run_default_skips_ai_seed_generation(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("SHERPA_VERIFY_STAGE_NO_AI", raising=False)
+    gen = _SlowSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+        seed_sleep_sec=1.5,
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out.get("failed") is not True
+    assert gen.seed_calls == 0
+    assert out["coverage_seed_generation_skipped_reason"] == "verify_stage_no_ai"
+
+
+def test_node_run_generates_ai_seeds_when_verify_no_ai_disabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
