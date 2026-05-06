@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Use CN mirrors by default (override with build args if needed).
 ARG APT_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian"
 ARG APT_SECURITY_MIRROR="http://mirrors.tuna.tsinghua.edu.cn/debian-security"
-ARG NPM_REGISTRY_CANDIDATES="https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm https://registry.npmjs.org"
+ARG NPM_REGISTRY_CANDIDATES="https://registry.npmjs.org https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm"
 
 # Best-effort: rewrite Debian apt sources to CN mirrors.
 RUN set -e; \
@@ -65,8 +65,8 @@ RUN set -eux; \
       fi; \
       echo "[npm] trying download from registry: $r"; \
       rm -f "${tmp_dir}/opencode.tgz"; \
-      if curl --retry 8 --retry-delay 3 --retry-all-errors --retry-max-time 1800 \
-        --connect-timeout 20 --max-time 900 --speed-time 90 --speed-limit 32768 \
+      if curl --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 240 \
+        --connect-timeout 10 --max-time 90 --speed-time 20 --speed-limit 32768 \
         -fL "$candidate" -o "${tmp_dir}/opencode.tgz"; then \
         selected="$r"; \
         tarball_url="$candidate"; \
