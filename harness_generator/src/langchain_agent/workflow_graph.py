@@ -5362,7 +5362,11 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             except Exception:
                 pass
 
-    tree_sitter_enabled = importlib.util.find_spec("tree_sitter_language_pack") is not None
+    tree_sitter_opt_in = str(os.environ.get("SHERPA_TARGET_ANALYSIS_TREE_SITTER") or "").strip().lower()
+    tree_sitter_enabled = (
+        tree_sitter_opt_in in {"1", "true", "yes", "on"}
+        and importlib.util.find_spec("tree_sitter_language_pack") is not None
+    )
     semgrep_enabled, semgrep_hits = _run_semgrep_rules(repo_root)
 
     source_exts = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".java"}

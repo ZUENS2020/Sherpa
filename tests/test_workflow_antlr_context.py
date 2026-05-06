@@ -44,6 +44,7 @@ def test_collect_target_analysis_parser_timeout_does_not_wait_for_executor_shutd
         encoding="utf-8",
     )
     monkeypatch.setattr(workflow_graph.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setenv("SHERPA_TARGET_ANALYSIS_TREE_SITTER", "1")
     monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _Executor)
 
     doc = workflow_graph._collect_target_analysis_context(tmp_path)
@@ -51,6 +52,29 @@ def test_collect_target_analysis_parser_timeout_does_not_wait_for_executor_shutd
     assert doc.get("enabled") is True
     assert calls
     assert calls == [False]
+
+
+def test_collect_target_analysis_skips_tree_sitter_by_default(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "demo.c").write_text(
+        "int parse_png(const char *data) { return data ? 1 : 0; }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow_graph.importlib.util, "find_spec", lambda _name: object())
+
+    class _Executor:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("tree-sitter parser acquisition should be opt-in")
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _Executor)
+    monkeypatch.delenv("SHERPA_TARGET_ANALYSIS_TREE_SITTER", raising=False)
+
+    doc = workflow_graph._collect_target_analysis_context(tmp_path)
+
+    assert doc.get("enabled") is True
+    assert doc.get("tree_sitter_enabled") is False
 
 
 def test_collect_target_analysis_context_prefers_runtime_fmt_targets(tmp_path: Path):
