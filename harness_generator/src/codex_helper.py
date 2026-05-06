@@ -47,6 +47,7 @@ from __future__ import annotations
 from loguru import logger
 
 import logging
+import fnmatch
 import json
 import hashlib
 import os
@@ -305,6 +306,44 @@ def _extract_changed_paths_from_diff(diff_text: str, *, limit: int = 20) -> list
                 out.append(p)
                 if len(out) >= limit:
                     return out
+    return out
+
+
+def _path_allowed_by_specs(path: str, specs: Sequence[str] | None) -> bool:
+    if specs is None:
+        return True
+    rel = str(path or "").strip().lstrip("./")
+    if not rel:
+        return False
+    for raw in specs:
+        spec = str(raw or "").strip().lstrip("./")
+        if not spec:
+            continue
+        if spec.endswith("/"):
+            if rel.startswith(spec):
+                return True
+            continue
+        if any(ch in spec for ch in "*?[]"):
+            if fnmatch.fnmatch(rel, spec):
+                return True
+            continue
+        if rel == spec or rel.startswith(spec.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _disallowed_changed_paths(paths: Sequence[str], specs: Sequence[str] | None) -> list[str]:
+    if specs is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        rel = str(path or "").strip().lstrip("./")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        if not _path_allowed_by_specs(rel, specs):
+            out.append(rel)
     return out
 
 
@@ -923,6 +962,33 @@ class CodexHelper:
             return f"{diff_text}\n\n=== status ===\n{status_text}"
         return diff_text or status_text
 
+    def _git_restore_paths(self, paths: Sequence[str]) -> None:
+        rels = [str(p).strip().lstrip("./") for p in paths if str(p).strip()]
+        if not rels:
+            return
+        if self.git_docker_image:
+            self._docker_git(["restore", "--worktree", "--staged", "--"] + rels, check=False)
+            self._docker_git(["clean", "-fd", "--"] + rels, check=False)
+            return
+        subprocess.run(
+            ["git", "restore", "--worktree", "--staged", "--"] + rels,
+            cwd=self.working_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["git", "clean", "-fd", "--"] + rels,
+            cwd=self.working_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -940,6 +1006,7 @@ class CodexHelper:
         idle_timeout_override: int | None = None,
         activity_watch_paths: Sequence[str] | None = None,
         activity_probe_interval_sec: float | None = None,
+        allowed_edit_paths: Sequence[str] | None = None,
     ) -> str | None:
         """Execute OpenCode with robust retry logic and return its stdout or *None*."""
 
@@ -1743,6 +1810,25 @@ class CodexHelper:
                 continue  # outer attempt loop
 
             # Refresh repo to ensure it sees new changes.
+            changed_paths = _extract_changed_paths_from_diff(diff_now, limit=200)
+            disallowed_paths = _disallowed_changed_paths(changed_paths, allowed_edit_paths)
+            if disallowed_paths:
+                LOGGER.warning(
+                    "[OpenCodeHelper] restoring disallowed edits outside allowed paths: %s",
+                    ", ".join(disallowed_paths[:20]),
+                )
+                logger.info(
+                    "[OpenCodeHelper] restoring disallowed edits outside allowed paths: "
+                    + ", ".join(disallowed_paths[:20])
+                )
+                run_meta["disallowed_edit_paths"] = disallowed_paths[:50]
+                self._git_restore_paths(disallowed_paths)
+                try:
+                    diff_now = self._git_diff_head()
+                except Exception:
+                    diff_now = ""
+                diff_changed = bool(diff_now) and diff_now != baseline_diff
+
             self._git_add_all()
 
             if diff_changed or self._git_diff_head() != baseline_diff:

@@ -279,6 +279,8 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Do not modify repository source files outside `fuzz/` and `./done`.
+- If upstream source appears syntactically broken, do not edit it; adapt the external harness/build glue, avoid that example/demo source, or record the limitation in `fuzz/repo_understanding.json`.
 - Query MCP evidence first when available and reflect cited findings in scaffold choices (code-navigation first).
 - Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and note the missing MCP evidence in `fuzz/README.md` or `fuzz/repo_understanding.json`.

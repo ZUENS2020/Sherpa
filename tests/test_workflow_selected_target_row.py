@@ -180,6 +180,33 @@ def test_build_selected_target_row_normalizes_parser_seed_profile_for_decoder(tm
     assert row["seed_families_suggested"] == []
 
 
+def test_build_selected_target_row_accepts_string_attack_hint(tmp_path: Path) -> None:
+    row = workflow_graph._build_selected_target_row(
+        repo_root=tmp_path,
+        item={
+            "name": "png_read_image",
+            "api": "png_read_image",
+            "target_type": "image",
+            "seed_profile": "decoder-binary",
+            "lang": "c",
+            "attack_hint": "Craft PNG images with oversized IHDR dimensions.",
+            "security_score_breakdown": {
+                "vuln_likelihood": 0.78,
+                "exploitability": 0.65,
+                "reachability_confidence": 0.75,
+            },
+        },
+        security_lookup={},
+        security_priority_mode=True,
+        degrade_reason="",
+        score_weights=workflow_graph._vuln_score_weights(),
+    )
+
+    assert isinstance(row["attack_hint"], dict)
+    assert row["attack_hint"]["trigger_condition"] == "Craft PNG images with oversized IHDR dimensions."
+    assert row["attack_hint"]["vuln_category"]
+
+
 def test_selected_targets_preserve_agent_risk_breakdown_over_exact_candidate_match(tmp_path: Path) -> None:
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True)
