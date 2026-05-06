@@ -285,6 +285,7 @@ Stage requirements:
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
 - Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
 - LibFuzzer harness contract is mandatory: do not define custom `main()` in harness source; expose fuzz entry via `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)` (or language-equivalent entrypoint only).
+- C/C++ harnesses using `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents).
 - Do not use argv/file-driven harness entry logic in libFuzzer mode (forbidden patterns include `fopen(argv[1], ...)`, `read(argv[1], ...)`, and manual corpus file loops).
 - `fuzz/README.md` must include:
   - `Selected target: ...`
@@ -298,6 +299,9 @@ Stage requirements:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
   - runtime artifact discovery (do not hardcode a single static library path)
   - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
+  - generated headers include path: if CMake/configure emits headers into a build directory, include that CMake build directory in both primary and replay compile commands
+  - owning source linkage: if a harness calls a contrib/example/demo function outside the main static library, compile the owning source file or use a public library API instead
+  - never call a static example helper directly; example files that define `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
   - compiler-by-suffix rule: compile `.c` harnesses with `clang`; compile `.cc/.cpp/.cxx` harnesses with `clang++`
   - coverage replay siblings: for each primary native fuzzer `fuzz/out/<name>`, also build `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`; do not symlink/copy primary fuzzers as replay binaries
 
@@ -335,8 +339,12 @@ Build-repair constraints:
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
 - keep coverage replay siblings real and instrumented: `fuzz/out/replay/<name>` must be linked with `-fprofile-instr-generate -fcoverage-mapping`, never a symlink/copy of the primary fuzzer
+- include generated headers from the CMake/configure build directory in both primary and replay compile commands when the project emits configured headers
+- resolve contrib/example/demo API calls by compiling the owning source file or switching to a public library API
+- never call a static example helper directly; do not link example files with their own `main()` into libFuzzer harnesses unless rewritten/guarded
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- ensure C/C++ harnesses include standard definitions for `uint8_t` and `size_t` (`<stdint.h>` and `<stddef.h>` or C++ equivalents)
 - forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
