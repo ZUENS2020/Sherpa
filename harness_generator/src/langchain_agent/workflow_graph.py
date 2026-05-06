@@ -2345,6 +2345,11 @@ def _build_selected_target_row(
     score_weights: dict[str, float],
 ) -> dict[str, Any]:
     item = _wf_norm.normalize_target_row(item)
+    explicit_security_breakdown = (
+        dict(item.get("security_score_breakdown") or {})
+        if isinstance(item.get("security_score_breakdown"), dict)
+        else {}
+    )
     target_name = str(item.get("target_name") or item.get("name") or "").strip()
     api = str(item.get("api") or target_name).strip()
     target_type = str(item.get("target_type") or "generic").strip().lower()
@@ -2386,21 +2391,38 @@ def _build_selected_target_row(
                 or {}
             ),
         )
-    vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
-    exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
-    reachability_raw = security_candidate.get("reachability_confidence", item.get("reachability_confidence"))
+    # If plan emitted an aggregate public validation target with explicit
+    # security_score_breakdown, treat that as the advisory risk source for this
+    # row. Exact candidate matches are often internal/helper APIs and must not
+    # overwrite the agent's selected public entrypoint risk summary.
+    vuln_likelihood_raw = explicit_security_breakdown.get(
+        "vuln_likelihood",
+        security_candidate.get("vuln_likelihood", item.get("vuln_likelihood")),
+    )
+    exploitability_raw = explicit_security_breakdown.get(
+        "exploitability",
+        security_candidate.get("exploitability", item.get("exploitability")),
+    )
+    reachability_raw = explicit_security_breakdown.get(
+        "reachability_confidence",
+        security_candidate.get("reachability_confidence", item.get("reachability_confidence")),
+    )
     security_reason = str(
         security_candidate.get("security_priority_reason")
         or item.get("security_priority_reason")
         or ""
     ).strip()
-    evidence_ids = list(
-        dict.fromkeys(
-            list(security_candidate.get("evidence_ids") or [])
-            or list(item.get("evidence_ids") or [])
-        )
+    evidence_ids_source = (
+        list(item.get("evidence_ids") or [])
+        if explicit_security_breakdown
+        else (list(security_candidate.get("evidence_ids") or []) or list(item.get("evidence_ids") or []))
     )
-    evidence_refs = list(security_candidate.get("evidence") or item.get("evidence") or [])
+    evidence_ids = list(dict.fromkeys(evidence_ids_source))
+    evidence_refs = (
+        list(item.get("evidence") or [])
+        if explicit_security_breakdown and item.get("evidence")
+        else list(security_candidate.get("evidence") or item.get("evidence") or [])
+    )
     signal_type = str(security_candidate.get("signal_type") or item.get("signal_type") or "").strip()
     try:
         vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
@@ -2473,6 +2495,11 @@ def _build_selected_target_row(
         + float(execution_bias.get("execution_depth_bias") or 0.0)
         - float(score_penalty)
     )
+    if explicit_security_breakdown and item.get("score_total") is not None:
+        try:
+            score_total = float(item.get("score_total") or 0.0) - float(score_penalty)
+        except Exception:
+            pass
     adjusted_target_score = max(0.0, float(score_total))
     internal_api = _is_internal_api_symbol(api)
     internal_min = _vuln_internal_api_min_score()
@@ -2558,10 +2585,42 @@ def _build_selected_target_row(
             "vuln_likelihood": float(vuln_likelihood),
             "exploitability": float(exploitability),
             "reachability_confidence": float(reachability_confidence),
-            "coverage_gap_ref": float(score_breakdown.get("coverage_gap") or 0.0),
-            "complexity_depth_ref": float(score_breakdown.get("complexity_depth") or 0.0),
-            "api_relevance_ref": float(score_breakdown.get("api_relevance") or 0.0),
-            "consumer_order_support_ref": float(score_breakdown.get("consumer_order_support") or 0.0),
+            "coverage_gap_ref": float(
+                explicit_security_breakdown.get(
+                    "coverage_gap_ref",
+                    explicit_security_breakdown.get(
+                        "coverage_gap",
+                        score_breakdown.get("coverage_gap") or 0.0,
+                    ),
+                )
+            ),
+            "complexity_depth_ref": float(
+                explicit_security_breakdown.get(
+                    "complexity_depth_ref",
+                    explicit_security_breakdown.get(
+                        "complexity_depth",
+                        score_breakdown.get("complexity_depth") or 0.0,
+                    ),
+                )
+            ),
+            "api_relevance_ref": float(
+                explicit_security_breakdown.get(
+                    "api_relevance_ref",
+                    explicit_security_breakdown.get(
+                        "api_relevance",
+                        score_breakdown.get("api_relevance") or 0.0,
+                    ),
+                )
+            ),
+            "consumer_order_support_ref": float(
+                explicit_security_breakdown.get(
+                    "consumer_order_support_ref",
+                    explicit_security_breakdown.get(
+                        "consumer_order_support",
+                        score_breakdown.get("consumer_order_support") or 0.0,
+                    ),
+                )
+            ),
             "recent_yield_penalty": float(score_penalty),
             "weights": {k: float(v) for k, v in score_weights.items()},
         },

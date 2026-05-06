@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -177,3 +178,92 @@ def test_build_selected_target_row_normalizes_parser_seed_profile_for_decoder(tm
 
     assert row["seed_profile"] == "decoder-binary"
     assert row["seed_families_suggested"] == []
+
+
+def test_selected_targets_preserve_agent_risk_breakdown_over_exact_candidate_match(tmp_path: Path) -> None:
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "png_read_png",
+                    "api": "png_read_png",
+                    "lang": "c-cpp",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "security_priority_mode": True,
+                    "security_score_breakdown": {
+                        "vuln_likelihood": 0.80,
+                        "exploitability": 0.65,
+                        "reachability_confidence": 0.80,
+                        "coverage_gap": 0.50,
+                        "complexity_depth": 0.40,
+                        "api_relevance": 0.90,
+                        "consumer_order_support": 0.50,
+                        "recent_yield_penalty": 0.0,
+                    },
+                    "score_total": 0.7305,
+                    "vuln_candidate_ids": ["mem_oob_025", "integer_overflow_025"],
+                    "evidence_ids": ["EV0098", "EV0097", "EV0096", "EV0099"],
+                    "depth_score": 7,
+                    "depth_class": "medium",
+                },
+                {
+                    "name": "readpng_init",
+                    "api": "readpng_init",
+                    "lang": "c-cpp",
+                    "target_type": "image",
+                    "seed_profile": "parser-structure",
+                    "security_priority_mode": True,
+                    "security_score_breakdown": {
+                        "vuln_likelihood": 0.78,
+                        "exploitability": 0.1716,
+                        "reachability_confidence": 0.62,
+                        "coverage_gap": 0.35,
+                        "complexity_depth": 0.40,
+                        "api_relevance": 0.60,
+                        "consumer_order_support": 0.40,
+                        "recent_yield_penalty": 0.0,
+                    },
+                    "score_total": 0.5376,
+                    "vuln_candidate_ids": ["integer_overflow_001"],
+                    "evidence_ids": ["EV0002"],
+                    "depth_score": 3,
+                    "depth_class": "medium",
+                },
+            ],
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fuzz_dir / "target_analysis.json").write_text(
+        json.dumps(
+            {
+                "recommended_targets": [
+                    {
+                        "name": "readpng_init",
+                        "api": "readpng_init",
+                        "target_type": "image",
+                        "vuln_likelihood": 0.78,
+                        "exploitability": 0.1716,
+                        "reachability_confidence": 0.62,
+                        "security_signal_scores": {
+                            "integer_overflow_candidate": 0.78,
+                        },
+                        "evidence_ids": ["EV0002"],
+                    }
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+
+    assert selected[0]["target_name"] == "png_read_png"
+    assert selected[0]["security_score_breakdown"]["vuln_likelihood"] == 0.80
+    assert selected[1]["target_name"] == "readpng_init"
