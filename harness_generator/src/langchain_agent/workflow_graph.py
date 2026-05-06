@@ -6526,7 +6526,8 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if _has_codex_key():
                 analysis_lines: list[str] = [
                     "Generate analysis artifacts for downstream planning.",
-                    "Write/update `fuzz/analysis_context.json` with concise actionable signals.",
+                    "Do not rewrite the full `fuzz/analysis_context.json`; it is already system-generated.",
+                    "Write concise AI advisory findings to `fuzz/vuln_hypotheses.md` and keep them evidence-linked.",
                 ]
                 if antlr_context_summary:
                     analysis_lines.append(f"ANTLR context: {antlr_context_summary}")

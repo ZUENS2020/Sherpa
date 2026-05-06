@@ -63,7 +63,8 @@ Goal:
 - keep outputs under `fuzz/` for downstream `plan` and `synthesize`
 
 Required outputs:
-- `fuzz/analysis_context.json`
+- `fuzz/analysis_context.json` (system-generated context marker; read it, do not rewrite it wholesale)
+- `fuzz/vuln_hypotheses.md` (small AI advisory output)
 - `fuzz/vuln_candidates.json`
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
@@ -77,8 +78,10 @@ Constraints:
 - This stage is analysis-only: do not modify repository business source files.
 - Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
 - When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
-- If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
+- If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/vuln_hypotheses.md`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
+- Do not rewrite the full `fuzz/analysis_context.json`; it is a system-generated fact artifact and can be large.
+- Write concise AI advisory analysis to `fuzz/vuln_hypotheses.md` instead. Keep it small and cite existing `evidence_id` values.
 - For each vulnerability hypothesis, include:
   - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
   - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
@@ -92,7 +95,7 @@ Security analysis (vulnerability-directed):
 - Locate format string sinks: printf-family calls with non-literal format arguments
 - Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
 - Map trust boundaries: where external/untrusted data first enters internal processing functions
-- For each finding, append an entry to `analysis_evidence.security_evidence[]`:
+- For each finding, summarize an advisory entry in `fuzz/vuln_hypotheses.md` that references existing `analysis_evidence.security_evidence[]` IDs:
   - `evidence_id`: stable ID string
   - `signal_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, authz_bypass_candidate, null_deref_candidate, uaf_candidate
   - `severity`: low|medium|high
