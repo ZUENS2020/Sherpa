@@ -296,6 +296,12 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert ".c` sources" in synth or ".c -> clang" in synth
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
+    assert "generated headers" in synth.lower()
+    assert "cmake build directory" in synth.lower()
+    assert "owning source" in synth.lower()
+    assert "static example helper" in synth.lower()
+    assert "<stdint.h>" in synth
+    assert "<stddef.h>" in synth
 
     assert "if harness source is missing" in complete
     assert "harness exists after this step" in complete or "create at least one harness source file" in complete
@@ -334,6 +340,12 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "build failure" in synth_repair_build.lower() or "build-stage failures" in synth_repair_build.lower()
     assert "`.c` sources must use `clang`" in synth_repair_build
     assert "`.cc/.cpp/.cxx` sources must use `clang++`" in synth_repair_build
+    assert "generated headers" in synth_repair_build.lower()
+    assert "cmake build directory" in synth_repair_build.lower()
+    assert "owning source" in synth_repair_build.lower()
+    assert "static example helper" in synth_repair_build.lower()
+    assert "<stdint.h>" in synth_repair_build
+    assert "<stddef.h>" in synth_repair_build
     assert "crash/repro" in synth_repair_crash.lower()
     assert "coverage" in synth_repair_coverage.lower()
     assert "in-place" in improve_in_place.lower()
