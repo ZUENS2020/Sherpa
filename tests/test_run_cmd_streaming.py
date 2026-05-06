@@ -243,6 +243,56 @@ def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path)
     assert "vcpkg install failed" in merged
 
 
+def test_run_cmd_retries_transient_vcpkg_lock_before_install_failure(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    state_file = tmp_path / "vcpkg-install-attempts"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        f"attempts=$(cat {state_file} 2>/dev/null || echo 0)\n"
+        "attempts=$((attempts + 1))\n"
+        f"echo \"$attempts\" > {state_file}\n"
+        "if [ \"$attempts\" = \"1\" ]; then\n"
+        "  echo 'vcpkg-running.lock: error: failed to take lock, another vcpkg may be running' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho lock-retry-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["SHERPA_VCPKG_INSTALL_RETRY_DELAY_SEC"] = "0"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "lock-retry-build-ok" in out
+    assert state_file.read_text(encoding="utf-8").strip() == "2"
+    assert "retrying vcpkg install after transient lock failure" in (out + err)
+
+
 def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"

@@ -2496,10 +2496,28 @@ EOF
                     echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
                 else
                     echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
-                    if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
+                    install_attempt=1
+                    install_max="${{SHERPA_VCPKG_INSTALL_RETRIES:-3}}"
+                    install_delay="${{SHERPA_VCPKG_INSTALL_RETRY_DELAY_SEC:-5}}"
+                    while :; do
+                        install_log="$(mktemp)"
+                        if "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs >"$install_log" 2>&1; then
+                            cat "$install_log"
+                            rm -f "$install_log"
+                            break
+                        fi
+                        cat "$install_log"
+                        if grep -Eiq 'vcpkg-running[.]lock|failed to take lock|filesystem lock|device or resource busy' "$install_log" && [ "$install_attempt" -lt "$install_max" ]; then
+                            echo "[warn] ({log_prefix}) retrying vcpkg install after transient lock failure ($install_attempt/$install_max)"
+                            rm -f "$install_log"
+                            install_attempt=$((install_attempt + 1))
+                            sleep "$install_delay"
+                            continue
+                        fi
+                        rm -f "$install_log"
                         echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
                         exit 87
-                    fi
+                    done
                 fi
             fi
 
