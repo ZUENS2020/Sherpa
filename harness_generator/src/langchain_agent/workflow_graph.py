@@ -10947,15 +10947,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             return _sha256_text("\n".join(parts))
 
-        _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
-        # Seed generation uses OpenCode and shared repo context; keep it serial.
-        prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
         last_seed_profile = str(state.get("coverage_seed_profile") or "")
         seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
         seed_generation_failed_fuzzers: list[str] = []
         seed_generation_error_by_fuzzer: dict[str, str] = {}
+        seed_generation_skipped_reason = ""
 
         def _accumulate_seed_counts(dst: dict[str, int], src: Any) -> None:
             if not isinstance(src, dict):
@@ -10994,45 +10992,52 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         missing_execution_targets.append(missing_name)
         if not seed_fuzzers:
             seed_fuzzers = list(bins)
-        try:
-            for idx, bin_path in enumerate(seed_fuzzers):
-                remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
-                if remaining_for_seed <= 0:
-                    return _time_budget_exceeded_state(state, step_name="run")
-                fuzzers_left = len(seed_fuzzers) - idx
-                per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
-                setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
-                fuzzer_name = bin_path.name
-                try:
-                    gen._pass_generate_seeds(fuzzer_name)
-                    profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
-                    if not last_seed_profile:
-                        last_seed_profile = str(profile_map.get(fuzzer_name) or "")
-                    bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
-                    meta = bootstrap_map.get(fuzzer_name) or {}
-                    if isinstance(meta, dict):
-                        _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
-                        _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
-                        _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
-                        sources = meta.get("sources") or []
-                        if isinstance(sources, list):
-                            for src in sources:
-                                src_text = str(src or "").strip()
-                                if src_text:
-                                    seed_sources.add(src_text)
-                        repo_examples_filtered = bool(meta.get("repo_examples_filtered") or repo_examples_filtered)
-                        repo_examples_rejected_count += int(meta.get("repo_examples_rejected_count") or 0)
-                        repo_examples_accepted_count += int(meta.get("repo_examples_accepted_count") or 0)
-                        seed_noise_rejected_count += int(meta.get("seed_noise_rejected_count") or 0)
-                        if not seed_family_coverage_state and isinstance(meta.get("seed_family_coverage"), dict):
-                            seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
-                except Exception as e:
-                    # Seed generation is best-effort; do not block fuzzing.
-                    seed_generation_failed_fuzzers.append(fuzzer_name)
-                    seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
-                    logger.info(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
-        finally:
-            setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
+        if _verify_stage_no_ai():
+            seed_generation_skipped_reason = "verify_stage_no_ai"
+            _wf_log(cast(dict[str, Any], state), "run: AI seed generation skipped by SHERPA_VERIFY_STAGE_NO_AI=1")
+        else:
+            _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
+            # Seed generation uses OpenCode and shared repo context; keep it serial.
+            prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+            try:
+                for idx, bin_path in enumerate(seed_fuzzers):
+                    remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
+                    if remaining_for_seed <= 0:
+                        return _time_budget_exceeded_state(state, step_name="run")
+                    fuzzers_left = len(seed_fuzzers) - idx
+                    per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
+                    setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
+                    fuzzer_name = bin_path.name
+                    try:
+                        gen._pass_generate_seeds(fuzzer_name)
+                        profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
+                        if not last_seed_profile:
+                            last_seed_profile = str(profile_map.get(fuzzer_name) or "")
+                        bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
+                        meta = bootstrap_map.get(fuzzer_name) or {}
+                        if isinstance(meta, dict):
+                            _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
+                            _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
+                            _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
+                            sources = meta.get("sources") or []
+                            if isinstance(sources, list):
+                                for src in sources:
+                                    src_text = str(src or "").strip()
+                                    if src_text:
+                                        seed_sources.add(src_text)
+                            repo_examples_filtered = bool(meta.get("repo_examples_filtered") or repo_examples_filtered)
+                            repo_examples_rejected_count += int(meta.get("repo_examples_rejected_count") or 0)
+                            repo_examples_accepted_count += int(meta.get("repo_examples_accepted_count") or 0)
+                            seed_noise_rejected_count += int(meta.get("seed_noise_rejected_count") or 0)
+                            if not seed_family_coverage_state and isinstance(meta.get("seed_family_coverage"), dict):
+                                seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
+                    except Exception as e:
+                        # Seed generation is best-effort; do not block fuzzing.
+                        seed_generation_failed_fuzzers.append(fuzzer_name)
+                        seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
+                        logger.info(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+            finally:
+                setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
 
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
@@ -11581,9 +11586,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_generation_failed_fuzzers": list(seed_generation_failed_fuzzers),
             "coverage_seed_generation_error_by_fuzzer": dict(seed_generation_error_by_fuzzer),
             "coverage_seed_generation_failed_count": int(len(seed_generation_failed_fuzzers)),
+            "coverage_seed_generation_skipped_reason": seed_generation_skipped_reason,
             "coverage_seed_generation_degraded": bool(
                 seed_generation_failed_fuzzers
-                or int(seed_count_filtered_total.get("total") or 0) <= 1
+                or (not seed_generation_skipped_reason and int(seed_count_filtered_total.get("total") or 0) <= 1)
                 or cold_start_failure_any
             ),
             "coverage_missing_execution_targets": missing_execution_targets,
@@ -11714,6 +11720,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "seed_generation_degraded": bool(out.get("coverage_seed_generation_degraded") or False),
                 "seed_generation_failed_count": int(out.get("coverage_seed_generation_failed_count") or 0),
                 "seed_generation_failed_fuzzers": list(out.get("coverage_seed_generation_failed_fuzzers") or []),
+                "seed_generation_skipped_reason": str(out.get("coverage_seed_generation_skipped_reason") or ""),
                 "by_fuzzer": by_fuzzer,
             }
             seed_feedback_path.write_text(
@@ -11781,6 +11788,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "seed_counts_filtered": dict(seed_count_filtered_total),
             "seed_sources": sorted(seed_sources),
             "seed_generation_failed_fuzzers": list(seed_generation_failed_fuzzers),
+            "seed_generation_skipped_reason": seed_generation_skipped_reason,
             "seed_generation_degraded": bool(out.get("coverage_seed_generation_degraded") or False),
             "quality_flags": list(out.get("coverage_quality_flags") or []),
             "degraded_reason": (
