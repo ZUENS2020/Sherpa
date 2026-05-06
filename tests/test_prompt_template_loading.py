@@ -170,6 +170,8 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "read-only exploration commands are allowed" in synth.lower()
     assert "Do NOT run build/execute commands." in synth
     assert "Prefer public/stable repository APIs for harness logic." in synth
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth
+    assert "If upstream source appears syntactically broken" in synth
     assert "Query MCP evidence first" in synth
     assert "do not define custom `main()` in harness source" in synth
     assert "LLVMFuzzerTestOneInput" in synth

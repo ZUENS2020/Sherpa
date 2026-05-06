@@ -112,6 +112,8 @@ Compiler-by-suffix rule:
 - If no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
 
 ## Constraints
+- Do not modify repository source files outside `fuzz/` and `./done`.
+- If upstream source appears syntactically broken, do not edit it; adapt the external harness/build glue, avoid that example/demo source, or record the limitation in `fuzz/repo_understanding.json`.
 - Multi-target buildability is required when execution plan has multiple targets.
 - Do not leave stale or missing execution target mappings in `fuzz/harness_index.json`.
 - If `attack_hint.key_code_path` is present, prefer harness call flow that reaches those functions instead of generic wrapper paths.

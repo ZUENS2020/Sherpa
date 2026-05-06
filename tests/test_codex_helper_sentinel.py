@@ -130,6 +130,49 @@ def test_run_codex_command_succeeds_only_when_done_and_diff_exist(monkeypatch: p
     assert done_path.is_file()
 
 
+def test_run_codex_command_restores_disallowed_edits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    restored: list[str] = []
+    add_calls = {"n": 0}
+
+    def _fake_popen(*args, **kwargs):
+        done_path.write_text("fuzz/out/\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        if restored:
+            return "M fuzz/build.py"
+        return "M fuzz/build.py\nM contrib/gregbook/readpng.c"
+
+    def _fake_restore(paths):
+        restored.extend(paths)
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_restore_paths", _fake_restore)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: add_calls.__setitem__("n", add_calls["n"] + 1))
+
+    out = helper.run_codex_command(
+        "produce fuzz scaffold",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+        allowed_edit_paths=("fuzz/**", "done"),
+    )
+
+    assert out is not None
+    assert restored == ["contrib/gregbook/readpng.c"]
+    assert add_calls["n"] == 1
+
+
 def test_run_codex_command_ignores_stale_done_until_fresh_sentinel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     helper = _prepare_helper(tmp_path)
     _patch_common(monkeypatch, helper)

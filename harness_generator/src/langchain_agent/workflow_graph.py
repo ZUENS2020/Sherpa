@@ -1742,6 +1742,30 @@ def _candidate_attack_hint(
     }
 
 
+def _normalize_attack_hint(
+    value: Any,
+    *,
+    api: str,
+    target_type: str,
+    signal_id: str,
+    source_path: str,
+    security_reason: str,
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_id,
+            source_path=source_path,
+            security_reason=security_reason,
+        )
+        hint["trigger_condition"] = value.strip()
+        return hint
+    return {}
+
+
 def _candidate_priority(
     *,
     vuln_likelihood: float,
@@ -2445,7 +2469,14 @@ def _build_selected_target_row(
     if not signal_type:
         top_signals = _top_security_signals(security_scores, threshold=0.0)
         signal_type = top_signals[0] if top_signals else "mem_oob_candidate"
-    attack_hint = dict(security_candidate.get("attack_hint") or item.get("attack_hint") or {})
+    attack_hint = _normalize_attack_hint(
+        security_candidate.get("attack_hint") or item.get("attack_hint"),
+        api=api,
+        target_type=target_type,
+        signal_id=signal_type,
+        source_path=str(item.get("file") or security_candidate.get("file") or ""),
+        security_reason=security_reason,
+    )
     if not attack_hint:
         attack_hint = _candidate_attack_hint(
             api=api,
@@ -7394,6 +7425,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
     prompt_render_issue = ""
+
+    def _synthesize_allowed_edit_paths() -> tuple[str, ...]:
+        return ("fuzz/**", "done")
+
     repair_mode = bool(state.get("repair_mode") or False)
     repair_origin_stage = str(state.get("repair_origin_stage") or "").strip().lower()
     if repair_origin_stage not in {"build", "crash", "coverage", "fix-harness"}:
@@ -7879,6 +7914,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             timeout=min(remaining, 300),
             max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
         _wf_log(cast(dict[str, Any], state), "synthesize: applied post-validation build.py repair for path/link issue")
 
@@ -7904,6 +7940,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     def _run_required_scaffold_repair(timeout: int) -> None:
@@ -7936,6 +7973,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     def _ensure_min_readme_fallback() -> bool:
@@ -7996,6 +8034,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     if not _has_codex_key():
@@ -8099,6 +8138,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 max_cli_retries=_opencode_cli_retries(),
                 idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
                 activity_watch_paths=_synthesize_activity_watch_paths(),
+                allowed_edit_paths=_synthesize_allowed_edit_paths(),
             )
             grace_raw = os.environ.get("SHERPA_SYNTHESIZE_GRACE_SEC", "15").strip()
             try:

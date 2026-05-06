@@ -43,6 +43,8 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
     assert "api_surface_exception" in synth
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth
+    assert "If upstream source appears syntactically broken" in synth
     assert "do not define custom `main()` in harness source" in synth
     assert "LLVMFuzzerTestOneInput" in synth
     assert "fopen(argv[1], ...)" in synth
