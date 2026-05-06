@@ -81,6 +81,7 @@ Minimal valid template:
   - generated headers include path: when a CMake/configure build emits headers into a build directory, add that CMake build directory to every primary and replay compile command (for example `-I{BUILD_DIR}` for generated headers such as `pnglibconf.h`)
   - owning source linkage: when a harness calls APIs implemented in contrib/example/demo source files outside the main static library, compile the owning source file alongside the harness or switch to a public library API
   - never call a static example helper directly from a harness; static example helpers are not linkable API and example sources with their own `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
+  - primary runnable fuzzers must link the libFuzzer runtime with `-fsanitize=fuzzer,address,undefined` (or equivalent sanitizer set including `fuzzer`); do not use `-fsanitize=fuzzer-no-link` for final binaries unless you also provide and link a valid fuzzer `main`
   - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
   - replay binaries must be real coverage-instrumented executables, not symlinks or copies of the primary fuzzer
 
@@ -122,6 +123,7 @@ Compiler-by-suffix rule:
   - do not define custom `main()` in harness source;
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
   - C/C++ harnesses that use `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents) in the harness source.
+- LibFuzzer link contract is mandatory: final runnable fuzzers under `fuzz/out/` must use `-fsanitize=fuzzer,address,undefined` or another command that links libFuzzer; `-fsanitize=fuzzer-no-link` alone is only valid for objects/libraries or replay binaries that provide their own `main`.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - When diagnostics include concrete file paths, use `Read and fix <path>[:line]` before broader edits.
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.

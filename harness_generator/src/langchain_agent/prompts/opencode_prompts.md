@@ -290,6 +290,7 @@ Stage requirements:
 - Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
 - LibFuzzer harness contract is mandatory: do not define custom `main()` in harness source; expose fuzz entry via `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)` (or language-equivalent entrypoint only).
 - C/C++ harnesses using `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents).
+- LibFuzzer link contract is mandatory: final runnable fuzzers under `fuzz/out/` must link libFuzzer with `-fsanitize=fuzzer,address,undefined` or equivalent; do not use `-fsanitize=fuzzer-no-link` alone for final binaries unless you also provide and link a valid fuzzer `main`.
 - Do not use argv/file-driven harness entry logic in libFuzzer mode (forbidden patterns include `fopen(argv[1], ...)`, `read(argv[1], ...)`, and manual corpus file loops).
 - `fuzz/README.md` must include:
   - `Selected target: ...`
@@ -349,6 +350,7 @@ Build-repair constraints:
 - never call a static example helper directly; do not link example files with their own `main()` into libFuzzer harnesses unless rewritten/guarded
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- enforce libFuzzer link contract: final runnable fuzzers under `fuzz/out/` must link libFuzzer with `-fsanitize=fuzzer,address,undefined`; `-fsanitize=fuzzer-no-link` alone is invalid for primary fuzzers and causes `undefined reference to main`
 - ensure C/C++ harnesses include standard definitions for `uint8_t` and `size_t` (`<stdint.h>` and `<stddef.h>` or C++ equivalents)
 - forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands

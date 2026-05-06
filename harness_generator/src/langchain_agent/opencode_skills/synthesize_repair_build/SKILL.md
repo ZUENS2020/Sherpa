@@ -55,6 +55,7 @@ Use this skill in repair mode when the previous build failed.
   - do not define custom `main()` in harness source;
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
   - C/C++ harnesses that use `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents) in the harness source.
+- LibFuzzer link contract is mandatory: final runnable fuzzers under `fuzz/out/` must link libFuzzer with `-fsanitize=fuzzer,address,undefined` or equivalent; `-fsanitize=fuzzer-no-link` alone causes `undefined reference to main` unless a valid fuzzer `main` is also linked.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 - Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
