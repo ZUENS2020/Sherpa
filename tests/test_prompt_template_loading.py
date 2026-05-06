@@ -85,6 +85,8 @@ def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
     assert "MUST classify each one" not in out
     assert "Keep `target_type` and `seed_profile` unchanged in analysis." in out
     assert "Do not treat analysis output as execution truth." in out
+    assert "Do not rewrite the full `fuzz/analysis_context.json`" in out
+    assert "`fuzz/vuln_hypotheses.md`" in out
 
 
 def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
@@ -110,6 +112,8 @@ def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
     legacy_security_path = "security_evidence" + ".vuln_patterns"
     assert legacy_security_path not in prompt_text
     assert "Do not reclassify target_type or seed_profile here." in skill_text
+    assert "Do not rewrite the full `fuzz/analysis_context.json`" in skill_text
+    assert "`fuzz/vuln_hypotheses.md`" in skill_text
     assert "must classify" not in prompt_text.lower()
 
 
