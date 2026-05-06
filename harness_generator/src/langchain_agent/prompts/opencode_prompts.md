@@ -95,6 +95,7 @@ Security analysis (vulnerability-directed):
 - Locate format string sinks: printf-family calls with non-literal format arguments
 - Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
 - Map trust boundaries: where external/untrusted data first enters internal processing functions
+- Do not rewrite `fuzz/vuln_candidates.json`; it is a system-generated machine-readable worklist. Read it only as input and keep AI-authored guidance in `fuzz/vuln_hypotheses.md`.
 - For each finding, summarize an advisory entry in `fuzz/vuln_hypotheses.md` that references existing `analysis_evidence.security_evidence[]` IDs:
   - `evidence_id`: stable ID string
   - `signal_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, authz_bypass_candidate, null_deref_candidate, uaf_candidate

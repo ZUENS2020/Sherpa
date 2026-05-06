@@ -6531,6 +6531,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 analysis_lines: list[str] = [
                     "Generate analysis artifacts for downstream planning.",
                     "Do not rewrite the full `fuzz/analysis_context.json`; it is already system-generated.",
+                    "Do not rewrite `fuzz/vuln_candidates.json`; it is already system-generated.",
                     "Write concise AI advisory findings to `fuzz/vuln_hypotheses.md` and keep them evidence-linked.",
                 ]
                 if antlr_context_summary:

@@ -42,15 +42,17 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 3. Refresh static analysis summaries for grammar/target context.
 4. Do not rewrite the full `fuzz/analysis_context.json`; it is a system-generated fact artifact and can be large.
    Treat it as read-only input unless you need a tiny, surgical metadata correction.
-5. Write concise AI advisory findings to `fuzz/vuln_hypotheses.md`.
+5. Do not rewrite `fuzz/vuln_candidates.json`; it is a system-generated machine-readable worklist.
+   Treat it as read-only input and summarize only the highest-signal candidate IDs in advisory prose.
+6. Write concise AI advisory findings to `fuzz/vuln_hypotheses.md`.
    Include vulnerability evidence fields:
    - `security_evidence[]` entries with `evidence_id`, `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`.
    - `vuln_candidate_inventory[]` entries with `candidate_id`, `api`, `file`, `target_type`, `vuln_likelihood`, `exploitability`, `reachability_confidence`, `evidence_ids`.
    - summary counters: `security_evidence_count`, `vuln_candidate_count`, `security_mode`, `vuln_focus_profile`, `target_surface_policy`.
    Keep this file small: prefer the top 3-8 high-signal hypotheses, not a full copy of `analysis_context.json`.
-6. Add `VULN_HYPOTHESES` in analysis notes/output and ensure every hypothesis cites existing `evidence_id` values.
-7. Do NOT reclassify `target_type` or `seed_profile` in this stage — that will be done by the seed generation stage with full function code context.
-8. Ensure downstream plan can consume paths and summaries directly.
+7. Add `VULN_HYPOTHESES` in analysis notes/output and ensure every hypothesis cites existing `evidence_id` values.
+8. Do NOT reclassify `target_type` or `seed_profile` in this stage — that will be done by the seed generation stage with full function code context.
+9. Ensure downstream plan can consume paths and summaries directly.
 
 ## Note on target_type classification
 The preliminary target analysis in `fuzz/target_analysis.json` uses regex/tree-sitter heuristics.
