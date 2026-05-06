@@ -55,11 +55,11 @@ Use this skill in repair mode when the previous build failed.
   - do not define custom `main()` in harness source;
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
   - C/C++ harnesses that use `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents) in the harness source.
-- LibFuzzer link contract is mandatory: final runnable fuzzers under `fuzz/out/` must link libFuzzer with `-fsanitize=fuzzer,address,undefined` or equivalent; `-fsanitize=fuzzer-no-link` alone causes `undefined reference to main` unless a valid fuzzer `main` is also linked.
+- LibFuzzer link contract is mandatory: every runnable executable under `fuzz/out/`, including `fuzz/out/replay/<name>`, must link a runnable entrypoint. Prefer `-fsanitize=fuzzer,address,undefined` for both primary and replay executables; `-fsanitize=fuzzer-no-link` alone causes `undefined reference to main` unless a separate replay `main()` wrapper is compiled and linked to call `LLVMFuzzerTestOneInput`.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 - Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
-- Do not satisfy coverage replay by symlinking/copying primary fuzzers into `fuzz/out/replay/`; replay binaries must be separately linked with LLVM profile coverage instrumentation.
+- Do not satisfy coverage replay by symlinking/copying primary fuzzers into `fuzz/out/replay/`; replay binaries must be separately linked with LLVM profile coverage instrumentation and must be runnable executables, not `fuzzer-no-link` objects without `main()`.
 - Generated headers must be discoverable: when CMake/configure emits headers into a build directory, add that CMake build directory to every primary and replay compile command before retrying the same build strategy.
 - Contrib/example/demo target calls must resolve their owning source: compile the owning source file alongside the harness, or switch the harness to a public library API if the source is not safe to link.
 - Do not call a static example helper directly from a harness; static example helpers are not linkable API and example sources that define `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded.
