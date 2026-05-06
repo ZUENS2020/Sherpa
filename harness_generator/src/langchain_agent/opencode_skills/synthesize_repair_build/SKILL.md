@@ -41,6 +41,7 @@ Use this skill in repair mode when the previous build failed.
 
 ## Constraints
 - No doc-only no-op patches.
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only and build repair must adapt harness/build glue instead.
 - Keep selected/final target and build strategy fields consistent across README and JSON files.
 - Update `fuzz/harness_index.json` so each execution target maps to existing harness.
 - Compiler-by-suffix in `fuzz/build.py`:

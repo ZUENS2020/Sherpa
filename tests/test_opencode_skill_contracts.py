@@ -139,6 +139,8 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "api_surface_exception" in synth_repair_crash
     assert "MCP tools from task-scoped PromeFuzz companion" in plan_repair_build
     assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in plan_repair_build
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth_repair_build
     assert "Strategy Delta" in synth_repair_build
     assert "Output Path Contract" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
