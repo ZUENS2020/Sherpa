@@ -843,6 +843,36 @@ def test_run_codex_command_reaps_process_on_eof_without_done(monkeypatch: pytest
     assert proc.wait_calls >= 1
 
 
+def test_run_codex_command_kills_process_group_even_when_wrapper_exited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    proc = _FakeProc(stdout_text="")
+    proc.returncode = 0
+    killed: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.os, "getpgid", lambda pid: 4242)
+    monkeypatch.setattr(ch.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(helper, "_git_diff_head", lambda: "")
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "repair build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=5,
+        initial_backoff=0,
+    )
+
+    assert out is None
+    assert killed, "cleanup must kill the remembered process group even if the wrapper exited"
+
+
 def test_run_codex_command_retries_when_cleanup_reap_failed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
