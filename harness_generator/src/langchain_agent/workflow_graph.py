@@ -9963,6 +9963,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     def _try_hotfix_missing_system_packages() -> bool:
         alias_map = {
             "z": "zlib",
+            "libz": "zlib",
+            "libz-dev": "zlib",
+            "zlib-dev": "zlib",
+            "zlib1g": "zlib",
+            "zlib1g-dev": "zlib",
             "bz2": "bzip2",
             "lzma": "liblzma",
             "xz": "liblzma",
