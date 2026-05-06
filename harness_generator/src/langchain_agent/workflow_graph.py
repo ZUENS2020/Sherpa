@@ -5132,6 +5132,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         return ""
 
     def _safe_get_parser(language: str, timeout_sec: float = 5.0) -> Any:
+        executor = None
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
             result = {}
@@ -5142,12 +5143,20 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 if callable(get_parser):
                     result["parser"] = get_parser(language)
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_get_parser_worker)
-                future.result(timeout=timeout_sec)
-                return result.get("parser")
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_get_parser_worker)
+            future.result(timeout=timeout_sec)
+            return result.get("parser")
         except (FuturesTimeoutError, Exception):
             return None
+        finally:
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
 
     def _extract_tree_sitter_functions(path: Path, rel: str) -> list[dict[str, Any]]:
         try:
