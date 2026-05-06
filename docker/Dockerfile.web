@@ -165,7 +165,7 @@ RUN set -e; \
 #   --build-arg INSTALL_OPENCODE=0
 ARG INSTALL_OPENCODE=1
 ARG NODE_VERSION="20.11.1"
-ARG NODE_MIRROR_CANDIDATES="https://npmmirror.com/mirrors/node https://nodejs.org/dist"
+ARG NODE_MIRROR_CANDIDATES="https://nodejs.org/dist https://npmmirror.com/mirrors/node"
 ARG NPM_REGISTRY_CANDIDATES="https://registry.npmjs.org https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm"
 ARG TARGETARCH
 RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
@@ -180,8 +180,8 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             for base in $NODE_MIRROR_CANDIDATES; do \
               echo "[node] trying mirror: $base"; \
               rm -f /tmp/node.tar.xz; \
-              if curl --retry 5 --retry-delay 2 --retry-all-errors \
-                --connect-timeout 20 --max-time 300 --speed-time 60 --speed-limit 32768 \
+              if curl --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 180 \
+                --connect-timeout 10 --max-time 90 --speed-time 20 --speed-limit 32768 \
                 -fsSL "$base/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" -o /tmp/node.tar.xz; then \
                 node_download_ok="1"; \
                 echo "[node] selected mirror: $base"; \
