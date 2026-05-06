@@ -137,6 +137,7 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "Known Issues" in build_repair
     assert "Strategy Delta" in build_repair
     assert "Output Path Contract" in build_repair
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in build_repair
     assert "api_surface_exception" in crash_repair
     assert "non_public_api_usage" in crash_repair
     assert "coverage plateau / replan trigger" in coverage_repair
@@ -194,6 +195,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "Known Issues" in synth_build_repair
     assert "Strategy Delta" in synth_build_repair
     assert "Output Path Contract" in synth_build_repair
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth_build_repair
     assert "MCP is unavailable, continue in degraded mode" in synth_build_repair
     assert "no custom `main()` in harness source" in synth_build_repair
     assert "LLVMFuzzerTestOneInput" in synth_build_repair
@@ -358,3 +360,18 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "api_surface_exception" in plan_repair_crash
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
+
+
+def test_build_repair_contracts_protect_upstream_sources() -> None:
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    plan_prompt = workflow_common.render_opencode_prompt("plan_repair_build_with_hint", hint="build-fail")
+    synth_prompt = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    plan_skill = (skill_root / "plan_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    synth_skill = (skill_root / "synthesize_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    required = "Do not modify repository source files outside `fuzz/` and `./done`"
+
+    assert required in plan_prompt
+    assert required in synth_prompt
+    assert required in plan_skill
+    assert required in synth_skill

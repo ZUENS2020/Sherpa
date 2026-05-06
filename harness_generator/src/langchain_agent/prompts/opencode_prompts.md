@@ -141,6 +141,7 @@ Constraints:
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only in build-repair planning.
 
 Required planning sections in `fuzz/PLAN.md`:
 - `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
@@ -333,6 +334,7 @@ Required outputs:
 
 Build-repair constraints:
 - consume `repair_*` diagnostics first
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only and repair must adapt harness/build glue instead
 - query MCP evidence first when available before applying repair strategy changes
 - change strategy if previous attempt signatures repeat
 - avoid no-op doc-only edits
