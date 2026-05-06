@@ -38,6 +38,7 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - `build_system.lower() != "unknown"`.
 - `evidence` must be non-empty string array.
 - If `fuzz/build.py` uses invalid parallel style (`$(nproc)`), repair to `["-j", str(os.cpu_count() or 1)]`.
+- If native fuzzers are built under `fuzz/out/`, `fuzz/build.py` must also build real coverage replay siblings under `fuzz/out/replay/` with `-fprofile-instr-generate -fcoverage-mapping`; do not use symlinks/copies of primary fuzzers as replay binaries.
 - Keep multi-target buildability when `fuzz/execution_plan.json` contains multiple targets.
 - Use explicit path actions: `Read and fix <path>[:line]`.
 
@@ -50,6 +51,7 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - If harness was missing before this step, harness exists after this step.
 - `fuzz/harness_index.json` contains no missing execution-target mappings.
 - `repo_understanding.json` is semantically valid.
+- `fuzz/out/replay/<fuzzer>` exists for native fuzzers and is profile-instrumented for per-input replay.
 
 ## Done contract
 - Write `fuzz/out/` into `./done`.

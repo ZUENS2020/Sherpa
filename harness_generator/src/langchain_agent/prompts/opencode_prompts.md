@@ -296,6 +296,7 @@ Stage requirements:
   - runtime artifact discovery (do not hardcode a single static library path)
   - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
   - compiler-by-suffix rule: compile `.c` harnesses with `clang`; compile `.cc/.cpp/.cxx` harnesses with `clang++`
+  - coverage replay siblings: for each primary native fuzzer `fuzz/out/<name>`, also build `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`; do not symlink/copy primary fuzzers as replay binaries
 
 MANDATORY:
 - create `./done`
@@ -330,6 +331,7 @@ Build-repair constraints:
 - keep target/build fields consistent across README + JSONs + build script
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
+- keep coverage replay siblings real and instrumented: `fuzz/out/replay/<name>` must be linked with `-fprofile-instr-generate -fcoverage-mapping`, never a symlink/copy of the primary fuzzer
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
 - forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)

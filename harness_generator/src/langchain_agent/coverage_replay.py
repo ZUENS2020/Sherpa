@@ -108,6 +108,23 @@ def _hash_file(path: Path, algo: str = "sha1") -> str:
     return h.hexdigest()
 
 
+def _replay_binary_looks_profile_instrumented(path: Path) -> bool:
+    try:
+        if not path.is_file() or not os.access(str(path), os.X_OK):
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return any(
+        marker in data
+        for marker in (
+            b"__llvm_prf",
+            b"LLVM_PROFILE_FILE",
+            b"__llvm_profile",
+        )
+    )
+
+
 def _safe_relpath(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))
@@ -644,6 +661,23 @@ def collect_per_input_frontier(
             runtime_sec=time.perf_counter() - started,
         )
 
+    if not _replay_binary_looks_profile_instrumented(replay_binary):
+        return CoverageReplayResult(
+            manifest_path=str(manifest_path),
+            frontier_path=str(frontier_path),
+            frontier_summary=empty_summary,
+            binary_hash="",
+            stage_success=False,
+            stage_error="replay_binary_not_profile_instrumented",
+            manifest_fresh_for_current_binary=False,
+            replay_queue_drained=False,
+            pending_inputs=0,
+            failed_inputs=0,
+            processed_inputs=0,
+            total_inputs=0,
+            runtime_sec=time.perf_counter() - started,
+        )
+
     llvm_profdata, llvm_cov = _llvm_tools()
     if not llvm_profdata or not llvm_cov:
         return CoverageReplayResult(
@@ -764,6 +798,16 @@ def collect_per_input_frontier(
             if str(item.get("replay_status") or "") == "failed"
         ]
     )
+    if (
+        processed_inputs > 0
+        and failed_inputs >= processed_inputs
+        and any(
+            str(item.get("replay_error") or "") == "profraw_not_generated"
+            for item in manifest_inputs
+        )
+    ):
+        stage_success = False
+        stage_error = "profraw_not_generated"
 
     frontier_summary, frontier_doc = _build_frontier_summary(
         manifest_inputs=manifest_inputs,

@@ -30,6 +30,7 @@ Use this skill in repair mode when the previous build failed.
 - `Known Issues` note in repair artifacts (README or repo_understanding) for unresolved blockers
 - `Strategy Delta` note in repair artifacts that states what changed versus the previous failed attempt
 - `Output Path Contract` note declaring executable fuzzer outputs must be written to `fuzz/out/`
+- coverage replay output contract: `fuzz/out/replay/<fuzzer>` must be built with `-fprofile-instr-generate -fcoverage-mapping` for every native fuzzer
 
 ## Workflow
 1. Query MCP evidence first when MCP is available (preprocessor first, semantic evidence second).
@@ -55,6 +56,7 @@ Use this skill in repair mode when the previous build failed.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 - Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
+- Do not satisfy coverage replay by symlinking/copying primary fuzzers into `fuzz/out/replay/`; replay binaries must be separately linked with LLVM profile coverage instrumentation.
 
 ## Command policy
 - Allowed: read-only commands only.
@@ -64,6 +66,7 @@ Use this skill in repair mode when the previous build failed.
 - Edits are build-failure-driven.
 - Repeated signatures result in strategy change.
 - Execution-plan and harness-index consistency is preserved.
+- Coverage replay siblings are profile-instrumented and located under `fuzz/out/replay/`.
 
 ## Done contract
 - Write `fuzz/out/` into `./done`.
