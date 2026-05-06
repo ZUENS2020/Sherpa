@@ -78,6 +78,8 @@ Minimal valid template:
   - Python-native parallel args: `["-j", str(os.cpu_count() or 1)]`
   - never use `$(nproc)` or shell substitutions
   - runtime artifact discovery (do not hardcode a single static library path)
+  - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
+  - replay binaries must be real coverage-instrumented executables, not symlinks or copies of the primary fuzzer
 
 Exact static-lib discovery block:
 ```python
@@ -129,6 +131,7 @@ Compiler-by-suffix rule:
 - README field `Harness file:` points to a real harness file.
 - `fuzz/repo_understanding.json` is semantically valid and complete.
 - Build script follows compiler-by-suffix and static-lib-discovery contracts.
+- `fuzz/out/replay/<name>` exists for each built native fuzzer and can emit `LLVM_PROFILE_FILE=...profraw` during single-input replay.
 
 ## Done contract
 - Write `fuzz/out/` into `./done`.

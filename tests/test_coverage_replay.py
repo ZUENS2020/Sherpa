@@ -21,7 +21,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     corpus_dir.mkdir(parents=True, exist_ok=True)
     replay_binary = repo_root / "fuzz" / "out" / "demo_fuzz"
     replay_binary.parent.mkdir(parents=True, exist_ok=True)
-    replay_binary.write_text("bin-v1", encoding="utf-8")
+    replay_binary.write_text("bin-v1 __llvm_prf", encoding="utf-8")
     replay_binary.chmod(0o755)
     return repo_root, replay_binary
 
@@ -112,7 +112,7 @@ def test_build_frontier_summary_prefers_partial_frontier_signal(tmp_path: Path) 
     repo_root.mkdir(parents=True, exist_ok=True)
     replay_binary = repo_root / "fuzz" / "out" / "demo_fuzz"
     replay_binary.parent.mkdir(parents=True, exist_ok=True)
-    replay_binary.write_text("bin-v1", encoding="utf-8")
+    replay_binary.write_text("bin-v1 __llvm_prf", encoding="utf-8")
 
     summary, frontier_doc = coverage_replay._build_frontier_summary(
         manifest_inputs=[
@@ -266,10 +266,56 @@ def test_collect_per_input_frontier_replays_all_inputs_after_binary_hash_change(
         fuzzer_name="demo_fuzz",
         replay_binary=replay_binary,
     )
-    replay_binary.write_text("bin-v2", encoding="utf-8")
+    replay_binary.write_text("bin-v2 __llvm_prf", encoding="utf-8")
     coverage_replay.collect_per_input_frontier(
         repo_root=repo_root,
         fuzzer_name="demo_fuzz",
         replay_binary=replay_binary,
     )
     assert calls == ["seed.bin", "seed.bin"]
+
+
+def test_collect_per_input_frontier_rejects_plain_fuzzer_binary(tmp_path: Path, monkeypatch) -> None:
+    repo_root, replay_binary = _make_repo(tmp_path)
+    replay_binary.write_text("plain fuzzer", encoding="utf-8")
+    (repo_root / "fuzz" / "corpus" / "demo_fuzz" / "seed.bin").write_bytes(b"seed")
+    monkeypatch.setattr(coverage_replay, "_llvm_tools", lambda: ("llvm-profdata", "llvm-cov"))
+
+    result = coverage_replay.collect_per_input_frontier(
+        repo_root=repo_root,
+        fuzzer_name="demo_fuzz",
+        replay_binary=replay_binary,
+    )
+
+    assert result.stage_success is False
+    assert result.stage_error == "replay_binary_not_profile_instrumented"
+    assert result.processed_inputs == 0
+
+
+def test_collect_per_input_frontier_marks_profraw_missing_as_stage_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root, replay_binary = _make_repo(tmp_path)
+    (repo_root / "fuzz" / "corpus" / "demo_fuzz" / "seed.bin").write_bytes(b"seed")
+    monkeypatch.setattr(coverage_replay, "_llvm_tools", lambda: ("llvm-profdata", "llvm-cov"))
+
+    def fake_export(**kwargs):
+        return {
+            "replay_status": "failed",
+            "replay_error": "profraw_not_generated",
+            "exec_time_us": 10,
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr(coverage_replay, "_export_input_coverage", fake_export)
+
+    result = coverage_replay.collect_per_input_frontier(
+        repo_root=repo_root,
+        fuzzer_name="demo_fuzz",
+        replay_binary=replay_binary,
+    )
+
+    assert result.stage_success is False
+    assert result.stage_error == "profraw_not_generated"
+    assert result.failed_inputs == 1

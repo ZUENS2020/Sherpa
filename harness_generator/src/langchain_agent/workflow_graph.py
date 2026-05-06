@@ -3892,24 +3892,60 @@ def _replay_out_dir(repo_root: Path) -> Path:
     return repo_root / "fuzz" / "out" / "replay"
 
 
+def _binary_looks_profile_instrumented(path: Path) -> bool:
+    try:
+        if not path.is_file() or not os.access(str(path), os.X_OK):
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return any(
+        marker in data
+        for marker in (
+            b"__llvm_prf",
+            b"LLVM_PROFILE_FILE",
+            b"__llvm_profile",
+        )
+    )
+
+
 def _materialize_replay_binaries(repo_root: Path, bin_paths: list[Path]) -> list[Path]:
     replay_dir = _replay_out_dir(repo_root)
     replay_dir.mkdir(parents=True, exist_ok=True)
-    source_by_name = {
-        p.name: p
+    fuzz_out = repo_root / "fuzz" / "out"
+    primary_names = {
+        p.name
         for p in bin_paths
-        if p.is_file() and p.parent == (repo_root / "fuzz" / "out")
+        if p.is_file() and p.parent == fuzz_out
     }
     for stale in replay_dir.iterdir():
-        if stale.is_file() and stale.name not in source_by_name:
+        if stale.is_file() and stale.name not in primary_names:
             try:
                 stale.unlink()
             except OSError:
                 pass
 
     created: list[Path] = []
-    for name, src in sorted(source_by_name.items()):
+    for name in sorted(primary_names):
         dest = replay_dir / name
+        candidates = [
+            dest,
+            replay_dir / f"{name}.exe",
+            fuzz_out / f"{name}_replay",
+            fuzz_out / f"{name}-replay",
+            fuzz_out / f"{name}.replay",
+        ]
+        src = next((p for p in candidates if _binary_looks_profile_instrumented(p)), None)
+        if src is None:
+            try:
+                if dest.exists() or dest.is_symlink():
+                    dest.unlink()
+            except OSError:
+                pass
+            continue
+        if src == dest:
+            created.append(dest)
+            continue
         try:
             if dest.exists() or dest.is_symlink():
                 dest.unlink()
@@ -3925,7 +3961,8 @@ def _materialize_replay_binaries(repo_root: Path, bin_paths: list[Path]) -> list
                 os.chmod(dest, mode)
             except OSError:
                 pass
-        created.append(dest)
+        if _binary_looks_profile_instrumented(dest):
+            created.append(dest)
     return created
 
 
@@ -3938,10 +3975,9 @@ def _resolve_per_input_replay_binary(repo_root: Path, fuzzer_name: str) -> Path 
         fuzz_out / f"{fuzzer_name}_replay",
         fuzz_out / f"{fuzzer_name}-replay",
         fuzz_out / f"{fuzzer_name}.replay",
-        fuzz_out / fuzzer_name,
     ]
     for candidate in candidates:
-        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+        if _binary_looks_profile_instrumented(candidate):
             return candidate
     return None
 
@@ -14738,6 +14774,33 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
+        "coverage_target_name": str(out.get("coverage_target_name") or ""),
+        "coverage_target_api": str(out.get("coverage_target_api") or ""),
+        "coverage_target_type": str(out.get("coverage_target_type") or ""),
+        "coverage_seed_profile": str(out.get("coverage_seed_profile") or ""),
+        "coverage_seed_quality": dict(out.get("coverage_seed_quality") or {}),
+        "coverage_seed_families_suggested": list(out.get("coverage_seed_families_suggested") or []),
+        "coverage_seed_families_covered": list(out.get("coverage_seed_families_covered") or []),
+        "coverage_seed_families_missing": list(out.get("coverage_seed_families_missing") or []),
+        "coverage_quality_flags": list(out.get("coverage_quality_flags") or []),
+        "coverage_quality_oracle": str(out.get("coverage_quality_oracle") or ""),
+        "coverage_target_depth_score": int(out.get("coverage_target_depth_score") or 0),
+        "coverage_target_depth_class": str(out.get("coverage_target_depth_class") or ""),
+        "coverage_selection_bias_reason": str(out.get("coverage_selection_bias_reason") or ""),
+        "coverage_target_score_breakdown": dict(out.get("coverage_target_score_breakdown") or {}),
+        "coverage_plateau_streak": int(out.get("coverage_plateau_streak") or 0),
+        "coverage_last_max_cov": int(out.get("coverage_last_max_cov") or 0),
+        "coverage_last_ft": int(out.get("coverage_last_ft") or 0),
+        "coverage_replan_required": bool(out.get("coverage_replan_required") or False),
+        "coverage_replan_reason": str(out.get("coverage_replan_reason") or ""),
+        "coverage_replan_effective": bool(out.get("coverage_replan_effective") or False),
+        "coverage_improve_mode": str(out.get("coverage_improve_mode") or ""),
+        "coverage_round_budget_exhausted": bool(out.get("coverage_round_budget_exhausted") or False),
+        "coverage_stop_reason": str(out.get("coverage_stop_reason") or ""),
+        "coverage_corpus_sources": list(out.get("coverage_corpus_sources") or []),
+        "coverage_seed_counts": dict(out.get("coverage_seed_counts") or {}),
+        "coverage_parallel_diagnosis_code": str(out.get("coverage_parallel_diagnosis_code") or ""),
+        "coverage_parallel_diagnosis": str(out.get("coverage_parallel_diagnosis") or ""),
         "coverage_per_input_manifest_path": str(out.get("coverage_per_input_manifest_path") or ""),
         "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
         "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),

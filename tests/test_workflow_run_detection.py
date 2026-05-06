@@ -970,13 +970,16 @@ def test_route_after_run_routes_crash_to_repro_stage():
     assert route == "crash-triage"
 
 
-def test_materialize_replay_binaries_writes_replay_dir_without_polluting_primary_discovery(tmp_path: Path):
+def test_materialize_replay_binaries_uses_profile_instrumented_replay_binary(tmp_path: Path):
     repo_root = tmp_path
     fuzz_out = repo_root / "fuzz" / "out"
     fuzz_out.mkdir(parents=True, exist_ok=True)
     primary = fuzz_out / "demo_fuzz"
     primary.write_text("bin", encoding="utf-8")
     primary.chmod(0o755)
+    source_replay = fuzz_out / "demo_fuzz_replay"
+    source_replay.write_text("bin __llvm_prf", encoding="utf-8")
+    source_replay.chmod(0o755)
 
     replay_bins = workflow_graph._materialize_replay_binaries(repo_root, [primary])
     assert len(replay_bins) == 1
@@ -984,6 +987,19 @@ def test_materialize_replay_binaries_writes_replay_dir_without_polluting_primary
     assert replay_bin.parent == repo_root / "fuzz" / "out" / "replay"
     assert replay_bin.name == "demo_fuzz"
     assert replay_bin.exists()
+
+
+def test_materialize_replay_binaries_does_not_symlink_plain_fuzzer(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("plain fuzzer", encoding="utf-8")
+    primary.chmod(0o755)
+
+    replay_bins = workflow_graph._materialize_replay_binaries(repo_root, [primary])
+    assert replay_bins == []
+    assert not (repo_root / "fuzz" / "out" / "replay" / "demo_fuzz").exists()
 
 
 def test_resolve_per_input_replay_binary_prefers_replay_dir(tmp_path: Path):
@@ -995,12 +1011,24 @@ def test_resolve_per_input_replay_binary_prefers_replay_dir(tmp_path: Path):
     primary = fuzz_out / "demo_fuzz"
     replay = replay_out / "demo_fuzz"
     primary.write_text("primary", encoding="utf-8")
-    replay.write_text("replay", encoding="utf-8")
+    replay.write_text("replay __llvm_prf", encoding="utf-8")
     primary.chmod(0o755)
     replay.chmod(0o755)
 
     resolved = workflow_graph._resolve_per_input_replay_binary(repo_root, "demo_fuzz")
     assert resolved == replay
+
+
+def test_resolve_per_input_replay_binary_rejects_plain_primary_fuzzer(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("primary", encoding="utf-8")
+    primary.chmod(0o755)
+
+    resolved = workflow_graph._resolve_per_input_replay_binary(repo_root, "demo_fuzz")
+    assert resolved is None
 
 
 def test_route_after_run_routes_clean_result_to_per_input_replay():
@@ -2707,6 +2735,20 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
         "repair_signature": "abcdef123456",
         "repair_recent_attempts": [{"origin": "fix-harness", "error_kind": "harness_bug"}],
         "repair_error_digest": {"error_code": "crash_triage_harness_bug"},
+        "coverage_target_name": "png_read_image",
+        "coverage_target_api": "png_read_image",
+        "coverage_target_type": "image",
+        "coverage_seed_profile": "decoder-binary",
+        "coverage_should_improve": True,
+        "coverage_improve_mode": "in_place",
+        "coverage_replan_required": False,
+        "coverage_plateau_streak": 1,
+        "coverage_last_max_cov": 18,
+        "coverage_last_ft": 37,
+        "coverage_quality_flags": ["repo_examples_missing"],
+        "coverage_seed_families_suggested": [],
+        "coverage_seed_families_covered": [],
+        "coverage_seed_families_missing": [],
     }
 
     class _FakeCompiledWorkflow:
@@ -2745,6 +2787,18 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
     assert result["repair_error_kind"] == "harness_bug"
     assert result["repair_error_code"] == "crash_triage_harness_bug"
     assert result["repair_signature"] == "abcdef123456"
+    assert result["coverage_target_name"] == "png_read_image"
+    assert result["coverage_target_api"] == "png_read_image"
+    assert result["coverage_target_type"] == "image"
+    assert result["coverage_seed_profile"] == "decoder-binary"
+    assert result["coverage_should_improve"] is True
+    assert result["coverage_improve_mode"] == "in_place"
+    assert result["coverage_replan_required"] is False
+    assert result["coverage_plateau_streak"] == 1
+    assert result["coverage_last_max_cov"] == 18
+    assert result["coverage_last_ft"] == 37
+    assert result["coverage_quality_flags"] == ["repo_examples_missing"]
+    assert result["coverage_seed_families_suggested"] == []
     assert isinstance(result["repair_recent_attempts"], list)
     assert isinstance(result["repair_error_digest"], dict)
 
