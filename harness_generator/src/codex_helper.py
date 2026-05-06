@@ -1382,6 +1382,12 @@ class CodexHelper:
                         errors="replace",
                         start_new_session=(os.name != "nt"),
                     )
+                    proc_pgid = int(getattr(proc, "pid", 0) or 0)
+                    if os.name != "nt":
+                        try:
+                            proc_pgid = int(os.getpgid(proc.pid))
+                        except Exception:
+                            proc_pgid = int(getattr(proc, "pid", 0) or 0)
                 except FileNotFoundError as e:
                     raise FileNotFoundError(
                         f"Failed to launch OpenCode CLI: {cli_exe} (cwd={self.working_dir}). "
@@ -1462,13 +1468,13 @@ class CodexHelper:
                     return reaped, status
 
                 def _terminate_or_kill_proc(force: bool) -> None:
-                    if proc.poll() is not None:
-                        return
                     if os.name != "nt":
                         try:
-                            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+                            os.killpg(proc_pgid, signal.SIGKILL if force else signal.SIGTERM)
                         except Exception:
                             pass
+                    if proc.poll() is not None:
+                        return
                     try:
                         if force:
                             proc.kill()
@@ -1486,15 +1492,15 @@ class CodexHelper:
                     cleanup_error = ""
                     cleanup_reaped_count = 0
                     cleanup_reap_status = "ok"
-                    proc_pgid = int(getattr(proc, "pid", 0) or 0)
                     try:
                         if proc.stdout is not None:
                             try:
                                 proc.stdout.close()
                             except Exception:
                                 pass
+                        _terminate_or_kill_proc(force=False)
+                        _wait_proc_with_timeout(0.5)
                         if proc.poll() is None:
-                            _terminate_or_kill_proc(force=False)
                             if not _wait_proc_with_timeout(4.0):
                                 _terminate_or_kill_proc(force=True if force_kill else False)
                                 if not _wait_proc_with_timeout(4.0):
