@@ -139,7 +139,10 @@ def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text(
+        "z\nzlib-dev\nzlib1g-dev\nlibz-dev\nbz2\nlzma\nlz4\n",
+        encoding="utf-8",
+    )
 
     ports = gen._declared_vcpkg_ports(repo_root=tmp_path)
 
@@ -150,7 +153,8 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+    dep_file = fuzz_dir / "system_packages.txt"
+    dep_file.write_text("z\nzlib-dev\nzlib1g-dev\nlibz-dev\nbz2\nlzma\nlz4\n", encoding="utf-8")
 
     log_path = tmp_path / "vcpkg.log"
     vcpkg_dir = tmp_path / "vcpkg"
@@ -191,8 +195,18 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     assert "list liblzma:" in log_text
     assert "list lz4:" in log_text
     assert "list z:" not in log_text
+    assert "list zlib-dev:" not in log_text
+    assert "list zlib1g-dev:" not in log_text
+    assert "list libz-dev:" not in log_text
     assert "list bz2:" not in log_text
     assert "list lzma:" not in log_text
+    assert dep_file.read_text(encoding="utf-8") == (
+        "# Auto-normalized to vcpkg port names.\n"
+        "zlib\n"
+        "bzip2\n"
+        "liblzma\n"
+        "lz4\n"
+    )
 def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"

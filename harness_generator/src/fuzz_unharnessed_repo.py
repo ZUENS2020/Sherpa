@@ -205,6 +205,11 @@ VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or "vcpkg_in
 VCPKG_PORT_ALIASES: Dict[str, str] = {
     # Common generic/library shorthands -> vcpkg ports
     "z": "zlib",
+    "libz": "zlib",
+    "libz-dev": "zlib",
+    "zlib-dev": "zlib",
+    "zlib1g": "zlib",
+    "zlib1g-dev": "zlib",
     "bz2": "bzip2",
     "lzma": "liblzma",
     "xz": "liblzma",
@@ -2317,6 +2322,7 @@ class NonOssFuzzHarnessGenerator:
                     pkg="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
                     case "$pkg" in
                         z) mapped="zlib" ;;
+                        libz|libz-dev|zlib-dev|zlib1g|zlib1g-dev) mapped="zlib" ;;
                         bz2) mapped="bzip2" ;;
                         lzma|xz) mapped="liblzma" ;;
                         ssl|crypto|libssl|libcrypto) mapped="openssl" ;;
