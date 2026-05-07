@@ -77,6 +77,28 @@ class _SeedMetadataRunGenerator(_FakeRunGenerator):
         }
 
 
+class _DeterministicSeedBootstrapGenerator(_SlowSeedGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, run_results, seed_sleep_sec=1.5)
+        self.deterministic_seed_calls: list[str] = []
+        self.last_seed_bootstrap_by_fuzzer: dict[str, dict[str, object]] = {}
+        self.last_seed_profile_by_fuzzer: dict[str, str] = {}
+
+    def _bootstrap_deterministic_seed_corpus(self, fuzzer_name: str) -> dict[str, object]:
+        self.deterministic_seed_calls.append(fuzzer_name)
+        meta = {
+            "counts": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "seed_counts_raw": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "seed_counts_filtered": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "sources": ["deterministic"],
+            "seed_profile": "decoder-binary",
+            "seed_family_coverage": {"required": [], "covered": ["png_signature"], "missing": []},
+        }
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = meta
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = "decoder-binary"
+        return meta
+
+
 class _MultiRunGenerator(_FakeRunGenerator):
     def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, run_sleep_sec: float = 0.0) -> None:
         super().__init__(tmp_path, run_results)
@@ -581,6 +603,48 @@ def test_node_run_default_skips_ai_seed_generation(tmp_path: Path, monkeypatch):
     assert out.get("failed") is not True
     assert gen.seed_calls == 0
     assert out["coverage_seed_generation_skipped_reason"] == "verify_stage_no_ai"
+
+
+def test_node_run_default_uses_deterministic_seed_bootstrap_when_available(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("SHERPA_VERIFY_STAGE_NO_AI", raising=False)
+    gen = _DeterministicSeedBootstrapGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["last_step"] == "run"
+    assert out.get("failed") is not True
+    assert gen.seed_calls == 0
+    assert gen.deterministic_seed_calls == ["demo_fuzz_1", "demo_fuzz_2"]
+    assert out["coverage_seed_generation_skipped_reason"] == "verify_stage_no_ai"
+    assert out["coverage_seed_counts"]["deterministic"] == 4
+    assert out["coverage_seed_counts_raw"]["deterministic"] == 4
+    assert out["coverage_seed_counts_filtered"]["deterministic"] == 4
+    assert "deterministic" in out["coverage_corpus_sources"]
+    assert out["coverage_seed_profile"] == "decoder-binary"
 
 
 def test_node_run_generates_ai_seeds_when_verify_no_ai_disabled(tmp_path: Path, monkeypatch):

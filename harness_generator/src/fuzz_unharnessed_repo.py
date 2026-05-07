@@ -65,6 +65,7 @@ import time
 import hashlib
 import uuid
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -1482,6 +1483,29 @@ def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
             families.add("archive_xz")
         if any(f in families for f in {"archive_zip", "archive_tar", "archive_gzip", "archive_bzip2", "archive_xz"}):
             families.add("valid_archive_sample")
+    if (profile == "decoder-binary" or data.startswith(b"\x89PNG\r\n\x1a\n")) and data:
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            families.add("magic_headers")
+            families.add("png_signature")
+            if b"IHDR" in data:
+                families.add("metadata_chunks")
+                families.add("png_ihdr_dimensions")
+            if b"IDAT" in data:
+                families.add("compressed_payload_variants")
+                families.add("png_idat_payloads")
+            if b"IEND" in data:
+                families.add("chunk_layout")
+                families.add("png_chunk_order")
+            if len(data) < 32:
+                families.add("truncated_sections")
+            if b"tEXt" in data or b"iTXt" in data or b"zTXt" in data:
+                families.add("metadata_chunks")
+                families.add("png_ancillary_chunks")
+        if len(data) >= 8 and re.search(rb"[\x7f\x80\xff]{2,}", data):
+            families.add("length_boundary_values")
+        if path.name.lower().startswith("deterministic_png_bad_crc"):
+            families.add("checksum_crc_variants")
+            families.add("png_crc_variants")
     if "{}" in text or re.search(r"\{[^{}]*\}", text):
         families.add("replacement_fields")
     if "{{" in text or "}}" in text:
@@ -4081,12 +4105,14 @@ EOF
     ) -> dict[str, object]:
         filter_mode = _seed_filter_mode()
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
-        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": len(files)}
+        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 0, "total": len(files)}
         for path in files:
             if path.name.startswith("repo_"):
                 raw_counts["repo_examples"] += 1
             elif path.name.startswith("radamsa_"):
                 raw_counts["radamsa"] += 1
+            elif path.name.startswith("deterministic_"):
+                raw_counts["deterministic"] = int(raw_counts.get("deterministic") or 0) + 1
             else:
                 raw_counts["ai"] += 1
         filtered_counts = dict(raw_counts)
@@ -4353,6 +4379,8 @@ EOF
                         filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
                     elif path.name.startswith("radamsa_"):
                         filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                    elif path.name.startswith("deterministic_"):
+                        filtered_counts["deterministic"] = max(0, int(filtered_counts.get("deterministic") or 0) - 1)
                     else:
                         filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
                     filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
@@ -4396,6 +4424,174 @@ EOF
             ),
             "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
         }
+
+    def _png_chunk(self, chunk_type: bytes, data: bytes, *, corrupt_crc: bool = False) -> bytes:
+        crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
+        if corrupt_crc:
+            crc ^= 0xFFFFFFFF
+        return len(data).to_bytes(4, "big") + chunk_type + data + crc.to_bytes(4, "big")
+
+    def _deterministic_decoder_seed_bytes(self, fuzzer_name: str, selected_target: dict[str, object]) -> dict[str, bytes]:
+        context = " ".join(
+            [
+                fuzzer_name,
+                str(selected_target.get("target_name") or ""),
+                str(selected_target.get("api") or ""),
+                json.dumps(selected_target.get("attack_hint") or {}, ensure_ascii=False),
+                " ".join(str(x) for x in selected_target.get("seed_families_optional") or []),
+                " ".join(str(x) for x in selected_target.get("seed_families_suggested") or []),
+            ]
+        ).lower()
+        if "png" not in context:
+            return {}
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr_1x1 = (1).to_bytes(4, "big") + (1).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+        ihdr_wide = (0x7FFFFFFF).to_bytes(4, "big") + (1).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+        raw_rgba_scanline = b"\x00\x00\x00\x00\x00"
+        idat = zlib.compress(raw_rgba_scanline)
+        return {
+            "deterministic_png_minimal.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1)
+                + self._png_chunk(b"IDAT", idat)
+                + self._png_chunk(b"IEND", b"")
+            ),
+            "deterministic_png_signature_only.bin": sig,
+            "deterministic_png_truncated_ihdr.bin": sig + (13).to_bytes(4, "big") + b"IHDR" + ihdr_1x1[:6],
+            "deterministic_png_bad_crc.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1, corrupt_crc=True)
+                + self._png_chunk(b"IEND", b"")
+            ),
+            "deterministic_png_large_dimension.png": sig + self._png_chunk(b"IHDR", ihdr_wide) + self._png_chunk(b"IEND", b""),
+            "deterministic_png_text_chunk.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1)
+                + self._png_chunk(b"tEXt", b"Comment\x00" + b"A" * 64)
+                + self._png_chunk(b"IEND", b"")
+            ),
+        }
+
+    def _bootstrap_deterministic_seed_corpus(self, fuzzer_name: str) -> dict[str, object]:
+        harness_src = self._locate_harness_source_for(fuzzer_name)
+        harness_text = read_text_safely(harness_src) if harness_src else ""
+        readme_text = read_text_safely(self.fuzz_dir / "README.md")
+        corpus_dir = self.fuzz_corpus_dir / fuzzer_name
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
+        observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
+        target_type = ""
+        seed_profile = ""
+        seed_profile_source = "fallback"
+        if selected_target:
+            selected_type = str(selected_target.get("target_type") or "").strip().lower()
+            selected_profile = str(selected_target.get("seed_profile") or "").strip().lower()
+            if selected_type in ALLOWED_TARGET_TYPES and selected_profile in ALLOWED_SEED_PROFILES:
+                target_type = selected_type
+                seed_profile = selected_profile
+                seed_profile_source = "selected_targets"
+        if not target_type or not seed_profile:
+            target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+            if observed_target:
+                seed_profile_source = "observed_or_inferred"
+        execution_target = dict(observed_target or selected_target)
+        if selected_target:
+            self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
+        required_families, optional_families = _seed_families_for_target(
+            seed_profile,
+            fuzzer_name,
+            harness_text,
+            readme_text,
+            str(execution_target.get("observed_target_api") or ""),
+            str(execution_target.get("selected_target_api") or ""),
+            str(execution_target.get("target_name") or ""),
+            str(execution_target.get("api") or ""),
+        )
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
+        repo_seed_files, repo_meta = self._collect_repo_seed_examples(
+            seed_profile,
+            fuzzer_name,
+            corpus_dir,
+            required_families=required_families,
+        )
+        deterministic_count = 0
+        if seed_profile == "decoder-binary":
+            for name, data in self._deterministic_decoder_seed_bytes(fuzzer_name, selected_target).items():
+                path = corpus_dir / name
+                if path.exists():
+                    continue
+                try:
+                    path.write_bytes(data)
+                    deterministic_count += 1
+                except Exception:
+                    continue
+        sources = list(repo_meta.get("sources") or [])
+        if deterministic_count > 0:
+            sources.append("deterministic")
+        filtered_meta = self._filter_seed_corpus(
+            corpus_dir,
+            seed_profile=seed_profile,
+            required_families=required_families,
+            target_markers=[
+                fuzzer_name,
+                harness_text,
+                readme_text,
+                str(execution_target.get("observed_target_api") or ""),
+                str(execution_target.get("selected_target_api") or ""),
+                str(execution_target.get("target_name") or ""),
+                str(execution_target.get("api") or ""),
+            ],
+        )
+        seed_quality_path = self.fuzz_dir / f"seed_quality_{re.sub(r'[^A-Za-z0-9_.-]+', '_', fuzzer_name)}.json"
+        seed_quality_doc = {
+            "fuzzer": fuzzer_name,
+            "seed_profile": seed_profile,
+            "target_type": target_type,
+            "seed_profile_source": seed_profile_source,
+            "generation_mode": "deterministic_no_ai",
+            "suggested_families": required_families,
+            "optional_families": optional_families,
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
+        }
+        try:
+            seed_quality_path.write_text(json.dumps(seed_quality_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        meta = {
+            "counts": {
+                "repo_examples": len(repo_seed_files),
+                "ai": 0,
+                "radamsa": 0,
+                "deterministic": int((filtered_meta.get("seed_counts_filtered") or {}).get("deterministic") or deterministic_count),
+                "total": len([p for p in corpus_dir.iterdir() if p.is_file()]),
+            },
+            "sources": sorted(set(str(x) for x in sources if str(x).strip())),
+            "seed_profile": seed_profile,
+            "seed_profile_source": seed_profile_source,
+            "target_type": target_type,
+            "selected_target": dict(selected_target),
+            "observed_target": dict(observed_target),
+            "attack_hint": dict((selected_target or {}).get("attack_hint") or {}),
+            "seed_families_suggested": required_families,
+            "seed_families_optional": optional_families,
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
+            "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
+            "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
+            "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
+            "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
+            "seed_quality_path": str(seed_quality_path.relative_to(self.repo_root)) if seed_quality_path.is_file() else "",
+            "generation_mode": "deterministic_no_ai",
+        }
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = meta
+        return meta
 
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -28,6 +29,10 @@ def _make_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     gen.repo_root = repo_root
     gen.fuzz_dir = repo_root / "fuzz"
     gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_out_dir = gen.fuzz_dir / "out"
+    gen.last_seed_profile_by_fuzzer = {}
+    gen.last_seed_bootstrap_by_fuzzer = {}
+    gen.last_selected_target_by_fuzzer = {}
     return gen
 
 
@@ -104,6 +109,43 @@ def test_collect_repo_seed_examples_bootstraps_archive_samples_when_repo_has_non
     assert ".zip" in suffixes or ".tar" in suffixes
     assert any(ext in suffixes for ext in {".gz", ".bz2", ".xz"})
     assert meta["accepted_count"] == len(selected)
+
+
+def test_deterministic_bootstrap_adds_png_decoder_seeds_without_ai(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "png_process_data",
+                    "api": "png_process_data",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "seed_families_suggested": [],
+                    "seed_families_optional": ["png_signature", "chunk_layout", "truncated_sections"],
+                    "attack_hint": {"trigger_condition": "crafted PNG chunks"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "png_process_data_fuzz.c").write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { png_process_data(0,0,data,size); return 0; }\n",
+        encoding="utf-8",
+    )
+    gen = _make_generator(tmp_path)
+
+    meta = gen._bootstrap_deterministic_seed_corpus("png_process_data")
+
+    corpus_dir = fuzz_dir / "corpus" / "png_process_data"
+    files = sorted(p for p in corpus_dir.iterdir() if p.is_file())
+    assert int(meta["counts"]["deterministic"]) >= 4
+    assert any(p.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for p in files)
+    assert "deterministic" in meta["sources"]
+    coverage = dict(meta["seed_family_coverage"])
+    assert "png_signature" in set(coverage.get("covered") or [])
+    assert gen.last_seed_bootstrap_by_fuzzer["png_process_data"]["generation_mode"] == "deterministic_no_ai"
 
 
 def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
