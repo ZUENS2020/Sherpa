@@ -135,6 +135,54 @@ def test_finalize_stage_result_merges_context_and_clears_restart_fields(monkeypa
     assert stage_record["result"] == stage_result
 
 
+def test_finalize_stage_result_preserves_worker_written_context(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    context_dir = repo_root / "fuzz" / "context"
+    context_dir.mkdir(parents=True)
+    monkeypatch.setattr(web_main, "_job_update", lambda *_args, **_kwargs: None)
+
+    web_main.write_context_docs(
+        context_dir,
+        control={"run_parallel_fuzzers_override": "1"},
+        workflow={
+            "run_details": [
+                {
+                    "fuzzer": "png_read_image",
+                    "target_name": "png_read_image",
+                    "target_api": "png_read_image",
+                    "target_type": "image",
+                    "final_cov": 27,
+                }
+            ],
+            "coverage_target_name": "png_read_image",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "image",
+        },
+        job_id="j1",
+    )
+
+    _repo_root, _context_dir, _next_control, next_workflow, _stage_record = web_main._finalize_stage_result(
+        stage_result={
+            "repo_root": str(repo_root),
+            "workflow_recommended_next": "per-input-replay",
+            "coverage_should_improve": True,
+        },
+        stage="run",
+        job_name="job-run",
+        stage_failed=False,
+        current_repo_root=str(repo_root),
+        context_dir=str(context_dir),
+        control_ctx={},
+        workflow_ctx={},
+        job_id="j1",
+    )
+
+    assert next_workflow["run_details"][0]["fuzzer"] == "png_read_image"
+    assert next_workflow["run_details"][0]["target_type"] == "image"
+    assert next_workflow["coverage_target_type"] == "image"
+    assert next_workflow["coverage_should_improve"] is True
+
+
 def test_finalize_stage_result_non_dict_keeps_minimal_record() -> None:
     repo_root, context_dir, next_control, next_workflow, stage_record = web_main._finalize_stage_result(
         stage_result="ok",
