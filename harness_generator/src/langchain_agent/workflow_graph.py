@@ -12038,6 +12038,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
         prev_cov = max(0, int(state.get("coverage_last_max_cov") or 0))
         prev_ft = max(0, int(state.get("coverage_last_ft") or 0))
+        best_cov = max(prev_cov, current_cov)
+        best_ft = max(prev_ft, current_ft)
         prev_plateau_streak = max(0, int(state.get("coverage_plateau_streak") or 0))
         current_seed_profile = str(state.get("coverage_seed_profile") or "")
         current_depth_score = int(state.get("coverage_target_depth_score") or 0)
@@ -12349,8 +12351,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_selection_bias_reason": current_selection_bias_reason,
             "coverage_target_score_breakdown": selected_target_score_breakdown,
             "coverage_plateau_streak": plateau_streak,
-            "coverage_last_max_cov": current_cov,
-            "coverage_last_ft": current_ft,
+            "coverage_last_max_cov": best_cov,
+            "coverage_last_ft": best_ft,
             "coverage_replan_required": replan_required,
             "coverage_replan_reason": replan_reason or str(state.get("coverage_replan_reason") or ""),
             "coverage_improve_mode": improve_mode,
