@@ -5,10 +5,46 @@ from typing import Any
 import workflow_common as _wf_common
 
 
+_BINARY_FORMAT_HINTS = {
+    "png",
+    "libpng",
+    "ihdr",
+    "plte",
+    "idat",
+    "iend",
+    "iccp",
+    "splt",
+    "jpeg",
+    "jpg",
+    "gif",
+    "webp",
+    "tiff",
+    "bmp",
+    "zip",
+    "gzip",
+    "zlib",
+    "deflate",
+    "inflate",
+    "archive",
+    "chunk",
+    "crc",
+    "checksum",
+}
+
+
+def _looks_like_binary_format_parser(*parts: str) -> bool:
+    text = " ".join(p for p in parts if p).lower()
+    if not text:
+        return False
+    return any(hint in text for hint in _BINARY_FORMAT_HINTS)
+
+
 def infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
     normalized_target_type = str(target_type or "").strip().lower()
     text = f"{name}\n{context}".lower()
     if normalized_target_type == "parser":
+        if _looks_like_binary_format_parser(name, context):
+            return "decoder-binary"
         if any(tok in text for tok in ("arg_id", "argument id", "positional", "named argument", "named arg", "number", "numeric")):
             return "parser-numeric"
         if any(tok in text for tok in ("format", "replacement field", "specifier", "brace", "printf", "fmt")):
@@ -34,6 +70,8 @@ def normalize_seed_profile(seed_profile: str, *, target_type: str, name: str, co
         normalized = ""
     if not normalized or normalized == "pending":
         return infer_seed_profile(name, context, target_type=normalized_target_type)
+    if normalized_target_type == "parser" and normalized.startswith("parser-") and _looks_like_binary_format_parser(name, context):
+        return "decoder-binary"
     if normalized_target_type != "parser" and normalized.startswith("parser-"):
         return infer_seed_profile(name, context, target_type=normalized_target_type)
     return normalized
