@@ -63,6 +63,8 @@ Use this skill in repair mode when the previous build failed.
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 - Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
 - Do not satisfy coverage replay by symlinking/copying primary fuzzers into `fuzz/out/replay/`; replay binaries must be separately linked with LLVM profile coverage instrumentation and must be runnable executables, not `fuzzer-no-link` objects without `main()`.
+- Coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`.
+- Do not link replay binaries against non-instrumented static libraries when function/path coverage is expected.
 - Generated headers must be discoverable: when CMake/configure emits headers into a build directory, add that CMake build directory to every primary and replay compile command before retrying the same build strategy.
 - Contrib/example/demo target calls must resolve their owning source: compile the owning source file alongside the harness, or switch the harness to a public library API if the source is not safe to link.
 - Do not call a static example helper directly from a harness; static example helpers are not linkable API and example sources that define `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded.
