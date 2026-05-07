@@ -1929,6 +1929,7 @@ def _finalize_stage_result(
         next_context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
         if next_context_dir and next_context_dir != context_dir:
             context_dir = next_context_dir
+        if context_dir:
             control_doc, workflow_doc = read_context_docs(
                 context_dir,
                 job_id=job_id,
