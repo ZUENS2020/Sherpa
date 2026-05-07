@@ -2142,6 +2142,45 @@ def test_node_coverage_analysis_preserves_target_identity_separate_from_api():
     assert out["coverage_target_type"] == "image"
 
 
+def test_node_coverage_analysis_restores_target_type_from_run_details():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 2,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_target_type": "",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": [],
+                "cold_start_failure": False,
+                "seed_score": 0.9,
+                "early_new_units_30s": 4,
+            },
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "decoder",
+                    "final_cov": 10,
+                    "final_ft": 20,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "png_process_data"
+    assert out["coverage_target_api"] == "png_process_data"
+    assert out["coverage_target_type"] == "decoder"
+
+
 def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
