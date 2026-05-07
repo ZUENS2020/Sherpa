@@ -65,7 +65,7 @@ Goal:
 Required outputs:
 - `fuzz/analysis_context.json` (system-generated context marker; read it, do not rewrite it wholesale)
 - `fuzz/vuln_hypotheses.md` (small AI advisory output)
-- `fuzz/vuln_candidates.json`
+- `fuzz/vuln_candidates.json` is system-generated input; read it, do not rewrite it
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
 - `fuzz/analysis_context.json.analysis_evidence.security_evidence`
@@ -77,17 +77,19 @@ Constraints:
 - Read-only exploration commands are allowed.
 - This stage is analysis-only: do not modify repository business source files.
 - Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
-- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
+- Bounded analysis mode: after reading required files, use at most 6 additional MCP/tool reads in the first pass.
+- Prefer existing system-generated `security_evidence[]` and `vuln_candidates.json`; treat them as sufficient unless empty or corrupt.
+- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools only if needed (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`).
+- Do not call semantic/comprehension MCP tools in the first pass unless the coordinator explicitly asks for semantic enrichment.
+- After one bounded evidence pass, write `fuzz/vuln_hypotheses.md` and `./done` immediately. Do not keep exploring after producing a coherent top 3-8 hypothesis set.
 - If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/vuln_hypotheses.md`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
 - Do not rewrite the full `fuzz/analysis_context.json`; it is a system-generated fact artifact and can be large.
-- Write concise AI advisory analysis to `fuzz/vuln_hypotheses.md` instead. Keep it small and cite existing `evidence_id` values.
+- Write concise AI advisory analysis to `fuzz/vuln_hypotheses.md` instead. Keep it under 120 lines and cite existing `evidence_id` values.
 - For each vulnerability hypothesis, include:
   - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
   - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
-- Also write `fuzz/vuln_candidates.json` as the machine-readable vulnerability candidate worklist:
-  - top-level `schema_version`, `updated_at`, `candidate_count`, `candidates`
-  - each candidate includes `candidate_id`, `source_stage=analysis`, `validation_status=pending`, `target_api`, `target_name`, `target_type`, `signal_type`, `vuln_likelihood`, `exploitability`, `reachability_confidence`, `priority`, `evidence_ids`, and `attack_hint`.
+- Do not write `fuzz/vuln_candidates.json`; it is the system-generated machine-readable vulnerability candidate worklist.
 
 Security analysis (vulnerability-directed):
 - Identify unsafe memory operations: unchecked memcpy/memmove/strcpy, raw pointer arithmetic, manual buffer management without bounds validation
