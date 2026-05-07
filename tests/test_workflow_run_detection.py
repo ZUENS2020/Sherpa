@@ -1333,6 +1333,39 @@ def test_node_coverage_analysis_replans_after_second_plateau_without_gain():
     assert out["coverage_plateau_streak"] == 2
 
 
+def test_node_coverage_analysis_preserves_best_coverage_state():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 2,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_last_max_cov": 185,
+            "coverage_last_ft": 384,
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data",
+                    "final_cov": 183,
+                    "final_ft": 380,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_last_max_cov"] == 185
+    assert out["coverage_last_ft"] == 384
+    assert out["coverage_history"][-1]["max_cov"] == 183
+    assert out["coverage_history"][-1]["max_ft"] == 380
+    assert out["coverage_history"][-1]["prev_cov"] == 185
+    assert out["coverage_history"][-1]["prev_ft"] == 384
+
+
 def test_node_coverage_analysis_stops_when_replan_budget_exhausted():
     out = workflow_graph._node_coverage_analysis(
         {
