@@ -221,6 +221,22 @@ VCPKG_PORT_ALIASES: Dict[str, str] = {
     "xml2": "libxml2",
     "libxml": "libxml2",
 }
+DEFAULT_VCPKG_SKIP_PORTS = {
+    # These are base toolchain/runtime libraries in the native image. Let the
+    # generated build script discover/link them instead of bootstrapping vcpkg.
+    "zlib",
+}
+
+
+def _vcpkg_skip_ports() -> set[str]:
+    raw = os.environ.get("SHERPA_VCPKG_SKIP_PORTS")
+    if raw is None:
+        return set(DEFAULT_VCPKG_SKIP_PORTS)
+    return {
+        VCPKG_PORT_ALIASES.get(token.strip().lower(), token.strip().lower())
+        for token in re.split(r"[,:\s]+", raw)
+        if token.strip()
+    }
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -2260,11 +2276,14 @@ class NonOssFuzzHarnessGenerator:
             return []
         ports: list[str] = []
         seen: set[str] = set()
+        skip_ports = _vcpkg_skip_ports()
         try:
             for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = raw_line.split("#", 1)[0].strip().lower()
                 norm = _normalize_port(line)
                 if not norm:
+                    continue
+                if norm in skip_ports:
                     continue
                 if norm in seen:
                     continue
@@ -2332,6 +2351,7 @@ class NonOssFuzzHarnessGenerator:
             repo_root="$(cd "$(dirname "$dep_file")/.." && pwd -P)"
             vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
             vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
+            skip_ports="${{SHERPA_VCPKG_SKIP_PORTS:-zlib}}"
 
             pkgs=""
             if [ -f "$dep_file" ]; then
@@ -2356,6 +2376,19 @@ class NonOssFuzzHarnessGenerator:
                     if [ "$mapped" != "$pkg" ]; then
                         echo "[warn] ({log_prefix}) normalized package token '$pkg' -> '$mapped' (vcpkg port)"
                     fi
+                    skip_this=0
+                    for skip_port in $(printf '%s' "$skip_ports" | tr ',:' '  '); do
+                        skip_port="$(printf '%s' "$skip_port" | tr '[:upper:]' '[:lower:]')"
+                        case "$skip_port" in
+                            z|libz|libz-dev|zlib-dev|zlib1g|zlib1g-dev) skip_port="zlib" ;;
+                        esac
+                        if [ "$mapped" = "$skip_port" ]; then
+                            echo "[*] ({log_prefix}) using native/system '$mapped'; skip vcpkg install"
+                            skip_this=1
+                            break
+                        fi
+                    done
+                    [ "$skip_this" -eq 0 ] || continue
                     case " $pkgs " in
                         *" $mapped "*) ;;
                         *) pkgs="$pkgs $mapped" ;;

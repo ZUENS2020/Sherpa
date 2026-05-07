@@ -90,7 +90,7 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     log_path = tmp_path / "vcpkg.log"
     bin_dir = tmp_path / "bin"
@@ -130,9 +130,46 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert rc == 0
     assert "native-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "list zlib:" in log_text
+    assert "list bzip2:" in log_text
     assert "install --triplet" in log_text
-    assert "zlib" in log_text
+    assert "bzip2" in log_text
+
+
+def test_run_cmd_skips_builtin_zlib_vcpkg_by_default(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    log_path = tmp_path / "vcpkg.log"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(f"#!/bin/sh\necho \"$@\" >> {log_path}\nexit 1\n", encoding="utf-8")
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho zlib-native-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "zlib-native-ok" in out
+    assert not log_path.exists()
+    assert gen._declared_vcpkg_ports(repo_root=tmp_path) == []
 
 
 def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
@@ -146,7 +183,7 @@ def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
 
     ports = gen._declared_vcpkg_ports(repo_root=tmp_path)
 
-    assert ports == ["zlib", "bzip2", "liblzma", "lz4"]
+    assert ports == ["bzip2", "liblzma", "lz4"]
 
 
 def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path):
@@ -190,7 +227,7 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     assert rc == 0
     assert "alias-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "list zlib:" in log_text
+    assert "list zlib:" not in log_text
     assert "list bzip2:" in log_text
     assert "list liblzma:" in log_text
     assert "list lz4:" in log_text
@@ -202,7 +239,6 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     assert "list lzma:" not in log_text
     assert dep_file.read_text(encoding="utf-8") == (
         "# Auto-normalized to vcpkg port names.\n"
-        "zlib\n"
         "bzip2\n"
         "liblzma\n"
         "lz4\n"
@@ -211,7 +247,7 @@ def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path)
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     build_script = fuzz_dir / "build.sh"
     build_script.write_text("#!/bin/sh\necho should-not-run\n", encoding="utf-8")
@@ -247,7 +283,7 @@ def test_run_cmd_retries_transient_vcpkg_lock_before_install_failure(tmp_path: P
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     state_file = tmp_path / "vcpkg-install-attempts"
     vcpkg_dir = tmp_path / "vcpkg"
@@ -297,7 +333,7 @@ def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     clone_log = tmp_path / "clone.log"
     git_bin_dir = tmp_path / "bin"
