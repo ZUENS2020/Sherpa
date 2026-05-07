@@ -87,6 +87,42 @@ def normalize_target_identity(*, target_name: str, target_api: str) -> dict[str,
     return {"target_name": name, "target_api": api}
 
 
+def _normalize_identity_token(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _target_type_from_run_details(
+    run_details: Any,
+    *,
+    target_name: str,
+    target_api: str,
+) -> str:
+    if not isinstance(run_details, list):
+        return ""
+    wanted = {
+        _normalize_identity_token(target_name),
+        _normalize_identity_token(target_api),
+    }
+    wanted.discard("")
+    details = [item for item in run_details if isinstance(item, dict)]
+    for detail in details:
+        candidates = {
+            _normalize_identity_token(str(detail.get("target_name") or "")),
+            _normalize_identity_token(str(detail.get("target_api") or "")),
+            _normalize_identity_token(str(detail.get("fuzzer") or "")),
+        }
+        if wanted and not (wanted & candidates):
+            continue
+        target_type = str(detail.get("target_type") or "").strip().lower()
+        if target_type:
+            return target_type
+    for detail in details:
+        target_type = str(detail.get("target_type") or "").strip().lower()
+        if target_type:
+            return target_type
+    return ""
+
+
 def normalize_target_row(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row or {})
     target_name = str(out.get("target_name") or out.get("target") or out.get("name") or "").strip()
@@ -117,6 +153,14 @@ def normalize_workflow_context(doc: dict[str, Any]) -> dict[str, Any]:
         out["coverage_target_name"] = identity["target_name"]
         out["coverage_target_api"] = identity["target_api"]
     target_type = str(out.get("coverage_target_type") or "").strip().lower()
+    if not target_type:
+        target_type = _target_type_from_run_details(
+            out.get("run_details"),
+            target_name=str(out.get("coverage_target_name") or ""),
+            target_api=str(out.get("coverage_target_api") or ""),
+        )
+        if target_type:
+            out["coverage_target_type"] = target_type
     if "coverage_seed_profile" in out and target_type:
         out["coverage_seed_profile"] = normalize_seed_profile(
             str(out.get("coverage_seed_profile") or ""),
