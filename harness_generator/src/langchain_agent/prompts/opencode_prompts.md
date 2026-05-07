@@ -302,6 +302,7 @@ Stage requirements:
 - If external deps are required, write canonical vcpkg port names to `fuzz/system_packages.txt` (one per line).
 - In `fuzz/build.py`, include:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
+  - CMake projects: invoke the system `cmake` binary directly; do not use `python -m cmake` or `sys.executable, "-m", "cmake"`
   - runtime artifact discovery (do not hardcode a single static library path)
   - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
   - generated headers include path: if CMake/configure emits headers into a build directory, include that CMake build directory in both primary and replay compile commands

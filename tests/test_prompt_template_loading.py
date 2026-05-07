@@ -167,6 +167,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "DEFAULT_CMAKE_ARGS" in synth
     assert "-DENABLE_TEST=OFF" in synth
     assert "-DENABLE_INSTALL=OFF" in synth
+    assert "do not use `python -m cmake`" in synth
     assert "read-only exploration commands are allowed" in synth.lower()
     assert "Do NOT run build/execute commands." in synth
     assert "Prefer public/stable repository APIs for harness logic." in synth
@@ -275,6 +276,8 @@ def test_stage_skills_include_exact_build_template_block():
         assert "## Command policy" in text
         assert "## Done contract" in text
         assert 'DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]' in text
+        assert "python -m cmake" in text
+        assert "system `cmake` binary" in text
         assert "def find_static_lib(repo_root):" in text
         assert '["find", str(repo_root), "-name", "*.a", "-type", "f"]' in text
         assert "capture_output=True, text=True, timeout=60" in text
