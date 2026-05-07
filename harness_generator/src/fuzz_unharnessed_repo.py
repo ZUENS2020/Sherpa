@@ -6904,22 +6904,36 @@ EOF
 
         capture_max_bytes = _bounded_env_int("SHERPA_CMD_CAPTURE_MAX_BYTES", 4 * 1024 * 1024)
         live_max_bytes = _bounded_env_int("SHERPA_CMD_LIVE_MAX_BYTES", 512 * 1024)
+        queue_max_bytes = _bounded_env_int(
+            "SHERPA_CMD_QUEUE_MAX_BYTES",
+            max(live_max_bytes, min(capture_max_bytes, 1024 * 1024)),
+        )
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
         capture_bytes = {"stdout": 0, "stderr": 0}
         capture_truncated = {"stdout": False, "stderr": False}
         live_bytes = {"stdout": 0, "stderr": 0}
         live_suppressed = {"stdout": False, "stderr": False}
+        enqueued_bytes = {"stdout": 0, "stderr": 0}
+        reader_dropped = {"stdout": False, "stderr": False}
         reader_eof = object()
         out_queue: queue.Queue[tuple[str, str] | object] = queue.Queue()
+        callback_lock = threading.Lock()
 
         def _append_bounded(kind: str, text: str) -> None:
             chunks = stdout_chunks if kind == "stdout" else stderr_chunks
             if capture_max_bytes <= 0:
                 capture_truncated[kind] = True
                 return
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            if text_bytes > capture_max_bytes:
+                # Preserve the newest diagnostic tail even when a single queued
+                # chunk is larger than the capture budget.
+                text = text[-capture_max_bytes:]
+                text_bytes = len(text.encode("utf-8", errors="replace"))
+                capture_truncated[kind] = True
             chunks.append(text)
-            capture_bytes[kind] += len(text.encode("utf-8", errors="replace"))
+            capture_bytes[kind] += text_bytes
             while capture_bytes[kind] > capture_max_bytes and chunks:
                 removed = chunks.pop(0)
                 capture_bytes[kind] -= len(removed.encode("utf-8", errors="replace"))
@@ -6944,13 +6958,63 @@ EOF
                 )
                 live_suppressed[kind] = True
 
+        def _record_callback(kind: str, text: str) -> None:
+            nonlocal callback_stop_reason
+            if line_callback is None or callback_stop_reason:
+                return
+            try:
+                reason = str(line_callback(kind, text) or "").strip()
+            except Exception:
+                reason = ""
+            if reason:
+                with callback_lock:
+                    if not callback_stop_reason:
+                        callback_stop_reason = reason
+
         def _reader(pipe: Optional[object], kind: str) -> None:
+            tail_chunks: List[str] = []
+            tail_bytes = 0
+
+            def _keep_tail(text: str) -> None:
+                nonlocal tail_bytes
+                if capture_max_bytes <= 0:
+                    return
+                tail_chunks.append(text)
+                tail_bytes += len(text.encode("utf-8", errors="replace"))
+                while tail_bytes > capture_max_bytes and tail_chunks:
+                    removed = tail_chunks.pop(0)
+                    tail_bytes -= len(removed.encode("utf-8", errors="replace"))
+
             try:
                 if pipe is None:
                     return
                 for line in pipe:
+                    _record_callback(kind, line)
+                    if queue_max_bytes <= 0 or enqueued_bytes[kind] >= queue_max_bytes:
+                        if not reader_dropped[kind]:
+                            reader_dropped[kind] = True
+                            out_queue.put(
+                                (
+                                    kind,
+                                    "\n"
+                                    f"[sherpa-output-reader-dropped] {kind} exceeded "
+                                    f"{queue_max_bytes} queued bytes; draining pipe and keeping tail only\n",
+                                )
+                            )
+                        _keep_tail(line)
+                        continue
                     out_queue.put((kind, line))
+                    enqueued_bytes[kind] += len(line.encode("utf-8", errors="replace"))
             finally:
+                if reader_dropped[kind] and tail_chunks:
+                    out_queue.put(
+                        (
+                            kind,
+                            "\n"
+                            f"[sherpa-output-reader-tail] {kind} tail after dropped backlog\n"
+                            + "".join(tail_chunks),
+                        )
+                    )
                 out_queue.put(reader_eof)
 
         t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
@@ -6980,6 +7044,9 @@ EOF
                     item = out_queue.get(timeout=0.2)
                 except queue.Empty:
                     # Queue timeout only means "no new output yet", not reader EOF.
+                    if callback_stop_reason:
+                        timed_out = True
+                        break
                     continue
 
                 if item is reader_eof:
@@ -6995,14 +7062,9 @@ EOF
                         # Keep stderr visible in real-time, but cap noisy libraries.
                         _maybe_print_live("stderr", safe_text)
                     last_activity = time.monotonic()
-                    if line_callback is not None:
-                        try:
-                            callback_stop_reason = str(line_callback(kind, safe_text) or "").strip()
-                        except Exception:
-                            callback_stop_reason = ""
-                        if callback_stop_reason:
-                            timed_out = True
-                            break
+                    if callback_stop_reason:
+                        timed_out = True
+                        break
 
                 if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
                     idle_timed_out = True
@@ -7065,6 +7127,18 @@ EOF
             err = (
                 f"[sherpa-output-truncated] stderr exceeded {capture_max_bytes} bytes; "
                 "kept captured tail only\n"
+            ) + err
+        if reader_dropped["stdout"] and "[sherpa-output-reader-dropped]" not in out:
+            out = (
+                f"[sherpa-output-reader-dropped] stdout exceeded {queue_max_bytes} queued bytes; "
+                "dropped middle backlog\n"
+                "[sherpa-output-reader-tail] stdout tail kept after dropped backlog\n"
+            ) + out
+        if reader_dropped["stderr"] and "[sherpa-output-reader-dropped]" not in err:
+            err = (
+                f"[sherpa-output-reader-dropped] stderr exceeded {queue_max_bytes} queued bytes; "
+                "dropped middle backlog\n"
+                "[sherpa-output-reader-tail] stderr tail kept after dropped backlog\n"
             ) + err
         if callback_stop_reason:
             err = (err or "") + f"\n[callback-stop] {callback_stop_reason}"
