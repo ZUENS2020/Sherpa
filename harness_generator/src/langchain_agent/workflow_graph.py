@@ -2999,6 +2999,40 @@ def _preferred_execution_target(
     return matched or _primary_execution_target(execution_targets)
 
 
+def _target_type_from_run_details(
+    run_details: list[dict[str, Any]] | None,
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> str:
+    details = [detail for detail in list(run_details or []) if isinstance(detail, dict)]
+    if not details:
+        return ""
+    wanted = {
+        _normalize_exec_target_token(target_name),
+        _normalize_exec_target_token(target_api),
+        _normalize_exec_target_token(fuzzer_name),
+    }
+    wanted.discard("")
+    for detail in details:
+        candidates = {
+            _normalize_exec_target_token(str(detail.get("target_name") or "")),
+            _normalize_exec_target_token(str(detail.get("target_api") or "")),
+            _normalize_exec_target_token(str(detail.get("fuzzer") or "")),
+        }
+        if wanted and not (wanted & candidates):
+            continue
+        target_type = str(detail.get("target_type") or "").strip()
+        if target_type:
+            return target_type
+    for detail in details:
+        target_type = str(detail.get("target_type") or "").strip()
+        if target_type:
+            return target_type
+    return ""
+
+
 def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
     if not bins or not execution_targets:
         return list(bins)
@@ -11734,6 +11768,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         coverage_target_name = str(preferred_identity.get("target_name") or "").strip()
         coverage_target_api = str(preferred_identity.get("target_api") or "").strip()
         coverage_target_type = str(preferred_identity.get("target_type") or "").strip()
+        if not coverage_target_type:
+            coverage_target_type = _target_type_from_run_details(
+                run_details,
+                target_name=coverage_target_name,
+                target_api=coverage_target_api,
+                fuzzer_name=str(preferred_identity.get("expected_fuzzer_name") or ""),
+            )
         coverage_seed_profile = str(preferred_identity.get("seed_profile") or last_seed_profile or "").strip()
 
         out = {
@@ -12138,7 +12179,17 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
             "coverage_frontier_summary": dict(replay.frontier_summary or {}),
             "coverage_target_name": str(preferred_identity.get("target_name") or state.get("coverage_target_name") or ""),
             "coverage_target_api": str(preferred_identity.get("target_api") or state.get("coverage_target_api") or ""),
-            "coverage_target_type": str(preferred_identity.get("target_type") or state.get("coverage_target_type") or ""),
+            "coverage_target_type": str(
+                preferred_identity.get("target_type")
+                or state.get("coverage_target_type")
+                or _target_type_from_run_details(
+                    run_details,
+                    target_name=str(preferred_identity.get("target_name") or state.get("coverage_target_name") or ""),
+                    target_api=str(preferred_identity.get("target_api") or state.get("coverage_target_api") or ""),
+                    fuzzer_name=fuzzer_name,
+                )
+                or ""
+            ),
             "coverage_replay_runtime_sec": float(replay.runtime_sec),
             "coverage_replay_binary_hash": str(replay.binary_hash or ""),
             "coverage_replay_stage_success": bool(replay.stage_success),
@@ -12218,6 +12269,12 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             current_target_name = str(preferred_identity.get("target_name") or current_target_name)
             current_target_api = str(preferred_identity.get("target_api") or current_target_api)
             current_target_type = str(preferred_identity.get("target_type") or current_target_type)
+        if not current_target_type:
+            current_target_type = _target_type_from_run_details(
+                run_details,
+                target_name=current_target_name,
+                target_api=current_target_api,
+            )
         selected_target_score_breakdown: dict[str, Any] = {}
         try:
             for item in _load_selected_targets_doc(analysis_repo_root):
