@@ -86,6 +86,33 @@ def test_run_cmd_keeps_stream_loop_open_while_process_is_silent(tmp_path: Path):
     assert "late-err" in err
 
 
+def test_run_cmd_caps_noisy_stderr_but_keeps_tail(tmp_path: Path, monkeypatch, capsys):
+    gen = _fake_generator(tmp_path)
+    monkeypatch.setenv("SHERPA_CMD_CAPTURE_MAX_BYTES", "512")
+    monkeypatch.setenv("SHERPA_CMD_LIVE_MAX_BYTES", "256")
+    script = (
+        "import sys;"
+        "[print(f'noise-{i:04d}-' + 'x'*80, file=sys.stderr, flush=True) for i in range(80)]"
+    )
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert out == ""
+    assert "[sherpa-output-truncated]" in err
+    assert "noise-0079" in err
+    assert "noise-0000" not in err
+    assert "[sherpa-live-output-suppressed]" in captured.out
+    assert captured.out.count("noise-") < 20
+
+
 def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
