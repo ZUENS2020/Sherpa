@@ -2889,6 +2889,136 @@ def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _execution_plan_targets(repo_root: Path) -> list[dict[str, Any]]:
+    doc = _load_execution_plan_doc(repo_root)
+    return [item for item in list(doc.get("execution_targets") or []) if isinstance(item, dict)]
+
+
+def _execution_target_sort_key(item: dict[str, Any], index: int) -> tuple[int, int]:
+    try:
+        priority = int(item.get("execution_priority") or index + 1)
+    except Exception:
+        priority = index + 1
+    must_run_rank = 0 if bool(item.get("must_run", True)) else 1
+    return (must_run_rank, priority)
+
+
+def _primary_execution_target(execution_targets: list[dict[str, Any]]) -> dict[str, Any]:
+    if not execution_targets:
+        return {}
+    indexed = [(item, idx) for idx, item in enumerate(execution_targets)]
+    indexed.sort(key=lambda pair: _execution_target_sort_key(pair[0], pair[1]))
+    return dict(indexed[0][0])
+
+
+def _execution_target_fuzzer_name(item: dict[str, Any]) -> str:
+    return str(
+        item.get("expected_fuzzer_name")
+        or item.get("wrapper_fuzzer_name")
+        or item.get("target_name")
+        or item.get("name")
+        or ""
+    ).strip()
+
+
+def _execution_target_identity(item: dict[str, Any]) -> dict[str, str]:
+    target_name = str(item.get("target_name") or item.get("name") or "").strip()
+    target_api = str(item.get("api") or target_name).strip()
+    target_type = str(item.get("target_type") or "").strip()
+    seed_profile = str(item.get("seed_profile") or "").strip()
+    expected_fuzzer_name = _execution_target_fuzzer_name(item)
+    identity = _wf_norm.normalize_target_identity(target_name=target_name, target_api=target_api)
+    return {
+        "target_name": identity["target_name"],
+        "target_api": identity["target_api"],
+        "target_type": target_type,
+        "seed_profile": seed_profile,
+        "expected_fuzzer_name": expected_fuzzer_name,
+    }
+
+
+def _execution_target_matches_token(item: dict[str, Any], token: str) -> bool:
+    normalized = _normalize_exec_target_token(token)
+    if not normalized:
+        return False
+    identity = _execution_target_identity(item)
+    candidates = [
+        identity.get("target_name", ""),
+        identity.get("target_api", ""),
+        identity.get("expected_fuzzer_name", ""),
+        str(item.get("wrapper_fuzzer_name") or ""),
+        str(item.get("source_path") or ""),
+    ]
+    return normalized in {_normalize_exec_target_token(value) for value in candidates if str(value or "").strip()}
+
+
+def _find_execution_target_for_tokens(
+    execution_targets: list[dict[str, Any]],
+    tokens: list[str],
+) -> dict[str, Any]:
+    for token in tokens:
+        for item in execution_targets:
+            if _execution_target_matches_token(item, token):
+                return dict(item)
+    return {}
+
+
+def _preferred_execution_target(
+    execution_targets: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    run_details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not execution_targets:
+        return {}
+    tokens: list[str] = []
+    for snap_key in ("latest_vuln_decision_snapshot", "latest_decision_snapshot"):
+        snap = state.get(snap_key)
+        if isinstance(snap, dict):
+            tokens.extend(
+                [
+                    str(snap.get("selected_target") or ""),
+                    str(snap.get("selected_api") or ""),
+                    str(snap.get("top_vuln_candidate") or ""),
+                ]
+            )
+    tokens.extend(
+        [
+            str(state.get("coverage_target_name") or ""),
+            str(state.get("coverage_target_api") or ""),
+            str(state.get("selected_target_api") or ""),
+            str(state.get("synthesize_selected_target_name") or ""),
+            str(state.get("synthesize_selected_target_api") or ""),
+            str(state.get("last_fuzzer") or ""),
+        ]
+    )
+    for detail in run_details or []:
+        if isinstance(detail, dict):
+            tokens.append(str(detail.get("fuzzer") or ""))
+    matched = _find_execution_target_for_tokens(execution_targets, tokens)
+    return matched or _primary_execution_target(execution_targets)
+
+
+def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
+    if not bins or not execution_targets:
+        return list(bins)
+    by_name = {p.name: p for p in bins}
+    by_stem = {p.stem: p for p in bins}
+    ordered: list[Path] = []
+    for item in sorted(
+        enumerate(execution_targets),
+        key=lambda pair: _execution_target_sort_key(pair[1], pair[0]),
+    ):
+        expected = _execution_target_fuzzer_name(item[1])
+        candidate = by_name.get(expected) or by_stem.get(Path(expected).stem)
+        if candidate is not None and candidate not in ordered:
+            ordered.append(candidate)
+    for p in bins:
+        if p not in ordered:
+            ordered.append(p)
+    return ordered
+
+
 def _discover_harness_sources(repo_root: Path) -> list[Path]:
     fuzz_dir = repo_root / "fuzz"
     if not fuzz_dir.is_dir():
@@ -11013,11 +11143,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_noise_rejected_count = 0
         missing_execution_targets: list[str] = []
         seed_family_coverage_state: dict[str, Any] = {}
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
-        execution_targets = [
-            item for item in list(execution_plan_doc.get("execution_targets") or [])
-            if isinstance(item, dict)
-        ]
+        execution_targets = _execution_plan_targets(gen.repo_root)
+        bins = _order_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
+        preferred_target = _preferred_execution_target(execution_targets, cast(dict[str, Any], state))
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        execution_target_by_fuzzer: dict[str, dict[str, Any]] = {}
+        for item in execution_targets:
+            expected = _execution_target_fuzzer_name(item)
+            if expected:
+                execution_target_by_fuzzer[expected] = dict(item)
         bins_by_name = {p.name: p for p in bins}
         bins_by_stem = {p.stem: p for p in bins}
         seed_fuzzers: list[Path] = []
@@ -11412,6 +11546,18 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             run_details.append(
                 {
                     "fuzzer": fuzzer_name,
+                    "target_name": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_name")
+                        or ""
+                    ),
+                    "target_api": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_api")
+                        or ""
+                    ),
+                    "target_type": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_type")
+                        or ""
+                    ),
                     "rc": rc,
                     "effective_rc": rc,
                     "crash_found": bool(run.crash_found),
@@ -11585,6 +11731,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             if bool(sq.get("cold_start_failure")):
                 cold_start_failure_any = True
 
+        coverage_target_name = str(preferred_identity.get("target_name") or "").strip()
+        coverage_target_api = str(preferred_identity.get("target_api") or "").strip()
+        coverage_target_type = str(preferred_identity.get("target_type") or "").strip()
+        coverage_seed_profile = str(preferred_identity.get("seed_profile") or last_seed_profile or "").strip()
+
         out = {
             **state,
             "last_step": "run",
@@ -11610,23 +11761,16 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
-                str(state.get("synthesize_selected_target_name") or "").strip()
-                or last_fuzzer
-                or next(
-                    (
-                        str(detail.get("fuzzer") or "").strip()
-                        for detail in run_details
-                        if str(detail.get("fuzzer") or "").strip()
-                    ),
-                    str(state.get("coverage_target_name") or ""),
-                )
+                coverage_target_name
+                or str(state.get("coverage_target_name") or "").strip()
             ),
             "coverage_target_api": (
-                str(state.get("synthesize_observed_target_api") or "").strip()
+                coverage_target_api
+                or str(state.get("coverage_target_api") or "").strip()
                 or str(state.get("selected_target_api") or "").strip()
             ),
-            "coverage_target_type": str(state.get("coverage_target_type") or ""),
-            "coverage_seed_profile": last_seed_profile,
+            "coverage_target_type": coverage_target_type or str(state.get("coverage_target_type") or ""),
+            "coverage_seed_profile": coverage_seed_profile,
             "coverage_seed_quality": aggregated_seed_quality,
             "coverage_seed_families_suggested": list(
                 families_suggested_values
@@ -11930,8 +12074,15 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
     _wf_log(cast(dict[str, Any], state), "-> per-input-replay")
     try:
         run_details = list(state.get("run_details") or [])
-        fuzzer_name = ""
-        if run_details:
+        execution_targets = _execution_plan_targets(gen.repo_root)
+        preferred_target = _preferred_execution_target(
+            execution_targets,
+            cast(dict[str, Any], state),
+            run_details=run_details,
+        )
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        fuzzer_name = str(preferred_identity.get("expected_fuzzer_name") or "").strip()
+        if not fuzzer_name and run_details:
             fuzzer_name = str(run_details[0].get("fuzzer") or "").strip()
         if not fuzzer_name:
             fuzzer_name = str(state.get("last_fuzzer") or state.get("coverage_target_name") or "").strip()
@@ -11968,7 +12119,8 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
             fuzzer_name=fuzzer_name,
             replay_binary=replay_binary,
             target_api=str(
-                state.get("coverage_target_api")
+                preferred_identity.get("target_api")
+                or state.get("coverage_target_api")
                 or state.get("selected_target_api")
                 or state.get("synthesize_selected_target_api")
                 or ""
@@ -11981,6 +12133,9 @@ def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunti
             "coverage_per_input_manifest_path": replay.manifest_path,
             "coverage_frontier_path": replay.frontier_path,
             "coverage_frontier_summary": dict(replay.frontier_summary or {}),
+            "coverage_target_name": str(preferred_identity.get("target_name") or state.get("coverage_target_name") or ""),
+            "coverage_target_api": str(preferred_identity.get("target_api") or state.get("coverage_target_api") or ""),
+            "coverage_target_type": str(preferred_identity.get("target_type") or state.get("coverage_target_type") or ""),
             "coverage_replay_runtime_sec": float(replay.runtime_sec),
             "coverage_replay_binary_hash": str(replay.binary_hash or ""),
             "coverage_replay_stage_success": bool(replay.stage_success),
@@ -12048,6 +12203,18 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_ft = 0
         current_target_name = str(state.get("coverage_target_name") or "")
         current_target_api = str(state.get("coverage_target_api") or "")
+        current_target_type = str(state.get("coverage_target_type") or "")
+        execution_targets = _execution_plan_targets(analysis_repo_root)
+        preferred_target = _preferred_execution_target(
+            execution_targets,
+            cast(dict[str, Any], state),
+            run_details=run_details,
+        )
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        if preferred_identity:
+            current_target_name = str(preferred_identity.get("target_name") or current_target_name)
+            current_target_api = str(preferred_identity.get("target_api") or current_target_api)
+            current_target_type = str(preferred_identity.get("target_type") or current_target_type)
         selected_target_score_breakdown: dict[str, Any] = {}
         try:
             for item in _load_selected_targets_doc(analysis_repo_root):
@@ -12369,7 +12536,7 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
             "coverage_target_api": current_target_api or str(state.get("coverage_target_api") or ""),
-            "coverage_target_type": str(state.get("coverage_target_type") or ""),
+            "coverage_target_type": current_target_type,
             "coverage_seed_profile": current_seed_profile,
             "coverage_seed_quality": seed_quality,
             "coverage_seed_families_suggested": seed_families_suggested,
