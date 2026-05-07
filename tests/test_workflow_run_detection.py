@@ -1133,6 +1133,142 @@ def test_resolve_per_input_replay_binary_rejects_plain_primary_fuzzer(tmp_path: 
     assert resolved is None
 
 
+def test_execution_plan_prefers_primary_target_over_first_run_detail(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_out = fuzz_dir / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "png_read_image_decode_fuzz"
+    secondary = fuzz_out / "png_process_data_progressive_fuzz"
+    primary.write_text("bin", encoding="utf-8")
+    secondary.write_text("bin", encoding="utf-8")
+    plan = {
+        "execution_targets": [
+            {
+                "target_name": "png_read_image_decode",
+                "expected_fuzzer_name": "png_read_image_decode_fuzz",
+                "api": "png_read_image",
+                "target_type": "image",
+                "seed_profile": "decoder-binary",
+                "must_run": True,
+                "execution_priority": 1,
+            },
+            {
+                "target_name": "png_process_data_progressive",
+                "expected_fuzzer_name": "png_process_data_progressive_fuzz",
+                "api": "png_process_data",
+                "target_type": "parser",
+                "seed_profile": "decoder-binary",
+                "must_run": True,
+                "execution_priority": 2,
+            },
+        ]
+    }
+    (fuzz_dir / "execution_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+    targets = workflow_graph._execution_plan_targets(tmp_path)
+    ordered = workflow_graph._order_fuzzer_bins_by_execution_plan([secondary, primary], targets)
+    preferred = workflow_graph._preferred_execution_target(
+        targets,
+        {
+            "latest_vuln_decision_snapshot": {
+                "selected_target": "png_read_image_decode",
+                "selected_api": "png_read_image",
+            },
+            # This is the polluted state shape observed from an older run. It
+            # must not override the authoritative vuln decision / plan primary.
+            "coverage_target_name": "png_process_data_progressive_fuzz",
+            "coverage_target_api": "png_process_data_progressive_fuzz",
+        },
+        run_details=[{"fuzzer": "png_process_data_progressive_fuzz"}],
+    )
+    identity = workflow_graph._execution_target_identity(preferred)
+
+    assert [p.name for p in ordered] == [
+        "png_read_image_decode_fuzz",
+        "png_process_data_progressive_fuzz",
+    ]
+    assert identity["target_name"] == "png_read_image_decode"
+    assert identity["target_api"] == "png_read_image"
+    assert identity["expected_fuzzer_name"] == "png_read_image_decode_fuzz"
+
+
+def test_coverage_analysis_restores_target_api_from_execution_plan(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "png_read_image_decode",
+                        "expected_fuzzer_name": "png_read_image_decode_fuzz",
+                        "api": "png_read_image",
+                        "target_type": "image",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                        "execution_priority": 1,
+                    },
+                    {
+                        "target_name": "png_process_data_progressive",
+                        "expected_fuzzer_name": "png_process_data_progressive_fuzz",
+                        "api": "png_process_data",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                        "execution_priority": 2,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "repo_root": str(tmp_path),
+            "coverage_loop_max_rounds": 0,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data_progressive_fuzz",
+            "coverage_target_api": "png_process_data_progressive_fuzz",
+            "coverage_seed_profile": "decoder-binary",
+            "latest_vuln_decision_snapshot": {
+                "selected_target": "png_read_image_decode",
+                "selected_api": "png_read_image",
+            },
+            "coverage_seed_quality": {
+                "seed_score": 0.9,
+                "early_new_units_30s": 10,
+                "cold_start_failure": False,
+                "quality_flags": [],
+            },
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data_progressive_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 22,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                },
+                {
+                    "fuzzer": "png_read_image_decode_fuzz",
+                    "final_cov": 30,
+                    "final_ft": 134,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                },
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "png_read_image_decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_target_type"] == "image"
+
+
 def test_route_after_run_routes_clean_result_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": False}
