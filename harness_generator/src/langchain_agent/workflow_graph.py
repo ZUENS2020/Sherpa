@@ -11762,10 +11762,13 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
                 coverage_target_name
+                or str(state.get("synthesize_selected_target_name") or "").strip()
                 or str(state.get("coverage_target_name") or "").strip()
             ),
             "coverage_target_api": (
                 coverage_target_api
+                or str(state.get("synthesize_observed_target_api") or "").strip()
+                or str(state.get("synthesize_selected_target_api") or "").strip()
                 or str(state.get("coverage_target_api") or "").strip()
                 or str(state.get("selected_target_api") or "").strip()
             ),
