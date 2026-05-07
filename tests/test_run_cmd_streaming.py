@@ -142,6 +142,15 @@ def test_run_cmd_drops_reader_backlog_but_keeps_tail(tmp_path: Path, monkeypatch
     assert captured.out.count("burst-") < 20
 
 
+def test_normalize_dict_token_emits_hex_only_bytes():
+    assert fur._normalize_dict_token('"PNG"') == '"\\x50\\x4e\\x47"'
+    assert fur._normalize_dict_token('"\\x89PNG\\r\\n\\x1a\\n"') == (
+        '"\\x89\\x50\\x4e\\x47\\x0d\\x0a\\x1a\\x0a"'
+    )
+    assert fur._normalize_dict_token('"\\0\\377\\\""') == '"\\x00\\xff\\x22"'
+    assert fur._normalize_dict_token('""') == ""
+
+
 def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
