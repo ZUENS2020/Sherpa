@@ -180,6 +180,31 @@ def test_build_selected_target_row_normalizes_parser_seed_profile_for_decoder(tm
     assert row["seed_families_suggested"] == []
 
 
+def test_build_selected_target_row_normalizes_binary_parser_seed_profile(tmp_path: Path) -> None:
+    row = workflow_graph._build_selected_target_row(
+        repo_root=tmp_path,
+        item={
+            "name": "png_read_info",
+            "api": "png_read_info",
+            "target_type": "parser",
+            "seed_profile": "parser-structure",
+            "lang": "c",
+            "depth_score": 7,
+            "depth_class": "medium",
+        },
+        security_lookup={},
+        security_priority_mode=True,
+        degrade_reason="",
+        score_weights=workflow_graph._vuln_score_weights(),
+    )
+
+    assert row["target_type"] == "parser"
+    assert row["seed_profile"] == "decoder-binary"
+    assert row["seed_families_suggested"] == []
+    assert "document_markers" not in row["seed_families_optional"]
+    assert "png_chunk_order" in row["seed_families_optional"]
+
+
 def test_build_selected_target_row_accepts_string_attack_hint(tmp_path: Path) -> None:
     row = workflow_graph._build_selected_target_row(
         repo_root=tmp_path,
