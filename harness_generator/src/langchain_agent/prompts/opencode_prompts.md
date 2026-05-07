@@ -311,6 +311,8 @@ Stage requirements:
   - compiler-by-suffix rule: compile `.c` harnesses with `clang`; compile `.cc/.cpp/.cxx` harnesses with `clang++`
   - coverage replay siblings: for each primary native fuzzer `fuzz/out/<name>`, also build `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`; replay siblings must be runnable executables and must not be symlinks/copies or `fuzzer-no-link` binaries without `main()`
   - coverage replay library instrumentation: replay binaries must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`; do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
+  - coverage replay compiler selection: CMake/configure coverage builds using LLVM coverage flags must use `clang`/`clang++` (`-DCMAKE_C_COMPILER=clang`, `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`), never `/usr/bin/cc`/GCC
+  - generated `subprocess` compile commands must start with the compiler executable (`clang` or `clang++`); append sanitizer/coverage flags after the compiler, never as `cmd[0]`
 
 MANDATORY:
 - create `./done`
@@ -348,6 +350,8 @@ Build-repair constraints:
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
 - keep coverage replay siblings real, runnable, and instrumented: `fuzz/out/replay/<name>` must be linked with `-fprofile-instr-generate -fcoverage-mapping` and a runnable entrypoint, never a symlink/copy of the primary fuzzer and never a `fuzzer-no-link` binary without `main()`
 - ensure coverage replay links coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects use a separate replay/coverage build directory or rebuild static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`, and do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
+- ensure CMake/configure coverage replay builds use `clang`/`clang++` rather than `/usr/bin/cc`/GCC when using LLVM coverage flags (`-DCMAKE_C_COMPILER=clang`, `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`)
+- ensure generated `subprocess` compile commands start with the compiler executable (`clang` or `clang++`), with sanitizer/coverage flags appended after it and never used as `cmd[0]`
 - include generated headers from the CMake/configure build directory in both primary and replay compile commands when the project emits configured headers
 - resolve contrib/example/demo API calls by compiling the owning source file or switching to a public library API
 - never call a static example helper directly; do not link example files with their own `main()` into libFuzzer harnesses unless rewritten/guarded
