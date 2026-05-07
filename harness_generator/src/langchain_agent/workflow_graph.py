@@ -6632,6 +6632,10 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "Do not rewrite the full `fuzz/analysis_context.json`; it is already system-generated.",
                     "Do not rewrite `fuzz/vuln_candidates.json`; it is already system-generated.",
                     "Write concise AI advisory findings to `fuzz/vuln_hypotheses.md` and keep them evidence-linked.",
+                    "Bounded analysis mode: after required files, use at most 6 additional MCP/tool reads in the first pass.",
+                    "Prefer existing `analysis_evidence.security_evidence[]` and `fuzz/vuln_candidates.json`; treat them as sufficient unless empty or corrupt.",
+                    "Do not call semantic/comprehension MCP tools unless this coordinator hint explicitly asks for semantic enrichment.",
+                    "After one bounded evidence pass, write `fuzz/vuln_hypotheses.md` and `./done`; do not continue open-ended exploration.",
                 ]
                 if antlr_context_summary:
                     analysis_lines.append(f"ANTLR context: {antlr_context_summary}")

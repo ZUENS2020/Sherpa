@@ -35,9 +35,17 @@ Use this skill in the dedicated `analysis` stage before `plan`.
 - `fuzz/analysis_context.json.analysis_evidence.vuln_candidate_inventory`
 - `VULN_HYPOTHESES` section with evidence-linked risk hypotheses
 
+## Bounded analysis mode
+- This stage must finish promptly. Do not perform open-ended vulnerability research.
+- After reading required files, use at most 6 additional MCP/tool reads in the first pass.
+- Prefer existing system-generated `security_evidence[]` and `vuln_candidates.json`; treat them as sufficient unless they are empty or corrupt.
+- Do not call semantic/comprehension MCP tools in the first pass unless the coordinator explicitly asks for semantic enrichment.
+- After one bounded evidence pass, write `fuzz/vuln_hypotheses.md` and `./done` immediately. Do not keep exploring after writing a coherent top 3-8 hypothesis set.
+- Keep `fuzz/vuln_hypotheses.md` under 120 lines.
+
 ## Workflow
 1. Query MCP evidence first when MCP is available.
-   Use code-navigation tools first to locate concrete symbols/definitions, then preprocessor tools, then semantic tools for evidence-backed summaries.
+   Use code-navigation tools first to locate concrete symbols/definitions, then preprocessor tools only if needed.
 2. Read existing analysis artifacts (if any) and companion file outputs as fallback.
 3. Refresh static analysis summaries for grammar/target context.
 4. Do not rewrite the full `fuzz/analysis_context.json`; it is a system-generated fact artifact and can be large.

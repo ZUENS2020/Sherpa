@@ -79,6 +79,9 @@ def test_plan_and_schema_fix_contracts_keep_target_semantics() -> None:
     assert "fuzz/analysis_context.json" in analysis
     assert "MCP tools from task-scoped PromeFuzz companion" in analysis
     assert "/shared/output/_k8s_jobs/<job-id>/promefuzz/" in analysis
+    assert "Bounded analysis mode" in analysis
+    assert "use at most 6 additional MCP/tool reads" in analysis
+    assert "Do not call semantic/comprehension MCP tools" in analysis
     assert "LLVMFuzzerTestOneInput" in plan
     assert "`api` must describe an API identifier" in plan
     assert "fuzz/execution_plan.json" in plan

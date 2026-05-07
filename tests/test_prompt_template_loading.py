@@ -88,6 +88,10 @@ def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
     assert "Do not rewrite the full `fuzz/analysis_context.json`" in out
     assert "Do not rewrite `fuzz/vuln_candidates.json`" in out
     assert "Write `fuzz/vuln_candidates.json`" not in out
+    assert "Bounded analysis mode" in out
+    assert "use at most 6 additional MCP/tool reads" in out
+    assert "Do not call semantic/comprehension MCP tools" in out
+    assert "under 120 lines" in out
     assert "`fuzz/vuln_hypotheses.md`" in out
 
 
@@ -117,6 +121,12 @@ def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
     assert "Do not rewrite the full `fuzz/analysis_context.json`" in skill_text
     assert "Do not rewrite `fuzz/vuln_candidates.json`" in skill_text
     assert "Write `fuzz/vuln_candidates.json`" not in skill_text
+    assert "Bounded analysis mode" in prompt_text
+    assert "Bounded analysis mode" in skill_text
+    assert "use at most 6 additional MCP/tool reads" in prompt_text
+    assert "use at most 6 additional MCP/tool reads" in skill_text
+    assert "Do not call semantic/comprehension MCP tools" in prompt_text
+    assert "Do not call semantic/comprehension MCP tools" in skill_text
     assert "`fuzz/vuln_hypotheses.md`" in skill_text
     assert "must classify" not in prompt_text.lower()
 
