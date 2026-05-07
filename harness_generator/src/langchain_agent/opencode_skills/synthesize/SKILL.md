@@ -75,6 +75,7 @@ Minimal valid template:
 ### `fuzz/build.py`
 - Must include:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
+  - invoke CMake with the system `cmake` binary (for example `["cmake", "-S", ...]` and `["cmake", "--build", ...]`); do not use `sys.executable, "-m", "cmake"` or `python -m cmake`
   - Python-native parallel args: `["-j", str(os.cpu_count() or 1)]`
   - never use `$(nproc)` or shell substitutions
   - runtime artifact discovery (do not hardcode a single static library path)

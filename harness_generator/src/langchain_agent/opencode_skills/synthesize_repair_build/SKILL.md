@@ -48,6 +48,9 @@ Use this skill in repair mode when the previous build failed.
   - `.c` sources must use `clang`
   - `.cc/.cpp/.cxx` sources must use `clang++`
   - do not use `clang++` as universal compiler for mixed C/C++
+- CMake invocation in `fuzz/build.py`:
+  - use the system `cmake` binary directly, e.g. `["cmake", "-S", ...]` and `["cmake", "--build", ...]`
+  - do not use `sys.executable, "-m", "cmake"` or `python -m cmake`; the runtime image does not guarantee the Python `cmake` package
 - Public/stable APIs are mandatory by default.
 - If non-public API is unavoidable, require `api_surface_exception` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, replace offending symbols first.

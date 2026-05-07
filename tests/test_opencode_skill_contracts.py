@@ -39,6 +39,8 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "build_system" in synth
     assert "fuzzer_entry_strategy" in synth
     assert "DEFAULT_CMAKE_ARGS" in synth
+    assert "python -m cmake" in synth
+    assert "system `cmake` binary" in synth
     assert "def find_static_lib(repo_root):" in synth
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
