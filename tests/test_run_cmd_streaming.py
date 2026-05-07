@@ -113,6 +113,35 @@ def test_run_cmd_caps_noisy_stderr_but_keeps_tail(tmp_path: Path, monkeypatch, c
     assert captured.out.count("noise-") < 20
 
 
+def test_run_cmd_drops_reader_backlog_but_keeps_tail(tmp_path: Path, monkeypatch, capsys):
+    gen = _fake_generator(tmp_path)
+    monkeypatch.setenv("SHERPA_CMD_CAPTURE_MAX_BYTES", "1024")
+    monkeypatch.setenv("SHERPA_CMD_LIVE_MAX_BYTES", "128")
+    monkeypatch.setenv("SHERPA_CMD_QUEUE_MAX_BYTES", "2048")
+    script = (
+        "import sys;"
+        "[sys.stderr.write(f'burst-{i:05d}-' + 'x'*180 + '\\n') for i in range(2500)];"
+        "sys.stderr.flush()"
+    )
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert out == ""
+    assert "[sherpa-output-reader-dropped]" in err
+    assert "[sherpa-output-reader-tail]" in err
+    assert "burst-02499" in err
+    assert "burst-00000" not in err
+    assert captured.out.count("burst-") < 20
+
+
 def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
