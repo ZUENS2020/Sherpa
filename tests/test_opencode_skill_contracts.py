@@ -56,6 +56,9 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "separate replay `main()` wrapper" in synth
     assert "coverage-instrumented repository/library objects" in synth
     assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "do not pass LLVM coverage flags to `/usr/bin/cc`/GCC" in synth
+    assert "never as `cmd[0]`" in synth
 
 
 def test_synthesize_complete_scaffold_requires_missing_item_repair() -> None:
@@ -177,6 +180,9 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "fuzzer-no-link` objects without `main()`" in synth_repair_build
     assert "coverage-instrumented repository/library objects" in synth_repair_build
     assert "non-instrumented static libraries" in synth_repair_build
+    assert "-DCMAKE_C_COMPILER=clang" in synth_repair_build
+    assert "do not pass LLVM coverage flags to `/usr/bin/cc`/GCC" in synth_repair_build
+    assert "never as `cmd[0]`" in synth_repair_build
     assert "do not define custom `main()` in harness source" in synth_repair_crash
     assert "LLVMFuzzerTestOneInput" in synth_repair_crash
     assert "fopen(argv[1], ...)" in synth_repair_crash

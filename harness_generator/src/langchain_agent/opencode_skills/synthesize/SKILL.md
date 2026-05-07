@@ -85,7 +85,9 @@ Minimal valid template:
   - primary runnable fuzzers must link the libFuzzer runtime with `-fsanitize=fuzzer,address,undefined` (or equivalent sanitizer set including `fuzzer`); do not use `-fsanitize=fuzzer-no-link` for final binaries unless you also provide and link a valid fuzzer `main`
   - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
   - coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild the static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`
+  - coverage/replay CMake builds that use LLVM coverage flags must configure with `clang`/`clang++` (for example `-DCMAKE_C_COMPILER=clang` and `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`); do not pass LLVM coverage flags to `/usr/bin/cc`/GCC
   - do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
+  - generated `subprocess` compile commands must start with the compiler executable (`clang` or `clang++`); append sanitizer/coverage flags after the compiler, never as `cmd[0]`
   - replay binaries must be real coverage-instrumented executables, not symlinks or copies of the primary fuzzer
   - replay executables must also link a runnable entrypoint: prefer `-fsanitize=fuzzer,address,undefined -fprofile-instr-generate -fcoverage-mapping`; if you use `-fsanitize=fuzzer-no-link`, you must compile and link a separate replay `main()` wrapper that calls `LLVMFuzzerTestOneInput`
 

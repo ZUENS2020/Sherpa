@@ -40,6 +40,8 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - If `fuzz/build.py` uses invalid parallel style (`$(nproc)`), repair to `["-j", str(os.cpu_count() or 1)]`.
 - If native fuzzers are built under `fuzz/out/`, `fuzz/build.py` must also build real coverage replay siblings under `fuzz/out/replay/` with `-fprofile-instr-generate -fcoverage-mapping`; do not use symlinks/copies of primary fuzzers as replay binaries.
 - Coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; do not link replay binaries against non-instrumented static libraries when function/path coverage is expected.
+- Coverage/replay CMake builds that use LLVM coverage flags must configure with `clang`/`clang++`, not `/usr/bin/cc`/GCC.
+- Generated `subprocess` compile commands must start with the compiler executable (`clang` or `clang++`); sanitizer/coverage flags must not become `cmd[0]`.
 - Keep multi-target buildability when `fuzz/execution_plan.json` contains multiple targets.
 - Use explicit path actions: `Read and fix <path>[:line]`.
 

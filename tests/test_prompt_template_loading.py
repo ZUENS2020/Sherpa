@@ -179,6 +179,9 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "fopen(argv[1], ...)" in synth
     assert "coverage-instrumented repository/library objects" in synth
     assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "never `/usr/bin/cc`/GCC" in synth
+    assert "never as `cmd[0]`" in synth
 
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
@@ -313,6 +316,8 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert "cmake build directory" in synth.lower()
     assert "coverage-instrumented repository/library objects" in synth
     assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "never as `cmd[0]`" in synth
     assert "owning source" in synth.lower()
     assert "static example helper" in synth.lower()
     assert "<stdint.h>" in synth
@@ -359,6 +364,8 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "cmake build directory" in synth_repair_build.lower()
     assert "coverage-instrumented repository/library objects" in synth_repair_build
     assert "non-instrumented static libraries" in synth_repair_build
+    assert "-DCMAKE_C_COMPILER=clang" in synth_repair_build
+    assert "never as `cmd[0]`" in synth_repair_build
     assert "owning source" in synth_repair_build.lower()
     assert "static example helper" in synth_repair_build.lower()
     assert "<stdint.h>" in synth_repair_build
