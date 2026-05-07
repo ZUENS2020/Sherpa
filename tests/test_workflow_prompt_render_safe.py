@@ -20,6 +20,11 @@ class _NoopPatcher:
         return None
 
 
+class _FailingPatcher:
+    def run_codex_command(self, _prompt: str, **_kwargs) -> None:
+        raise RuntimeError("provider stalled")
+
+
 def _broken_render(*_args, **_kwargs) -> str:
     raise ValueError("Single '}' encountered in format string")
 
@@ -79,6 +84,48 @@ def test_analysis_degrades_when_prompt_template_is_invalid(tmp_path: Path, monke
     assert out["analysis_done"] is True
     assert out["prompt_render_degraded"] is True
     assert "Single '}' encountered in format string" in out["prompt_render_issue"]
+
+
+def test_analysis_opencode_advisory_failure_is_fail_open(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "fuzz").mkdir(parents=True, exist_ok=True)
+    antlr_path = tmp_path / "fuzz" / "antlr_plan_context.json"
+    target_path = tmp_path / "fuzz" / "target_analysis.json"
+    antlr_path.write_text("{}", encoding="utf-8")
+    target_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        workflow_graph,
+        "_prepare_antlr_assist_context",
+        lambda _repo_root: (str(antlr_path), "antlr-ok"),
+    )
+    monkeypatch.setattr(
+        workflow_graph,
+        "_prepare_target_analysis_context",
+        lambda _repo_root: (str(target_path), "target-ok"),
+    )
+    monkeypatch.setattr(workflow_graph, "_collect_analysis_companion_context", lambda: ({}, ""))
+    monkeypatch.setattr(
+        workflow_graph,
+        "_build_analysis_evidence_index",
+        lambda **_kwargs: {"summary": {"evidence_count": 1, "security_evidence_count": 1, "vuln_candidate_count": 1}},
+    )
+    monkeypatch.setattr(workflow_graph, "_write_analysis_vuln_candidates", lambda *_args, **_kwargs: {"path": "fuzz/vuln_candidates.json", "candidate_count": 1})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_FailingPatcher())
+
+    out = workflow_graph._node_analysis(
+        {
+            "generator": gen,
+            "codex_hint": "analysis",
+        }
+    )
+
+    assert out["last_step"] == "analysis"
+    assert out["analysis_done"] is True
+    assert out["analysis_degraded"] is False
+    assert out["analysis_advisory_degraded"] is True
+    assert "provider stalled" in out["analysis_advisory_error"]
+    assert out["prompt_render_degraded"] is True
+    assert "analysis_advisory_failed" in out["prompt_render_issue"]
 
 
 def test_crash_analysis_degrades_when_prompt_template_is_invalid(tmp_path: Path, monkeypatch) -> None:

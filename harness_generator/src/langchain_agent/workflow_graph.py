@@ -4336,6 +4336,29 @@ def _opencode_cli_retries() -> int:
         return 2
 
 
+def _analysis_opencode_advisory_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_ADVISORY_ENABLED") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _analysis_opencode_timeout_sec(state: FuzzWorkflowRuntimeState) -> int:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_TIMEOUT_SEC") or "120").strip()
+    try:
+        configured = max(15, min(int(raw), 900))
+    except Exception:
+        configured = 120
+    remaining = _remaining_time_budget_sec(state)
+    return max(15, min(configured, remaining))
+
+
+def _analysis_opencode_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC") or "75").strip()
+    try:
+        return max(10, min(int(raw), 600))
+    except Exception:
+        return 75
+
+
 def _fix_build_max_noop_streak() -> int:
     raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_NOOP_STREAK") or "3").strip()
     try:
@@ -6589,6 +6612,8 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     companion_summary = ""
     analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
     prompt_render_issue = ""
+    analysis_advisory_degraded = False
+    analysis_advisory_error = ""
 
     for attempt in range(1, attempts + 1):
         try:
@@ -6626,7 +6651,7 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             analysis_report_path = str(analysis_path)
             vuln_candidates_doc = _write_analysis_vuln_candidates(gen.repo_root, analysis_context_path)
 
-            if _has_codex_key():
+            if _has_codex_key() and _analysis_opencode_advisory_enabled():
                 analysis_lines: list[str] = [
                     "Generate analysis artifacts for downstream planning.",
                     "Do not rewrite the full `fuzz/analysis_context.json`; it is already system-generated.",
@@ -6656,13 +6681,24 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if render_issue:
                     prompt_render_issue = str(render_issue)
                     _wf_log(cast(dict[str, Any], state), f"analysis: prompt render degraded -> {render_issue}")
-                gen.patcher.run_codex_command(
-                    prompt,
-                    stage_skill="analysis",
-                    timeout=_remaining_time_budget_sec(state),
-                    max_attempts=1,
-                    max_cli_retries=_opencode_cli_retries(),
-                )
+                try:
+                    gen.patcher.run_codex_command(
+                        prompt,
+                        stage_skill="analysis",
+                        timeout=_analysis_opencode_timeout_sec(state),
+                        max_attempts=1,
+                        max_cli_retries=1,
+                        idle_timeout_override=_analysis_opencode_idle_timeout_sec(),
+                        activity_watch_paths=("fuzz/vuln_hypotheses.md", "done"),
+                    )
+                except Exception as e:
+                    analysis_advisory_degraded = True
+                    analysis_advisory_error = str(e)[:4096]
+                    prompt_render_issue = prompt_render_issue or f"analysis_advisory_failed: {analysis_advisory_error}"
+                    _wf_log(
+                        cast(dict[str, Any], state),
+                        f"analysis: OpenCode advisory degraded; continuing with system evidence: {analysis_advisory_error}",
+                    )
                 if not analysis_path.is_file():
                     analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -6693,6 +6729,8 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "analysis_done": True,
                 "analysis_degraded": False,
                 "analysis_error": "",
+                "analysis_advisory_degraded": analysis_advisory_degraded,
+                "analysis_advisory_error": analysis_advisory_error,
                 "analysis_report_path": analysis_report_path,
                 "analysis_context_path": analysis_context_path,
                 "analysis_evidence_count": analysis_evidence_count,
