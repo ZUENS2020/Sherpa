@@ -727,6 +727,80 @@ def test_list_tasks_exposes_frontier_and_replay_fields_from_active_child():
     assert detail["children"][0]["fuzz_coverage_run_feedback_summary"]["function_gap_count"] == 3
 
 
+def test_task_apis_enrich_active_child_from_workflow_context(tmp_path: Path):
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main.write_context_docs(
+        tmp_path / "fuzz" / "context",
+        control={},
+        workflow={
+            "coverage_seed_quality": {
+                "final_cov": 68,
+                "final_ft": 179,
+            },
+            "coverage_loop_round": 4,
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_quality_flags": ["repo_examples_missing"],
+            "coverage_run_feedback_summary": {
+                "function_gap_count": 0,
+                "path_frontier_count": 5,
+            },
+            "coverage_frontier_summary": {
+                "frontier_function_count": 12,
+            },
+            "coverage_replay_stage_success": True,
+            "coverage_replay_binary_count": 3,
+            "coverage_replay_processed_inputs": 32,
+            "coverage_replay_total_inputs": 73,
+            "decision_trace_count": 5,
+            "latest_decision_snapshot": {
+                "kind": "choose_seed",
+                "selected_target": "png_process_data",
+            },
+            "security_evidence_count": 7,
+            "vuln_candidate_count": 3,
+            "vuln_hunting_enabled": True,
+            "security_priority_mode": True,
+            "latest_vuln_decision_snapshot": {
+                "top_vuln_candidate": "png_process_data",
+            },
+        },
+        job_id=child_id,
+    )
+    web_main._job_update(
+        child_id,
+        status="running",
+        parent_id=task_id,
+        workflow_repo_root=str(tmp_path),
+        fuzz_max_cov=0,
+        fuzz_max_ft=0,
+        decision_trace_count=0,
+    )
+    web_main._job_update(task_id, children=[child_id], status="running")
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+        detail = client.get(f"/api/task/{task_id}").json()
+
+    assert listing[0]["job_id"] == task_id
+    assert listing[0]["fuzz_max_cov"] == 68
+    assert listing[0]["fuzz_max_ft"] == 179
+    assert listing[0]["fuzz_coverage_loop_round"] == 4
+    assert listing[0]["fuzz_coverage_seed_profile"] == "decoder-binary"
+    assert listing[0]["fuzz_coverage_quality_flags"] == ["repo_examples_missing"]
+    assert listing[0]["fuzz_coverage_run_feedback_summary"]["path_frontier_count"] == 5
+    assert listing[0]["fuzz_coverage_frontier_summary"]["frontier_function_count"] == 12
+    assert listing[0]["fuzz_coverage_replay_stage_success"] is True
+    assert listing[0]["fuzz_coverage_replay_processed_inputs"] == 32
+    assert listing[0]["decision_trace_count"] == 5
+    assert listing[0]["latest_decision_snapshot"]["selected_target"] == "png_process_data"
+    assert listing[0]["security_evidence_count"] == 7
+    assert listing[0]["vuln_candidate_count"] == 3
+    assert listing[0]["security_priority_mode"] is True
+    assert detail["children"][0]["fuzz_max_cov"] == 68
+    assert detail["children"][0]["latest_vuln_decision_snapshot"]["top_vuln_candidate"] == "png_process_data"
+
+
 def test_list_tasks_applies_limit_and_filters_non_task_jobs():
     web_main._create_job("fuzz", "https://github.com/example/repo.git")
     web_main._create_job("task", "batch")
