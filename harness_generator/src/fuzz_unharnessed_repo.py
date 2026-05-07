@@ -344,10 +344,80 @@ _C_ESCAPE_TO_HEX: Dict[str, str] = {
 
 
 def _normalize_dict_token(tok: str) -> str:
-    """Convert C-style escape sequences to ``\\xNN`` for libFuzzer compatibility."""
-    for c_esc, hex_esc in _C_ESCAPE_TO_HEX.items():
-        tok = tok.replace(c_esc, hex_esc)
-    return tok
+    r"""Normalize a quoted token to libFuzzer's conservative ``\xNN`` form.
+
+    Agent-generated and harness-extracted literals may contain C escapes that
+    libFuzzer's dictionary parser does not accept (for example ``\0`` or
+    partial/non-hex escapes).  Emitting every byte as ``\xNN`` avoids parse
+    errors while preserving the mutation hint bytes.
+    """
+
+    tok = str(tok or "").strip()
+    if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':
+        tok = tok[1:-1]
+    if not tok:
+        return ""
+
+    out = bytearray()
+    i = 0
+    while i < len(tok):
+        ch = tok[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8", errors="replace"))
+            i += 1
+            continue
+
+        if i + 1 >= len(tok):
+            out.append(ord("\\"))
+            i += 1
+            continue
+
+        nxt = tok[i + 1]
+        mapped = _C_ESCAPE_TO_HEX.get("\\" + nxt)
+        if mapped:
+            try:
+                out.append(int(mapped[2:], 16))
+            except Exception:
+                pass
+            i += 2
+            continue
+
+        if nxt == "x":
+            hex_part = tok[i + 2 : i + 4]
+            if len(hex_part) == 2 and re.fullmatch(r"[0-9A-Fa-f]{2}", hex_part):
+                out.append(int(hex_part, 16))
+                i += 4
+                continue
+            # Invalid \x escape: keep the escaped byte literally.
+            out.append(ord("x"))
+            i += 2
+            continue
+
+        if nxt in {"'", '"', "\\"}:
+            out.append(ord(nxt))
+            i += 2
+            continue
+
+        if nxt in "01234567":
+            j = i + 1
+            oct_digits = []
+            while j < len(tok) and len(oct_digits) < 3 and tok[j] in "01234567":
+                oct_digits.append(tok[j])
+                j += 1
+            try:
+                out.append(int("".join(oct_digits), 8) & 0xFF)
+            except Exception:
+                pass
+            i = j
+            continue
+
+        # Unknown escape: keep the escaped character as a literal byte.
+        out.extend(nxt.encode("utf-8", errors="replace"))
+        i += 2
+
+    if not out:
+        return ""
+    return '"' + "".join(f"\\x{b:02x}" for b in out) + '"'
 
 
 # ── Per-profile adaptive max_len (bytes) ─────────────────────────────────
@@ -5151,6 +5221,9 @@ EOF
         seen: set[str] = set()
         unique_tokens: list[str] = []
         for t in tokens:
+            t = _normalize_dict_token(t)
+            if not t:
+                continue
             if t not in seen:
                 seen.add(t)
                 unique_tokens.append(t)
