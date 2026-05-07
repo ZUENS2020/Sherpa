@@ -6855,6 +6855,16 @@ EOF
             out = re.sub(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)", r"\1***", out)
             return out
 
+        def _bounded_env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 64 * 1024 * 1024) -> int:
+            raw = str(os.environ.get(name) or "").strip()
+            if not raw:
+                return default
+            try:
+                value = int(raw)
+            except Exception:
+                return default
+            return max(min_value, min(value, max_value))
+
         if extra_inputs:
             # Append corpus/extra inputs directly. libFuzzer treats a bare "--" as an ignored flag
             # and logs noisy warnings that can look like failures in UI streams.
@@ -6892,10 +6902,47 @@ EOF
         if track_for_early_stop:
             self._register_active_run_process(proc)
 
+        capture_max_bytes = _bounded_env_int("SHERPA_CMD_CAPTURE_MAX_BYTES", 4 * 1024 * 1024)
+        live_max_bytes = _bounded_env_int("SHERPA_CMD_LIVE_MAX_BYTES", 512 * 1024)
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
+        capture_bytes = {"stdout": 0, "stderr": 0}
+        capture_truncated = {"stdout": False, "stderr": False}
+        live_bytes = {"stdout": 0, "stderr": 0}
+        live_suppressed = {"stdout": False, "stderr": False}
         reader_eof = object()
         out_queue: queue.Queue[tuple[str, str] | object] = queue.Queue()
+
+        def _append_bounded(kind: str, text: str) -> None:
+            chunks = stdout_chunks if kind == "stdout" else stderr_chunks
+            if capture_max_bytes <= 0:
+                capture_truncated[kind] = True
+                return
+            chunks.append(text)
+            capture_bytes[kind] += len(text.encode("utf-8", errors="replace"))
+            while capture_bytes[kind] > capture_max_bytes and chunks:
+                removed = chunks.pop(0)
+                capture_bytes[kind] -= len(removed.encode("utf-8", errors="replace"))
+                capture_truncated[kind] = True
+
+        def _maybe_print_live(kind: str, text: str) -> None:
+            if live_max_bytes <= 0:
+                if not live_suppressed[kind]:
+                    print(f"[sherpa-live-output-suppressed] {kind} live output disabled", flush=True)
+                    live_suppressed[kind] = True
+                return
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            if live_bytes[kind] + text_bytes <= live_max_bytes:
+                live_bytes[kind] += text_bytes
+                print(text, end="", flush=True)
+                return
+            if not live_suppressed[kind]:
+                print(
+                    f"[sherpa-live-output-suppressed] {kind} exceeded "
+                    f"{live_max_bytes} bytes; continuing with bounded captured tail",
+                    flush=True,
+                )
+                live_suppressed[kind] = True
 
         def _reader(pipe: Optional[object], kind: str) -> None:
             try:
@@ -6941,12 +6988,12 @@ EOF
                     kind, text = item
                     safe_text = _redact_text(text)
                     if kind == "stdout":
-                        stdout_chunks.append(safe_text)
-                        print(safe_text, end="", flush=True)
+                        _append_bounded("stdout", safe_text)
+                        _maybe_print_live("stdout", safe_text)
                     else:
-                        stderr_chunks.append(safe_text)
-                        # Keep stderr visible in real-time to avoid silent failures.
-                        print(safe_text, end="", flush=True)
+                        _append_bounded("stderr", safe_text)
+                        # Keep stderr visible in real-time, but cap noisy libraries.
+                        _maybe_print_live("stderr", safe_text)
                     last_activity = time.monotonic()
                     if line_callback is not None:
                         try:
@@ -7001,14 +7048,24 @@ EOF
                 kind, text = item
                 safe_text = _redact_text(text)
                 if kind == "stdout":
-                    stdout_chunks.append(safe_text)
+                    _append_bounded("stdout", safe_text)
                 else:
-                    stderr_chunks.append(safe_text)
+                    _append_bounded("stderr", safe_text)
             if track_for_early_stop:
                 self._unregister_active_run_process(proc)
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
+        if capture_truncated["stdout"]:
+            out = (
+                f"[sherpa-output-truncated] stdout exceeded {capture_max_bytes} bytes; "
+                "kept captured tail only\n"
+            ) + out
+        if capture_truncated["stderr"]:
+            err = (
+                f"[sherpa-output-truncated] stderr exceeded {capture_max_bytes} bytes; "
+                "kept captured tail only\n"
+            ) + err
         if callback_stop_reason:
             err = (err or "") + f"\n[callback-stop] {callback_stop_reason}"
         elif idle_timed_out:
