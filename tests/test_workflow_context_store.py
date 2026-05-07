@@ -131,6 +131,36 @@ def test_merge_result_into_contexts_normalizes_target_identity_and_seed_profile(
     assert merged_workflow["coverage_seed_families_suggested"] == []
 
 
+def test_merge_result_into_contexts_restores_target_type_from_run_details() -> None:
+    _merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "coverage_target_name": "png_read_image",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "",
+            "coverage_seed_profile": "decoder-binary",
+            "run_details": [
+                {
+                    "fuzzer": "png_read_image",
+                    "target_name": "png_read_image",
+                    "target_api": "png_read_image",
+                    "target_type": "image",
+                },
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "parser",
+                },
+            ],
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_workflow["coverage_target_type"] == "image"
+    assert merged_workflow["coverage_seed_profile"] == "decoder-binary"
+
+
 def test_merge_result_into_contexts_normalizes_binary_parser_seed_profile() -> None:
     _merged_control, merged_workflow = store.merge_result_into_contexts(
         {
