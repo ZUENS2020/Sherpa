@@ -3912,6 +3912,113 @@ def _job_snapshot(job_id: str) -> dict | None:
     return view
 
 
+def _context_value_present(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _assign_context_value(view: dict, target_key: str, value, *, cast=None, allow_empty: bool = False) -> None:
+    if not allow_empty and not _context_value_present(value):
+        return
+    try:
+        view[target_key] = cast(value) if cast else value
+    except Exception:
+        return
+
+
+def _workflow_context_for_job_view(view: dict) -> dict:
+    repo_root = str(
+        view.get("workflow_repo_root")
+        or view.get("resume_repo_root")
+        or view.get("analysis_companion_repo_root")
+        or ""
+    ).strip()
+    context_dir = context_dir_for_repo_root(repo_root)
+    if not context_dir:
+        return {}
+    try:
+        _control_doc, workflow_doc = read_context_docs(context_dir, job_id=str(view.get("job_id") or view.get("id") or ""))
+    except Exception:
+        return {}
+    return strip_meta(workflow_doc)
+
+
+def _enrich_job_view_from_workflow_context(view: dict) -> None:
+    """Mirror the current double-file workflow context into API job fields.
+
+    The DB/log-derived fields are still used, but active k8s stages can update
+    fuzz/context/workflow_context.json without emitting a metrics log line yet.
+    Reading the context here keeps /api/task* aligned with the workflow truth.
+    """
+    workflow_ctx = _workflow_context_for_job_view(view)
+    if not workflow_ctx:
+        return
+
+    seed_quality = workflow_ctx.get("coverage_seed_quality")
+    if isinstance(seed_quality, dict):
+        final_cov = seed_quality.get("final_cov")
+        final_ft = seed_quality.get("final_ft")
+        if _context_value_present(final_cov) and int(view.get("fuzz_max_cov") or 0) <= 0:
+            _assign_context_value(view, "fuzz_max_cov", final_cov, cast=int)
+        if _context_value_present(final_ft) and int(view.get("fuzz_max_ft") or 0) <= 0:
+            _assign_context_value(view, "fuzz_max_ft", final_ft, cast=int)
+
+    mappings = (
+        ("coverage_loop_round", "fuzz_coverage_loop_round", int),
+        ("coverage_loop_max_rounds", "fuzz_coverage_loop_max_rounds", int),
+        ("coverage_plateau_streak", "fuzz_coverage_plateau_streak", int),
+        ("coverage_seed_profile", "fuzz_coverage_seed_profile", str),
+        ("coverage_quality_flags", "fuzz_coverage_quality_flags", list),
+        ("coverage_bottleneck_kind", "fuzz_coverage_bottleneck_kind", str),
+        ("coverage_run_feedback_path", "fuzz_coverage_run_feedback_path", str),
+        ("coverage_run_feedback_summary", "fuzz_coverage_run_feedback_summary", dict),
+        ("coverage_per_input_manifest_path", "fuzz_coverage_per_input_manifest_path", str),
+        ("coverage_frontier_path", "fuzz_coverage_frontier_path", str),
+        ("coverage_frontier_summary", "fuzz_coverage_frontier_summary", dict),
+        ("coverage_replay_runtime_sec", "fuzz_coverage_replay_runtime_sec", float),
+        ("coverage_replay_binary_hash", "fuzz_coverage_replay_binary_hash", str),
+        ("coverage_replay_binary_dir", "fuzz_coverage_replay_binary_dir", str),
+        ("coverage_replay_binary_count", "fuzz_coverage_replay_binary_count", int),
+        ("coverage_replay_stage_success", "fuzz_coverage_replay_stage_success", bool),
+        ("coverage_replay_error", "fuzz_coverage_replay_error", str),
+        (
+            "coverage_replay_manifest_fresh_for_current_binary",
+            "fuzz_coverage_replay_manifest_fresh_for_current_binary",
+            bool,
+        ),
+        ("coverage_replay_queue_drained", "fuzz_coverage_replay_queue_drained", bool),
+        ("coverage_replay_pending_inputs", "fuzz_coverage_replay_pending_inputs", int),
+        ("coverage_replay_failed_inputs", "fuzz_coverage_replay_failed_inputs", int),
+        ("coverage_replay_processed_inputs", "fuzz_coverage_replay_processed_inputs", int),
+        ("coverage_replay_total_inputs", "fuzz_coverage_replay_total_inputs", int),
+        ("analysis_evidence_count", "analysis_evidence_count", int),
+        ("security_evidence_count", "security_evidence_count", int),
+        ("vuln_candidate_count", "vuln_candidate_count", int),
+        ("vuln_hunting_enabled", "vuln_hunting_enabled", bool),
+        ("security_priority_mode", "security_priority_mode", bool),
+        ("latest_vuln_decision_snapshot", "latest_vuln_decision_snapshot", dict),
+        ("vuln_candidates_path", "vuln_candidates_path", str),
+        ("crash_vuln_report_path", "crash_vuln_report_path", str),
+        ("latest_crash_vuln_candidate", "latest_crash_vuln_candidate", dict),
+        ("crash_vuln_candidate_count", "crash_vuln_candidate_count", int),
+        ("target_scoring_enabled", "target_scoring_enabled", bool),
+        ("target_score_breakdown_available", "target_score_breakdown_available", bool),
+        ("constraint_memory_count", "constraint_memory_count", int),
+        ("decision_trace_count", "decision_trace_count", int),
+        ("latest_decision_snapshot", "latest_decision_snapshot", dict),
+        ("crash_signature_dedup_hit", "crash_signature_dedup_hit", bool),
+    )
+    for source_key, target_key, cast in mappings:
+        if source_key not in workflow_ctx:
+            continue
+        _assign_context_value(view, target_key, workflow_ctx.get(source_key), cast=cast, allow_empty=True)
+
+
 def _enrich_job_view(view: dict) -> None:
     """Add workflow/resume/cancel tracking fields and fuzz metrics to a job API view."""
     # -- workflow & resume tracking --
@@ -4010,6 +4117,8 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("decision_trace_count", 0)
     view.setdefault("latest_decision_snapshot", {})
     view.setdefault("crash_signature_dedup_hit", False)
+
+    _enrich_job_view_from_workflow_context(view)
 
     companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
     if companion_status:
@@ -4140,7 +4249,14 @@ def _derive_task_status(job: dict) -> dict:
 
 def _derive_task_status_from_snapshot(job: dict, jobs_snapshot: dict[str, dict]) -> tuple[str, dict, list[dict]]:
     child_ids = list(job.get("children") or [])
-    child_jobs = [dict(jobs_snapshot[cid]) for cid in child_ids if cid in jobs_snapshot]
+    child_jobs = []
+    for cid in child_ids:
+        if cid not in jobs_snapshot:
+            continue
+        child_view = dict(jobs_snapshot[cid])
+        _hydrate_job_log_from_disk(child_view)
+        _enrich_job_view(child_view)
+        child_jobs.append(child_view)
     total = len(child_jobs)
     buckets = [_status_for_parent(str(j.get("status") or "")) for j in child_jobs]
     queued = sum(1 for b in buckets if b == "queued")
