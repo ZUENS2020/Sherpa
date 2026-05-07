@@ -84,6 +84,8 @@ Minimal valid template:
   - never call a static example helper directly from a harness; static example helpers are not linkable API and example sources with their own `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
   - primary runnable fuzzers must link the libFuzzer runtime with `-fsanitize=fuzzer,address,undefined` (or equivalent sanitizer set including `fuzzer`); do not use `-fsanitize=fuzzer-no-link` for final binaries unless you also provide and link a valid fuzzer `main`
   - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
+  - coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild the static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`
+  - do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
   - replay binaries must be real coverage-instrumented executables, not symlinks or copies of the primary fuzzer
   - replay executables must also link a runnable entrypoint: prefer `-fsanitize=fuzzer,address,undefined -fprofile-instr-generate -fcoverage-mapping`; if you use `-fsanitize=fuzzer-no-link`, you must compile and link a separate replay `main()` wrapper that calls `LLVMFuzzerTestOneInput`
 
