@@ -3836,27 +3836,6 @@ def _write_fallback_targets_json(
         targets_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except Exception:
         return False
-    try:
-        plan_path = fuzz_dir / "PLAN.md"
-        primary = doc[0] if doc else {}
-        plan_path.write_text(
-            "\n".join(
-                [
-                    "# Deterministic fallback plan",
-                    "",
-                    "OpenCode did not produce a usable planning artifact, so the workflow selected targets from static analysis context.",
-                    f"- primary_target: {primary.get('name') or primary.get('api') or 'default_target'}",
-                    f"- api: {primary.get('api') or primary.get('name') or 'default_target'}",
-                    f"- target_type: {primary.get('target_type') or 'generic'}",
-                    f"- seed_profile: {primary.get('seed_profile') or 'generic'}",
-                    f"- source: {target_analysis_path or antlr_context_path or 'repository scan'}",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
     ok, _err = _validate_targets_json(repo_root)
     return ok
 
@@ -4804,22 +4783,6 @@ def _opencode_cli_retries() -> int:
         return max(1, min(int(raw), 8))
     except Exception:
         return 2
-
-
-def _plan_opencode_cli_retries() -> int:
-    raw = (os.environ.get("SHERPA_WORKFLOW_OPENCODE_PLAN_CLI_RETRIES") or "1").strip()
-    try:
-        return max(1, min(int(raw), 8))
-    except Exception:
-        return 1
-
-
-def _plan_opencode_idle_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC") or "120").strip()
-    try:
-        return max(15, min(int(raw), 3600))
-    except Exception:
-        return 120
 
 
 def _analysis_opencode_advisory_enabled() -> bool:
@@ -7521,7 +7484,6 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     include_contents=False,
                 )
                 render_known_issues.extend(crash_known_issues)
-        plan_codex_output: str | None = None
         if hint:
             prompt, render_issue = _render_opencode_prompt_safe(
                 plan_template_name,
@@ -7534,17 +7496,15 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 prompt_render_issue = str(render_issue)
                 hint = (hint + "\n\nKnown Issues:\n- " + render_issue).strip()
                 _wf_log(cast(dict[str, Any], state), f"plan: prompt render degraded -> {render_issue}")
-            plan_codex_output = gen.patcher.run_codex_command(
+            gen.patcher.run_codex_command(
                 prompt,
                 stage_skill=plan_stage_skill,
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
-                max_cli_retries=_plan_opencode_cli_retries(),
-                idle_timeout_override=_plan_opencode_idle_timeout_sec(),
+                max_cli_retries=_opencode_cli_retries(),
             )
         else:
             gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
-            plan_codex_output = ""
 
         strict_targets = (os.environ.get("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1").strip().lower() in {"1", "true", "yes", "on"})
         plan_retry_reason = ""
@@ -7552,29 +7512,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         plan_targets_schema_valid_after_retry = True
         plan_used_fallback_targets = False
         ok_targets, targets_err = _validate_targets_json(gen.repo_root)
-        targets_path = gen.repo_root / "fuzz" / "targets.json"
-        plan_silent_no_targets = (
-            strict_targets
-            and not ok_targets
-            and not targets_path.is_file()
-            and not str(plan_codex_output or "").strip()
-        )
-        if plan_silent_no_targets:
-            plan_retry_reason = "silent-plan-fallback"
-            plan_targets_schema_valid_before_retry = False
-            _wf_log(
-                cast(dict[str, Any], state),
-                "plan: OpenCode produced no output and no targets.json; applying deterministic fallback",
-            )
-            plan_used_fallback_targets = _write_fallback_targets_json(
-                gen.repo_root,
-                antlr_context_path=antlr_context_path,
-                target_analysis_path=target_analysis_path,
-            )
-            ok_targets, targets_err = _validate_targets_json(gen.repo_root)
-            plan_targets_schema_valid_after_retry = bool(ok_targets)
         if strict_targets and not ok_targets:
-            plan_retry_reason = plan_retry_reason or "targets-schema"
+            plan_retry_reason = "targets-schema"
             plan_targets_schema_valid_before_retry = False
             _wf_log(cast(dict[str, Any], state), f"plan: targets.json schema invalid -> {targets_err}; retrying once")
             cleared_done = _clear_opencode_done_sentinel(gen.repo_root)
