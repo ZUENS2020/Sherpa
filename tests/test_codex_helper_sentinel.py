@@ -97,6 +97,37 @@ def test_run_codex_command_requires_done_even_when_diff_exists(monkeypatch: pyte
     assert not (helper.working_dir / "done").exists()
 
 
+def test_run_codex_command_accepts_plan_partial_diff_without_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: _FakeProc(stdout_text="wrote targets\n"))
+
+    diff_calls = {"n": 0}
+    add_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/targets.json"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: add_calls.__setitem__("n", add_calls["n"] + 1))
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    assert "wrote targets" in out
+    assert add_calls["n"] == 1
+    assert not (helper.working_dir / "done").exists()
+
+
 def test_run_codex_command_succeeds_only_when_done_and_diff_exist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     helper = _prepare_helper(tmp_path)
     _patch_common(monkeypatch, helper)
