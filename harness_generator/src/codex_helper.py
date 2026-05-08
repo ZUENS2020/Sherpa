@@ -1795,6 +1795,54 @@ class CodexHelper:
             diff_changed = bool(diff_now) and diff_now != baseline_diff
 
             if not done_path.exists():
+                partial_success_stages = {
+                    item.strip()
+                    for item in (
+                        os.environ.get(
+                            "SHERPA_OPENCODE_PARTIAL_SUCCESS_STAGE_SKILLS",
+                            "plan",
+                        )
+                        or ""
+                    ).split(",")
+                    if item.strip()
+                }
+                if diff_changed and stage_skill_name in partial_success_stages:
+                    changed_paths = _extract_changed_paths_from_diff(diff_now, limit=200)
+                    disallowed_paths = _disallowed_changed_paths(changed_paths, allowed_edit_paths)
+                    if disallowed_paths:
+                        LOGGER.warning(
+                            "[OpenCodeHelper] restoring disallowed edits outside allowed paths: %s",
+                            ", ".join(disallowed_paths[:20]),
+                        )
+                        logger.info(
+                            "[OpenCodeHelper] restoring disallowed edits outside allowed paths: "
+                            + ", ".join(disallowed_paths[:20])
+                        )
+                        run_meta["disallowed_edit_paths"] = disallowed_paths[:50]
+                        self._git_restore_paths(disallowed_paths)
+                        try:
+                            diff_now = self._git_diff_head()
+                        except Exception:
+                            diff_now = ""
+                        diff_changed = bool(diff_now) and diff_now != baseline_diff
+                    if diff_changed:
+                        self._git_add_all()
+                        LOGGER.info(
+                            "[OpenCodeHelper] partial diff produced without sentinel for stage=%s — accepting",
+                            stage_skill_name,
+                        )
+                        logger.info(
+                            "[OpenCodeHelper] partial diff produced without sentinel; accepting for "
+                            f"stage={stage_skill_name}"
+                        )
+                        _record_session_attempt(
+                            "partial_success_no_sentinel",
+                            changed_paths=_extract_changed_paths_from_diff(diff_now, limit=20),
+                        )
+                        run_meta["status"] = "partial_success_no_sentinel"
+                        run_meta["cli_retries_used"] = cli_try
+                        _append_opencode_metadata(self.working_dir, run_meta)
+                        return "".join(captured_chunks)
                 if not self.last_cli_error_kind:
                     self.last_cli_error_kind = "missing_sentinel"
                     self.last_cli_error_message = "OpenCode did not create done sentinel"
