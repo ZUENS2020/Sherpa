@@ -526,6 +526,49 @@ def test_sync_execution_plan_derives_from_selected_targets(tmp_path: Path):
     assert "png_process_data" not in json.dumps(doc)
 
 
+def test_workflow_target_state_follows_synced_execution_plan(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_chunks",
+                    "target": "parse_chunks",
+                    "api": "png_read_info",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "parser",
+                    "score_total": 1.3,
+                    "score_breakdown": {"coverage_gap": 7.5},
+                    "security_priority_mode": True,
+                    "security_score_breakdown": {"vuln_likelihood": 0.78},
+                    "execution_priority": 1,
+                    "must_run": True,
+                },
+                {
+                    "target_name": "decode_full",
+                    "target": "decode_full",
+                    "api": "png_read_image",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "image",
+                    "execution_priority": 2,
+                    "must_run": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _, execution_doc = workflow_graph._sync_execution_plan_doc_from_selected_targets(tmp_path)
+
+    state = workflow_graph._workflow_target_state_from_execution_plan(tmp_path, execution_doc)
+
+    assert state["coverage_target_name"] == "parse_chunks"
+    assert state["coverage_target_api"] == "png_read_info"
+    assert state["coverage_seed_profile"] == "decoder-binary"
+    assert state["latest_decision_snapshot"]["selected_target"] == "parse_chunks"
+    assert state["latest_vuln_decision_snapshot"]["selected_api"] == "png_read_info"
+
+
 def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
