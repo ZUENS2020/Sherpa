@@ -2841,17 +2841,24 @@ def _build_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]
     max_targets = _execution_targets_max()
     min_required = _execution_targets_min_required()
     execution_targets: list[dict[str, Any]] = []
+    seen_identity_tokens: set[str] = set()
     for item in selected:
         prio = int(item.get("execution_priority") or 0)
         if prio <= 0 or prio > max_targets:
             continue
         target_name = str(item.get("target_name") or item.get("name") or "").strip()
+        api = str(item.get("api") or "").strip()
+        identity_token = _normalize_exec_target_token(api) or _normalize_exec_target_token(target_name)
+        if identity_token and identity_token in seen_identity_tokens:
+            continue
+        if identity_token:
+            seen_identity_tokens.add(identity_token)
         expected_bin = str(item.get("wrapper_fuzzer_name") or target_name).strip()
         execution_targets.append(
             {
                 "target_name": target_name,
                 "expected_fuzzer_name": expected_bin,
-                "api": str(item.get("api") or "").strip(),
+                "api": api,
                 "seed_profile": str(item.get("seed_profile") or "").strip(),
                 "target_type": str(item.get("target_type") or "").strip(),
                 "must_run": bool(item.get("must_run") or False),
@@ -3241,9 +3248,20 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         if source_path:
             used_sources.add(source_path)
         else:
-            label = target_name or expected or api
-            if label:
-                missing_targets.append(label)
+            api_norm = _normalize_exec_target_token(api)
+            for prior in mappings:
+                if (
+                    api_norm
+                    and api_norm == _normalize_exec_target_token(str(prior.get("api") or ""))
+                    and str(prior.get("source_path") or "").strip()
+                ):
+                    source_path = str(prior.get("source_path") or "").strip()
+                    matched_by = "api_equivalent"
+                    break
+            if not source_path:
+                label = target_name or expected or api
+                if label:
+                    missing_targets.append(label)
         mappings.append(
             {
                 "target_name": target_name,
