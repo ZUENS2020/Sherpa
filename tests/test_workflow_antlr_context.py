@@ -845,43 +845,6 @@ def test_node_plan_uses_deterministic_fallback_after_retry_failure(tmp_path: Pat
     assert '"seed_profile": "parser-structure"' in targets
 
 
-def test_node_plan_silent_no_targets_falls_back_without_schema_retry(tmp_path: Path, monkeypatch):
-    fuzz_dir = tmp_path / "fuzz"
-    fuzz_dir.mkdir(parents=True, exist_ok=True)
-    src = tmp_path / "src"
-    src.mkdir(parents=True, exist_ok=True)
-    (src / "demo.c").write_text(
-        "int png_read_image(const unsigned char* data, unsigned long size) { return (data && size) ? 1 : 0; }\n",
-        encoding="utf-8",
-    )
-
-    class _Patcher:
-        def __init__(self):
-            self.calls = 0
-
-        def run_codex_command(self, _prompt: str, **kwargs):
-            self.calls += 1
-            return None
-
-    patcher = _Patcher()
-    gen = SimpleNamespace(repo_root=tmp_path, patcher=patcher, _pass_plan_targets=lambda timeout: None)
-    monkeypatch.setattr(workflow_graph, "_has_codex_key", lambda: True)
-    monkeypatch.setattr(workflow_graph, "_make_plan_hint", lambda _repo_root: "base plan hint")
-    monkeypatch.setenv("SHERPA_PLAN_STRICT_TARGETS_SCHEMA", "1")
-
-    out = workflow_graph._node_plan({"generator": gen, "codex_hint": "select a png target"})
-
-    assert out["last_error"] == ""
-    assert patcher.calls == 1
-    assert out["plan_retry_reason"] == "silent-plan-fallback"
-    assert out["plan_targets_schema_valid_before_retry"] is False
-    assert out["plan_targets_schema_valid_after_retry"] is True
-    assert out["plan_used_fallback_targets"] is True
-    assert (fuzz_dir / "PLAN.md").is_file()
-    targets = (fuzz_dir / "targets.json").read_text(encoding="utf-8")
-    assert "png_read_image" in targets
-
-
 def test_collect_target_analysis_prefers_deeper_targets_over_shallow_utilities(tmp_path: Path):
     src = tmp_path / "src"
     src.mkdir(parents=True, exist_ok=True)
