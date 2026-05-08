@@ -2159,6 +2159,77 @@ def test_node_coverage_analysis_cold_start_stays_in_place_when_threshold_not_met
     assert out["cold_start_seed_replan_triggered"] is False
 
 
+def test_node_coverage_analysis_uses_current_target_seed_quality(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 6,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_target_type": "decoder",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "seed_score": 0.31,
+                "early_new_units_30s": 0,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "png_read_image",
+                    "target_name": "png_read_image",
+                    "target_api": "png_read_image",
+                    "target_type": "decoder",
+                    "final_cov": 0,
+                    "final_ft": 0,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 60,
+                    "seed_quality": {
+                        "quality_flags": ["low_early_yield"],
+                        "cold_start_failure": True,
+                        "seed_score": 0.31,
+                        "early_new_units_30s": 0,
+                    },
+                },
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "decoder",
+                    "final_cov": 28,
+                    "final_ft": 60,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                    "seed_quality": {
+                        "quality_flags": ["repo_examples_missing"],
+                        "cold_start_failure": False,
+                        "seed_score": 0.82,
+                        "early_new_units_30s": 18,
+                        "final_cov": 28,
+                        "final_ft": 60,
+                    },
+                },
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_seed_quality"]["seed_score"] == 0.82
+    assert out["coverage_quality_flags"] == ["repo_examples_missing"]
+    assert out["cold_start_seed_replan_triggered"] is False
+    assert out["degraded_seed_replan_triggered"] is False
+    assert out["coverage_improve_mode"] == "in_place"
+    snap = dict(out.get("cold_start_trigger_snapshot") or {})
+    assert snap.get("cold_start_failure") is False
+    assert snap.get("early_new_units_30s") == 18
+
+
 def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(monkeypatch):
     monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
     monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
