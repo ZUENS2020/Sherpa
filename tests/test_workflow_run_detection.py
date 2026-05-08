@@ -1408,6 +1408,31 @@ def test_route_after_improve_harness_stops_when_round_budget_exhausted_in_legacy
     assert route == "stop"
 
 
+def test_node_improve_harness_accepts_structured_exhausted_targets(tmp_path: Path):
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_improve_harness(
+        {
+            "generator": gen,
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+            "coverage_exhausted_targets": [
+                {"name": "png_process_data", "round": 7},
+                {"name": "png_read_image", "round": 6},
+            ],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_quality_flags": ["low_early_yield"],
+        }
+    )
+
+    assert out["last_step"] == "improve-harness"
+    assert out["last_error"] == ""
+    assert "png_process_data" in out["codex_hint"]
+    assert "png_read_image" in out["codex_hint"]
+
+
 def test_node_coverage_analysis_keeps_first_plateau_in_place():
     out = workflow_graph._node_coverage_analysis(
         {

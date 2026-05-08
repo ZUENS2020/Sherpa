@@ -12777,6 +12777,18 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
     _wf_log(cast(dict[str, Any], state), "-> improve-harness")
     prompt_render_issue = ""
     try:
+        def _target_names(values: Any) -> list[str]:
+            names: list[str] = []
+            for item in list(values or []):
+                if isinstance(item, dict):
+                    value = item.get("name") or item.get("target_name") or item.get("api") or item.get("target")
+                else:
+                    value = item
+                name = str(value or "").strip()
+                if name:
+                    names.append(name)
+            return names
+
         if not bool(state.get("coverage_should_improve")):
             out = {
                 **state,
@@ -12840,7 +12852,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             )
             # Append coverage-guided target selection context
             coverage_feedback_for_plan = str(state.get("coverage_feedback_for_plan") or "")
-            exhausted_targets = list(state.get("coverage_exhausted_targets") or [])
+            exhausted_targets = _target_names(state.get("coverage_exhausted_targets"))
             if exhausted_targets:
                 hint += f"- AVOID re-selecting these exhausted targets: {', '.join(exhausted_targets)}\n"
             if coverage_feedback_for_plan:
