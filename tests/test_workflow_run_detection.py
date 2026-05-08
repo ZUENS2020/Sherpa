@@ -139,6 +139,16 @@ class _DeterministicParallelGenerator(_FakeRunGenerator):
         self.terminate_calls.append(reason)
 
 
+class _PlanFilteredRunGenerator(_DeterministicParallelGenerator):
+    def __init__(self, tmp_path: Path, results_by_name: dict[str, FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, results_by_name)
+        self.ran_bins: list[str] = []
+
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
+        self.ran_bins.append(bin_path.name)
+        return super()._run_fuzzer(bin_path)
+
+
 class _CoverageBindingGenerator:
     def __init__(self, tmp_path: Path) -> None:
         self.repo_root = tmp_path
@@ -240,6 +250,52 @@ def test_node_run_maps_fuzz_suffix_binary_to_execution_target_identity(tmp_path:
     assert out["run_details"][0]["target_api"] == "png_process_data"
     assert out["run_details"][0]["target_type"] == "parser"
     assert out["coverage_target_type"] == "parser"
+
+
+def test_node_run_filters_stale_binaries_not_in_execution_plan(tmp_path: Path):
+    gen = _PlanFilteredRunGenerator(
+        tmp_path,
+        results_by_name={
+            "demo_fuzz_2": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=17,
+                final_ft=31,
+                final_execs_per_sec=100,
+            )
+        },
+    )
+    (tmp_path / "fuzz" / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "execution_targets": [
+                    {
+                        "target_name": "demo_fuzz_2",
+                        "expected_fuzzer_name": "demo_fuzz_2",
+                        "api": "demo_api",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert gen.ran_bins == ["demo_fuzz_2"]
+    assert [detail["fuzzer"] for detail in out["run_details"]] == ["demo_fuzz_2"]
+    assert out["coverage_target_name"] == "demo_fuzz_2"
+    assert out["coverage_target_api"] == "demo_api"
 
 
 def test_build_harness_index_preserves_execution_target_type(tmp_path: Path):
