@@ -2899,6 +2899,143 @@ def _sync_execution_plan_doc_from_selected_targets(repo_root: Path) -> tuple[str
     return _write_execution_plan_doc(repo_root, selected_doc)
 
 
+def _selected_target_row_for_execution_target(
+    selected_doc: list[dict[str, Any]],
+    execution_target: dict[str, Any],
+) -> dict[str, Any]:
+    if not selected_doc:
+        return {}
+    target_tokens = [
+        str(execution_target.get("target_name") or ""),
+        str(execution_target.get("expected_fuzzer_name") or ""),
+        str(execution_target.get("api") or ""),
+    ]
+    for row in selected_doc:
+        row_tokens = [
+            str(row.get("target_name") or ""),
+            str(row.get("target") or ""),
+            str(row.get("name") or ""),
+            str(row.get("wrapper_fuzzer_name") or ""),
+            str(row.get("api") or ""),
+        ]
+        for target_token in target_tokens:
+            if target_token and _execution_target_matches_token(
+                {
+                    "target_name": target_token,
+                    "expected_fuzzer_name": target_token,
+                    "api": target_token,
+                },
+                " ".join(row_tokens),
+            ):
+                return dict(row)
+        normalized_target_tokens = {
+            _normalize_exec_target_token(token)
+            for token in target_tokens
+            if str(token or "").strip()
+        }
+        normalized_row_tokens = {
+            _normalize_exec_target_token(token)
+            for token in row_tokens
+            if str(token or "").strip()
+        }
+        if normalized_target_tokens.intersection(normalized_row_tokens):
+            return dict(row)
+    return dict(selected_doc[0])
+
+
+def _workflow_target_state_from_execution_plan(
+    repo_root: Path,
+    execution_plan_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    execution_doc = execution_plan_doc if isinstance(execution_plan_doc, dict) else _load_execution_plan_doc(repo_root)
+    execution_targets = [
+        item for item in list(execution_doc.get("execution_targets") or [])
+        if isinstance(item, dict)
+    ]
+    if not execution_targets:
+        return {}
+    selected_doc = _load_selected_targets_doc(repo_root)
+    primary = _primary_execution_target(execution_targets)
+    selected = _selected_target_row_for_execution_target(selected_doc, primary)
+    target_name = str(
+        primary.get("target_name")
+        or selected.get("target_name")
+        or selected.get("target")
+        or selected.get("name")
+        or ""
+    ).strip()
+    target_api = str(primary.get("api") or selected.get("api") or target_name).strip()
+    target_type = str(primary.get("target_type") or selected.get("target_type") or "").strip().lower()
+    seed_profile = _normalize_seed_profile(
+        str(primary.get("seed_profile") or selected.get("seed_profile") or ""),
+        target_type=target_type,
+        name=target_name,
+        context=target_api,
+    )
+    suggested_families = list(selected.get("seed_families_suggested") or [])
+    score_breakdown = dict(
+        selected.get("score_breakdown")
+        or selected.get("target_score_breakdown")
+        or {}
+    )
+    selected_targets_path = str(_selected_targets_path(repo_root))
+    decision_snapshot = {
+        "kind": "choose_target",
+        "selected_target": str(selected.get("target") or target_name or ""),
+        "selected_api": str(selected.get("api") or target_api or ""),
+        "score_total": float(selected.get("score_total") or selected.get("target_score") or 0.0),
+        "score_breakdown": score_breakdown,
+        "penalty_reason": str(
+            selected.get("penalty_reason")
+            or selected.get("target_score_penalty_reason")
+            or ""
+        ),
+        "selected_targets_path": selected_targets_path,
+        "degraded_reason": "" if selected_doc else "selected_targets_missing_or_empty",
+        "security_priority_mode": bool(selected.get("security_priority_mode") or False),
+        "top_vuln_candidate": str(selected.get("target") or target_name or ""),
+        "security_score_breakdown": dict(selected.get("security_score_breakdown") or {}),
+        "api_surface_exception_used": bool(
+            dict(selected.get("api_surface_exception") or {}).get("used") or False
+        ),
+        "tie_break_reason": str(selected.get("tie_break_reason") or ""),
+        "selection_delta_vs_runner_up": dict(selected.get("selection_delta_vs_runner_up") or {}),
+    }
+    out: dict[str, Any] = {
+        "coverage_target_name": target_name,
+        "coverage_target_api": target_api,
+        "coverage_target_type": target_type,
+        "selected_target_api": target_api,
+        "coverage_seed_profile": seed_profile,
+        "coverage_seed_families_suggested": suggested_families,
+        "coverage_seed_families_missing": suggested_families,
+        "coverage_target_score_breakdown": score_breakdown,
+        "target_scoring_enabled": bool(selected.get("target_scoring_enabled") or False),
+        "target_score_breakdown_available": bool(
+            selected.get("target_score_breakdown_available")
+            or selected.get("score_breakdown")
+            or selected.get("target_score_breakdown")
+        ),
+        "selected_targets_path": selected_targets_path if selected_doc else "",
+        "execution_plan_path": str(_execution_plan_path(repo_root)),
+        "latest_decision_snapshot": decision_snapshot,
+    }
+    if bool(selected.get("security_priority_mode") or False):
+        out["latest_vuln_decision_snapshot"] = {
+            "kind": "choose_target",
+            "selected_target": str(decision_snapshot.get("selected_target") or ""),
+            "selected_api": str(decision_snapshot.get("selected_api") or ""),
+            "security_priority_mode": True,
+            "top_vuln_candidate": str(decision_snapshot.get("top_vuln_candidate") or ""),
+            "security_score_breakdown": dict(decision_snapshot.get("security_score_breakdown") or {}),
+            "api_surface_exception_used": bool(decision_snapshot.get("api_surface_exception_used") or False),
+            "tie_break_reason": str(decision_snapshot.get("tie_break_reason") or ""),
+            "selection_delta_vs_runner_up": dict(decision_snapshot.get("selection_delta_vs_runner_up") or {}),
+        }
+        out["security_priority_mode"] = True
+    return out
+
+
 def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     path = _execution_plan_path(repo_root)
     if not path.is_file():
@@ -8653,6 +8790,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         _run_post_synthesize_build_validation()
         _, execution_plan_doc = _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
         harness_index_path = ""
         harness_index_doc: dict[str, Any] = {}
         try:
@@ -8759,6 +8900,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
             "coverage_target_name": str(target_alignment.get("expected_target_name") or selected_target_name or state.get("coverage_target_name") or ""),
+            **boundary_target_state,
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
             "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
@@ -9292,6 +9434,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             item for item in list(execution_plan_doc.get("execution_targets") or [])
             if isinstance(item, dict)
         ]
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
+        next_state.update(boundary_target_state)
         if selected_targets_doc:
             try:
                 _, harness_index_doc = _write_harness_index_doc(
@@ -11174,6 +11321,12 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             item for item in list(execution_plan_doc.get("execution_targets") or [])
             if isinstance(item, dict)
         ]
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
+        if boundary_target_state:
+            state = cast(FuzzWorkflowRuntimeState, {**state, **boundary_target_state})
         if execution_targets:
             bins = _filter_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
         if not bins:
