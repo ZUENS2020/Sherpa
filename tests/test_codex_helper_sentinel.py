@@ -44,6 +44,32 @@ class _FakeProc:
         self.returncode = -9
 
 
+class _RecordingStdout:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def __iter__(self):
+        return iter(())
+
+    def close(self) -> None:
+        self.events.append("stdout.close")
+
+
+class _RecordingProc(_FakeProc):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(stdout_text="")
+        self.stdout = _RecordingStdout(events)
+        self._events = events
+
+    def terminate(self) -> None:
+        self._events.append("proc.terminate")
+        super().terminate()
+
+    def kill(self) -> None:
+        self._events.append("proc.kill")
+        super().kill()
+
+
 class _NoopThread:
     def __init__(self, *args, **kwargs) -> None:
         self.args = args
@@ -915,6 +941,35 @@ def test_run_codex_command_reaps_process_on_eof_without_done(monkeypatch: pytest
 
     assert out is None
     assert proc.wait_calls >= 1
+
+
+def test_run_codex_command_terminates_before_closing_stdout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    events: list[str] = []
+    proc = _RecordingProc(events)
+
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(helper, "_git_diff_head", lambda: "")
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "repair build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=0.1,
+        initial_backoff=0,
+    )
+
+    assert out is None
+    assert "proc.terminate" in events
+    assert "stdout.close" in events
+    assert events.index("proc.terminate") < events.index("stdout.close")
 
 
 def test_run_codex_command_kills_process_group_even_when_wrapper_exited(

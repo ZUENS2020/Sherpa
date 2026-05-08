@@ -1560,11 +1560,10 @@ class CodexHelper:
                     cleanup_reaped_count = 0
                     cleanup_reap_status = "ok"
                     try:
-                        if proc.stdout is not None:
-                            try:
-                                proc.stdout.close()
-                            except Exception:
-                                pass
+                        # Terminate first. Closing the stdout pipe while the reader
+                        # thread is blocked in a buffered read can block on the
+                        # reader's internal lock, preventing the kill path from ever
+                        # running and leaving orphaned opencode processes alive.
                         _terminate_or_kill_proc(force=False)
                         _wait_proc_with_timeout(0.5)
                         if proc.poll() is None:
@@ -1573,6 +1572,11 @@ class CodexHelper:
                                 if not _wait_proc_with_timeout(4.0):
                                     cleanup_status = "failed"
                                     cleanup_error = "process did not exit after terminate/kill sequence"
+                        if proc.stdout is not None:
+                            try:
+                                proc.stdout.close()
+                            except Exception:
+                                pass
                         reaped_pg, reap_status_pg = _reap_process_group_children(proc_pgid, 1.0)
                         cleanup_reaped_count += int(reaped_pg)
                         if reap_status_pg == "failed":
