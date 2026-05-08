@@ -444,6 +444,40 @@ def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
     assert len(list(written.get("mappings") or [])) == 2
 
 
+def test_execution_plan_harness_consistency_allows_duplicate_api_target(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "readpng_decode",
+                        "expected_fuzzer_name": "readpng_decode",
+                        "api": "png_read_image",
+                    },
+                    {
+                        "target_name": "png_read_image",
+                        "expected_fuzzer_name": "png_read_image",
+                        "api": "png_read_image",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "readpng_decode_fuzzer.c").write_text("int x;", encoding="utf-8")
+
+    ok, reason, doc = workflow_graph._validate_execution_plan_harness_consistency(tmp_path)
+
+    assert ok is True
+    assert reason == ""
+    assert list(doc.get("missing_targets") or []) == []
+    mappings = list(doc.get("mappings") or [])
+    assert mappings[1]["matched_by"] == "api_equivalent"
+    assert mappings[1]["source_path"] == "fuzz/readpng_decode_fuzzer.c"
+
+
 def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)

@@ -2401,6 +2401,44 @@ def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path)
     assert str(top.get("target_score_penalty_reason") or "") == "cold_start_low_yield"
 
 
+def test_build_execution_plan_doc_dedupes_duplicate_api_targets(tmp_path: Path):
+    selected_doc = [
+        {
+            "target_name": "readpng_decode",
+            "name": "readpng_decode",
+            "api": "png_read_image",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 1,
+            "must_run": True,
+        },
+        {
+            "target_name": "png_read_image",
+            "name": "png_read_image",
+            "api": "png_read_image",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 2,
+            "must_run": True,
+        },
+        {
+            "target_name": "progressive_decode",
+            "name": "progressive_decode",
+            "api": "png_process_data",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 3,
+            "must_run": False,
+        },
+    ]
+
+    doc = workflow_graph._build_execution_plan_doc(tmp_path, selected_doc)
+    rows = list(doc.get("execution_targets") or [])
+
+    assert [row["target_name"] for row in rows] == ["readpng_decode", "progressive_decode"]
+    assert [row["api"] for row in rows] == ["png_read_image", "png_process_data"]
+
+
 def test_build_selected_targets_doc_prefers_high_vuln_signal_when_base_factors_equal(
     tmp_path: Path, monkeypatch
 ):
