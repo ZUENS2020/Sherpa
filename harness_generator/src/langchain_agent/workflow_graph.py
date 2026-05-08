@@ -2885,6 +2885,20 @@ def _write_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]
     return str(path), doc
 
 
+def _sync_execution_plan_doc_from_selected_targets(repo_root: Path) -> tuple[str, dict[str, Any]]:
+    """Make execution_plan.json a derived artifact of selected_targets.json.
+
+    Agent-authored repair plans may edit execution_plan.json directly. The
+    control-plane contract treats selected_targets.json as the normalized ranked
+    target source, so stage boundaries must re-derive execution_plan.json from it
+    when it exists.
+    """
+    selected_doc = _load_selected_targets_doc(repo_root)
+    if not selected_doc:
+        return str(_execution_plan_path(repo_root)), _load_execution_plan_doc(repo_root)
+    return _write_execution_plan_doc(repo_root, selected_doc)
+
+
 def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     path = _execution_plan_path(repo_root)
     if not path.is_file():
@@ -8638,7 +8652,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         _run_post_synthesize_build_validation()
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        _, execution_plan_doc = _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
         harness_index_path = ""
         harness_index_doc: dict[str, Any] = {}
         try:
@@ -9269,20 +9283,33 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             return next_state
 
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        selected_targets_doc = _load_selected_targets_doc(gen.repo_root)
+        if selected_targets_doc:
+            _, execution_plan_doc = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
+        else:
+            execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
         execution_targets = [
             item for item in list(execution_plan_doc.get("execution_targets") or [])
             if isinstance(item, dict)
         ]
-        harness_index_doc = _load_harness_index_doc(gen.repo_root)
-        if not harness_index_doc:
+        if selected_targets_doc:
             try:
                 _, harness_index_doc = _write_harness_index_doc(
                     gen.repo_root,
                     execution_plan_doc=execution_plan_doc,
                 )
             except Exception:
-                harness_index_doc = {}
+                harness_index_doc = _load_harness_index_doc(gen.repo_root)
+        else:
+            harness_index_doc = _load_harness_index_doc(gen.repo_root)
+            if not harness_index_doc:
+                try:
+                    _, harness_index_doc = _write_harness_index_doc(
+                        gen.repo_root,
+                        execution_plan_doc=execution_plan_doc,
+                    )
+                except Exception:
+                    harness_index_doc = {}
         mapping_by_target: dict[str, dict[str, Any]] = {}
         for row in list(harness_index_doc.get("mappings") or []):
             if not isinstance(row, dict):
@@ -11142,7 +11169,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 pass
 
         bins = gen._discover_fuzz_binaries()
-        execution_targets = _execution_plan_targets(gen.repo_root)
+        _, execution_plan_doc = _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
         if execution_targets:
             bins = _filter_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
         if not bins:
