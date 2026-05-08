@@ -3061,6 +3061,35 @@ def _target_type_from_run_details(
     return ""
 
 
+def _matching_run_details_for_target(
+    run_details: list[dict[str, Any]] | None,
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> list[dict[str, Any]]:
+    details = [detail for detail in list(run_details or []) if isinstance(detail, dict)]
+    wanted = {
+        _normalize_exec_target_token(target_name),
+        _normalize_exec_target_token(target_api),
+        _normalize_exec_target_token(fuzzer_name),
+    }
+    wanted.discard("")
+    if not details or not wanted:
+        return []
+    matched: list[dict[str, Any]] = []
+    for detail in details:
+        candidates = {
+            _normalize_exec_target_token(str(detail.get("target_name") or "")),
+            _normalize_exec_target_token(str(detail.get("target_api") or "")),
+            _normalize_exec_target_token(str(detail.get("fuzzer") or "")),
+        }
+        candidates.discard("")
+        if wanted & candidates:
+            matched.append(detail)
+    return matched
+
+
 def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
     if not bins or not execution_targets:
         return list(bins)
@@ -4416,6 +4445,34 @@ def _aggregate_seed_quality_from_run_details(
         merged["quality_flags"] = sorted(all_flags)
 
     return merged
+
+
+def _seed_quality_from_run_details_for_target(
+    run_details: list[dict[str, Any]],
+    fallback: dict[str, Any],
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> dict[str, Any]:
+    matched = _matching_run_details_for_target(
+        run_details,
+        target_name=target_name,
+        target_api=target_api,
+        fuzzer_name=fuzzer_name,
+    )
+    if matched:
+        return _aggregate_seed_quality_from_run_details(matched, fallback)
+    return _aggregate_seed_quality_from_run_details(run_details, fallback)
+
+
+def _quality_flags_from_seed_quality(seed_quality: dict[str, Any]) -> list[str]:
+    flags: set[str] = set()
+    for flag in list(seed_quality.get("quality_flags") or []):
+        sval = str(flag or "").strip()
+        if sval:
+            flags.add(sval)
+    return sorted(flags)
 
 
 def _build_harness_feedback(state: dict[str, Any]) -> dict[str, Any]:
@@ -11783,23 +11840,6 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 else 0
             )
 
-        aggregated_seed_quality = _aggregate_seed_quality_from_run_details(
-            run_details,
-            dict(state.get("coverage_seed_quality") or {}),
-        )
-        aggregated_quality_flags: set[str] = set()
-        cold_start_failure_any = False
-        for detail in run_details:
-            sq = detail.get("seed_quality") or {}
-            if not isinstance(sq, dict):
-                continue
-            for flag in list(sq.get("quality_flags") or []):
-                sval = str(flag or "").strip()
-                if sval:
-                    aggregated_quality_flags.add(sval)
-            if bool(sq.get("cold_start_failure")):
-                cold_start_failure_any = True
-
         coverage_target_name = str(preferred_identity.get("target_name") or "").strip()
         coverage_target_api = str(preferred_identity.get("target_api") or "").strip()
         coverage_target_type = str(preferred_identity.get("target_type") or "").strip()
@@ -11811,6 +11851,15 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 fuzzer_name=str(preferred_identity.get("expected_fuzzer_name") or ""),
             )
         coverage_seed_profile = str(preferred_identity.get("seed_profile") or last_seed_profile or "").strip()
+        coverage_fuzzer_name = str(preferred_identity.get("expected_fuzzer_name") or coverage_target_name).strip()
+        current_seed_quality = _seed_quality_from_run_details_for_target(
+            run_details,
+            dict(state.get("coverage_seed_quality") or {}),
+            target_name=coverage_target_name,
+            target_api=coverage_target_api,
+            fuzzer_name=coverage_fuzzer_name,
+        )
+        current_quality_flags = _quality_flags_from_seed_quality(current_seed_quality)
 
         out = {
             **state,
@@ -11850,7 +11899,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             ),
             "coverage_target_type": coverage_target_type or str(state.get("coverage_target_type") or ""),
             "coverage_seed_profile": coverage_seed_profile,
-            "coverage_seed_quality": aggregated_seed_quality,
+            "coverage_seed_quality": current_seed_quality,
             "coverage_seed_families_suggested": list(
                 families_suggested_values
                 if families_suggested_found
@@ -11867,8 +11916,9 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 else list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
-                sorted(aggregated_quality_flags)
-                or list(state.get("coverage_quality_flags") or [])
+                current_quality_flags
+                if current_seed_quality
+                else list(state.get("coverage_quality_flags") or [])
             ),
             "coverage_target_depth_score": int(state.get("coverage_target_depth_score") or 0),
             "coverage_target_depth_class": str(state.get("coverage_target_depth_class") or ""),
@@ -11885,7 +11935,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_generation_degraded": bool(
                 seed_generation_failed_fuzzers
                 or (not seed_generation_skipped_reason and int(seed_count_filtered_total.get("total") or 0) <= 1)
-                or cold_start_failure_any
+                or bool(current_seed_quality.get("cold_start_failure") or False)
             ),
             "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
@@ -12349,8 +12399,17 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         current_depth_score = int(state.get("coverage_target_depth_score") or 0)
         current_depth_class = str(state.get("coverage_target_depth_class") or "")
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
-        seed_quality = dict(state.get("coverage_seed_quality") or {})
-        seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
+        seed_quality = _seed_quality_from_run_details_for_target(
+            run_details,
+            dict(state.get("coverage_seed_quality") or {}),
+            target_name=current_target_name,
+            target_api=current_target_api,
+            fuzzer_name=str(preferred_identity.get("expected_fuzzer_name") or current_target_name),
+        )
+        seed_feedback_state = dict(state)
+        seed_feedback_state["coverage_seed_quality"] = seed_quality
+        seed_feedback_state["coverage_quality_flags"] = _quality_flags_from_seed_quality(seed_quality)
+        seed_feedback = _build_seed_feedback(cast(dict[str, Any], seed_feedback_state))
         frontier_summary = dict(state.get("coverage_frontier_summary") or {})
         coverage_frontier_input_count = int(frontier_summary.get("top_input_count") or 0)
         coverage_replay_stage_success = bool(state.get("coverage_replay_stage_success") or False)
@@ -12361,7 +12420,9 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         coverage_replay_pending_inputs = int(state.get("coverage_replay_pending_inputs") or 0)
         coverage_replay_failed_inputs = int(state.get("coverage_replay_failed_inputs") or 0)
         coverage_replay_error = str(state.get("coverage_replay_error") or "")
-        quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
+        quality_flags = _quality_flags_from_seed_quality(seed_quality)
+        if not quality_flags and not seed_quality:
+            quality_flags = list(state.get("coverage_quality_flags") or [])
         seed_families_suggested = list(state.get("coverage_seed_families_suggested") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
         seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
