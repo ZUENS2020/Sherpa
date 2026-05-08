@@ -193,6 +193,82 @@ def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: 
     assert out["run_error_kind"] == "nonzero_exit_without_crash"
 
 
+def test_node_run_maps_fuzz_suffix_binary_to_execution_target_identity(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=11,
+                final_ft=21,
+                final_execs_per_sec=100,
+            )
+        ],
+    )
+    gen._bin = gen.fuzz_out_dir / "png_process_data_fuzz"
+    gen._bin.write_text("", encoding="utf-8")
+    (tmp_path / "fuzz" / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "execution_targets": [
+                    {
+                        "target_name": "png_process_data",
+                        "expected_fuzzer_name": "png_process_data",
+                        "api": "png_process_data",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["run_details"][0]["fuzzer"] == "png_process_data_fuzz"
+    assert out["run_details"][0]["target_name"] == "png_process_data"
+    assert out["run_details"][0]["target_api"] == "png_process_data"
+    assert out["run_details"][0]["target_type"] == "parser"
+    assert out["coverage_target_type"] == "parser"
+
+
+def test_build_harness_index_preserves_execution_target_type(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "png_process_data_fuzz.c").write_text("int x;\n", encoding="utf-8")
+
+    doc = workflow_graph._build_harness_index_doc(
+        tmp_path,
+        execution_plan_doc={
+            "schema_version": 1,
+            "execution_targets": [
+                {
+                    "target_name": "png_process_data",
+                    "expected_fuzzer_name": "png_process_data",
+                    "api": "png_process_data",
+                    "target_type": "parser",
+                    "seed_profile": "decoder-binary",
+                    "must_run": True,
+                }
+            ],
+        },
+    )
+
+    assert doc["mappings"][0]["target_name"] == "png_process_data"
+    assert doc["mappings"][0]["target_type"] == "parser"
+    assert doc["mappings"][0]["seed_profile"] == "decoder-binary"
+
+
 def test_node_run_accepts_sanitizer_log_crash_without_native_artifact(tmp_path: Path):
     artifact = tmp_path / "fuzz" / "out" / "artifacts" / "crash-log-1.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
