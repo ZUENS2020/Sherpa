@@ -478,6 +478,54 @@ def test_execution_plan_harness_consistency_allows_duplicate_api_target(tmp_path
     assert mappings[1]["source_path"] == "fuzz/readpng_decode_fuzzer.c"
 
 
+def test_sync_execution_plan_derives_from_selected_targets(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "png_read_info",
+                    "api": "png_read_info",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "parser",
+                    "execution_priority": 1,
+                    "must_run": True,
+                },
+                {
+                    "target_name": "png_read_image",
+                    "api": "png_read_image",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "image",
+                    "execution_priority": 2,
+                    "must_run": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "png_process_data",
+                        "expected_fuzzer_name": "png_process_data",
+                        "api": "png_process_data",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, doc = workflow_graph._sync_execution_plan_doc_from_selected_targets(tmp_path)
+
+    targets = list(doc.get("execution_targets") or [])
+    assert [item["target_name"] for item in targets] == ["png_read_info", "png_read_image"]
+    assert "png_process_data" not in json.dumps(doc)
+
+
 def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
