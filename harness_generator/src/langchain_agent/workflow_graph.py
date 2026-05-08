@@ -3120,6 +3120,32 @@ def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: li
     return ordered
 
 
+def _filter_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
+    """Return only fuzzer binaries that are current execution-plan targets.
+
+    `fuzz/out` can contain binaries from earlier plan/replan rounds. Running those
+    stale binaries pollutes run_details and can make coverage-analysis optimize a
+    target that is no longer in the active plan.
+    """
+    if not bins or not execution_targets:
+        return list(bins)
+    by_name = {p.name: p for p in bins}
+    by_stem = {p.stem: p for p in bins}
+    filtered: list[Path] = []
+    for item in sorted(
+        enumerate(execution_targets),
+        key=lambda pair: _execution_target_sort_key(pair[1], pair[0]),
+    ):
+        candidate = None
+        for alias in _execution_target_fuzzer_aliases(item[1]):
+            candidate = by_name.get(alias) or by_stem.get(Path(alias).stem)
+            if candidate is not None:
+                break
+        if candidate is not None and candidate not in filtered:
+            filtered.append(candidate)
+    return filtered
+
+
 def _discover_harness_sources(repo_root: Path) -> list[Path]:
     fuzz_dir = repo_root / "fuzz"
     if not fuzz_dir.is_dir():
@@ -11116,7 +11142,12 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 pass
 
         bins = gen._discover_fuzz_binaries()
+        execution_targets = _execution_plan_targets(gen.repo_root)
+        if execution_targets:
+            bins = _filter_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
         if not bins:
+            if execution_targets:
+                raise HarnessGeneratorError("No fuzzer binaries found under fuzz/out/ matching execution_plan.json")
             raise HarnessGeneratorError("No fuzzer binaries found under fuzz/out/")
 
         crash_found = False
@@ -11285,7 +11316,6 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_noise_rejected_count = 0
         missing_execution_targets: list[str] = []
         seed_family_coverage_state: dict[str, Any] = {}
-        execution_targets = _execution_plan_targets(gen.repo_root)
         bins = _order_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
         preferred_target = _preferred_execution_target(execution_targets, cast(dict[str, Any], state))
         preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
