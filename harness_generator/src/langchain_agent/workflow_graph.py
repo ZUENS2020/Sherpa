@@ -2921,6 +2921,34 @@ def _execution_target_fuzzer_name(item: dict[str, Any]) -> str:
     ).strip()
 
 
+def _execution_target_fuzzer_aliases(item: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    for value in (
+        _execution_target_fuzzer_name(item),
+        item.get("wrapper_fuzzer_name"),
+        item.get("target_name"),
+        item.get("name"),
+        item.get("api"),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        base = Path(text).name
+        stem = Path(base).stem
+        for candidate in (text, base, stem):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in aliases:
+                aliases.append(candidate)
+            if candidate and not re.search(r"_fuzz(?:er)?$", candidate):
+                fuzz_candidate = f"{candidate}_fuzz"
+                if fuzz_candidate not in aliases:
+                    aliases.append(fuzz_candidate)
+            stripped = re.sub(r"_fuzz(?:er)?$", "", candidate)
+            if stripped and stripped not in aliases:
+                aliases.append(stripped)
+    return aliases
+
+
 def _execution_target_identity(item: dict[str, Any]) -> dict[str, str]:
     target_name = str(item.get("target_name") or item.get("name") or "").strip()
     target_api = str(item.get("api") or target_name).strip()
@@ -3043,8 +3071,11 @@ def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: li
         enumerate(execution_targets),
         key=lambda pair: _execution_target_sort_key(pair[1], pair[0]),
     ):
-        expected = _execution_target_fuzzer_name(item[1])
-        candidate = by_name.get(expected) or by_stem.get(Path(expected).stem)
+        candidate = None
+        for alias in _execution_target_fuzzer_aliases(item[1]):
+            candidate = by_name.get(alias) or by_stem.get(Path(alias).stem)
+            if candidate is not None:
+                break
         if candidate is not None and candidate not in ordered:
             ordered.append(candidate)
     for p in bins:
@@ -3189,6 +3220,8 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
                 "target_name": target_name,
                 "expected_fuzzer_name": expected,
                 "api": api,
+                "target_type": str(item.get("target_type") or "").strip(),
+                "seed_profile": str(item.get("seed_profile") or "").strip(),
                 "must_run": bool(item.get("must_run") or False),
                 "source_path": source_path,
                 "matched_by": matched_by,
@@ -11183,21 +11216,23 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
         execution_target_by_fuzzer: dict[str, dict[str, Any]] = {}
         for item in execution_targets:
-            expected = _execution_target_fuzzer_name(item)
-            if expected:
-                execution_target_by_fuzzer[expected] = dict(item)
+            for alias in _execution_target_fuzzer_aliases(item):
+                execution_target_by_fuzzer.setdefault(alias, dict(item))
         bins_by_name = {p.name: p for p in bins}
         bins_by_stem = {p.stem: p for p in bins}
         seed_fuzzers: list[Path] = []
         if execution_targets:
             for item in execution_targets:
-                expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
-                candidate = bins_by_name.get(expected) or bins_by_stem.get(Path(expected).stem)
+                candidate = None
+                for alias in _execution_target_fuzzer_aliases(item):
+                    candidate = bins_by_name.get(alias) or bins_by_stem.get(Path(alias).stem)
+                    if candidate is not None:
+                        break
                 if candidate is not None:
                     if candidate not in seed_fuzzers:
                         seed_fuzzers.append(candidate)
                 else:
-                    missing_name = str(item.get("target_name") or expected)
+                    missing_name = str(item.get("target_name") or _execution_target_fuzzer_name(item))
                     if missing_name and missing_name not in missing_execution_targets:
                         missing_execution_targets.append(missing_name)
         if not seed_fuzzers:
