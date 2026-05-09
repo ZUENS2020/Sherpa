@@ -649,6 +649,7 @@ score_total = 0.45 * vuln_likelihood
 |----------|---------|
 | `analysis` | 安全审计输出 `security_evidence[]`（✅ 已实现） |
 | `analysis` 扩展 | analysis 结束后落盘 `vuln_candidates.json` 候选工件（✅ 已实现） |
+| `vuln_hunt` 内部子阶段 | plan 开头刷新候选、写 `vuln_hunt_summary.md` / `vuln_hunt_events.jsonl`（✅ 已实现，外部 stage 名暂不变） |
 | `plan` | 从 coverage-first 改为 candidate-first，显式读取 `vuln_candidates.json`（✅ 已实现） |
 | `synthesize` | hint 注入漏洞路径（✅ 已实现 `vuln_hint_lines` + `attack_hint` 候选透传） |
 | `seed_generation` | 注入 `VULN_SEED_GUIDANCE` + `VULN_DICTIONARY_TOKENS`（✅ 已实现） |
@@ -929,10 +930,12 @@ flowchart LR
 
 - 已按最小闭环落地：
   - `analysis` 基于 `analysis_context.json.analysis_evidence.vuln_candidate_inventory` 生成 `fuzz/vuln_candidates.json`
+  - `analysis -> vuln-hunt -> plan` 显式 stage 路由已接入；`plan` 在直接 resume 时仍可按需刷新 hunt 候选
+  - `_node_vuln_hunt` 刷新候选并记录 `fuzz/vuln_hunt_summary.md` / `fuzz/vuln_hunt_events.jsonl`
   - `plan` 显式读取 `fuzz/vuln_candidates.json`，执行 candidate-first 排序
   - `selected_targets.json` 保留 `vuln_candidate_id`、`vuln_candidate_priority`、`attack_hint`
   - `synthesize` 继续沿用漏洞 hint 注入
-- 当前仍未做独立 `_node_vuln_hunt`；现阶段先复用 analysis 产出候选，减少状态机复杂度。
+- `vuln-hunt` 已暴露为独立 k8s/resume stage；`vuln_hunt` resume alias 会归一化为 `vuln-hunt`。
 - 不引入新队列抽象，不改变 k8s Job 调度模型。
 - 保持单任务线性主链。
 
@@ -948,14 +951,15 @@ flowchart LR
 - `improve_harness` 阶段注入覆盖率路径反馈。
 - 压缩到 200 行以内。
 
-### Phase 1c：迭代验证循环
+### Phase 1c：迭代验证循环（已完成基础闭环）
 
 **目标**：单候选多轮迭代验证（模仿 FuzzingBrain 的 do_pov 循环）。
 
-- coverage loop 增加"候选验证进展"语义。
-- 每个候选最多 5 轮迭代。
-- 对话上下文跨迭代保持（messages 列表模式）。
-- 覆盖率反馈注入每轮 LLM 调用。
+- coverage loop 已增加"候选验证进展"语义。
+- coverage plateau / seed degraded / harness feedback 会写入 `vuln_hunt_events.jsonl`。
+- 当前 active candidate 会更新 `attempt_count`、`validation_status`、`last_result`。
+- 每个候选默认最多 5 轮迭代，超过后从 `cooling` 升级为 `exhausted`。
+- `coverage-analysis` 在 replan 场景下优先回到 `vuln-hunt`，再进入 `plan/materialize`。
 
 ### Phase 2：状态解耦（DB 驱动）
 
@@ -1054,12 +1058,16 @@ SHERPA_VULN_COOLING_HOURS=24
 | 降级传播到 decision snapshot | 前置：可观测性 | ✅ 已完成 |
 | plan prompt candidate-first 排序声明 | 前置：排序策略 | ✅ 已完成 |
 | analysis 落盘 `fuzz/vuln_candidates.json` | Phase 1a | ✅ 已完成 |
+| 显式 `vuln-hunt` stage（analysis -> vuln-hunt -> plan） | Phase 1a/2 | ✅ 已完成 |
 | plan 显式消费 `fuzz/vuln_candidates.json` | Phase 1a | ✅ 已完成 |
 | selected target 透出 `vuln_candidate_id` / `attack_hint` | Phase 1a | ✅ 已完成 |
+| coverage feedback 回写 `vuln_hunt_events.jsonl` | Phase 1c | ✅ 已完成 |
+| active candidate 状态回写（attempt/status/last_result） | Phase 1c | ✅ 已完成 |
+| coverage replan 路由回 `vuln-hunt` | Phase 2/3 | ✅ 已完成 |
 
-**当前状态**：前置工作与 Phase 1a 最小闭环已完成，当前是“analysis 产候选 + plan candidate-first + synthesize attack hint”的可运行版本。
+**当前状态**：前置工作、显式 `vuln-hunt` stage、candidate-first plan、synthesize attack hint、以及 coverage feedback 驱动候选状态回写已完成。当前是“发现 → 候选 → 目标物化 → fuzz 验证 → 反馈回 hunt”的文件工件闭环版本。
 
-**下一步**：Phase 1b — 细粒度覆盖率反馈与验证闭环；如仍需更强自主性，再引入独立 `_node_vuln_hunt`。
+**下一步**：DB 驱动候选表与并发验证引擎仍未实现；该部分属于后续重架构，不在当前文件工件闭环范围内。
 
 ---
 

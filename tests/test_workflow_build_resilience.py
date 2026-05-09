@@ -933,12 +933,20 @@ def test_route_after_init_defaults_to_analysis_for_invalid_resume_step() -> None
     assert route == "analysis"
 
 
-def test_route_after_analysis_goes_to_plan_on_success_or_degraded() -> None:
+def test_route_after_analysis_goes_to_vuln_hunt_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
     assert workflow_graph._route_after_analysis_state(
         {"failed": False, "last_error": "", "analysis_degraded": False}
-    ) == "plan"
+    ) == "vuln-hunt"
     assert workflow_graph._route_after_analysis_state(
         {"failed": False, "last_error": "analysis failed", "analysis_degraded": True}
+    ) == "vuln-hunt"
+
+
+def test_route_after_analysis_goes_to_plan_when_vuln_hunt_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "0")
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "", "analysis_degraded": False}
     ) == "plan"
 
 

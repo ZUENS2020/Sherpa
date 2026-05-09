@@ -2481,6 +2481,7 @@ def _is_status_terminal(raw: str | None) -> bool:
 
 _RESUMABLE_WORKFLOW_STEPS = {
     "analysis",
+    "vuln-hunt",
     "plan",
     "synthesize",
     "build",
@@ -2495,6 +2496,7 @@ _RESUMABLE_WORKFLOW_STEPS = {
 }
 _STAGED_WORKFLOW_STEPS = (
     "analysis",
+    "vuln-hunt",
     "plan",
     "synthesize",
     "build",
@@ -2515,6 +2517,8 @@ def _normalize_resume_step(raw: str | None) -> str:
         return "stop"
     if s == "repro_crash":
         return "re-build"
+    if s in {"vuln_hunt", "vuln-hunt"}:
+        return "vuln-hunt"
     if s in {"crash_triage", "crash-triage"}:
         return "crash-triage"
     if s in {"fix_harness", "fix-harness"}:
@@ -4001,6 +4005,12 @@ def _enrich_job_view_from_workflow_context(view: dict) -> None:
         ("security_evidence_count", "security_evidence_count", int),
         ("vuln_candidate_count", "vuln_candidate_count", int),
         ("vuln_hunting_enabled", "vuln_hunting_enabled", bool),
+        ("vuln_hunt_enabled", "vuln_hunt_enabled", bool),
+        ("vuln_hunt_candidate_count", "vuln_hunt_candidate_count", int),
+        ("vuln_hunt_active_candidate_id", "vuln_hunt_active_candidate_id", str),
+        ("vuln_hunt_degraded", "vuln_hunt_degraded", bool),
+        ("vuln_hunt_last_reason", "vuln_hunt_last_reason", str),
+        ("vuln_hunt_summary_path", "vuln_hunt_summary_path", str),
         ("security_priority_mode", "security_priority_mode", bool),
         ("latest_vuln_decision_snapshot", "latest_vuln_decision_snapshot", dict),
         ("vuln_candidates_path", "vuln_candidates_path", str),
@@ -4106,6 +4116,12 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("security_evidence_count", 0)
     view.setdefault("vuln_candidate_count", 0)
     view.setdefault("vuln_hunting_enabled", False)
+    view.setdefault("vuln_hunt_enabled", False)
+    view.setdefault("vuln_hunt_candidate_count", 0)
+    view.setdefault("vuln_hunt_active_candidate_id", "")
+    view.setdefault("vuln_hunt_degraded", False)
+    view.setdefault("vuln_hunt_last_reason", "")
+    view.setdefault("vuln_hunt_summary_path", "")
     view.setdefault("security_priority_mode", False)
     view.setdefault("latest_vuln_decision_snapshot", {})
     view.setdefault("vuln_candidates_path", "")
@@ -4378,6 +4394,12 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
                 "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),
                 "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
+                "vuln_hunt_enabled": bool((active_child or job).get("vuln_hunt_enabled", False)),
+                "vuln_hunt_candidate_count": int((active_child or job).get("vuln_hunt_candidate_count", 0) or 0),
+                "vuln_hunt_active_candidate_id": str((active_child or job).get("vuln_hunt_active_candidate_id") or ""),
+                "vuln_hunt_degraded": bool((active_child or job).get("vuln_hunt_degraded", False)),
+                "vuln_hunt_last_reason": str((active_child or job).get("vuln_hunt_last_reason") or ""),
+                "vuln_hunt_summary_path": str((active_child or job).get("vuln_hunt_summary_path") or ""),
                 "security_priority_mode": bool((active_child or job).get("security_priority_mode", False)),
                 "latest_vuln_decision_snapshot": dict((active_child or job).get("latest_vuln_decision_snapshot") or {}),
                 "vuln_candidates_path": str((active_child or job).get("vuln_candidates_path") or ""),
@@ -4617,7 +4639,7 @@ def _run_fuzz_job(
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     if (
-                        stage == "plan"
+                        stage in {"vuln-hunt", "plan"}
                         and companion_pod
                         and _k8s_analysis_require_rag_ready()
                     ):
@@ -4661,7 +4683,7 @@ def _run_fuzz_job(
                             "message": "analysis skipped: reuse existing analysis context",
                             "repo_root": current_repo_root,
                             "workflow_last_step": "analysis",
-                            "workflow_recommended_next": "plan",
+                            "workflow_recommended_next": "vuln-hunt",
                             "restart_to_plan": False,
                             "analysis_done": True,
                             "analysis_degraded": False,
@@ -4691,7 +4713,7 @@ def _run_fuzz_job(
                             f"{reusable_path or '(unknown path)'}"
                         )
                         last_result = stage_result
-                        current_stage = "plan"
+                        current_stage = "vuln-hunt"
                         continue
                     if current_repo_root:
                         context_dir = str(context_dir_for_repo_root(current_repo_root) or context_dir).strip()
@@ -4894,6 +4916,12 @@ def _run_fuzz_job(
                 "security_evidence_count": int(res.get("security_evidence_count") or 0),
                 "vuln_candidate_count": int(res.get("vuln_candidate_count") or 0),
                 "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
+                "vuln_hunt_enabled": bool(res.get("vuln_hunt_enabled") or False),
+                "vuln_hunt_candidate_count": int(res.get("vuln_hunt_candidate_count") or 0),
+                "vuln_hunt_active_candidate_id": str(res.get("vuln_hunt_active_candidate_id") or ""),
+                "vuln_hunt_degraded": bool(res.get("vuln_hunt_degraded") or False),
+                "vuln_hunt_last_reason": str(res.get("vuln_hunt_last_reason") or ""),
+                "vuln_hunt_summary_path": str(res.get("vuln_hunt_summary_path") or ""),
                 "security_priority_mode": bool(res.get("security_priority_mode") or False),
                 "latest_vuln_decision_snapshot": dict(res.get("latest_vuln_decision_snapshot") or {}),
                 "vuln_candidates_path": str(res.get("vuln_candidates_path") or ""),

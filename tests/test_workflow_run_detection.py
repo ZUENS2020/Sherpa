@@ -1451,6 +1451,20 @@ def test_route_after_coverage_analysis_routes_to_improve_harness():
     assert route == "improve-harness"
 
 
+def test_route_after_coverage_analysis_routes_replan_to_vuln_hunt(monkeypatch):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+        }
+    )
+    assert route == "vuln-hunt"
+
+
 def test_route_after_coverage_analysis_continues_run_when_no_improve_in_hard_fail_only(monkeypatch):
     monkeypatch.delenv("SHERPA_AUTO_STOP_POLICY", raising=False)
     route = workflow_graph._route_after_coverage_analysis_state(

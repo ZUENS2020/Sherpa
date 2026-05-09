@@ -159,6 +159,9 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
 
     out = workflow_graph._node_plan({"generator": gen, "codex_hint": ""})
     assert out["last_error"] == ""
+    assert out["vuln_hunt_enabled"] is True
+    assert out["vuln_hunt_candidate_count"] >= 0
+    assert (tmp_path / "fuzz" / "vuln_hunt_summary.md").is_file()
     assert "antlr_context_path" in out
     antlr_ctx = Path(str(out.get("antlr_context_path") or ""))
     assert antlr_ctx.is_file()
