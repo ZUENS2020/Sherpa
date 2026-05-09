@@ -61,6 +61,7 @@ WORKFLOW_CONTEXT_OWNERS = {
             "prompt_render_issue",
             "latest_decision_snapshot",
             "latest_vuln_decision_snapshot",
+            "vuln_hunt_summary_path",
         ]
     ),
     "runtime-derived": sorted(
@@ -125,6 +126,13 @@ WORKFLOW_CONTEXT_KEYS = {
     "vuln_candidate_count",
     "security_priority_mode",
     "latest_vuln_decision_snapshot",
+    "vuln_hunt_enabled",
+    "vuln_hunt_iteration",
+    "vuln_hunt_active_candidate_id",
+    "vuln_hunt_candidate_count",
+    "vuln_hunt_degraded",
+    "vuln_hunt_last_reason",
+    "vuln_hunt_summary_path",
 }
 
 WORKFLOW_CONTEXT_PREFIXES = (
@@ -153,6 +161,7 @@ WORKFLOW_CONTEXT_PREFIXES = (
     "selected_",
     "synthesize_",
     "target_",
+    "vuln_hunt_",
 )
 
 WORKFLOW_CONTEXT_KEY_SUFFIXES = (

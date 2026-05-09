@@ -117,6 +117,36 @@ Additional instruction from coordinator:
 {{hint}}
 <!-- END TEMPLATE -->
 
+<!-- TEMPLATE: vuln_hunt_with_hint -->
+You are coordinating an internal vulnerability-hunt subphase before execution planning.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- discover or update vulnerability-first candidate worklist
+- keep outputs advisory; the coordinator will normalize candidates before execution
+
+Required outputs:
+- `fuzz/vuln_candidates.json`
+- `fuzz/vuln_hunt_summary.md`
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- Do not modify repository business source files.
+- Do not write `workflow_context`, `selected_targets.json`, or `execution_plan.json`.
+- Preserve useful existing candidate state: `validation_status`, `attempt_count`, `last_result`.
+- Every candidate should include evidence references, concrete attack hint, risk scores, and validation status.
+- If feedback shows plateau, false positive, exhausted candidate, or repeated harness failure, change candidate focus.
+
+MANDATORY:
+- create `./done`
+- write `fuzz/vuln_hunt_summary.md` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
 <!-- TEMPLATE: plan_repair_build_with_hint -->
 You are coordinating a repair planning workflow after a build-stage failure.
 Follow the STAGE SKILL loaded by the runner as primary instructions.

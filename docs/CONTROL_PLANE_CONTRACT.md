@@ -66,6 +66,15 @@ Purpose: workflow business state and decision snapshots.
 | `run_details` | runtime-derived | per-fuzzer run facts |
 | `latest_decision_snapshot` | system-owned | normalized decision snapshot |
 | `latest_vuln_decision_snapshot` | system-owned | normalized vuln snapshot |
+| `vuln_hunt_enabled` | system-owned | internal hunt subphase enabled |
+| `vuln_hunt_iteration` | system-owned | hunt subphase invocation count |
+| `vuln_hunt_active_candidate_id` | system-owned | top active candidate chosen from candidate worklist |
+| `vuln_hunt_candidate_count` | runtime-derived | current `fuzz/vuln_candidates.json` candidate count |
+| `vuln_hunt_degraded` | system-owned | hunt degradation flag |
+| `vuln_hunt_last_reason` | system-owned | structured hunt degradation/reason text |
+| `vuln_hunt_summary_path` | system-owned | path to `fuzz/vuln_hunt_summary.md` |
+| `vuln_hunt_events_path` | runtime-derived | path to append-only hunt feedback events |
+| `vuln_hunt_rerun_requested` | system-owned | coverage/crash feedback requested another hunt refresh |
 | `prompt_render_degraded` | system-owned | degraded observability |
 | `prompt_render_issue` | system-owned | degraded observability |
 
@@ -94,6 +103,28 @@ Source chain:
 1. `targets.json` is candidate input.
 2. `selected_targets.json` is normalized ranked output.
 3. `execution_plan.json` must be generated from normalized selected targets only.
+
+### `fuzz/vuln_candidates.json`
+
+Purpose: vulnerability-hunt advisory worklist consumed by plan/materialize.
+
+| Field | Owner | Notes |
+| --- | --- | --- |
+| `candidate_id` | system-owned | stable candidate identity |
+| `target_api` / `api` | agent-suggested | normalized before target materialization |
+| `target_name` / `name` | agent-suggested | normalized before target materialization |
+| `source_path` / `line` | agent-suggested | evidence location |
+| `risk_type` | agent-suggested | vulnerability category signal |
+| `priority` | system-owned | normalized hunt priority |
+| `vuln_likelihood` | agent-suggested | risk score input |
+| `exploitability` | agent-suggested | risk score input |
+| `reachability_confidence` | agent-suggested | risk score input |
+| `detectability_confidence` | agent-suggested | fuzz validation feasibility |
+| `evidence_ids` | agent-suggested | must reference `analysis_evidence.security_evidence[]` when available |
+| `attack_hint` | agent-suggested | advisory seed/harness guidance |
+| `validation_status` | system-owned | `pending`, `validating`, `validated`, `inconclusive`, `exhausted`, `cooling` |
+| `attempt_count` | runtime-derived | validation attempts |
+| `last_result` | runtime-derived | latest validation feedback |
 
 ### `fuzz/decision_trace.jsonl`
 

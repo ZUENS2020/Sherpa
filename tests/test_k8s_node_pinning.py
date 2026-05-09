@@ -168,6 +168,7 @@ def test_normalize_resume_step_preserves_stop_signal():
     assert web_main._normalize_resume_step("stop") == "stop"
     assert web_main._normalize_resume_step("STOP") == "stop"
     assert web_main._normalize_resume_step("repro_crash") == "re-build"
+    assert web_main._normalize_resume_step("vuln_hunt") == "vuln-hunt"
     assert web_main._normalize_resume_step(None) == "analysis"
 
 
@@ -392,13 +393,23 @@ def test_run_fuzz_job_reuses_analysis_context_on_reentry(
                 },
                 "node-a",
             )
+        if stage == "vuln-hunt":
+            return (
+                {
+                    "repo_root": str(repo_root),
+                    "workflow_recommended_next": "plan",
+                    "vuln_hunt_enabled": True,
+                    "vuln_hunt_candidate_count": 0,
+                },
+                "node-a",
+            )
         raise AssertionError(f"unexpected stage dispatched: {stage}")
 
     monkeypatch.setattr(web_main, "_execute_k8s_job", _fake_execute_k8s_job)
 
     web_main._run_fuzz_job("job-analysis-reuse-1", request, cfg, resumed=False, trigger="new")
 
-    assert dispatched_stages == ["analysis", "plan", "plan"]
+    assert dispatched_stages == ["analysis", "plan", "vuln-hunt", "plan"]
     result = latest_job.get("result")
     assert isinstance(result, dict)
     stage_results = result.get("stage_results")
