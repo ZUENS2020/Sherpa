@@ -677,6 +677,27 @@ def test_list_tasks_exposes_vuln_hunting_fields_from_active_child():
     assert detail["children"][0]["security_priority_mode"] is True
 
 
+def test_list_tasks_treats_vuln_hunting_enabled_as_vuln_hunt_alias():
+    task_id = web_main._create_job("task", "batch")
+    child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")
+    web_main._job_update(
+        child_id,
+        status="success",
+        vuln_hunting_enabled=True,
+        vuln_hunt_enabled=False,
+        vuln_candidate_count=2,
+    )
+    web_main._job_update(task_id, children=[child_id], status="success")
+
+    with TestClient(web_main.app) as client:
+        listing = client.get("/api/tasks?limit=5").json()["items"]
+        detail = client.get(f"/api/task/{task_id}").json()
+
+    assert listing[0]["vuln_hunting_enabled"] is True
+    assert listing[0]["vuln_hunt_enabled"] is True
+    assert detail["children"][0]["vuln_hunt_enabled"] is True
+
+
 def test_list_tasks_exposes_frontier_and_replay_fields_from_active_child():
     task_id = web_main._create_job("task", "batch")
     child_id = web_main._create_job("fuzz", "https://github.com/example/repo.git")

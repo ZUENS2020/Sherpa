@@ -930,6 +930,9 @@ def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
     if not done_path.exists():
         return False
     try:
+        if done_path.is_dir():
+            shutil.rmtree(done_path)
+            return True
         done_path.unlink()
         return True
     except Exception:
@@ -2038,6 +2041,51 @@ def _execution_depth_bias(
     }
 
 
+def _target_surface_penalty(
+    *,
+    target_name: str,
+    api: str,
+    source_path: str,
+    runtime_replacement_reason: str = "",
+) -> dict[str, Any]:
+    if str(runtime_replacement_reason or "").strip() == "test_demo_helper_public_surrogate":
+        return {"target_surface_penalty": 0.0, "target_surface_penalty_reason": ""}
+    normalized_path = str(source_path or "").replace("\\", "/").strip().lower()
+    basename = Path(normalized_path).name.lower()
+    symbol_text = f"{target_name} {api}".strip().lower()
+    penalty = 0.0
+    reasons: list[str] = []
+    non_core_tokens = (
+        "contrib/arm",
+        "contrib/intel",
+        "contrib/mips",
+        "contrib/powerpc",
+        "contrib/riscv",
+        "contrib/loongarch",
+        "/arm-neon/",
+        "arm-neon/",
+        "linux-auxv",
+        "/auxv",
+    )
+    if any(token in normalized_path for token in non_core_tokens):
+        penalty += 0.45
+        reasons.append("non_core_auxiliary_source")
+    elif normalized_path.startswith("contrib/") and not any(
+        token in normalized_path
+        for token in ("contrib/oss-fuzz/", "contrib/libtests/", "contrib/examples/", "contrib/gregbook/")
+    ):
+        penalty += 0.25
+        reasons.append("contrib_auxiliary_source")
+    helper_tokens = ("safe_read", "auxv", "helper", "wrapper", "callback", "platform", "cpuinfo")
+    if any(token in symbol_text for token in helper_tokens) or any(token in basename for token in helper_tokens):
+        penalty += 0.12
+        reasons.append("helper_surface")
+    return {
+        "target_surface_penalty": round(min(max(penalty, 0.0), 0.75), 4),
+        "target_surface_penalty_reason": ";".join(dict.fromkeys(reasons)),
+    }
+
+
 def _apply_selected_target_filters(
     ranked_items: list[dict[str, Any]],
     *,
@@ -2912,8 +2960,15 @@ def _build_selected_target_row(
         depth_score=int(item.get("depth_score") or 0),
         selection_rationale=selection_rationale,
     )
+    surface_penalty = _target_surface_penalty(
+        target_name=target_name,
+        api=api,
+        source_path=source_hint,
+        runtime_replacement_reason=runtime_replacement_reason,
+    )
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
-    score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
+    target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
+    score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
         float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
         + float(score_weights["exploitability"]) * float(exploitability)
@@ -2924,10 +2979,15 @@ def _build_selected_target_row(
         + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
         + float(execution_bias.get("execution_depth_bias") or 0.0)
         - float(score_penalty)
+        - float(target_surface_penalty)
     )
     if explicit_security_breakdown and item.get("score_total") is not None:
         try:
-            score_total = float(item.get("score_total") or 0.0) - float(score_penalty)
+            score_total = (
+                float(item.get("score_total") or 0.0)
+                - float(score_penalty)
+                - float(target_surface_penalty)
+            )
         except Exception:
             pass
     adjusted_target_score = max(0.0, float(score_total))
@@ -2956,8 +3016,12 @@ def _build_selected_target_row(
         evidence_count=max(len(evidence_ids), len(evidence_refs)),
         signal_score=signal_score,
     )
-    priority_penalty = min(0.95, max(0.0, score_penalty) * 0.55)
-    penalty_reason = str(runtime_penalty.get("reason") or "")
+    priority_penalty = min(0.95, (max(0.0, score_penalty) * 0.55) + (target_surface_penalty * 0.9))
+    penalty_parts = [
+        str(runtime_penalty.get("reason") or "").strip(),
+        str(surface_penalty.get("target_surface_penalty_reason") or "").strip(),
+    ]
+    penalty_reason = ";".join(dict.fromkeys(x for x in penalty_parts if x))
     if any(
         token in penalty_reason
         for token in (
@@ -3013,7 +3077,7 @@ def _build_selected_target_row(
         ),
         "score_total": float(adjusted_target_score),
         "score_breakdown": score_breakdown_fixed,
-        "penalty_reason": str(runtime_penalty.get("reason") or ""),
+        "penalty_reason": penalty_reason,
         "security_score_breakdown": {
             "vuln_likelihood": float(vuln_likelihood),
             "exploitability": float(exploitability),
@@ -3054,7 +3118,7 @@ def _build_selected_target_row(
                     ),
                 )
             ),
-            "recent_yield_penalty": float(score_penalty),
+            "recent_yield_penalty": float(score_penalty + target_surface_penalty),
             "weights": {k: float(v) for k, v in score_weights.items()},
         },
         "security_priority_mode": bool(security_priority_mode),
@@ -3069,6 +3133,8 @@ def _build_selected_target_row(
         "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
         "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
         "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
+        "target_surface_penalty": float(target_surface_penalty),
+        "target_surface_penalty_reason": str(surface_penalty.get("target_surface_penalty_reason") or ""),
         "evidence": list(evidence_refs),
         "evidence_ids": evidence_ids,
         "vuln_candidate_id": str(security_candidate.get("candidate_id") or item.get("candidate_id") or ""),
@@ -3082,8 +3148,8 @@ def _build_selected_target_row(
         "api_surface_exception": api_surface_exception,
         "target_score_breakdown": score_breakdown,
         "target_score": float(adjusted_target_score),
-        "target_score_penalty": float(score_penalty),
-        "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
+        "target_score_penalty": float(score_penalty + target_surface_penalty),
+        "target_score_penalty_reason": penalty_reason,
         "target_score_breakdown_available": True,
         "target_scoring_enabled": True,
         "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
