@@ -4,7 +4,7 @@ description: Generate high-signal seed corpus with real samples first and contro
 compatibility: opencode
 metadata:
   stage: seed-generation
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

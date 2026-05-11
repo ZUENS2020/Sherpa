@@ -96,11 +96,11 @@
   <!-- Orange left accent bar -->
   <rect x="362" y="48" width="4" height="58" rx="2" fill="#f97316"/>
 
-  <!-- SHERPA -->
+  <!-- TIANHENG -->
   <text x="380" y="92"
         font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
         font-size="56" font-weight="900" letter-spacing="-1"
-        fill="#1a1a1a">SHERPA</text>
+        fill="#1a1a1a">TIANHENG</text>
 
   <!-- Subtitle -->
   <text x="382" y="120"

@@ -1,4 +1,4 @@
-# Sherpa API 参考
+# TianHeng API 参考
 
 最后更新：2026-03-24
 事实来源：[`harness_generator/src/langchain_agent/main.py`](../harness_generator/src/langchain_agent/main.py)

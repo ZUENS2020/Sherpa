@@ -4,7 +4,7 @@ description: Analyze reproduced crash evidence and produce a structured verdict 
 compatibility: opencode
 metadata:
   stage: crash-analysis
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

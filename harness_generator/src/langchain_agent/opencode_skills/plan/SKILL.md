@@ -4,7 +4,7 @@ description: Produce runtime-viable fuzz targets and execution plan artifacts fo
 compatibility: opencode
 metadata:
   stage: plan
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

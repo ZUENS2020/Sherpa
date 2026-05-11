@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fuzz_relative_functions import fuzz_logic
 from persistent_config import apply_config_to_env, load_config
-from errors import SherpaError
+from errors import TianHengError
 from workflow_context_store import (
     context_dir_for_repo_root,
     read_context_docs,
@@ -237,7 +237,7 @@ def main() -> int:
         _write_json(result_path, out)
         print(f"[k8s-worker] done job_id={job_id} result_path={result_path}")
         return 0
-    except (SherpaError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as e:
+    except (TianHengError, ValueError, OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         tb = traceback.format_exc()
         msg = f"{e}\n{tb}"
         _write_error(error_path, msg)

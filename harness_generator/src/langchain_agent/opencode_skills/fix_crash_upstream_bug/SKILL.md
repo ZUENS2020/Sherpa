@@ -4,7 +4,7 @@ description: Apply minimal upstream source fixes for verified real crashes witho
 compatibility: opencode
 metadata:
   stage: fix-crash-upstream-bug
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

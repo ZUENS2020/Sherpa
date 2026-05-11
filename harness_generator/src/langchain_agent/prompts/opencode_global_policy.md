@@ -1,4 +1,4 @@
-# Sherpa OpenCode Global Policy
+# TianHeng OpenCode Global Policy
 
 This policy applies to every OpenCode stage unless explicitly overridden by stage instructions.
 

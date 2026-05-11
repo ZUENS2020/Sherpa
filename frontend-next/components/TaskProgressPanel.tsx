@@ -98,12 +98,12 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
       variant="outlined"
       sx={{
         height: '100%',
-        background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(247,250,252,0.96))',
+        background: 'var(--tianheng-surface)',
         borderColor: 'rgba(15, 23, 42, 0.08)',
       }}
     >
-      <CardContent>
-        <Stack spacing={2}>
+      <CardContent sx={{ height: '100%', overflow: 'auto' }}>
+        <Stack spacing={1.25}>
           <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" spacing={1}>
             <Stack spacing={0.5}>
               <Typography variant="h6">任务进度</Typography>
@@ -136,7 +136,7 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
             sx={{
               display: 'grid',
               gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' },
-              gap: 1.25,
+              gap: 1,
             }}
           >
             {[
@@ -152,10 +152,10 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
               <Box
                 key={label}
                 sx={{
-                  p: 1.25,
-                  borderRadius: 2,
-                  border: '1px solid rgba(15, 23, 42, 0.08)',
-                  backgroundColor: 'rgba(248, 250, 252, 0.95)',
+                  p: 1,
+                  borderRadius: '4px',
+                  border: '1px solid var(--tianheng-ink)',
+                  backgroundColor: 'rgba(255, 250, 240, 0.88)',
                 }}
               >
                 <Typography variant="caption" color="text.secondary">{label}</Typography>
@@ -211,9 +211,9 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
                 <Box
                   sx={{
                     p: 1.25,
-                    borderRadius: 2,
-                    border: '1px solid rgba(15, 23, 42, 0.08)',
-                    backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                    borderRadius: '4px',
+                    border: '1px solid var(--tianheng-ink)',
+                    backgroundColor: 'rgba(255, 250, 240, 0.78)',
                   }}
                 >
                   <Typography variant="subtitle2" sx={{ mb: 0.75 }}>函数缺口</Typography>
@@ -237,9 +237,9 @@ export function TaskProgressPanel({ detail, onStopTask, stopDisabled = true, sto
                 <Box
                   sx={{
                     p: 1.25,
-                    borderRadius: 2,
-                    border: '1px solid rgba(15, 23, 42, 0.08)',
-                    backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                    borderRadius: '4px',
+                    border: '1px solid var(--tianheng-ink)',
+                    backgroundColor: 'rgba(255, 250, 240, 0.78)',
                   }}
                 >
                   <Typography variant="subtitle2" sx={{ mb: 0.75 }}>路径前沿</Typography>

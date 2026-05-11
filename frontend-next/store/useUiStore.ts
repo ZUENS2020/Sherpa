@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-const ACTIVE_TASK_KEY = 'sherpa_active_task_id';
+const ACTIVE_TASK_KEY = 'tianheng_active_task_id';
 
 function readActiveTask(): string {
   if (typeof window === 'undefined') return '';

@@ -4,7 +4,7 @@
 
 ## 当前运行现实
 
-Sherpa 现在默认假设：
+TianHeng 现在默认假设：
 
 - Kubernetes 是主要的分阶段执行环境
 - worker 在阶段 Pod 内原生执行

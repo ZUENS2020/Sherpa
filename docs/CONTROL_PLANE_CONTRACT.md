@@ -1,8 +1,8 @@
-# Sherpa Control Plane Contract
+# TianHeng Control Plane Contract
 
 ## Purpose
 
-Sherpa separates execution truth from AI strategy:
+TianHeng separates execution truth from AI strategy:
 
 - `strict contract`: system-owned fields that may drive routing, build, run, replay, or retry decisions.
 - `advisory contract`: agent-suggested fields that may influence strategy, but must be normalized before they can affect execution.

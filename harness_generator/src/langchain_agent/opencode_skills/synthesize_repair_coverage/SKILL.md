@@ -4,7 +4,7 @@ description: Repair scaffold for coverage replan cycles using seed and harness f
 compatibility: opencode
 metadata:
   stage: synthesize-repair-coverage
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

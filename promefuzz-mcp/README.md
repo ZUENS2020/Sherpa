@@ -4,7 +4,7 @@
 
 ## 当前定位
 
-`promefuzz-mcp` 是一个面向 C/C++ 库分析的 MCP 服务与工具集合，当前在 Sherpa 中主要承担：
+`promefuzz-mcp` 是一个面向 C/C++ 库分析的 MCP 服务与工具集合，当前在 TianHeng 中主要承担：
 
 1. 预处理源码/头文件，提取候选 API 与基础调用关系。
 2. 产出可被工作流消费的分析工件（`preprocess.json`、`coverage_hints.json`）。
@@ -59,7 +59,7 @@ python -m promefuzz_mcp.server start \
 3. `SHERPA_PROMEFUZZ_ENABLE_COMPREHENDER=1`（默认）时启用 `comprehend_*` 语义工具。
 4. 语义工具输出统一结构：`claim/evidence[]/confidence/limitations/degraded/degraded_reason`。
 
-### 3) 与 Sherpa 工作流的实际接入（已接入）
+### 3) 与 TianHeng 工作流的实际接入（已接入）
 
 当前主流程接线（代码已接入）：
 
@@ -101,7 +101,7 @@ python -m promefuzz_mcp.server start \
 
 ## 推荐使用方式（当前阶段）
 
-如果你在 Sherpa 中使用 PromeFuzz，建议按以下口径：
+如果你在 TianHeng 中使用 PromeFuzz，建议按以下口径：
 
 1. 把它当作“分析增强与候选信号来源”，而不是最终漏洞判定引擎。
 2. 关键决策仍结合 build/run/crash 证据与 workflow 状态机。
@@ -115,7 +115,7 @@ python -m promefuzz_mcp.server start \
 sudo apt-get install -y clang llvm libclang-dev nlohmann-json3-dev
 ```
 
-在 Sherpa 的 k8s 默认运行镜像中，这些依赖应在镜像构建阶段预装；`init` 仅做依赖检查，不在运行期安装。
+在 TianHeng 的 k8s 默认运行镜像中，这些依赖应在镜像构建阶段预装；`init` 仅做依赖检查，不在运行期安装。
 
 RAG embedding 运行时依赖（K8s secret）：
 

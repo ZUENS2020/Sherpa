@@ -4,7 +4,7 @@ description: Generate pre-plan analysis context artifacts for target selection a
 compatibility: opencode
 metadata:
   stage: analysis
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

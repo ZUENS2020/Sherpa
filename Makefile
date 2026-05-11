@@ -1,4 +1,4 @@
-# Makefile for sherpa project
+# Makefile for TianHeng project
 # Usage:
 #   make setup      # Set up Python venv and install dependencies
 #   make clean      # Remove venv and __pycache__

@@ -4,7 +4,7 @@ description: Re-plan target and strategy after coverage plateau using seed/harne
 compatibility: opencode
 metadata:
   stage: plan-repair-coverage
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

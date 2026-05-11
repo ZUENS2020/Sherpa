@@ -1,7 +1,7 @@
-# Sherpa 吸收 AIxCC AFC 思路迁移计划
+# TianHeng 吸收 AIxCC AFC 思路迁移计划
 
 ## 目标
-在不照搬 Theori AFC 实现细节的前提下，迁移其可落地的方法论能力，提升 Sherpa 的稳定性、可解释性和长期 coverage 收益。
+在不照搬 Theori AFC 实现细节的前提下，迁移其可落地的方法论能力，提升 TianHeng 的稳定性、可解释性和长期 coverage 收益。
 
 当前主流程保持不变：
 `analysis -> plan -> synthesize -> build -> run -> coverage-analysis`

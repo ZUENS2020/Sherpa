@@ -4,7 +4,7 @@ description: Repair planning loop for crash-triaged harness bugs with evidence-f
 compatibility: opencode
 metadata:
   stage: plan-repair-fix-harness
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
