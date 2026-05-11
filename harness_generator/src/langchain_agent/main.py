@@ -2004,6 +2004,38 @@ def _next_stage_from_result(stage_result: object) -> str:
     return _normalize_resume_step(next_raw)
 
 
+def _workflow_result_has_terminal_error(res: dict[str, object]) -> bool:
+    if bool(res.get("failed")):
+        return True
+    next_stage = _next_stage_from_result(res)
+    if next_stage:
+        return False
+    last_error = str(res.get("last_error") or res.get("error") or "").strip()
+    message = str(res.get("message") or "").strip().lower()
+    if last_error and (
+        message.endswith("failed")
+        or " failed" in message
+        or message.startswith("failed")
+    ):
+        return True
+    if last_error and str(res.get("status") or "").strip().lower() in {"error", "failed"}:
+        return True
+    return False
+
+
+def _final_status_from_workflow_result(*, resumed: bool, res: dict[str, object]) -> tuple[str, str | None]:
+    if _workflow_result_has_terminal_error(res):
+        run_terminal_reason = str(res.get("run_terminal_reason") or "").strip()
+        final_error = str(
+            res.get("last_error")
+            or res.get("error")
+            or run_terminal_reason
+            or "workflow_failed"
+        ).strip()
+        return "error", final_error
+    return ("resumed" if resumed else "success"), None
+
+
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
     if _executor_mode() == "k8s_job":
         return []
@@ -4117,6 +4149,8 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("vuln_candidate_count", 0)
     view.setdefault("vuln_hunting_enabled", False)
     view.setdefault("vuln_hunt_enabled", False)
+    if bool(view.get("vuln_hunting_enabled")) and not bool(view.get("vuln_hunt_enabled")):
+        view["vuln_hunt_enabled"] = True
     view.setdefault("vuln_hunt_candidate_count", 0)
     view.setdefault("vuln_hunt_active_candidate_id", "")
     view.setdefault("vuln_hunt_degraded", False)
@@ -4394,7 +4428,10 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
                 "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),
                 "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
-                "vuln_hunt_enabled": bool((active_child or job).get("vuln_hunt_enabled", False)),
+                "vuln_hunt_enabled": bool(
+                    (active_child or job).get("vuln_hunt_enabled", False)
+                    or (active_child or job).get("vuln_hunting_enabled", False)
+                ),
                 "vuln_hunt_candidate_count": int((active_child or job).get("vuln_hunt_candidate_count", 0) or 0),
                 "vuln_hunt_active_candidate_id": str((active_child or job).get("vuln_hunt_active_candidate_id") or ""),
                 "vuln_hunt_degraded": bool((active_child or job).get("vuln_hunt_degraded", False)),
@@ -4894,21 +4931,10 @@ def _run_fuzz_job(
                 last_resume_finished_at=time.time() if resumed else None,
             )
             return
-        res_failed = bool(isinstance(res, dict) and res.get("failed"))
-        run_terminal_reason = str((res.get("run_terminal_reason") if isinstance(res, dict) else "") or "").strip()
         final_status = ("resumed" if resumed else "success")
         final_error = None
-        if res_failed:
-            final_status = "error"
-            final_error = str(
-                (
-                    res.get("last_error")
-                    if isinstance(res, dict)
-                    else ""
-                )
-                or run_terminal_reason
-                or "workflow_failed"
-            ).strip()
+        if isinstance(res, dict):
+            final_status, final_error = _final_status_from_workflow_result(resumed=resumed, res=res)
         final_metric_fields: dict[str, object] = {}
         if isinstance(res, dict):
             final_metric_fields = {
@@ -4916,7 +4942,7 @@ def _run_fuzz_job(
                 "security_evidence_count": int(res.get("security_evidence_count") or 0),
                 "vuln_candidate_count": int(res.get("vuln_candidate_count") or 0),
                 "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
-                "vuln_hunt_enabled": bool(res.get("vuln_hunt_enabled") or False),
+                "vuln_hunt_enabled": bool(res.get("vuln_hunt_enabled") or res.get("vuln_hunting_enabled") or False),
                 "vuln_hunt_candidate_count": int(res.get("vuln_hunt_candidate_count") or 0),
                 "vuln_hunt_active_candidate_id": str(res.get("vuln_hunt_active_candidate_id") or ""),
                 "vuln_hunt_degraded": bool(res.get("vuln_hunt_degraded") or False),

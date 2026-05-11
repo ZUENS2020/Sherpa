@@ -1081,6 +1081,17 @@ class CodexHelper:
             if txt:
                 watch_specs.append(txt)
 
+        def _clear_done_path() -> None:
+            if not done_path.exists():
+                return
+            if done_path.is_dir():
+                shutil.rmtree(done_path)
+                return
+            done_path.unlink(missing_ok=True)
+
+        def _has_valid_done_file() -> bool:
+            return done_path.exists() and done_path.is_file()
+
         def _watch_targets(spec: str) -> List[Path]:
             p = Path(spec)
             if any(ch in spec for ch in "*?[]"):
@@ -1305,7 +1316,7 @@ class CodexHelper:
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 
             try:
-                done_path.unlink(missing_ok=True)
+                _clear_done_path()
             except Exception as e:
                 LOGGER.warning("[OpenCodeHelper] failed to clear pre-attempt done flag: %s", e)
 
@@ -1690,6 +1701,19 @@ class CodexHelper:
                             logger.info(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         if done_path.exists():
+                            if not done_path.is_file():
+                                LOGGER.warning(
+                                    "[OpenCodeHelper] invalid done flag type at %s; removing and continuing",
+                                    done_path,
+                                )
+                                logger.info("[OpenCodeHelper] invalid done flag type; removing and continuing")
+                                try:
+                                    _clear_done_path()
+                                except Exception as e:
+                                    raise RuntimeError(
+                                        f"stale done flag could not be removed: {done_path} ({e})"
+                                    ) from e
+                                continue
                             stale_done = False
                             done_mtime = 0.0
                             try:
@@ -1705,7 +1729,7 @@ class CodexHelper:
                                 )
                                 logger.info("[OpenCodeHelper] stale done flag detected; removing and continuing")
                                 try:
-                                    done_path.unlink(missing_ok=True)
+                                    _clear_done_path()
                                 except Exception as e:
                                     raise RuntimeError(
                                         f"stale done flag could not be removed: {done_path} ({e})"
@@ -1798,7 +1822,7 @@ class CodexHelper:
 
             diff_changed = bool(diff_now) and diff_now != baseline_diff
 
-            if not done_path.exists():
+            if not _has_valid_done_file():
                 partial_success_stages = {
                     item.strip()
                     for item in (

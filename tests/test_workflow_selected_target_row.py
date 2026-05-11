@@ -354,6 +354,65 @@ def test_selected_targets_replace_example_helper_with_public_surrogate(tmp_path:
     assert selected[0]["runtime_replacement_reason"] == "test_demo_helper_public_surrogate"
 
 
+def test_selected_targets_demote_platform_contrib_helpers_below_core_decoder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "safe_read",
+                    "api": "safe_read",
+                    "file": "contrib/arm-neon/linux-auxv.c",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 7,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "vuln_likelihood": 0.78,
+                    "exploitability": 0.52,
+                    "reachability_confidence": 0.62,
+                    "security_signal_scores": {
+                        "integer_overflow_candidate": 0.78,
+                        "mem_oob_candidate": 0.68,
+                    },
+                    "evidence_ids": ["EV_SAFE"],
+                },
+                {
+                    "name": "png_read_image",
+                    "api": "png_read_image",
+                    "file": "pngread.c",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 7,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "vuln_likelihood": 0.74,
+                    "exploitability": 0.50,
+                    "reachability_confidence": 0.62,
+                    "security_signal_scores": {
+                        "integer_overflow_candidate": 0.72,
+                        "mem_oob_candidate": 0.66,
+                    },
+                    "evidence_ids": ["EV_PNG"],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+
+    assert selected[0]["target_name"] == "png_read_image"
+    safe_read = next(row for row in selected if row["target_name"] == "safe_read")
+    assert "non_core_auxiliary_source" in safe_read["penalty_reason"]
+    assert safe_read["target_surface_penalty"] > 0
+
+
 def test_selected_targets_preserve_agent_risk_breakdown_over_exact_candidate_match(tmp_path: Path) -> None:
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True)

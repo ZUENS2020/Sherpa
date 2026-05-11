@@ -13,6 +13,32 @@ for p in (APP_DIR, SRC_DIR):
 import main as web_main
 
 
+def test_workflow_terminal_error_result_is_not_success() -> None:
+    status, final_error = web_main._final_status_from_workflow_result(
+        resumed=False,
+        res={
+            "message": "plan failed",
+            "last_error": "stale done flag could not be removed",
+            "workflow_recommended_next": "",
+        },
+    )
+
+    assert status == "error"
+    assert "stale done flag" in str(final_error)
+
+
+def test_enrich_job_view_treats_vuln_hunting_enabled_as_hunt_alias() -> None:
+    view = {
+        "vuln_hunting_enabled": True,
+        "vuln_hunt_enabled": False,
+    }
+
+    web_main._enrich_job_view(view)
+
+    assert view["vuln_hunting_enabled"] is True
+    assert view["vuln_hunt_enabled"] is True
+
+
 def test_build_stage_payload_populates_context_and_paths(tmp_path: Path) -> None:
     result_path = tmp_path / "result.json"
     error_path = tmp_path / "error.log"
