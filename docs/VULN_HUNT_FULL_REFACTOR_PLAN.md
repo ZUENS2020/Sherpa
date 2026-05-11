@@ -1,4 +1,4 @@
-# Sherpa 全面改造计划：持续漏洞挖掘主引擎 + 异步 Fuzz 验证引擎
+# TianHeng 全面改造计划：持续漏洞挖掘主引擎 + 异步 Fuzz 验证引擎
 
 > 参考项目：[FuzzingBrain (o2lab/afc-crs)](https://github.com/o2lab/afc-crs-all-you-need-is-a-fuzzing-brain)
 > 本地 clone：`references/afc-crs-all-you-need-is-a-fuzzing-brain` (commit `0fba44e`)
@@ -6,8 +6,8 @@
 ## 1. 目标与范围
 
 ### 1.1 目标
-- 把 Sherpa 从单线性 `analysis → plan → synthesize → build → run → coverage-analysis` 模式，升级为"持续漏洞挖掘优先"的双引擎系统。
-- 模仿 FuzzingBrain 的 **可疑点生命周期** 和 **攻击策略菜单**，让 Sherpa 具备"发现可疑点 → 生成攻击输入 → 验证 → 反馈 → 继续发现"的完整闭环。AI 自主选择攻击策略组合，系统只校验输出质量。
+- 把 TianHeng 从单线性 `analysis → plan → synthesize → build → run → coverage-analysis` 模式，升级为"持续漏洞挖掘优先"的双引擎系统。
+- 模仿 FuzzingBrain 的 **可疑点生命周期** 和 **攻击策略菜单**，让 TianHeng 具备"发现可疑点 → 生成攻击输入 → 验证 → 反馈 → 继续发现"的完整闭环。AI 自主选择攻击策略组合，系统只校验输出质量。
 - 主引擎持续发现漏洞候选，验证引擎异步消费并验证，主引擎不中断继续发现下一个候选。
 - 复用现有 fuzz 执行与修复能力，避免推倒重写。
 
@@ -19,7 +19,7 @@
 
 ## 2. 参考架构：FuzzingBrain 核心模式
 
-> 以下是从参考项目提取的关键设计模式，Sherpa 的改造将模仿这些模式。
+> 以下是从参考项目提取的关键设计模式，TianHeng 的改造将模仿这些模式。
 
 ### 2.1 FuzzingBrain 的漏洞发现循环
 
@@ -45,7 +45,7 @@ flowchart TD
     end
 ```
 
-### 2.2 FuzzingBrain 的覆盖率反馈机制（Sherpa 重点借鉴）
+### 2.2 FuzzingBrain 的覆盖率反馈机制（TianHeng 重点借鉴）
 
 FuzzingBrain 在每次迭代失败后，会把**具体执行了哪些代码路径**回传给 LLM：
 
@@ -62,7 +62,7 @@ You should generate a new x.bin to execute a different code path:
 - 压缩到 200 行（前 100 + 后 100）
 - 直接追加到 LLM 对话上下文中
 
-**Sherpa 现状差距**：目前 coverage loop 只看覆盖率数字（cov/ft），不告诉 LLM 具体走了哪些路径、哪些分支没覆盖。
+**TianHeng 现状差距**：目前 coverage loop 只看覆盖率数字（cov/ft），不告诉 LLM 具体走了哪些路径、哪些分支没覆盖。
 
 ### 2.3 FuzzingBrain 的 Security Analyzer Agent
 
@@ -387,7 +387,7 @@ stateDiagram-v2
 
 ### 5.1 现状问题
 
-Sherpa 当前的 coverage loop 只传递数字：
+TianHeng 当前的 coverage loop 只传递数字：
 ```
 cov: 120, ft: 450, plateau_detected: true, plateau_idle_seconds: 180
 ```
@@ -551,7 +551,7 @@ flowchart TD
 
 ### 6.2 与 FuzzingBrain 的对比
 
-| 维度 | FuzzingBrain | Sherpa 改造 |
+| 维度 | FuzzingBrain | TianHeng 改造 |
 |------|-------------|------------|
 | 攻击输入 | LLM 生成 Python → 产出 blob 二进制 | LLM 写 C harness + 生成 seed 文件 |
 | 每轮输入数 | AS0: 5 个 blob (x1~x5)；XS0: 1 个 | 每轮 1 个 harness + N 个 seed |
@@ -637,7 +637,7 @@ score_total = 0.45 * vuln_likelihood
 
 ---
 
-## 8. 与现有 Sherpa 功能的关系
+## 8. 与现有 TianHeng 功能的关系
 
 ### 8.1 保留
 - 现有 `synthesize/build/run/coverage/crash-triage/repair` 执行能力。
@@ -723,7 +723,7 @@ description: >
 compatibility: opencode
 metadata:
   stage: vuln-hunt
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -856,7 +856,7 @@ def validate(candidates: list[dict], evidence_ids: set[str]) -> dict:
     return {"valid": len(errors) == 0, "errors": errors}
 ```
 
-### 10.2 Skill vs Prompt 在 Sherpa 各阶段的对比
+### 10.2 Skill vs Prompt 在 TianHeng 各阶段的对比
 
 ```mermaid
 flowchart LR
@@ -1077,12 +1077,12 @@ SHERPA_VULN_COOLING_HOURS=24
 - GitHub：[o2lab/afc-crs-all-you-need-is-a-fuzzing-brain](https://github.com/o2lab/afc-crs-all-you-need-is-a-fuzzing-brain)
 
 ### 16.2 本机 clone
-- 完整 clone：`/Users/zuens2020/Documents/Sherpa/references/afc-crs-all-you-need-is-a-fuzzing-brain`
+- 完整 clone：`references/afc-crs-all-you-need-is-a-fuzzing-brain`
 - 当前 commit：`0fba44e`
 
 ### 16.3 关键参考文件
 
-| 文件 | Sherpa 对照点 |
+| 文件 | TianHeng 对照点 |
 |------|-------------|
 | `crs/strategy/core/pov_strategy.py` | 迭代验证循环模板 |
 | `crs/strategy/jeff/as0_full.py` | 多阶段攻击策略 |

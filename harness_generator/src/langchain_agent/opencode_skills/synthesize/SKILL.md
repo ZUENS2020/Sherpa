@@ -4,7 +4,7 @@ description: Generate complete fuzz scaffold artifacts aligned to selected targe
 compatibility: opencode
 metadata:
   stage: synthesize
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

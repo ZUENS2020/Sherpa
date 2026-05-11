@@ -4,7 +4,7 @@ description: Repair harness/build glue for crash-triaged harness bugs using evid
 compatibility: opencode
 metadata:
   stage: synthesize-repair-fix-harness
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

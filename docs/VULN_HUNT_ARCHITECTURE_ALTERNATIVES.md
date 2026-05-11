@@ -85,7 +85,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph NOW["现有 Sherpa 节点"]
+    subgraph NOW["现有 TianHeng 节点"]
         direction TB
         N1["analysis"] --> N2["plan"] --> N3["synthesize"]
         N3 --> N4["build"] --> N5["run"]

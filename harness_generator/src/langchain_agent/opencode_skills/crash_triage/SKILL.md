@@ -4,7 +4,7 @@ description: Classify reproduced crashes into harness bug, upstream bug, or inco
 compatibility: opencode
 metadata:
   stage: crash-triage
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

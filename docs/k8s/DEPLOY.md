@@ -1,6 +1,6 @@
 # Kubernetes 部署指南
 
-这是 Sherpa 当前在 Kubernetes 上的简版部署说明。
+这是 TianHeng 当前在 Kubernetes 上的简版部署说明。
 
 ## 1. 会部署什么
 

@@ -4,7 +4,7 @@ description: Repair targets.json into strict schema-valid shape without losing p
 compatibility: opencode
 metadata:
   stage: plan-fix-targets-schema
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

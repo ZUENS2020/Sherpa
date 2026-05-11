@@ -4,7 +4,7 @@ description: Discover, update, and rank vulnerability candidates before executio
 compatibility: opencode
 metadata:
   stage: vuln_hunt
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

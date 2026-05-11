@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup-env.sh for sherpa project
+# setup-env.sh for TianHeng project
 # Usage: source ./setup-env.sh
 
 VENV_DIR=".venv"

@@ -4,7 +4,7 @@ description: Repair scaffold for crash/repro failures while preserving crash-pat
 compatibility: opencode
 metadata:
   stage: synthesize-repair-crash
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

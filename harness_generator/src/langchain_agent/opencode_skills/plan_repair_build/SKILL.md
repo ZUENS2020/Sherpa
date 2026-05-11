@@ -4,7 +4,7 @@ description: Re-plan targets and scaffold strategy after build-stage failures us
 compatibility: opencode
 metadata:
   stage: plan-repair-build
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

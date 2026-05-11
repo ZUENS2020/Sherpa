@@ -4,7 +4,7 @@ description: Improve coverage in place for the current target without switching 
 compatibility: opencode
 metadata:
   stage: improve-harness-in-place
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

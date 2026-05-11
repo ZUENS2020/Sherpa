@@ -9312,7 +9312,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             try:
                 build_full_log_path.parent.mkdir(parents=True, exist_ok=True)
                 header = (
-                    "Sherpa build full log\n"
+                    "TianHeng build full log\n"
                     f"repo_root={gen.repo_root}\n"
                     f"generated_at={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
                     + "=" * 88

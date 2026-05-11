@@ -4,7 +4,7 @@ description: Apply minimal evidence-driven build fixes in fuzz scaffold files fo
 compatibility: opencode
 metadata:
   stage: fix-build
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

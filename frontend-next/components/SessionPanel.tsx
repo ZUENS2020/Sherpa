@@ -17,7 +17,7 @@ export function SessionPanel({ tasks }: { tasks: TaskSummary[] }) {
     <Card
       variant="outlined"
       sx={{
-        background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(247,250,252,0.96))',
+        background: 'var(--tianheng-surface)',
         borderColor: 'rgba(15, 23, 42, 0.08)',
       }}
     >

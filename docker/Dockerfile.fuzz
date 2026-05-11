@@ -1,4 +1,4 @@
-# Minimal Linux environment for SHERPA non-OSS-fuzz local workflow.
+# Minimal Linux environment for TianHeng non-OSS-fuzz local workflow.
 # Focus: build & run generated fuzzers inside Docker (useful on Windows hosts).
 
 FROM ubuntu:24.04

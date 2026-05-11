@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo } from 'react';
 import { Alert, Box, Stack, Typography } from '@mui/material';
-import { ConfigPanel } from '@/components/ConfigPanel';
+import { AppShell } from '@/components/AppShell';
 import { LogPanel } from '@/components/LogPanel';
 import { SessionPanel } from '@/components/SessionPanel';
 import { SystemOverviewCard } from '@/components/SystemOverviewCard';
@@ -49,38 +49,39 @@ export default function HomePage() {
   };
 
   return (
-    <Box sx={{ maxWidth: 1720, mx: 'auto', px: { xs: 1.5, md: 3 }, py: { xs: 1.5, md: 2.5 } }}>
-      <Stack spacing={2.25}>
-        <Stack spacing={0.75}>
-          <Typography variant="h4" fontWeight={700}>Sherpa 控制台</Typography>
-          <Typography variant="body2" color="text.secondary">
-            面向运行中的 fuzz 任务。当前页优先展示阶段、候选、异常信号和详细日志。
-          </Typography>
-        </Stack>
-
+    <AppShell
+      dense
+      eyebrow="Monitor / Live operations"
+      title="TianHeng 监控台"
+      description="面向值班和运行观察：只展示任务状态、阶段信号、漏洞候选、replay/frontier 反馈和日志。发起新任务已拆到独立页面，避免监控时误提交。"
+      rail={(
+        <>
+          <Typography className="suzuka-kicker">NO TASK MUTATION</Typography>
+          <Typography className="suzuka-kicker">LIVE SIGNALS</Typography>
+        </>
+      )}
+    >
+      <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <SystemOverviewCard
           data={system.data}
           error={system.isError ? (system.error as Error).message : undefined}
         />
 
-        <Stack direction={{ xs: 'column', xl: 'row' }} spacing={2} alignItems="stretch">
-          <Box sx={{ width: { xs: '100%', xl: 380 }, flexShrink: 0 }}>
-            <Stack spacing={2}>
-              <ConfigPanel />
-              <SessionPanel tasks={tasks.data || []} />
-            </Stack>
+        <Stack direction="row" spacing={1.25} alignItems="stretch" sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <Box sx={{ width: 330, flexShrink: 0, minHeight: 0, overflow: 'auto', pr: 0.25 }}>
+            <SessionPanel tasks={tasks.data || []} />
           </Box>
 
-          <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Stack spacing={2}>
+          <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+            <Stack spacing={1.25} sx={{ height: '100%', minHeight: 0, overflow: 'hidden' }}>
               {tasks.isError ? <Alert severity="warning">任务列表加载失败</Alert> : null}
               {activeSummary?.error ? <Alert severity="error">{activeSummary.error}</Alert> : null}
               {stopTask.isError ? (
                 <Alert severity="error">停止任务失败：{(stopTask.error as Error).message}</Alert>
               ) : null}
 
-              <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems="stretch">
-                <Box sx={{ width: { xs: '100%', lg: 420 }, flexShrink: 0 }}>
+              <Stack direction="row" spacing={1.25} alignItems="stretch" sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                <Box sx={{ width: 390, flexShrink: 0, minHeight: 0, overflow: 'auto', pr: 0.25 }}>
                   <TaskProgressPanel
                     detail={detail.data}
                     onStopTask={handleStopTask}
@@ -88,7 +89,7 @@ export default function HomePage() {
                     stopLoading={stopTask.isPending}
                   />
                 </Box>
-                <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
                   <LogPanel detail={detail.data} />
                 </Box>
               </Stack>
@@ -96,6 +97,6 @@ export default function HomePage() {
           </Box>
         </Stack>
       </Stack>
-    </Box>
+    </AppShell>
   );
 }

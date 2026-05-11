@@ -137,16 +137,22 @@ export function ConfigPanel() {
 
   return (
     <Card variant="outlined" sx={{ height: '100%' }}>
-      <CardContent>
-        <Stack spacing={2}>
-          <Typography variant="h6">会话与配置</Typography>
+      <CardContent sx={{ height: '100%', overflow: 'auto' }}>
+        <Stack spacing={1.25}>
+          <Stack spacing={0.5}>
+            <Typography className="suzuka-kicker">Launch Parameters</Typography>
+            <Typography variant="h6">任务发起与预算</Typography>
+            <Typography variant="body2" color="text.secondary">
+              这里是唯一允许提交新任务的页面。参数保存和任务提交分开执行，便于值班环境审计。
+            </Typography>
+          </Stack>
 
           {cfgQuery.isLoading ? (
             <Box display="flex" justifyContent="center" py={2}><CircularProgress size={20} /></Box>
           ) : null}
 
           <TextField
-            label="仓库 URL"
+            label="目标仓库 URL"
             placeholder="https://github.com/madler/zlib.git"
             value={repoUrl}
             onChange={(e) => setRepoUrl(e.target.value)}
@@ -155,9 +161,9 @@ export function ConfigPanel() {
           />
 
           <Stack spacing={1}>
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} alignItems="flex-start">
               <TextField
-                label="总时长(秒)"
+                label="任务总预算(秒)"
                 value={totalBudget}
                 onChange={(e) => setTotalBudget(e.target.value)}
                 size="small"
@@ -177,9 +183,9 @@ export function ConfigPanel() {
               />
             </Stack>
 
-            <Stack direction="row" spacing={1} alignItems="center">
+            <Stack direction="row" spacing={1} alignItems="flex-start">
               <TextField
-                label="单次时长(秒)"
+                label="单轮 run 预算(秒)"
                 value={runBudget}
                 onChange={(e) => setRunBudget(e.target.value)}
                 size="small"
@@ -210,7 +216,7 @@ export function ConfigPanel() {
           />
 
           <TextField
-            label="不限时时单轮上限(秒)"
+            label="不限时时单轮保护上限(秒)"
             value={unlimitedRoundBudget}
             onChange={(e) => setUnlimitedRoundBudget(e.target.value)}
             size="small"
@@ -220,7 +226,7 @@ export function ConfigPanel() {
           />
 
           <TextField
-            label="Plateau Idle Window (sec)"
+            label="覆盖停滞判定窗口(秒)"
             value={plateauIdleGrowthSec}
             onChange={(e) => setPlateauIdleGrowthSec(e.target.value)}
             size="small"
@@ -236,10 +242,10 @@ export function ConfigPanel() {
               onClick={handleSave}
               disabled={saveCfg.isPending || !mergedConfig}
             >
-              保存配置
+              保存参数
             </Button>
             <Button variant="contained" onClick={handleSubmit} disabled={submitTask.isPending}>
-              提交任务
+              发起任务
             </Button>
           </Stack>
 

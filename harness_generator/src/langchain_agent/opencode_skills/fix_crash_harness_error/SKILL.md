@@ -4,7 +4,7 @@ description: Repair harness-side crash causes while preserving target behavior a
 compatibility: opencode
 metadata:
   stage: fix-crash-harness-error
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

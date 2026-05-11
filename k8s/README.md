@@ -1,6 +1,6 @@
 # Kubernetes 清单
 
-本目录包含 Sherpa 当前线上部署使用的 Kubernetes manifests。
+本目录包含 TianHeng 当前线上部署使用的 Kubernetes manifests。
 
 当前口径：
 

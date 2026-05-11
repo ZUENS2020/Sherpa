@@ -288,12 +288,12 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
       variant="outlined"
       sx={{
         minHeight: 520,
-        background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(245,247,252,0.96))',
+        background: 'var(--tianheng-surface)',
         borderColor: 'rgba(15, 23, 42, 0.08)',
       }}
     >
-      <CardContent>
-        <Stack spacing={2}>
+      <CardContent sx={{ height: '100%', overflow: 'hidden' }}>
+        <Stack spacing={1.25} sx={{ height: '100%', minHeight: 0, overflow: 'hidden' }}>
           <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }} spacing={1.5}>
             <Stack spacing={0.5}>
               <Typography variant="h6">运行观察台</Typography>
@@ -314,16 +314,17 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
             </Stack>
           </Stack>
 
-          <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems="stretch">
+          <Stack direction="row" spacing={1.25} alignItems="stretch" sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <Stack
               spacing={1.25}
               sx={{
-                width: { xs: '100%', lg: 280 },
+                width: 260,
                 flexShrink: 0,
-                p: 1.25,
-                borderRadius: 2,
-                border: '1px solid rgba(15, 23, 42, 0.08)',
-                backgroundColor: 'rgba(248, 250, 252, 0.95)',
+                p: 1,
+                borderRadius: '4px',
+                border: '1px solid var(--tianheng-ink)',
+                backgroundColor: 'rgba(255, 250, 240, 0.88)',
+                overflow: 'auto',
               }}
             >
               <TextField
@@ -362,8 +363,8 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
               )}
             </Stack>
 
-            <Stack spacing={1.5} sx={{ flex: 1, minWidth: 0 }}>
-              <Stack direction={{ xs: 'column', md: 'row' }} spacing={1}>
+            <Stack spacing={1.25} sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+              <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
                 <Tabs value={viewMode} onChange={(_event, value) => setViewMode(value)} sx={{ minHeight: 40 }}>
                   <Tab value="log" label="实时日志" sx={{ minHeight: 40 }} />
                   <Tab value="signals" label="运行信号" sx={{ minHeight: 40 }} />
@@ -398,15 +399,17 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
 
               {viewMode === 'log' ? (
                 <Box
+                  className="suzuka-terminal"
                   ref={logRef}
                   onScroll={onScroll}
                   sx={{
-                    border: '1px solid rgba(15, 23, 42, 0.08)',
-                    borderRadius: 2,
-                    background: 'linear-gradient(180deg, rgba(2, 6, 23, 0.98), rgba(15, 23, 42, 0.98))',
+                    border: '1px solid var(--tianheng-ink)',
+                    borderRadius: '4px',
+                    background: '#101310',
                     color: '#e2e8f0',
                     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                    maxHeight: 560,
+                    flex: 1,
+                    minHeight: 0,
                     overflow: 'auto',
                   }}
                 >
@@ -463,9 +466,12 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                   spacing={1.5}
                   sx={{
                     p: 1.5,
-                    borderRadius: 2,
-                    border: '1px solid rgba(15, 23, 42, 0.08)',
-                    backgroundColor: 'rgba(248, 250, 252, 0.95)',
+                    borderRadius: '4px',
+                    border: '1px solid var(--tianheng-ink)',
+                    backgroundColor: 'rgba(255, 250, 240, 0.88)',
+                    flex: 1,
+                    minHeight: 0,
+                    overflow: 'auto',
                   }}
                 >
                   {selectedChild?.error ? <Alert severity="error">{selectedChild.error}</Alert> : null}
@@ -487,9 +493,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                         key={section.title}
                         sx={{
                           p: 1.5,
-                          borderRadius: 2,
-                          border: '1px solid rgba(15, 23, 42, 0.08)',
-                          backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                          borderRadius: '4px',
+                          border: '1px solid var(--tianheng-ink)',
+                          backgroundColor: 'rgba(255, 250, 240, 0.86)',
                         }}
                       >
                         <Typography variant="subtitle2" sx={{ mb: 1 }}>{section.title}</Typography>
@@ -509,9 +515,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                     <Box
                       sx={{
                         p: 1.5,
-                        borderRadius: 2,
-                        border: '1px solid rgba(15, 23, 42, 0.08)',
-                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                        borderRadius: '4px',
+                        border: '1px solid var(--tianheng-ink)',
+                        backgroundColor: 'rgba(255, 250, 240, 0.86)',
                       }}
                     >
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>Frontier Top Inputs</Typography>
@@ -521,9 +527,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                             key={`${input.input_relpath || 'input'}-${index}`}
                             sx={{
                               p: 1.25,
-                              borderRadius: 2,
-                              border: '1px solid rgba(15, 23, 42, 0.08)',
-                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                              borderRadius: '4px',
+                              border: '1px solid var(--tianheng-ink)',
+                              backgroundColor: 'rgba(255, 250, 240, 0.78)',
                             }}
                           >
                             <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={0.75}>
@@ -571,9 +577,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                     <Box
                       sx={{
                         p: 1.5,
-                        borderRadius: 2,
-                        border: '1px solid rgba(15, 23, 42, 0.08)',
-                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                        borderRadius: '4px',
+                        border: '1px solid var(--tianheng-ink)',
+                        backgroundColor: 'rgba(255, 250, 240, 0.86)',
                       }}
                     >
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>Top Function Gaps</Typography>
@@ -583,9 +589,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                             key={`${String(item.name || 'gap')}-${index}`}
                             sx={{
                               p: 1.1,
-                              borderRadius: 2,
-                              border: '1px solid rgba(15, 23, 42, 0.08)',
-                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                              borderRadius: '4px',
+                              border: '1px solid var(--tianheng-ink)',
+                              backgroundColor: 'rgba(255, 250, 240, 0.78)',
                             }}
                           >
                             <Typography variant="caption" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
@@ -607,9 +613,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                     <Box
                       sx={{
                         p: 1.5,
-                        borderRadius: 2,
-                        border: '1px solid rgba(15, 23, 42, 0.08)',
-                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                        borderRadius: '4px',
+                        border: '1px solid var(--tianheng-ink)',
+                        backgroundColor: 'rgba(255, 250, 240, 0.86)',
                       }}
                     >
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>Top Path Frontiers</Typography>
@@ -619,9 +625,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                             key={`${String(item.input_relpath || 'path')}-${index}`}
                             sx={{
                               p: 1.1,
-                              borderRadius: 2,
-                              border: '1px solid rgba(15, 23, 42, 0.08)',
-                              backgroundColor: 'rgba(248, 250, 252, 0.92)',
+                              borderRadius: '4px',
+                              border: '1px solid var(--tianheng-ink)',
+                              backgroundColor: 'rgba(255, 250, 240, 0.78)',
                             }}
                           >
                             <Typography variant="caption" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
@@ -649,9 +655,9 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
                     <Box
                       sx={{
                         p: 1.5,
-                        borderRadius: 2,
-                        border: '1px solid rgba(15, 23, 42, 0.08)',
-                        backgroundColor: 'rgba(255, 255, 255, 0.86)',
+                        borderRadius: '4px',
+                        border: '1px solid var(--tianheng-ink)',
+                        backgroundColor: 'rgba(255, 250, 240, 0.86)',
                       }}
                     >
                       <Typography variant="subtitle2" sx={{ mb: 1 }}>Function to Inputs</Typography>
@@ -673,8 +679,8 @@ export function LogPanel({ detail }: { detail?: TaskDetail }) {
 
                   <Box
                     sx={{
-                      borderRadius: 2,
-                      backgroundColor: '#0f172a',
+                      borderRadius: '4px',
+                      backgroundColor: '#101310',
                       color: '#cbd5e1',
                       p: 1.5,
                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',

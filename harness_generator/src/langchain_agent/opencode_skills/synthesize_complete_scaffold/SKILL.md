@@ -4,7 +4,7 @@ description: Complete missing scaffold artifacts with minimal changes while pres
 compatibility: opencode
 metadata:
   stage: synthesize-complete-scaffold
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

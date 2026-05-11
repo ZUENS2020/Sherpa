@@ -4,7 +4,7 @@ description: Repair harness-side crash causes after run-time triage while preser
 compatibility: opencode
 metadata:
   stage: fix-harness
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

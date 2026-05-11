@@ -4,7 +4,7 @@ description: Repair fuzz scaffold after build failures with strategy change and 
 compatibility: opencode
 metadata:
   stage: synthesize-repair-build
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does

@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="./assets/banner.svg" alt="Sherpa Banner" width="100%" />
+  <img src="./assets/banner.svg" alt="TianHeng Banner" width="100%" />
 </p>
 
-# Sherpa
+# TianHeng
 
-Sherpa 是一个面向公开仓库的 fuzz 编排系统。它解决的不是“单次生成一个 harness”这一个动作，而是把一个仓库的 fuzz 工作拆成可恢复、可观测、可复现的阶段闭环。
+TianHeng 是一个面向公开仓库的 fuzz 编排系统。它解决的不是“单次生成一个 harness”这一个动作，而是把一个仓库的 fuzz 工作拆成可恢复、可观测、可复现的阶段闭环。
 
-Sherpa 当前关注的是完整流程：
+TianHeng 当前关注的是完整流程：
 
 - 选目标
 - 产脚手架
@@ -38,7 +38,7 @@ flowchart LR
 
 ## 当前主工作流
 
-Sherpa 的主线可以按三条闭环理解：
+TianHeng 的主线可以按三条闭环理解：
 
 ```mermaid
 flowchart TD
@@ -129,7 +129,7 @@ flowchart TD
 
 ## 部署模型
 
-Sherpa 当前采用的运行形态是：
+TianHeng 当前采用的运行形态是：
 
 - FastAPI 后端 + Postgres 常驻
 - 前端独立部署

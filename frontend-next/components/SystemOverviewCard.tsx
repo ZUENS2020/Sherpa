@@ -35,14 +35,14 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
     <Card
       variant="outlined"
       sx={{
-        background: 'linear-gradient(135deg, rgba(255,255,255,0.98), rgba(238,244,252,0.96))',
+        background: 'var(--tianheng-surface)',
         borderColor: 'rgba(15, 23, 42, 0.08)',
       }}
     >
       <CardContent>
-        <Stack spacing={1.5}>
+        <Stack spacing={1}>
           <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="h6">Sherpa 任务总览</Typography>
+            <Typography variant="h6">TianHeng 任务总览</Typography>
             <Chip
               size="small"
               color={data?.ok ? 'success' : 'warning'}
@@ -50,7 +50,7 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
               variant="outlined"
             />
           </Stack>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
             <Typography variant="body2">总任务：{jobs?.total ?? 0}</Typography>
             <Typography variant="body2">排队：{jobs?.queued ?? 0}</Typography>
             <Typography variant="body2">运行中：{jobs?.running ?? 0}</Typography>

@@ -4,7 +4,7 @@ description: Re-plan after crash/repro failures while preserving crash-path reac
 compatibility: opencode
 metadata:
   stage: plan-repair-crash
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
