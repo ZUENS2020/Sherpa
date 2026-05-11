@@ -663,25 +663,6 @@ jobs:
             .
           docker save -o "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
 
-      - name: Cleanup legacy dev tunnel in shared namespace
-        if: steps.kube_preflight.outputs.reachable == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl -n sherpa delete deploy cloudflared-dev --ignore-not-found=true
-          kubectl -n sherpa delete configmap cloudflared-dev-proxy-config --ignore-not-found=true
-          kubectl -n sherpa delete secret cloudflare-tunnel-dev --ignore-not-found=true
-
-      - name: Cleanup legacy shared tunnel
-        if: steps.kube_preflight.outputs.reachable == 'true' && env.NAMESPACE != 'sherpa'
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl -n sherpa delete deploy cloudflared --ignore-not-found=true
-          kubectl -n sherpa delete configmap cloudflared-proxy-config --ignore-not-found=true
-          kubectl -n sherpa delete secret cloudflare-tunnel --ignore-not-found=true
-          kubectl -n sherpa delete secret cloudflare-public-host --ignore-not-found=true
-
       - name: Deploy cloudflared tunnel
         if: steps.kube_preflight.outputs.reachable == 'true'
         shell: bash
@@ -925,14 +906,16 @@ jobs:
         run: |
           set -euo pipefail
           kubectl -n "${NAMESPACE}" port-forward svc/sherpa-web 18001:8001 >/tmp/pf-web.log 2>&1 &
-          pf_pid=$!
+          web_pf_pid=$!
+          kubectl -n "${NAMESPACE}" port-forward deployment/cloudflared 18002:20241 >/tmp/pf-cloudflared.log 2>&1 &
+          cf_pf_pid=$!
           cleanup() {
-            kill "${pf_pid}" >/dev/null 2>&1 || true
+            kill "${web_pf_pid}" "${cf_pf_pid}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
           for i in $(seq 1 30); do
-            if ! kill -0 "${pf_pid}" >/dev/null 2>&1; then
-              echo "::error::port-forward exited early"
+            if ! kill -0 "${web_pf_pid}" >/dev/null 2>&1; then
+              echo "::error::web port-forward exited early"
               cat /tmp/pf-web.log || true
               exit 1
             fi
@@ -942,3 +925,42 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:18001/api/health
+
+          public_host="$(kubectl -n "${NAMESPACE}" get secret cloudflare-public-host -o jsonpath='{.data.host}' | base64 --decode)"
+          if [[ -z "${public_host}" ]]; then
+            echo "::error::cloudflare public host secret is empty"
+            exit 1
+          fi
+
+          for i in $(seq 1 90); do
+            if ! kill -0 "${cf_pf_pid}" >/dev/null 2>&1; then
+              echo "::error::cloudflared metrics port-forward exited early"
+              cat /tmp/pf-cloudflared.log || true
+              exit 1
+            fi
+            ha_connections="$(curl -fsS --max-time 2 http://127.0.0.1:18002/metrics 2>/dev/null | awk '/^cloudflared_tunnel_ha_connections / {print int($2); found=1} END {if (!found) print 0}' || echo 0)"
+            echo "::notice::cloudflared ha_connections=${ha_connections} attempt=${i}"
+            if [[ "${ha_connections}" -ge 2 ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ "${ha_connections:-0}" -lt 2 ]]; then
+            echo "::error::cloudflared did not establish enough HA edge connections"
+            kubectl -n "${NAMESPACE}" logs deployment/cloudflared -c cloudflared --tail=120 || true
+            exit 1
+          fi
+
+          public_url="https://${public_host}/api/health"
+          for i in $(seq 1 90); do
+            if curl -fsS --max-time 15 "${public_url}" >/tmp/public-health.json 2>/tmp/public-health.err; then
+              cat /tmp/public-health.json
+              exit 0
+            fi
+            echo "::warning::public tunnel health failed attempt=${i} url=${public_url}"
+            cat /tmp/public-health.err || true
+            kubectl -n "${NAMESPACE}" logs deployment/cloudflared -c cloudflared --tail=40 || true
+            sleep 5
+          done
+          echo "::error::public tunnel health did not become ready: ${public_url}"
+          exit 1
