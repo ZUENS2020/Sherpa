@@ -8451,6 +8451,17 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     selected_target_api = str(state.get("selected_target_api") or "").strip()
     selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
     selected_target_doc = _load_selected_targets_doc(gen.repo_root)
+    # Overwrite targets.json with only must_run targets so the synthesize
+    # agent generates harnesses for the correct execution targets.
+    if selected_target_doc and _vuln_hunting_enabled():
+        _must_run = [t for t in selected_target_doc if bool(t.get("must_run") or False)]
+        if _must_run:
+            _filtered_targets_path = gen.repo_root / "fuzz" / "targets.json"
+            _filtered_targets_path.parent.mkdir(parents=True, exist_ok=True)
+            _filtered_targets_path.write_text(
+                json.dumps(_must_run, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
     selected_target_name = ""
     if selected_target_doc:
         selected_primary = selected_target_doc[0]
