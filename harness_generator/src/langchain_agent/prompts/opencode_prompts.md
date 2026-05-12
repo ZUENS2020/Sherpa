@@ -36,7 +36,7 @@ Constraints:
 - Target selection is vulnerability-first by default (`security_priority_mode=true`):
   - ranking must be driven by risk dimensions first: `vuln_likelihood`, then `exploitability`, then `reachability_confidence`
   - treat `score_total` and non-security dimensions (coverage/complexity/api-relevance) as reference output only, not the primary ordering basis.
-  - `score_total = 0.45*vuln_likelihood + 0.25*exploitability + 0.18*reachability_confidence + 0.05*coverage_gap + 0.04*complexity_depth + 0.02*api_relevance + 0.01*consumer_order_support - recent_yield_penalty` is retained for observability/comparison.
+  - `score_total = 0.50*vuln_likelihood + 0.30*exploitability + 0.20*reachability_confidence - recent_yield_penalty`. Non-vuln dimensions (coverage_gap, complexity_depth, api_relevance, consumer_order_support) are NOT scored.
 - `fuzz/selected_targets.json` must include per-target:
   - `security_score_breakdown`
   - `api_surface_exception`
