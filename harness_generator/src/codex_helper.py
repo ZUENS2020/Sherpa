@@ -1576,7 +1576,10 @@ class CodexHelper:
                         # reader's internal lock, preventing the kill path from ever
                         # running and leaving orphaned opencode processes alive.
                         _terminate_or_kill_proc(force=False)
-                        _wait_proc_with_timeout(0.5)
+                        # For done_flag, give Node.js event loop more time to flush
+                        # async writes before escalating to SIGKILL.
+                        _done_flag_wait = 2.0 if reason == "done_flag" else 0.5
+                        _wait_proc_with_timeout(_done_flag_wait)
                         if proc.poll() is None:
                             if not _wait_proc_with_timeout(4.0):
                                 _terminate_or_kill_proc(force=True if force_kill else False)
@@ -1736,7 +1739,36 @@ class CodexHelper:
                                     ) from e
                             else:
                                 LOGGER.info("[OpenCodeHelper] done flag detected")
-                                logger.info("[OpenCodeHelper] done flag detected; terminating")
+                                logger.info("[OpenCodeHelper] done flag detected; graceful flush")
+
+                                # Read done content to find the referenced artifact path.
+                                _done_content = ""
+                                try:
+                                    _done_content = done_path.read_text(encoding="utf-8", errors="replace").strip()
+                                except Exception:
+                                    pass
+
+                                # Wait for referenced artifact to appear on disk.
+                                # OpenCode (Node.js) uses async I/O; the done file can be
+                                # flushed before the actual output files.  Give the event
+                                # loop time to complete pending writes.
+                                if _done_content:
+                                    _ref_path = (self.working_dir / _done_content).resolve()
+                                    if not _ref_path.exists() or (_ref_path.is_file() and _ref_path.stat().st_size == 0):
+                                        _flush_deadline = time.time() + 3.0
+                                        while time.time() < _flush_deadline:
+                                            if _ref_path.exists() and _ref_path.stat().st_size > 0:
+                                                break
+                                            time.sleep(0.3)
+
+                                # Kernel dirty-page writeback window.
+                                try:
+                                    os.sync()
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+
+                                logger.info("[OpenCodeHelper] done flag verified; terminating")
                                 _kill_proc("done_flag")
                                 break
 

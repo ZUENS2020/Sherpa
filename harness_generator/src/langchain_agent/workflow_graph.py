@@ -557,6 +557,22 @@ def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
     _wf_obs.emit_fuzz_metrics(state)
 
 
+def _grace_wait_for_file(path: Path, max_sec: int = 5, *, min_size: int = 1) -> bool:
+    """Wait up to max_sec for a file to appear on disk with minimum size.
+
+    This handles filesystem flush delays when OpenCode (Node.js async I/O)
+    signals completion via ./done before output files are fully written.
+    """
+    if max_sec <= 0:
+        return path.is_file() and path.stat().st_size >= min_size
+    deadline = time.time() + max_sec
+    while time.time() < deadline:
+        if path.is_file() and path.stat().st_size >= min_size:
+            return True
+        time.sleep(0.5)
+    return path.is_file() and path.stat().st_size >= min_size
+
+
 def _fmt_dt(seconds: float) -> str:
     return _wf_common.fmt_dt(seconds)
 
@@ -13872,8 +13888,10 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("fix.patch", "fix_summary.md", "done"),
         )
         patch_path = repo_root / "fix.patch"
+        _grace_wait_for_file(patch_path, max_sec=5, min_size=0)
         fix_summary_path = repo_root / "fix_summary.md"
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
         patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
@@ -14211,11 +14229,17 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("crash_triage.json", "done"),
         )
+        # Grace period for filesystem flush — OpenCode (Node.js) uses async I/O,
+        # so the output file may not be flushed to disk when the done sentinel fires.
+        _grace_wait_for_file(triage_json_path, max_sec=5)
         parsed: dict[str, Any] = {}
         if triage_json_path.is_file():
             try:
-                parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
+                raw = triage_json_path.read_text(encoding="utf-8", errors="replace").strip()
+                if raw:
+                    parsed = json.loads(raw)
             except Exception:
                 parsed = {}
         if isinstance(parsed, dict) and parsed:
@@ -14455,13 +14479,17 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("crash_analysis.json", "done"),
         )
+        _grace_wait_for_file(analysis_json_path, max_sec=5)
         parsed_doc: dict[str, Any] = {}
         if analysis_json_path.is_file():
             try:
-                loaded = json.loads(analysis_json_path.read_text(encoding="utf-8", errors="replace"))
-                if isinstance(loaded, dict):
-                    parsed_doc = loaded
+                raw = analysis_json_path.read_text(encoding="utf-8", errors="replace").strip()
+                if raw:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        parsed_doc = loaded
             except Exception:
                 parsed_doc = {}
         if parsed_doc:
@@ -14692,8 +14720,10 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("fix.patch", "done"),
         )
         patch_path = repo_root / "fix.patch"
+        _grace_wait_for_file(patch_path, max_sec=5, min_size=0)
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
         patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
         if not changed_files:
