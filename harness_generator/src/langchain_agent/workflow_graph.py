@@ -1536,17 +1536,25 @@ def _vuln_max_iterations_per_candidate() -> int:
         return 5
 
 
+_VULN_REPLAN_PRIORITY_THRESHOLD = 0.65
+
+
+def _vuln_replan_priority_threshold() -> float:
+    raw = os.environ.get("SHERPA_VULN_REPLAN_PRIORITY_THRESHOLD") or ""
+    if raw:
+        try:
+            return max(0.0, min(float(raw.strip()), 1.0))
+        except ValueError:
+            pass
+    return _VULN_REPLAN_PRIORITY_THRESHOLD
+
+
 def _vuln_score_weights() -> dict[str, float]:
-    # Vulnerability scores dominate (0.88); coverage/complexity are
-    # reference tiebreakers only (0.12).
+    # Pure vuln-driven scoring. All non-vuln factors removed.
     return {
-        "vuln_likelihood": 0.45,
-        "exploitability": 0.25,
-        "reachability_confidence": 0.18,
-        "coverage_gap": 0.05,
-        "complexity_depth": 0.04,
-        "api_relevance": 0.02,
-        "consumer_order_support": 0.01,
+        "vuln_likelihood": 0.50,
+        "exploitability": 0.30,
+        "reachability_confidence": 0.20,
     }
 
 
@@ -2713,6 +2721,7 @@ def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         "vuln_hunt_enabled": enabled,
         "vuln_hunt_iteration": int(state.get("vuln_hunt_iteration") or 0) + 1,
         "vuln_hunt_active_candidate_id": str(active_candidate.get("candidate_id") or ""),
+        "vuln_hunt_highest_priority": float(active_candidate.get("priority") or 0.0) if active else 0.0,
         "vuln_hunt_candidate_count": len(candidates),
         "vuln_hunt_degraded": bool(degraded_reason),
         "vuln_hunt_last_reason": degraded_reason,
@@ -2986,13 +2995,9 @@ def _build_selected_target_row(
     target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
     score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
-        float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
-        + float(score_weights["exploitability"]) * float(exploitability)
-        + float(score_weights["reachability_confidence"]) * float(reachability_confidence)
-        + float(score_weights["coverage_gap"]) * float(score_breakdown.get("coverage_gap") or 0.0)
-        + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
-        + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
-        + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
+        float(score_weights.get("vuln_likelihood", 0.50)) * float(vuln_likelihood)
+        + float(score_weights.get("exploitability", 0.30)) * float(exploitability)
+        + float(score_weights.get("reachability_confidence", 0.20)) * float(reachability_confidence)
         + float(execution_bias.get("execution_depth_bias") or 0.0)
         - float(score_penalty)
         - float(target_surface_penalty)
@@ -3061,9 +3066,9 @@ def _build_selected_target_row(
         4,
     )
     score_breakdown_fixed = {
-        "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
-        "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
-        "api_relevance": float(score_breakdown.get("api_relevance") or 0.0),
+        "vuln_likelihood": float(vuln_likelihood),
+        "exploitability": float(exploitability),
+        "reachability_confidence": float(reachability_confidence),
         "recent_yield_penalty": float(score_breakdown.get("recent_yield_penalty") or 0.0),
     }
     return {
@@ -3098,42 +3103,6 @@ def _build_selected_target_row(
             "vuln_likelihood": float(vuln_likelihood),
             "exploitability": float(exploitability),
             "reachability_confidence": float(reachability_confidence),
-            "coverage_gap_ref": float(
-                explicit_security_breakdown.get(
-                    "coverage_gap_ref",
-                    explicit_security_breakdown.get(
-                        "coverage_gap",
-                        score_breakdown.get("coverage_gap") or 0.0,
-                    ),
-                )
-            ),
-            "complexity_depth_ref": float(
-                explicit_security_breakdown.get(
-                    "complexity_depth_ref",
-                    explicit_security_breakdown.get(
-                        "complexity_depth",
-                        score_breakdown.get("complexity_depth") or 0.0,
-                    ),
-                )
-            ),
-            "api_relevance_ref": float(
-                explicit_security_breakdown.get(
-                    "api_relevance_ref",
-                    explicit_security_breakdown.get(
-                        "api_relevance",
-                        score_breakdown.get("api_relevance") or 0.0,
-                    ),
-                )
-            ),
-            "consumer_order_support_ref": float(
-                explicit_security_breakdown.get(
-                    "consumer_order_support_ref",
-                    explicit_security_breakdown.get(
-                        "consumer_order_support",
-                        score_breakdown.get("consumer_order_support") or 0.0,
-                    ),
-                )
-            ),
             "recent_yield_penalty": float(score_penalty + target_surface_penalty),
             "weights": {k: float(v) for k, v in score_weights.items()},
         },
@@ -3218,6 +3187,7 @@ def _build_selected_targets_doc(
     out = _wf_target_selection.assign_execution_priority(
         ranked_items,
         max_targets=max_targets,
+        security_priority_mode=security_priority_mode,
     )
     return out
 
@@ -15508,10 +15478,8 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
     if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if bool(state.get("coverage_should_improve")):
-        mode = str(state.get("coverage_improve_mode") or "").strip()
-        if _vuln_hunting_enabled() and (
-            bool(state.get("coverage_replan_required") or False) or mode == "replan"
-        ):
+        if _vuln_hunting_enabled():
+            state["_vuln_hunt_entry_source"] = "coverage-analysis"
             return "vuln-hunt"
         return "improve-harness"
     # Circuit breaker: force a full replan after repeated no-improvement
@@ -15519,7 +15487,10 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
     max_continuous = int(os.environ.get("SHERPA_MAX_CONTINUOUS_LOOP", "3"))
     loop_count = int(state.get("continuous_loop_count") or 0)
     if loop_count >= max_continuous:
-        return "vuln-hunt" if _vuln_hunting_enabled() else "plan"
+        if _vuln_hunting_enabled():
+            state["_vuln_hunt_entry_source"] = "coverage-analysis"
+            return "vuln-hunt"
+        return "plan"
     if _auto_stop_policy() == "hard_fail_only":
         return "run"
     return "stop"
@@ -15548,7 +15519,11 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
             return "plan"
         return "stop"
     if bool(state.get("coverage_should_improve")):
-        if str(state.get("coverage_improve_mode") or "").strip() == "in_place":
+        mode = str(state.get("coverage_improve_mode") or "").strip()
+        if _vuln_hunting_enabled() and mode == "in_place":
+            state["_vuln_hunt_entry_source"] = "improve-harness"
+            return "vuln-hunt"
+        if mode == "in_place":
             return "build"
         return "plan"
     return "stop"
@@ -15561,7 +15536,10 @@ def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     if str(state.get("last_error") or err.get("message") or "").strip() and not bool(state.get("analysis_degraded")):
         return "stop"
-    return "vuln-hunt" if _vuln_hunting_enabled() else "plan"
+    if _vuln_hunting_enabled():
+        state["_vuln_hunt_entry_source"] = "analysis"
+        return "vuln-hunt"
+    return "plan"
 
 
 def _route_after_plan_state(state: FuzzWorkflowRuntimeState) -> str:
@@ -15756,6 +15734,19 @@ def _route_after_vuln_hunt_state(state: FuzzWorkflowRuntimeState) -> str:
         return "stop"
     if str(state.get("last_error") or "").strip():
         return "stop"
+
+    source = str(state.get("_vuln_hunt_entry_source") or "").strip()
+
+    if source == "improve-harness":
+        return "build"
+
+    if source == "coverage-analysis":
+        active_priority = float(state.get("vuln_hunt_highest_priority") or 0.0)
+        if active_priority >= _vuln_replan_priority_threshold():
+            return "plan"
+        return "improve-harness"
+
+    # "analysis" or unknown sources — initial flow, unchanged
     return "plan"
 
 
@@ -15870,7 +15861,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "vuln-hunt",
         lambda state: _apply_stage_stop_guard(state, "vuln-hunt", _route_after_vuln_hunt_state(state)),
-        {"plan": "plan", "stop": END},
+        {"plan": "plan", "improve-harness": "improve-harness", "build": "build", "stop": END},
     )
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
@@ -15907,7 +15898,7 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "improve-harness",
         _route_after_improve_harness,
-        {"build": "build", "plan": "plan", "stop": END},
+        {"build": "build", "plan": "plan", "vuln-hunt": "vuln-hunt", "stop": END},
     )
     graph.add_conditional_edges(
         "re-build",
@@ -16153,6 +16144,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "vuln_hunt_enabled": bool(out.get("vuln_hunt_enabled") or False),
         "vuln_hunt_iteration": int(out.get("vuln_hunt_iteration") or 0),
         "vuln_hunt_active_candidate_id": str(out.get("vuln_hunt_active_candidate_id") or ""),
+        "vuln_hunt_highest_priority": float(out.get("vuln_hunt_highest_priority") or 0.0),
         "vuln_hunt_candidate_count": int(out.get("vuln_hunt_candidate_count") or 0),
         "vuln_hunt_degraded": bool(out.get("vuln_hunt_degraded") or False),
         "vuln_hunt_last_reason": str(out.get("vuln_hunt_last_reason") or ""),
