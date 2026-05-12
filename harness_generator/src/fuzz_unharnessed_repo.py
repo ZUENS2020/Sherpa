@@ -2852,9 +2852,15 @@ EOF
             """
         ).strip()
 
+        selected_targets_path = self.fuzz_dir / "selected_targets.json"
+        execution_plan_path = self.fuzz_dir / "execution_plan.json"
+        selected_text = read_text_safely(selected_targets_path)
+        execution_text = read_text_safely(execution_plan_path)
         context = (
             "=== fuzz/PLAN.md ===\n" + plan_text +
-            "\n\n=== fuzz/targets.json ===\n" + targets_text
+            "\n\n=== fuzz/targets.json ===\n" + targets_text +
+            "\n\n=== fuzz/selected_targets.json (EXECUTION TARGETS) ===\n" + selected_text +
+            "\n\n=== fuzz/execution_plan.json ===\n" + execution_text
         )
         overload_retry_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES") or "3").strip()
         overload_backoff_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC") or "10").strip()
