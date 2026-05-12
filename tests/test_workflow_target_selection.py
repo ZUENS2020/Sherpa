@@ -89,7 +89,9 @@ def test_sort_ranked_items_risk_first_uses_priority_and_evidence_count() -> None
     assert sorted_rows[0]["target_name"] == "high-priority"
 
 
-def test_sort_ranked_items_risk_first_demotes_low_yield_target() -> None:
+def test_sort_ranked_items_risk_first_prefers_highest_vuln_likelihood() -> None:
+    # Pure vuln-driven: higher vuln_likelihood wins, regardless of effective_priority
+    # or yield penalties. "stuck_decode" has vuln=0.92 > "fresh_init" vuln=0.40.
     rows = [
         {
             "target_name": "stuck_decode",
@@ -133,7 +135,7 @@ def test_sort_ranked_items_risk_first_demotes_low_yield_target() -> None:
         runtime_viability_rank_fn=lambda _: 3,
         prefer_deeper=True,
     )
-    assert sorted_rows[0]["target_name"] == "fresh_init"
+    assert sorted_rows[0]["target_name"] == "stuck_decode"
 
 
 def test_sort_ranked_items_risk_first_breaks_ties_with_execution_depth_and_callback_penalty() -> None:
