@@ -2835,6 +2835,9 @@ EOF
             f"""
             Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
             Goal: synthesize a complete fuzz scaffold under `{FUZZ_DIR}`.
+            TARGET PRIORITY: `fuzz/selected_targets.json` contains the execution targets
+            with `must_run=true`. Generate harnesses ONLY for must_run targets, NOT for
+            every candidate in `fuzz/targets.json`. Ignore targets that are not must_run.
             Required outputs:
             - harness source file(s)
             - `fuzz/build.py` or `fuzz/build.sh`
