@@ -220,6 +220,17 @@ class FuzzWorkflowState(TypedDict, total=False):
     replan_effective: bool
     replan_stop_reason: str
     vuln_hunting_enabled: bool
+    vuln_hunt_iteration: int
+    vuln_hunt_highest_priority: float
+    vuln_hunt_enabled: bool
+    vuln_hunt_active_candidate_id: str
+    vuln_hunt_candidate_count: int
+    vuln_hunt_degraded: bool
+    vuln_hunt_last_reason: str
+    vuln_hunt_summary_path: str
+    vuln_hunt_events_path: str
+    vuln_hunt_rerun_requested: bool
+    _vuln_hunt_entry_source: str
     vuln_focus_profile: str
     target_surface_policy: str
     security_evidence_count: int
@@ -2597,8 +2608,11 @@ def _vuln_hunt_event_from_state(state: dict[str, Any]) -> dict[str, Any]:
         event_type = "harness_bug"
     elif bool(state.get("repair_mode") or False):
         event_type = "repair_feedback"
+    # Always emit at least a coverage_normal event so the vuln-hunt agent
+    # receives current run/coverage data for iterative refinement.
     if not event_type:
-        return {}
+        event_type = "coverage_normal"
+    seed_quality = dict(state.get("coverage_seed_quality") or {}) if isinstance(state.get("coverage_seed_quality"), dict) else {}
     return {
         "ts": int(time.time()),
         "event_type": event_type,
@@ -2609,6 +2623,12 @@ def _vuln_hunt_event_from_state(state: dict[str, Any]) -> dict[str, Any]:
         "coverage_seed_generation_degraded": bool(state.get("coverage_seed_generation_degraded") or False),
         "crash_triage_label": str(state.get("crash_triage_label") or ""),
         "repair_origin_stage": str(state.get("repair_origin_stage") or ""),
+        "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
+        "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
+        "cov_delta": int(seed_quality.get("cov_delta") or 0),
+        "ft_delta": int(seed_quality.get("ft_delta") or 0),
+        "seed_score": float(seed_quality.get("seed_score") or 0.0),
+        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
     }
 
 
@@ -2678,14 +2698,28 @@ def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         if has_hunt_input and _has_codex_key() and getattr(gen, "patcher", None) is not None:
             try:
                 _clear_opencode_done_sentinel(repo_root)
-                hunt_hint = "\n".join(
-                    [
-                        f"- analysis_context_path: {analysis_context_path}",
-                        "- read `fuzz/analysis_context.json` and `fuzz/vuln_candidates.json` first",
-                        "- update only advisory vulnerability candidates and hunt summary",
-                        "- preserve validation_status/attempt_count/last_result for existing candidates",
-                    ]
-                )
+                hunt_hint_lines = [
+                    f"- analysis_context_path: {analysis_context_path}",
+                    "- read `fuzz/analysis_context.json` and `fuzz/vuln_candidates.json` first",
+                    "- update only advisory vulnerability candidates and hunt summary",
+                    "- preserve validation_status/attempt_count/last_result for existing candidates",
+                ]
+                # Inject run/coverage feedback paths so the agent can refine
+                # vulnerability assessments with actual fuzz data.
+                run_feedback_path = str(state.get("fuzz_coverage_run_feedback_path") or "")
+                if run_feedback_path:
+                    hunt_hint_lines.append(f"- run_feedback_path: {run_feedback_path}")
+                coverage_frontier = str(state.get("fuzz_coverage_frontier_path") or "")
+                if coverage_frontier:
+                    hunt_hint_lines.append(f"- coverage_frontier_path: {coverage_frontier}")
+                replay_manifest = str(state.get("coverage_per_input_manifest_path") or "")
+                if replay_manifest:
+                    hunt_hint_lines.append(f"- per_input_manifest_path: {replay_manifest}")
+                # Attach run summary if available.
+                run_summary_path = str(state.get("fuzz_coverage_run_feedback_summary") or "")
+                if run_summary_path:
+                    hunt_hint_lines.append(f"- coverage_run_feedback_summary: {run_summary_path}")
+                hunt_hint = "\n".join(hunt_hint_lines)
                 event = _vuln_hunt_event_from_state(cast(dict[str, Any], state))
                 if event:
                     hunt_hint += "\n- latest_feedback_event: " + json.dumps(event, ensure_ascii=False, sort_keys=True)
@@ -15471,6 +15505,9 @@ def _route_after_per_input_replay_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if bool(state.get("coverage_should_improve")) and _vuln_hunting_enabled():
+        state["_vuln_hunt_entry_source"] = "coverage-analysis"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
@@ -15479,7 +15516,6 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
         return "stop"
     if bool(state.get("coverage_should_improve")):
         if _vuln_hunting_enabled():
-            state["_vuln_hunt_entry_source"] = "coverage-analysis"
             return "vuln-hunt"
         return "improve-harness"
     # Circuit breaker: force a full replan after repeated no-improvement
@@ -15488,7 +15524,6 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
     loop_count = int(state.get("continuous_loop_count") or 0)
     if loop_count >= max_continuous:
         if _vuln_hunting_enabled():
-            state["_vuln_hunt_entry_source"] = "coverage-analysis"
             return "vuln-hunt"
         return "plan"
     if _auto_stop_policy() == "hard_fail_only":
@@ -15497,6 +15532,13 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
 
 
 def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if (
+        bool(state.get("coverage_should_improve"))
+        and _vuln_hunting_enabled()
+        and str(state.get("coverage_improve_mode") or "").strip() == "in_place"
+    ):
+        state["_vuln_hunt_entry_source"] = "improve-harness"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
@@ -15521,7 +15563,6 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
     if bool(state.get("coverage_should_improve")):
         mode = str(state.get("coverage_improve_mode") or "").strip()
         if _vuln_hunting_enabled() and mode == "in_place":
-            state["_vuln_hunt_entry_source"] = "improve-harness"
             return "vuln-hunt"
         if mode == "in_place":
             return "build"
@@ -15530,6 +15571,9 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
 
 
 def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if _vuln_hunting_enabled():
+        state["_vuln_hunt_entry_source"] = "analysis"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
@@ -15537,7 +15581,6 @@ def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
     if str(state.get("last_error") or err.get("message") or "").strip() and not bool(state.get("analysis_degraded")):
         return "stop"
     if _vuln_hunting_enabled():
-        state["_vuln_hunt_entry_source"] = "analysis"
         return "vuln-hunt"
     return "plan"
 
