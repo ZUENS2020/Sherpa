@@ -1018,7 +1018,7 @@ class CodexHelper:
                     return max(0, min(int(v), 86_400))
                 except Exception:
                     return 300
-            raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "300").strip()
+            raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "600").strip()
             try:
                 return max(0, min(int(raw), 86_400))
             except Exception:

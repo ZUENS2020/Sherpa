@@ -1,9 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
-import * as Sentry from '@sentry/nextjs';
 
 const theme = createTheme({
   palette: {
@@ -198,18 +197,6 @@ const theme = createTheme({
   },
 });
 
-let sentryReady = false;
-function initSentryIfNeeded() {
-  const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
-  if (!dsn || sentryReady) return;
-  Sentry.init({
-    dsn,
-    tracesSampleRate: 0.1,
-    enabled: true,
-  });
-  sentryReady = true;
-}
-
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() =>
     new QueryClient({
@@ -222,10 +209,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
       },
     }),
   );
-
-  useEffect(() => {
-    initSentryIfNeeded();
-  }, []);
 
   return (
     <ThemeProvider theme={theme}>

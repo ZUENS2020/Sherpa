@@ -3,21 +3,40 @@
 import { Alert, Box, Card, CardContent, Chip, Stack, Typography } from '@mui/material';
 import type { SystemStatus } from '@/lib/api/schemas';
 
-type CrashVulnCandidate = {
-  validation_status?: string;
-  target_api?: string;
-  target_name?: string;
-};
-
-function fmtDuration(sec?: number): string {
-  if (!Number.isFinite(sec) || (sec as number) < 0) return '--';
-  const s = Math.floor(sec as number);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  if (h > 0) return `${h}h ${m}m ${r}s`;
-  if (m > 0) return `${m}m ${r}s`;
-  return `${r}s`;
+function StatBox({ label, value, accent }: { label: string; value: string | number; accent?: boolean }) {
+  return (
+    <Box
+      sx={{
+        p: 1.5,
+        borderRadius: '4px',
+        border: '1px solid var(--tianheng-ink)',
+        backgroundColor: accent ? 'var(--tianheng-green)' : 'rgba(255, 250, 240, 0.88)',
+        color: accent ? '#f5f0e6' : 'inherit',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 0.5,
+        minWidth: 80,
+      }}
+    >
+      <Typography
+        variant="caption"
+        sx={{ color: accent ? 'rgba(245,240,230,0.75)' : 'var(--tianheng-muted)', letterSpacing: '0.06em', textTransform: 'uppercase', fontSize: 10 }}
+      >
+        {label}
+      </Typography>
+      <Typography
+        variant="h6"
+        sx={{
+          fontFamily: '"Space Grotesk", sans-serif',
+          fontWeight: 900,
+          lineHeight: 1,
+          color: accent ? '#f5f0e6' : 'var(--tianheng-ink)',
+        }}
+      >
+        {value}
+      </Typography>
+    </Box>
+  );
 }
 
 export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error?: string }) {
@@ -27,63 +46,44 @@ export function SystemOverviewCard({ data, error }: { data?: SystemStatus; error
 
   const jobs = data?.jobs;
   const security = data?.security;
-  const latestCandidate = (security?.latest_crash_vuln_candidate || {}) as CrashVulnCandidate;
-  const latestStatus = String(latestCandidate.validation_status || '');
-  const latestTarget = String(latestCandidate.target_api || latestCandidate.target_name || '');
+  const running = jobs?.running ?? 0;
+  const success = jobs?.success ?? 0;
+  const errCount = jobs?.error ?? 0;
+  const total = jobs?.total ?? 0;
+  const crashCount = security?.crash_vuln_candidate_count ?? 0;
 
   return (
-    <Card
-      variant="outlined"
-      sx={{
-        background: 'var(--tianheng-surface)',
-        borderColor: 'rgba(15, 23, 42, 0.08)',
-      }}
-    >
+    <Card variant="outlined">
       <CardContent>
-        <Stack spacing={1}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="h6">TianHeng 任务总览</Typography>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Typography variant="h6">系统概览</Typography>
             <Chip
               size="small"
               color={data?.ok ? 'success' : 'warning'}
-              label={data?.ok ? '联机' : '离线'}
+              label={data?.ok ? '在线' : '离线'}
               variant="outlined"
             />
           </Stack>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-            <Typography variant="body2">总任务：{jobs?.total ?? 0}</Typography>
-            <Typography variant="body2">排队：{jobs?.queued ?? 0}</Typography>
-            <Typography variant="body2">运行中：{jobs?.running ?? 0}</Typography>
-            <Typography variant="body2">成功：{jobs?.success ?? 0}</Typography>
-            <Typography variant="body2">失败：{jobs?.error ?? 0}</Typography>
-          </Box>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-            <Chip
-              size="small"
-              variant="outlined"
-              color={security?.vuln_hunting_enabled ? 'warning' : 'default'}
-              label={`漏洞导向：${security?.vuln_hunting_enabled ? '开启' : '未开启'}`}
-            />
-            <Chip size="small" variant="outlined" label={`分析候选：${security?.analysis_vuln_candidate_count ?? 0}`} />
-            <Chip
-              size="small"
-              variant="outlined"
-              color={(security?.crash_vuln_candidate_count ?? 0) > 0 ? 'warning' : 'default'}
-              label={`Crash 候选：${security?.crash_vuln_candidate_count ?? 0}`}
-            />
-            {latestStatus ? (
-              <Chip size="small" color={latestStatus === 'real_bug' ? 'error' : 'warning'} label={`${latestStatus}${latestTarget ? ` | ${latestTarget}` : ''}`} />
-            ) : null}
-          </Box>
-          {latestStatus ? (
-            <Alert severity={latestStatus === 'real_bug' ? 'error' : 'warning'}>
-              最近的 crash 漏洞候选：{latestTarget || 'unknown'}
-            </Alert>
+          {security?.vuln_hunting_enabled ? (
+            <Chip size="small" color="warning" label="漏洞导向已开启" />
           ) : null}
-          <Typography variant="caption" color="text.secondary">
-            服务时间：{data?.server_time_iso || '--'} | Uptime：{fmtDuration(data?.uptime_sec)}
-          </Typography>
         </Stack>
+
+        <Box
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1,
+          }}
+        >
+          <StatBox label="总任务" value={total} />
+          <StatBox label="运行中" value={running} accent={running > 0} />
+          <StatBox label="已完成" value={success} />
+          <StatBox label="失败" value={errCount} />
+          <StatBox label="分析候选" value={security?.analysis_vuln_candidate_count ?? 0} />
+          <StatBox label="Crash 候选" value={crashCount} accent={crashCount > 0} />
+        </Box>
       </CardContent>
     </Card>
   );
