@@ -3228,38 +3228,6 @@ def _build_selected_targets_doc(
                 vuln_priority_by_api=_vuln_priority_by_api,
             )
         )
-    # Inject high-priority vuln candidates that are missing from targets.json.
-    # The plan stage's OpenCode may not include internal helper functions
-    # that vuln-hunt identified as attack surfaces.  Create target entries
-    # for them so they participate in ranking.
-    _seen_apis: set[str] = {str(r.get("api") or "").strip().lower() for r in ranked_items}
-    _seen_apis.update(str(r.get("target_name") or "").strip().lower() for r in ranked_items)
-    for _vc_api, _vc_prio in sorted(_vuln_priority_by_api.items(), key=lambda x: -x[1]):
-        if _vc_api.lower() not in _seen_apis and len(ranked_items) < _execution_targets_max() * 2:
-            _synthetic_item = {
-                "name": _vc_api,
-                "api": _vc_api,
-                "lang": "c",
-                "target_type": "generic",
-                "seed_profile": "generic",
-                "priority": _vc_prio,
-                "vuln_likelihood": _vc_prio,
-                "exploitability": 0.5,
-                "reachability_confidence": 0.5,
-                "_synthetic_from_vuln_candidate": True,
-            }
-            ranked_items.append(
-                _build_selected_target_row(
-                    repo_root=repo_root,
-                    item=_synthetic_item,
-                    security_lookup=security_lookup,
-                    security_priority_mode=security_priority_mode,
-                    degrade_reason=degrade_reason,
-                    score_weights=score_weights,
-                    vuln_priority_by_api=_vuln_priority_by_api,
-                )
-            )
-            _seen_apis.add(_vc_api.lower())
     # In risk-first mode, ranking is driven by security risk directly.
     # `score_total` is still emitted for observability/reference, not as the
     # primary ordering key.
