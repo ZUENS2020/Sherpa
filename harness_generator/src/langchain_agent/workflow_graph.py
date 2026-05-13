@@ -952,6 +952,84 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
     return "\n\n".join(texts).strip()
 
 
+def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) -> None:
+    """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
+
+    LibFuzzer requires coverage feedback instrumentation to guide its mutation
+    engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
+    occasionally omits these flags even when the SKILL.md contract requires them.
+    This function patches build.py in-place to add the missing flags to every
+    primary fuzz link line that carries ``-fsanitize=fuzzer`` but lacks
+    ``-fsanitize-coverage``, while leaving replay (``-fprofile-instr-generate``)
+    lines untouched.
+    """
+    COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    bp = Path(build_py_path)
+    if not bp.is_file():
+        return
+    try:
+        text = bp.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+    if COVERAGE_FLAGS in text:
+        return  # already present
+
+    lines = text.splitlines()
+    changed = False
+    for i, line in enumerate(lines):
+        # Only touch primary fuzz lines, not replay lines that use clang source-based cov
+        if "-fsanitize=fuzzer" not in line:
+            continue
+        if "-fsanitize-coverage" in line:
+            continue  # already has coverage (shouldn't happen due to early-return above)
+        if "-fprofile-instr-generate" in line or "-fcoverage-mapping" in line:
+            continue  # replay binary — uses different coverage mechanism
+
+        # Inject coverage flags into this argument list
+        # Handle both list-style (['-fsanitize=...']) and string-style flags
+        if "'-fsanitize=fuzzer" in line or '"-fsanitize=fuzzer' in line:
+            # List element: replace '-fsanitize=fuzzer,address,undefined' →
+            #              '-fsanitize=fuzzer,address,undefined -fsanitize-coverage=...'
+            import re
+            new_line = re.sub(
+                r"(['\"]-fsanitize=fuzzer[^'\"]*)",  # match the full sanitize flag element
+                rf"\1 {COVERAGE_FLAGS}'" if "'" in line.split("-fsanitize=fuzzer")[0][-3:] else rf'\1 {COVERAGE_FLAGS}"',
+                line,
+            )
+            # Simpler approach: append coverage flag after the sanitize=fuzzer argument
+            indent = line[:len(line) - len(line.lstrip())]
+            if line.rstrip().endswith(","):
+                # In a list context, insert a new list element
+                lines[i] = line
+                lines.insert(i + 1, f"{indent}'{COVERAGE_FLAGS}',")
+            else:
+                # Append to the existing string
+                lines[i] = line.rstrip().rstrip(",") + f" + ' {COVERAGE_FLAGS}'"
+            changed = True
+            break  # one fix per file is enough — all targets share the same link function
+
+    if not changed:
+        # Fallback: find the compiler command template and inject there
+        for i, line in enumerate(lines):
+            if "clang" in line.lower() and "-fsanitize=fuzzer" in line and "replay" not in line.lower() and "-fprofile" not in line:
+                if COVERAGE_FLAGS not in line:
+                    lines[i] = line.replace(
+                        "-fsanitize=fuzzer,address,undefined",
+                        f"-fsanitize=fuzzer,address,undefined {COVERAGE_FLAGS}",
+                    )
+                    changed = True
+                    break
+
+    if changed:
+        new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        try:
+            bp.write_text(new_text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into build.py")
+        except Exception:
+            pass
+
+
 def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
     done_path = _opencode_done_path(repo_root)
     if not done_path.exists():
@@ -9642,6 +9720,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             fallback_cwd = gen.repo_root
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
+            # Ensure coverage instrumentation flags are present in primary fuzz
+            # binaries. The synthesize agent may omit -fsanitize-coverage flags
+            # even when the SKILL.md contract requires them.
+            _inject_coverage_instrumentation(str(build_py), state)
         elif build_sh.is_file():
             shell = "bash"
             if not getattr(gen, "docker_image", None):
