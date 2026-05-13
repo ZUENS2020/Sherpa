@@ -2845,6 +2845,7 @@ def _build_selected_target_row(
     security_priority_mode: bool,
     degrade_reason: str,
     score_weights: dict[str, float],
+    vuln_priority_by_api: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     item = _wf_norm.normalize_target_row(item)
     explicit_security_breakdown = (
@@ -2966,6 +2967,14 @@ def _build_selected_target_row(
         )
         if not security_reason:
             security_reason = derived_reason
+    # Override vuln_likelihood with vuln_candidate priority when a
+    # matching candidate exists.  This bridges vuln-hunt findings
+    # into plan target selection so the highest-priority vuln candidate
+    # becomes the selected target.
+    _vuln_override = vuln_priority_by_api or {}
+    _vc_prio = float(_vuln_override.get(target_api, _vuln_override.get(target_name, 0.0)) or 0.0)
+    if _vc_prio > 0:
+        vuln_likelihood = max(vuln_likelihood, _vc_prio)
     if not security_reason:
         _, _, _, security_reason = _derive_security_priority(
             target_type=target_type,
@@ -3184,6 +3193,21 @@ def _build_selected_targets_doc(
     prefer_deeper: bool = False,
 ) -> list[dict[str, Any]]:
     security_lookup = _load_target_analysis_security_index(repo_root)
+    # Build vuln_candidate priority override: map API→priority from
+    # vuln_candidates.json so vuln-hunt findings directly influence
+    # target scoring, not just target_analysis static signals.
+    _vuln_priority_by_api: dict[str, float] = {}
+    if _vuln_hunting_enabled():
+        try:
+            _vc_doc = _load_vuln_candidates_doc(repo_root)
+            for _vc in _vc_doc.get("candidates") or []:
+                _vc_api = str(_vc.get("api") or _vc.get("target_api") or "").strip()
+                _vc_prio = float(_vc.get("priority") or 0.0)
+                if _vc_api and _vc_prio > 0:
+                    _existing = _vuln_priority_by_api.get(_vc_api, 0.0)
+                    _vuln_priority_by_api[_vc_api] = max(_existing, _vc_prio)
+        except Exception:
+            pass
     security_priority_mode = bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
     degrade_reason = ""
     if not _vuln_hunting_enabled():
@@ -3201,6 +3225,7 @@ def _build_selected_targets_doc(
                 security_priority_mode=security_priority_mode,
                 degrade_reason=degrade_reason,
                 score_weights=score_weights,
+                vuln_priority_by_api=_vuln_priority_by_api,
             )
         )
     # In risk-first mode, ranking is driven by security risk directly.
