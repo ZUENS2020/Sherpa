@@ -959,10 +959,9 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
     the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
     occasionally omits these flags even when the SKILL.md contract requires them.
-    This function patches build.py in-place to add the missing flags to every
-    primary fuzz link line that carries ``-fsanitize=fuzzer`` but lacks
-    ``-fsanitize-coverage``, while leaving replay (``-fprofile-instr-generate``)
-    lines untouched.
+    This function patches build.py in-place to add the missing flags inside
+    the list-element string that carries ``-fsanitize=fuzzer``, without changing
+    the list structure.
     """
     COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
     bp = Path(build_py_path)
@@ -978,46 +977,36 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     lines = text.splitlines()
     changed = False
     for i, line in enumerate(lines):
-        # Only touch primary fuzz lines, not replay lines that use clang source-based cov
         if "-fsanitize=fuzzer" not in line:
             continue
         if "-fsanitize-coverage" in line:
-            continue  # already has coverage (shouldn't happen due to early-return above)
+            continue
         if "-fprofile-instr-generate" in line or "-fcoverage-mapping" in line:
-            continue  # replay binary — uses different coverage mechanism
+            continue  # replay binary
 
-        # Inject coverage flags into this argument list
-        # Handle both list-style (['-fsanitize=...']) and string-style flags
-        if "'-fsanitize=fuzzer" in line or '"-fsanitize=fuzzer' in line:
-            # List element: replace '-fsanitize=fuzzer,address,undefined' →
-            #              '-fsanitize=fuzzer,address,undefined -fsanitize-coverage=...'
-            import re
-            new_line = re.sub(
-                r"(['\"]-fsanitize=fuzzer[^'\"]*)",  # match the full sanitize flag element
-                rf"\1 {COVERAGE_FLAGS}'" if "'" in line.split("-fsanitize=fuzzer")[0][-3:] else rf'\1 {COVERAGE_FLAGS}"',
-                line,
-            )
-            # Simpler approach: append coverage flag after the sanitize=fuzzer argument
-            indent = line[:len(line) - len(line.lstrip())]
-            if line.rstrip().endswith(","):
-                # In a list context, insert a new list element
-                lines[i] = line
-                lines.insert(i + 1, f"{indent}'{COVERAGE_FLAGS}',")
-            else:
-                # Append to the existing string
-                lines[i] = line.rstrip().rstrip(",") + f" + ' {COVERAGE_FLAGS}'"
+        # Inject coverage flag INSIDE the existing sanitize string element.
+        # The sanitize flag is typically a quoted string like
+        #   '-fsanitize=fuzzer,address,undefined'
+        # We append the coverage flag inside that same string.
+        new_line = re.sub(
+            r"(-fsanitize=fuzzer[^'\"]*)",
+            rf"\1 {COVERAGE_FLAGS}",
+            line,
+        )
+        if new_line != line:
+            lines[i] = new_line
             changed = True
-            break  # one fix per file is enough — all targets share the same link function
+            break
 
     if not changed:
-        # Fallback: find the compiler command template and inject there
+        # Fallback: simple string replacement in any line
         for i, line in enumerate(lines):
-            if "clang" in line.lower() and "-fsanitize=fuzzer" in line and "replay" not in line.lower() and "-fprofile" not in line:
-                if COVERAGE_FLAGS not in line:
-                    lines[i] = line.replace(
-                        "-fsanitize=fuzzer,address,undefined",
-                        f"-fsanitize=fuzzer,address,undefined {COVERAGE_FLAGS}",
-                    )
+            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower():
+                lines[i] = line.replace(
+                    "-fsanitize=fuzzer,address,undefined",
+                    f"-fsanitize=fuzzer,address,undefined {COVERAGE_FLAGS}",
+                )
+                if lines[i] != line:
                     changed = True
                     break
 
