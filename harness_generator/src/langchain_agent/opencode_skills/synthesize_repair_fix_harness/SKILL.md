@@ -37,7 +37,7 @@ Use this skill when `repair_origin_stage=fix-harness` after crash triage labeled
 - Forbidden: build/execute commands.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).
 
 ## Constraints
 - Must modify executable `fuzz/` code paths; doc-only/no-op patches are invalid.

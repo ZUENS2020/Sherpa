@@ -74,4 +74,4 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - `fuzz/execution_plan.json` is consistent with selected runtime targets.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).

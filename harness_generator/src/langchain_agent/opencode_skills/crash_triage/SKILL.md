@@ -51,4 +51,4 @@ Use this skill in the `crash-triage` stage after `run` or `re-run` crash evidenc
 
 ## Done contract
 - Create `./done`.
-- Write exactly `crash_triage.json` into `./done`.
+- Write the path string `crash_triage.json` as the sole text of `./done` (run `echo 'crash_triage.json' > ./done`; do **not** copy the file's contents).

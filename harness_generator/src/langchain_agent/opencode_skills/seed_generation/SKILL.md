@@ -114,4 +114,4 @@ Use this skill during pre-run seed generation and seed repair cycles.
 - Seed format matches the function's actual input requirements (not just the preliminary `seed_profile` from `target_analysis.json`).
 
 ## Done contract
-- Write one created/updated seed file path into `./done`.
+- Write one created/updated seed file path as the sole text of `./done` (a relative path string like `fuzz/foo.c`; do **not** copy file contents).

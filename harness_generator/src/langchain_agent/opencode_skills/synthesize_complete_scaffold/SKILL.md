@@ -57,4 +57,4 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - `fuzz/out/replay/<fuzzer>` exists for native fuzzers and is profile-instrumented for per-input replay.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

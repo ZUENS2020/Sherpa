@@ -8978,7 +8978,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             5. Keep non-root compatibility (no install-to-system-dir flow).
 
             Do not run commands. Only edit `fuzz/build.py` and `fuzz/build_strategy.json` if needed.
-            Write `fuzz/build.py` into `./done`.
+            Write the path string `fuzz/build.py` as the sole text of `./done` (run `echo 'fuzz/build.py' > ./done`; do **not** copy the file's contents).
             """
         ).strip()
         context = (
@@ -9045,7 +9045,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
               Selected target, Final target, Technical reason, Relation, Harness file.
             - If strategy is missing, create a valid `fuzz/build_strategy.json` matching the current harness/build path.
             - Do NOT run commands.
-            - Write `fuzz/out/` into `./done` before exit.
+            - Write the path string `fuzz/out/` as the sole text of `./done` before exit (run `echo 'fuzz/out/' > ./done`; do **not** copy file contents).
             """
         ).strip()
         gen.patcher.run_codex_command(
@@ -9106,7 +9106,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             - The README must describe the actual observed target, not the original one.
             - Keep the README concise.
             - Do not edit any source/build files.
-            - Write `fuzz/README.md` into `./done` before finishing.
+            - Write the path string `fuzz/README.md` as the sole text of `./done` before finishing (run `echo 'fuzz/README.md' > ./done`; do **not** copy the file's contents).
             """
         ).strip()
         gen.patcher.run_codex_command(

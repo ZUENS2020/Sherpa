@@ -1752,7 +1752,17 @@ class CodexHelper:
                                 # OpenCode (Node.js) uses async I/O; the done file can be
                                 # flushed before the actual output files.  Give the event
                                 # loop time to complete pending writes.
-                                if _done_content:
+                                # Guard: only treat done content as a path if it looks like one
+                                # (no newlines, short enough for the filesystem).  Agents
+                                # occasionally write the file's *content* rather than just its
+                                # path (e.g. `cat fuzz/PLAN.md > ./done`), which would cause
+                                # ENAMETOOLONG when passed to the OS.
+                                _done_is_valid_path = (
+                                    bool(_done_content)
+                                    and "\n" not in _done_content
+                                    and len(_done_content) < 512
+                                )
+                                if _done_is_valid_path:
                                     _ref_path = (self.working_dir / _done_content).resolve()
                                     if not _ref_path.exists() or (_ref_path.is_file() and _ref_path.stat().st_size == 0):
                                         _flush_deadline = time.time() + 3.0

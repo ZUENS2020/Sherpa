@@ -47,4 +47,4 @@ Use this skill only in `fix-harness` when crash triage/analysis indicates `harne
 - No semantic bypass and no doc-only/no-op patch.
 
 ## Done contract
-- Write one key modified path into `./done`.
+- Write one key modified path as the sole text of `./done` (a relative path string like `fuzz/foo.c`; do **not** copy file contents).

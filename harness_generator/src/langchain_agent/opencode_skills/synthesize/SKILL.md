@@ -148,4 +148,4 @@ Compiler-by-suffix rule:
 - `fuzz/out/replay/<name>` exists for each built native fuzzer and can emit `LLVM_PROFILE_FILE=...profraw` during single-input replay.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

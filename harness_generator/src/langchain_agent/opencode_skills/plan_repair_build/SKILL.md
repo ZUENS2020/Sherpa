@@ -63,4 +63,4 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - `Known Issues` exists and names concrete unresolved blockers for this build-repair cycle.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).

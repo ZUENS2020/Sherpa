@@ -82,4 +82,4 @@ Use this skill in repair mode when the previous build failed.
 - Coverage replay siblings are profile-instrumented and located under `fuzz/out/replay/`.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

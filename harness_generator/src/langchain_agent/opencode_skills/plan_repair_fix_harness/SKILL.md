@@ -38,7 +38,7 @@ Use this skill when `repair_origin_stage=fix-harness` and crash triage classifie
 - Forbidden: build/execute commands.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).
 
 ## Constraints
 - `fuzz/PLAN.md` must include `Known Issues` with concrete blockers and next action.

@@ -80,4 +80,4 @@ The seed generation stage has access to actual function code and will make final
 The PromeFuzz companion's `status.json` may show `state: waiting_repo_root` during initialization. **This is NOT an error or degraded condition** — it means the companion is running normally and waiting for analysis to begin. Do NOT report this as a degraded reason. Only report degraded reason when MCP tools actually fail or return errors.
 
 ## Done contract
-- Write `fuzz/analysis_context.json` into `./done`.
+- Write the path string `fuzz/analysis_context.json` as the sole text of `./done` (run `echo 'fuzz/analysis_context.json' > ./done`; do **not** copy the file's contents).

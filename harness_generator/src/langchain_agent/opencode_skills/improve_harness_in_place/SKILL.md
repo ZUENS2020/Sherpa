@@ -52,4 +52,4 @@ Use this skill after `coverage-analysis` selects `in_place` improvement mode.
 - `fuzz/execution_plan.json` and `fuzz/harness_index.json` remain consistent.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

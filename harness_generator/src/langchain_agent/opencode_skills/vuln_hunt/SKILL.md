@@ -55,4 +55,4 @@ Use this skill in the internal hunt subphase before `plan` materializes `selecte
 - `validation_status` is updated for candidates that appeared in recent fuzz/coverage feedback.
 
 ## Done contract
-- Write `fuzz/vuln_hunt_summary.md` into `./done`.
+- Write the path string `fuzz/vuln_hunt_summary.md` as the sole text of `./done` (run `echo 'fuzz/vuln_hunt_summary.md' > ./done`; do **not** copy the file's contents).

@@ -56,4 +56,4 @@ Use this skill when `coverage-analysis` selects replan mode.
 - `Known Issues` exists and lists concrete unresolved plateau/quality blockers.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).

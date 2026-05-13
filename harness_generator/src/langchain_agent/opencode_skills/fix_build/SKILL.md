@@ -80,4 +80,4 @@ def find_static_lib(repo_root):
 - Build/scaffold behavior remains aligned with execution-plan expectations.
 
 ## Done contract
-- Write one key modified path under `fuzz/` into `./done`.
+- Write one key modified path under `fuzz/` as the sole text of `./done` (a relative path string like `fuzz/foo.c`; do **not** copy file contents).
