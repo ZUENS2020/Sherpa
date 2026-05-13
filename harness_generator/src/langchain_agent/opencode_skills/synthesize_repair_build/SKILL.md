@@ -58,7 +58,7 @@ Use this skill in repair mode when the previous build failed.
   - do not define custom `main()` in harness source;
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint) as the only fuzz entry.
   - C/C++ harnesses that use `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents) in the harness source.
-- LibFuzzer link contract is mandatory: every runnable executable under `fuzz/out/`, including `fuzz/out/replay/<name>`, must link a runnable entrypoint. Prefer `-fsanitize=fuzzer,address,undefined` for both primary and replay executables; `-fsanitize=fuzzer-no-link` alone causes `undefined reference to main` unless a separate replay `main()` wrapper is compiled and linked to call `LLVMFuzzerTestOneInput`.
+- LibFuzzer link contract is mandatory: every runnable executable under `fuzz/out/`, including `fuzz/out/replay/<name>`, must link a runnable entrypoint. For primary fuzzers prefer `-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters`; for replay executables prefer `-fsanitize=fuzzer,address,undefined -fprofile-instr-generate -fcoverage-mapping`; `-fsanitize=fuzzer-no-link` alone causes `undefined reference to main` unless a separate replay `main()` wrapper is compiled and linked to call `LLVMFuzzerTestOneInput`.
 - Forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops).
 - If MCP is unavailable, continue in degraded mode and record this in `fuzz/repo_understanding.json`.
 - Always keep output-path consistency explicit: build glue must place runnable fuzzers under `fuzz/out/` and avoid root-level `fuzz/` binary outputs.
