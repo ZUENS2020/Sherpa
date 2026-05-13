@@ -959,9 +959,9 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
     the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
     occasionally omits these flags even when the SKILL.md contract requires them.
-    This function patches build.py in-place to add the missing flags inside
-    the list-element string that carries ``-fsanitize=fuzzer``, without changing
-    the list structure.
+    This function patches build.py in-place to insert a separate list element
+    ``'-fsanitize-coverage=...'`` after the ``-fsanitize=fuzzer`` element in
+    Python list-style flag definitions.
     """
     COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
     bp = Path(build_py_path)
@@ -977,34 +977,54 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     lines = text.splitlines()
     changed = False
     for i, line in enumerate(lines):
+        # Must be a primary fuzz line (not replay with -fprofile-instr-generate)
         if "-fsanitize=fuzzer" not in line:
             continue
         if "-fsanitize-coverage" in line:
             continue
         if "-fprofile-instr-generate" in line or "-fcoverage-mapping" in line:
-            continue  # replay binary
+            continue
 
-        # Inject coverage flag INSIDE the existing sanitize string element.
-        # The sanitize flag is typically a quoted string like
-        #   '-fsanitize=fuzzer,address,undefined'
-        # We append the coverage flag inside that same string.
-        new_line = re.sub(
-            r"(-fsanitize=fuzzer[^'\"]*)",
-            rf"\1 {COVERAGE_FLAGS}",
+        # Insert a new list element for the coverage flag right after
+        # the sanitize=fuzzer element.  The sanitize flag is typically quoted:
+        #   '-fsanitize=fuzzer,address,undefined',
+        #   '-fsanitize=fuzzer,address,undefined']
+        indent = line[:len(line) - len(line.lstrip())]
+
+        # Match the sanitize=fuzzer element line (a single-flag list entry)
+        m = re.match(
+            r"^(\s*)(['\"])-fsanitize=fuzzer[^,]*,[^'\"]*\2,?\s*$",
             line,
         )
-        if new_line != line:
-            lines[i] = new_line
+        if m:
+            # This line contains ONLY the sanitize flag. Insert coverage flag after it.
+            flag_quote = m.group(2)
+            new_flag_line = f"{indent}{flag_quote}{COVERAGE_FLAGS}{flag_quote},"
+            lines.insert(i + 1, new_flag_line)
             changed = True
             break
 
+        # Broader match: any line with -fsanitize=fuzzer that's not replay
+        if re.search(r"['\"]-fsanitize=fuzzer[^'\"]*['\"]", line):
+            # Split the line at the sanitize flag element and insert coverage after
+            pattern = r"(['\"]-fsanitize=fuzzer[^'\"]*['\"]\s*,?\s*)"
+            m2 = re.search(pattern, line)
+            if m2:
+                flag_quote = m2.group(1)[0]  # ' or "
+                new_element = f"{flag_quote}{COVERAGE_FLAGS}{flag_quote}, "
+                new_line = line[:m2.end()] + new_element + line[m2.end():]
+                lines[i] = new_line
+                changed = True
+                break
+
     if not changed:
-        # Fallback: simple string replacement in any line
+        # Fallback: simple string replacement in any non-replay line
         for i, line in enumerate(lines):
-            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower():
+            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower() and "-fprofile" not in line:
+                # Replace the sanitize string but keep -fsanitize-coverage as separate arg
                 lines[i] = line.replace(
                     "-fsanitize=fuzzer,address,undefined",
-                    f"-fsanitize=fuzzer,address,undefined {COVERAGE_FLAGS}",
+                    "-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
                 )
                 if lines[i] != line:
                     changed = True
