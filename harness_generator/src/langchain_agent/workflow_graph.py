@@ -2697,6 +2697,22 @@ def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             issue = f"vuln_hunt_candidate_materialize_error:{exc}"
         if has_hunt_input and _has_codex_key() and getattr(gen, "patcher", None) is not None:
             try:
+                # Snapshot vuln_candidates.json before the agent runs so we can
+                # roll back if it is killed mid-write and leaves a corrupt file.
+                # The done-file flush grace period only waits for the file named
+                # in ./done (vuln_hunt_summary.md), not vuln_candidates.json.
+                _vc_path = _vuln_candidates_path(repo_root)
+                _vc_snap_raw: bytes | None = None
+                _vc_snap_count = 0
+                try:
+                    if _vc_path.is_file():
+                        _vc_snap_raw = _vc_path.read_bytes()
+                        _vc_snap_count = len(
+                            (_load_vuln_candidates_doc(repo_root).get("candidates") or [])
+                        )
+                except Exception:
+                    _vc_snap_raw = None
+
                 _clear_opencode_done_sentinel(repo_root)
                 hunt_hint_lines = [
                     f"- analysis_context_path: {analysis_context_path}",
@@ -2738,6 +2754,33 @@ def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     max_attempts=1,
                     max_cli_retries=_opencode_cli_retries(),
                 )
+
+                # Validate vuln_candidates.json; restore snapshot if agent
+                # left a corrupt file (truncated write due to process kill).
+                if _vc_snap_raw is not None:
+                    _post_ok = False
+                    _post_count = 0
+                    try:
+                        _raw = json.loads(_vc_path.read_text(encoding="utf-8", errors="replace"))
+                        _post_ok = isinstance(_raw, dict)
+                        _post_count = len(_raw.get("candidates") or []) if _post_ok else 0
+                    except Exception:
+                        pass
+                    if not _post_ok:
+                        try:
+                            _vc_path.write_bytes(_vc_snap_raw)
+                            issue = "; ".join(
+                                x for x in [
+                                    issue,
+                                    f"vuln_candidates_corrupt_restored(pre={_vc_snap_count},post={_post_count})",
+                                ]
+                                if str(x).strip()
+                            )
+                        except Exception as _restore_exc:
+                            issue = "; ".join(
+                                x for x in [issue, f"vuln_candidates_restore_failed:{_restore_exc}"]
+                                if str(x).strip()
+                            )
             except Exception as exc:
                 issue = "; ".join(
                     x for x in [issue, f"vuln_hunt_opencode_error:{exc}"] if str(x).strip()
