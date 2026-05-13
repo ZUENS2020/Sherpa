@@ -5420,7 +5420,7 @@ def _run_idle_timeout_sec() -> int:
 
 
 def _synthesize_opencode_idle_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "300").strip()
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "600").strip()
     try:
         return max(0, min(int(raw), 86_400))
     except Exception:
@@ -8051,6 +8051,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=600,
             )
         else:
             gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
@@ -8083,6 +8084,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=600,
             )
             ok_targets, targets_err = _validate_targets_json(gen.repo_root)
             plan_targets_schema_valid_after_retry = bool(ok_targets)

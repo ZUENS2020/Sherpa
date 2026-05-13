@@ -29,8 +29,8 @@ export function AppShell({ eyebrow, title, description, rail, dense = false, chi
             <Stack direction="row" spacing={1.25} alignItems="center">
               <Box className="suzuka-mark">TH</Box>
               <Stack spacing={0}>
+                <Typography variant="h6" sx={{ fontFamily: '"Space Grotesk", sans-serif', fontWeight: 700, lineHeight: 1.2, letterSpacing: '-0.02em' }}>TianHeng System</Typography>
                 <Typography className="suzuka-kicker">XDU TianHeng Lab</Typography>
-                <Typography variant="caption" color="text.secondary">Industrial vulnerability hunting console</Typography>
               </Stack>
             </Stack>
             <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
@@ -63,9 +63,6 @@ export function AppShell({ eyebrow, title, description, rail, dense = false, chi
             <Stack spacing={0.75}>
               <Typography className="suzuka-kicker">{eyebrow}</Typography>
               <Typography variant="h4">{title}</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 780 }}>
-                {description}
-              </Typography>
             </Stack>
             {rail ? (
               <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
