@@ -9809,6 +9809,10 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             build_cmd_timeout = _remaining_time_budget_sec(state, min_timeout=0)
             if build_cmd_timeout <= 0:
                 return _time_budget_exceeded_state(state, step_name="build")
+            # Re-inject coverage flags every retry because the fix_build agent
+            # may regenerate build.py without them.
+            if build_py.is_file():
+                _inject_coverage_instrumentation(str(build_py), state)
             _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
             rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=build_cmd_timeout)
             _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
