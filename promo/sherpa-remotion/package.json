@@ -1,0 +1,24 @@
+{
+  "name": "sherpa-promo-video",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "still": "remotion still SherpaPromo --frame=90 --scale=0.35 out/frame-90.png",
+    "render": "remotion render SherpaPromo out/sherpa-promo.mp4 --codec=h264 --audio-codec=aac",
+    "render:zh": "remotion render SherpaPromoZh out/sherpa-promo-zh.mp4 --codec=h264 --audio-codec=aac"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.368",
+    "@remotion/lambda": "^4.0.368",
+    "@remotion/media-utils": "^4.0.368",
+    "remotion": "^4.0.368",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "typescript": "^5.9.2"
+  }
+}
