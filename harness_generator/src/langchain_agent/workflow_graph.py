@@ -8487,6 +8487,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 json.dumps(_must_run, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+    # Ensure selected_targets.json exists even if plan failed to write it.
+    # Rebuild from targets.json if the file is missing.
+    if not selected_target_doc:
+        _targets_doc = _load_targets_doc(gen.repo_root)
+        if _targets_doc:
+            selected_target_doc = _targets_doc
+            _write_selected_targets_doc(gen.repo_root)
+            _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
     selected_target_name = ""
     if selected_target_doc:
         selected_primary = selected_target_doc[0]
