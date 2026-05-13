@@ -1,0 +1,184 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - paragraph [ref=e7]: XDU TianHeng Lab / Risk-first fuzz orchestration
+        - heading "TianHeng 控制台" [level=4] [ref=e8]
+        - paragraph [ref=e9]: 以漏洞候选为主线，连续观察 hunt、plan、synthesize、run 与 replay 信号；Fuzz 验证只作为证据闭环。
+      - generic [ref=e10]:
+        - paragraph [ref=e11]: LIVE TASK CONTROL
+        - paragraph [ref=e12]: SUZUKA UI
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - heading "TianHeng 任务总览" [level=6] [ref=e17]
+        - generic [ref=e19]: 离线
+      - generic [ref=e20]:
+        - paragraph [ref=e21]: 总任务：0
+        - paragraph [ref=e22]: 排队：0
+        - paragraph [ref=e23]: 运行中：0
+        - paragraph [ref=e24]: 成功：0
+        - paragraph [ref=e25]: 失败：0
+      - generic [ref=e26]:
+        - generic [ref=e28]: 漏洞导向：未开启
+        - generic [ref=e30]: 分析候选：0
+        - generic [ref=e32]: Crash 候选：0
+      - generic [ref=e33]: 服务时间：-- | Uptime：--
+    - generic [ref=e34]:
+      - generic [ref=e36]:
+        - generic [ref=e39]:
+          - heading "会话与配置" [level=6] [ref=e40]
+          - progressbar [ref=e42]:
+            - img [ref=e43]
+          - generic [ref=e45]:
+            - generic: 仓库 URL
+            - generic [ref=e46]:
+              - textbox "仓库 URL" [ref=e47]:
+                - /placeholder: https://github.com/madler/zlib.git
+              - group:
+                - generic: 仓库 URL
+          - generic [ref=e48]:
+            - generic [ref=e49]:
+              - generic [ref=e50]:
+                - generic [ref=e51]: 总时长(秒)
+                - generic [ref=e52]:
+                  - spinbutton "总时长(秒)" [ref=e53]: "900"
+                  - group:
+                    - generic: 总时长(秒)
+              - generic [ref=e54] [cursor=pointer]:
+                - switch "不限时" [ref=e57]
+                - generic [ref=e60]: 不限时
+            - generic [ref=e61]:
+              - generic [ref=e62]:
+                - generic [ref=e63]: 单次时长(秒)
+                - generic [ref=e64]:
+                  - spinbutton "单次时长(秒)" [ref=e65]: "900"
+                  - group:
+                    - generic: 单次时长(秒)
+              - generic [ref=e66] [cursor=pointer]:
+                - switch "不限时" [ref=e69]
+                - generic [ref=e72]: 不限时
+          - generic [ref=e73]:
+            - generic [ref=e74]: Max Tokens
+            - generic [ref=e75]:
+              - spinbutton "Max Tokens" [ref=e76]: "0"
+              - group:
+                - generic: Max Tokens
+          - generic [ref=e77]:
+            - generic [ref=e78]: 不限时时单轮上限(秒)
+            - generic [ref=e79]:
+              - spinbutton "不限时时单轮上限(秒)" [ref=e80]: "7200"
+              - group:
+                - generic: 不限时时单轮上限(秒)
+            - paragraph [ref=e81]: 0 表示完全不限时；建议默认 7200（2小时）
+          - generic [ref=e82]:
+            - generic [ref=e83]: Plateau Idle Window (sec)
+            - generic [ref=e84]:
+              - spinbutton "Plateau Idle Window (sec)" [ref=e85]: "600"
+              - group:
+                - generic: Plateau Idle Window (sec)
+            - paragraph [ref=e86]: 平台期判定间隔，范围 30-86400 秒（默认 600）
+          - generic [ref=e87]:
+            - button "保存配置" [disabled]
+            - button "提交任务" [ref=e88] [cursor=pointer]
+        - generic [ref=e91]:
+          - heading "会话绑定" [level=6] [ref=e92]
+          - generic [ref=e95]: 任务 0
+          - generic [ref=e96]:
+            - generic: 选择任务
+            - generic [ref=e97]:
+              - combobox "选择任务" [ref=e98] [cursor=pointer]
+              - textbox
+              - img
+              - group:
+                - generic: 选择任务
+      - generic [ref=e101]:
+        - generic [ref=e105]:
+          - generic [ref=e106]:
+            - generic [ref=e107]:
+              - heading "任务进度" [level=6] [ref=e108]
+              - paragraph [ref=e109]: 跟踪当前主任务的阶段、修复节奏和漏洞候选状态。
+            - generic [ref=e110]:
+              - generic [ref=e112]: unknown
+              - button "停止任务" [disabled]
+          - paragraph [ref=e113]: 子任务：0/0（running=0, success=0, error=0）
+          - progressbar [ref=e114]
+          - generic [ref=e116]:
+            - generic [ref=e117]:
+              - text: 阶段
+              - paragraph [ref=e118]: n/a
+            - generic [ref=e119]:
+              - text: Coverage
+              - paragraph [ref=e120]: n/a
+            - generic [ref=e121]:
+              - text: 目标 API
+              - paragraph [ref=e122]: n/a
+            - generic [ref=e123]:
+              - text: Fix Rounds
+              - paragraph [ref=e124]: 0/0
+            - generic [ref=e125]:
+              - text: Replay
+              - paragraph [ref=e126]: 0 bins · 0/0
+            - generic [ref=e127]:
+              - text: Replay Queue
+              - paragraph [ref=e128]: 0/0
+            - generic [ref=e129]:
+              - text: Frontier
+              - paragraph [ref=e130]: 0 inputs · 0 fns
+            - generic [ref=e131]:
+              - text: Run Feedback
+              - paragraph [ref=e132]: 0 gaps · 0 paths
+          - generic [ref=e133]:
+            - generic [ref=e135]: 漏洞导向：未开启
+            - generic [ref=e137]: 分析候选：0
+            - generic [ref=e139]: Crash 候选：0
+            - generic [ref=e141]: Replay：0
+            - generic [ref=e143]: Frontier：0/0
+            - generic [ref=e145]: Run Feedback：0/0
+          - heading "当前活跃子任务" [level=6] [ref=e146]
+          - paragraph [ref=e147]: 暂无子任务
+        - generic [ref=e151]:
+          - generic [ref=e152]:
+            - generic [ref=e153]:
+              - heading "运行观察台" [level=6] [ref=e154]
+              - paragraph [ref=e155]: 聚焦当前子任务的实时日志、失败信号和漏洞候选。
+            - generic [ref=e156]:
+              - generic [ref=e158]: Lines 0
+              - generic [ref=e160]: Warn 0
+              - generic [ref=e162]: Error 0
+              - generic [ref=e164]: no-child
+          - generic [ref=e165]:
+            - generic [ref=e166]:
+              - generic [ref=e167]:
+                - generic: 子任务
+                - generic [ref=e168]:
+                  - combobox "子任务" [ref=e169] [cursor=pointer]
+                  - textbox
+                  - img
+                  - group:
+                    - generic: 子任务
+              - separator [ref=e170]
+              - alert [ref=e171]:
+                - img [ref=e173]
+                - generic [ref=e175]: 暂无子任务可观察
+            - generic [ref=e176]:
+              - generic [ref=e177]:
+                - tablist [ref=e180]:
+                  - tab "实时日志" [selected] [ref=e181] [cursor=pointer]
+                  - tab "运行信号" [ref=e182] [cursor=pointer]
+                - generic [ref=e184]:
+                  - generic [ref=e185]:
+                    - generic [ref=e186]: 级别
+                    - generic [ref=e187]:
+                      - combobox "级别 全部" [ref=e188] [cursor=pointer]: 全部
+                      - textbox: all
+                      - img
+                      - group:
+                        - generic: 级别
+                  - generic [ref=e189]:
+                    - generic: 关键词
+                    - generic [ref=e190]:
+                      - textbox "关键词" [ref=e191]
+                      - group:
+                        - generic: 关键词
+              - paragraph [ref=e194]: 暂无日志输出
+  - alert [ref=e195]

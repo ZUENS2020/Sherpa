@@ -2972,7 +2972,7 @@ def _build_selected_target_row(
     # into plan target selection so the highest-priority vuln candidate
     # becomes the selected target.
     _vuln_override = vuln_priority_by_api or {}
-    _vc_prio = float(_vuln_override.get(target_api, _vuln_override.get(target_name, 0.0)) or 0.0)
+    _vc_prio = float(_vuln_override.get(api, _vuln_override.get(target_name, 0.0)) or 0.0)
     if _vc_prio > 0:
         vuln_likelihood = max(vuln_likelihood, _vc_prio)
     if not security_reason:

@@ -1,0 +1,140 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: TH
+        - generic [ref=e8]:
+          - paragraph [ref=e9]: XDU TianHeng Lab
+          - generic [ref=e10]: Industrial vulnerability hunting console
+      - generic [ref=e11]:
+        - link "MONITOR / 监控台" [ref=e12] [cursor=pointer]:
+          - /url: /
+        - link "RUN / 跑任务" [ref=e13] [cursor=pointer]:
+          - /url: /run
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - paragraph [ref=e17]: Monitor / Live operations
+        - heading "TianHeng 监控台" [level=4] [ref=e18]
+        - paragraph [ref=e19]: 面向值班和运行观察：只展示任务状态、阶段信号、漏洞候选、replay/frontier 反馈和日志。发起新任务已拆到独立页面，避免监控时误提交。
+      - generic [ref=e20]:
+        - paragraph [ref=e21]: NO TASK MUTATION
+        - paragraph [ref=e22]: LIVE SIGNALS
+    - generic [ref=e23]:
+      - generic [ref=e26]:
+        - generic [ref=e27]:
+          - heading "TianHeng 任务总览" [level=6] [ref=e28]
+          - generic [ref=e30]: 离线
+        - generic [ref=e31]:
+          - paragraph [ref=e32]: 总任务：0
+          - paragraph [ref=e33]: 排队：0
+          - paragraph [ref=e34]: 运行中：0
+          - paragraph [ref=e35]: 成功：0
+          - paragraph [ref=e36]: 失败：0
+        - generic [ref=e37]:
+          - generic [ref=e39]: 漏洞导向：未开启
+          - generic [ref=e41]: 分析候选：0
+          - generic [ref=e43]: Crash 候选：0
+        - generic [ref=e44]: 服务时间：-- | Uptime：--
+      - generic [ref=e45]:
+        - generic [ref=e49]:
+          - heading "会话绑定" [level=6] [ref=e50]
+          - generic [ref=e53]: 任务 0
+          - generic [ref=e54]:
+            - generic: 选择任务
+            - generic [ref=e55]:
+              - combobox "选择任务" [ref=e56] [cursor=pointer]
+              - textbox
+              - img
+              - group:
+                - generic: 选择任务
+        - generic [ref=e59]:
+          - generic [ref=e63]:
+            - generic [ref=e64]:
+              - generic [ref=e65]:
+                - heading "任务进度" [level=6] [ref=e66]
+                - paragraph [ref=e67]: 跟踪当前主任务的阶段、修复节奏和漏洞候选状态。
+              - generic [ref=e68]:
+                - generic [ref=e70]: unknown
+                - button "停止任务" [disabled]
+            - paragraph [ref=e71]: 子任务：0/0（running=0, success=0, error=0）
+            - progressbar [ref=e72]
+            - generic [ref=e74]:
+              - generic [ref=e75]:
+                - text: 阶段
+                - paragraph [ref=e76]: n/a
+              - generic [ref=e77]:
+                - text: Coverage
+                - paragraph [ref=e78]: n/a
+              - generic [ref=e79]:
+                - text: 目标 API
+                - paragraph [ref=e80]: n/a
+              - generic [ref=e81]:
+                - text: Fix Rounds
+                - paragraph [ref=e82]: 0/0
+              - generic [ref=e83]:
+                - text: Replay
+                - paragraph [ref=e84]: 0 bins · 0/0
+              - generic [ref=e85]:
+                - text: Replay Queue
+                - paragraph [ref=e86]: 0/0
+              - generic [ref=e87]:
+                - text: Frontier
+                - paragraph [ref=e88]: 0 inputs · 0 fns
+              - generic [ref=e89]:
+                - text: Run Feedback
+                - paragraph [ref=e90]: 0 gaps · 0 paths
+            - generic [ref=e91]:
+              - generic [ref=e93]: 漏洞导向：未开启
+              - generic [ref=e95]: 分析候选：0
+              - generic [ref=e97]: Crash 候选：0
+              - generic [ref=e99]: Replay：0
+              - generic [ref=e101]: Frontier：0/0
+              - generic [ref=e103]: Run Feedback：0/0
+            - heading "当前活跃子任务" [level=6] [ref=e104]
+            - paragraph [ref=e105]: 暂无子任务
+          - generic [ref=e109]:
+            - generic [ref=e110]:
+              - generic [ref=e111]:
+                - heading "运行观察台" [level=6] [ref=e112]
+                - paragraph [ref=e113]: 聚焦当前子任务的实时日志、失败信号和漏洞候选。
+              - generic [ref=e114]:
+                - generic [ref=e116]: Lines 0
+                - generic [ref=e118]: Warn 0
+                - generic [ref=e120]: Error 0
+                - generic [ref=e122]: no-child
+            - generic [ref=e123]:
+              - generic [ref=e124]:
+                - generic [ref=e125]:
+                  - generic: 子任务
+                  - generic [ref=e126]:
+                    - combobox "子任务" [ref=e127] [cursor=pointer]
+                    - textbox
+                    - img
+                    - group:
+                      - generic: 子任务
+                - separator [ref=e128]
+                - alert [ref=e129]:
+                  - img [ref=e131]
+                  - generic [ref=e133]: 暂无子任务可观察
+              - generic [ref=e134]:
+                - generic [ref=e135]:
+                  - tablist [ref=e138]:
+                    - tab "实时日志" [selected] [ref=e139] [cursor=pointer]
+                    - tab "运行信号" [ref=e140] [cursor=pointer]
+                  - generic [ref=e142]:
+                    - generic [ref=e143]:
+                      - generic [ref=e144]: 级别
+                      - generic [ref=e145]:
+                        - combobox "级别 全部" [ref=e146] [cursor=pointer]: 全部
+                        - textbox: all
+                        - img
+                        - group:
+                          - generic: 级别
+                    - generic [ref=e147]:
+                      - generic: 关键词
+                      - generic [ref=e148]:
+                        - textbox "关键词" [ref=e149]
+                        - group:
+                          - generic: 关键词
+                - paragraph [ref=e152]: 暂无日志输出
+  - alert [ref=e153]
