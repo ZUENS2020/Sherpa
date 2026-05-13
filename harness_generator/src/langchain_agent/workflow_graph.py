@@ -959,9 +959,9 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
     the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
     occasionally omits these flags even when the SKILL.md contract requires them.
-    This function patches build.py in-place to add the missing flags inside
-    the list-element string that carries ``-fsanitize=fuzzer``, without changing
-    the list structure.
+    This function inserts a separate ``'-fsanitize-coverage=...'`` list element
+    after the ``-fsanitize=fuzzer`` element so that clang receives them as
+    distinct arguments.
     """
     COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
     bp = Path(build_py_path)
@@ -972,7 +972,7 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     except Exception:
         return
     if COVERAGE_FLAGS in text:
-        return  # already present
+        return
 
     lines = text.splitlines()
     changed = False
@@ -982,29 +982,33 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
         if "-fsanitize-coverage" in line:
             continue
         if "-fprofile-instr-generate" in line or "-fcoverage-mapping" in line:
-            continue  # replay binary
+            continue
 
-        # Inject coverage flag INSIDE the existing sanitize string element.
-        # The sanitize flag is typically a quoted string like
-        #   '-fsanitize=fuzzer,address,undefined'
-        # We append the coverage flag inside that same string.
-        new_line = re.sub(
-            r"(-fsanitize=fuzzer[^'\"]*)",
-            rf"\1 {COVERAGE_FLAGS}",
-            line,
-        )
-        if new_line != line:
-            lines[i] = new_line
+        indent = line[:len(line) - len(line.lstrip())]
+
+        # Case 1: standalone flag line: "    '-fsanitize=fuzzer,address,undefined',"
+        m = re.match(r"^(\s*)(['\"])(-fsanitize=fuzzer[^'\"]*)\2\s*,?\s*$", line)
+        if m:
+            q = m.group(2)
+            lines.insert(i + 1, f"{indent}{q}{COVERAGE_FLAGS}{q},")
+            changed = True
+            break
+
+        # Case 2: flag inside a longer line — insert after the sanitize element
+        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"]\s*,?\s*)", line)
+        if m2:
+            q = m2.group(1)[0]
+            ins = f"{q}{COVERAGE_FLAGS}{q}, "
+            lines[i] = line[:m2.end()] + ins + line[m2.end():]
             changed = True
             break
 
     if not changed:
-        # Fallback: simple string replacement in any line
         for i, line in enumerate(lines):
-            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower():
+            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower() and "-fprofile" not in line:
                 lines[i] = line.replace(
                     "-fsanitize=fuzzer,address,undefined",
-                    f"-fsanitize=fuzzer,address,undefined {COVERAGE_FLAGS}",
+                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
                 )
                 if lines[i] != line:
                     changed = True
