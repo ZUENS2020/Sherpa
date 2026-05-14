@@ -4281,6 +4281,9 @@ def _derive_task_status(job: dict) -> dict:
         c["phase"] = _phase_for_job(c)
         c["runtime_mode"] = _runtime_mode_for_job(c)
         _enrich_job_view(c)
+    # Aggregate coverage from children to parent view
+    view["fuzz_max_cov"] = max(int(c.get("fuzz_max_cov") or 0) for c in child_jobs) if child_jobs else 0
+    view["fuzz_max_ft"] = max(int(c.get("fuzz_max_ft") or 0) for c in child_jobs) if child_jobs else 0
     view["children"] = child_jobs
     err = _error_object_for_job(view)
     view["error"] = err
