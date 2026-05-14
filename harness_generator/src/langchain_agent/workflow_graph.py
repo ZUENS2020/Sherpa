@@ -952,6 +952,73 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
     return "\n\n".join(texts).strip()
 
 
+def _try_hotfix_missing_decl(state: dict[str, Any], build_py_path: str) -> bool:
+    """Detect implicit-function-decl / undeclared-identifier build errors
+    and insert ``extern`` declarations into harness source files.
+
+    Called from the build retry loop so header-only / single-file library
+    harnesses can be patched in-place without going through a full
+    plan→synthesize→build cycle.
+    """
+    last_error = str(state.get("last_error") or state.get("build_stdout_tail") or "").strip()
+    stdout_tail = str(state.get("build_stdout_tail") or "").strip()
+    stderr_tail = str(state.get("build_stderr_tail") or "").strip()
+    diag_raw = (last_error + "\n" + stdout_tail + "\n" + stderr_tail)
+    diag_lower = diag_raw.lower()
+    if "implicit declaration of function" not in diag_lower and "undeclared identifier" not in diag_lower:
+        return False
+
+    gen = state.get("generator")
+    if gen is None:
+        return False
+    repo_root = gen.repo_root
+
+    import re as _re_local
+    _changes = 0
+    _diag_lines = diag_raw.splitlines()
+    for _dl in _diag_lines:
+        _m = _re_local.search(
+            r"(?P<file>[^\s:]+\.(?:c|cc|cpp|cxx)):\d+:\d+:\s+(?:error|fatal error):\s+.*?(?:undeclared identifier|implicit declaration of function).*?(?:'|\")(?P<sym>[A-Za-z_][A-Za-z0-9_]*)(?:'|\")",
+            _dl,
+        )
+        if not _m:
+            continue
+        _src_name = _m.group("file")
+        _symbol = _m.group("sym")
+        _src_path = Path(_src_name)
+        if not _src_path.is_absolute():
+            _src_path = repo_root / _src_path
+        if not _src_path.is_file() or _src_path.parent.name != "fuzz":
+            continue
+        try:
+            _src_text = _src_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if "extern " in _src_text and _symbol in _src_text:
+            continue
+        _lines = _src_text.splitlines()
+        _insert_at = 0
+        for _j, _line in enumerate(_lines):
+            if _line.lstrip().startswith("#include") or _line.lstrip().startswith("#define"):
+                _insert_at = _j + 1
+        if _insert_at == 0:
+            for _j, _line in enumerate(_lines):
+                if _line.lstrip().startswith("#if"):
+                    _insert_at = _j + 1
+        _decl = f"extern void {_symbol}(void);  /* sherpa-hotfix: forward declaration for header-only lib */"
+        _lines.insert(_insert_at, _decl)
+        _new_text = "\n".join(_lines) + ("\n" if _src_text.endswith("\n") else "")
+        if _new_text == _src_text:
+            continue
+        try:
+            _src_path.write_text(_new_text, encoding="utf-8", errors="replace")
+            _changes += 1
+            _wf_log(state, f"build: added extern {_symbol}() to {_src_path.relative_to(repo_root)}")
+        except Exception:
+            continue
+    return _changes > 0
+
+
 def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
     """Install a compiler wrapper that auto-injects -fsanitize-coverage flags.
 
@@ -9883,6 +9950,20 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=build_cmd_timeout)
             _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
             attempts_used += 1
+
+            # Fast-path hotfix for implicit-decl / undeclared-identifier errors.
+            # Header-only libraries often need extern declarations that the
+            # synthesize agent omits.  Patch harness sources in-place so the
+            # next retry (or the fallback retries below) can succeed without
+            # going through a full plan→synthesize cycle.
+            if rc != 0:
+                _hotfix_state: dict[str, Any] = dict(cast(dict[str, Any], state))
+                _hotfix_state["last_error"] = (out or "") + "\n" + (err or "")
+                _hotfix_state["build_stdout_tail"] = out or ""
+                _hotfix_state["build_stderr_tail"] = err or ""
+                if _try_hotfix_missing_decl(_hotfix_state, ""):
+                    # Hotfix applied — retry the build immediately
+                    _wf_log(cast(dict[str, Any], state), "build: harness hotfix applied; retrying")
 
             # Backward-compatibility shim: older generated scripts may hardcode "fuzz/..."
             # and therefore need repo-root cwd.
