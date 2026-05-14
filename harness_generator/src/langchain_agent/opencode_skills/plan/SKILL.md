@@ -47,6 +47,9 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
 - Rank runtime-executable/public targets first.
+- Deprioritize functions in `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories.
+  Check the `file`/`source_hint` field.  Prefer public API equivalents from `lib/` or `src/` instead.
+  Only select a deprecated-path target when no public alternative exists; mark it with `api_surface_exception` and `vuln_likelihood` ≤ 0.3.
 - Keep vulnerability candidates primary; coverage/complexity are secondary references.
 - If `fuzz/vuln_candidates.json` has pending candidates, `fuzz/PLAN.md` must name the chosen `candidate_id`, target API, evidence IDs, and attack hint.
 - `fuzz/execution_plan.json` must include `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`.

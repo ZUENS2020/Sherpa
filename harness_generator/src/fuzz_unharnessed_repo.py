@@ -810,6 +810,50 @@ def write_patch_from_snapshot(
     return changed_files
 
 
+def _snapshot_crash_evidence(
+    *,
+    bin_path: Path,
+    artifact_path: Path,
+    repro_output: str,
+    repo_root: Path,
+    fuzzer_name: str,
+) -> None:
+    """Preserve crash evidence before subsequent synthesize stages rebuild the binary.
+
+    Copies the crashing binary, ASAN output, and build-source hash into
+    ``fuzz/out/artifacts/`` alongside the crash input file so that the crash
+    remains reproducible even after the harness/build.py are regenerated.
+    """
+    artifacts_dir = repo_root / "fuzz" / "out" / "artifacts"
+    artifact_stem = artifact_path.name
+    try:
+        # 1) Crash binary
+        if bin_path.is_file():
+            dest = artifacts_dir / f"{artifact_stem}.binary"
+            shutil.copy2(bin_path, dest)
+            print(f"[*] crash binary preserved: {dest}")
+
+        # 2) ASAN / reproducer output
+        dest_asan = artifacts_dir / f"{artifact_stem}.asan.txt"
+        dest_asan.write_text(repro_output, encoding="utf-8", errors="replace")
+        print(f"[*] ASAN output preserved: {dest_asan}")
+
+        # 3) Build-source hash (build.py + harness sources)
+        _build_files: list[str] = []
+        build_py = repo_root / "fuzz" / "build.py"
+        if build_py.is_file():
+            _build_files.append(build_py.read_text(encoding="utf-8", errors="replace"))
+        for src in sorted((repo_root / "fuzz").glob(f"{fuzzer_name}*fuzz*.c")):
+            _build_files.append(src.read_text(encoding="utf-8", errors="replace"))
+        _combined = "\n---\n".join(_build_files)
+        _hash = hashlib.sha256(_combined.encode("utf-8", errors="replace")).hexdigest()[:16]
+        dest_hash = artifacts_dir / f"{artifact_stem}.build_hash"
+        dest_hash.write_text(f"sha256:{_hash}\n", encoding="utf-8", errors="replace")
+        print(f"[*] build hash preserved: {dest_hash} (hash={_hash})")
+    except Exception as exc:
+        print(f"[warn] crash snapshot partial: {exc}")
+
+
 def hexdump(path: Path, limit_bytes: int = 512) -> str:
     try:
         return subprocess.check_output(
@@ -6125,6 +6169,16 @@ EOF
         ]
         write_text_safely(self.repo_root / "crash_info.md", "\n".join(info_md))
         print("[*] crash_info.md written.")
+
+        # Snapshot crash evidence before subsequent synthesize stages can
+        # rebuild the binary and destroy the crash repro context.
+        _snapshot_crash_evidence(
+            bin_path=bin_path,
+            artifact_path=artifact_path,
+            repro_output=combined,
+            repo_root=self.repo_root,
+            fuzzer_name=fuzzer_name,
+        )
 
         # 3) Ask Codex for crash_analysis.md
         context_blob = (

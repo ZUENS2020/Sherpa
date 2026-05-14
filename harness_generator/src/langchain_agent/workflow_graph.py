@@ -1497,9 +1497,18 @@ def _is_test_or_demo_helper_target(*, name: str, api: str, file_hint: str = "") 
             "contrib/examples/",
             "/examples/",
             "examples/",
+            "/demo/",
+            "demo/",
+            "/demos/",
+            "demos/",
+            "/deprecated/",
+            "deprecated/",
+            "/legacy/",
+            "legacy/",
+            "examples/",
         )
     )
-    demo_file = any(token in basename for token in ("test", "demo", "example"))
+    demo_file = any(token in basename for token in ("test", "demo", "example", "deprecated", "legacy"))
     return bool((helper_name and (test_file or demo_file)) or ((test_file or demo_file) and not public_like_symbol))
 
 
@@ -11536,6 +11545,86 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
         return changed
 
+    def _try_hotfix_missing_decl() -> bool:
+        """Detect implicit-function-declaration and undeclared-identifier errors
+        in harness source files and add extern declarations or missing includes.
+
+        Header-only / single-file libraries often expose internal symbols that
+        the synthesize agent fails to declare.  This hotfix scans the build
+        diagnostics for ``implicit declaration`` or ``undeclared identifier``
+        messages, extracts the symbol name, and inserts the appropriate
+        ``extern`` declaration into the offending harness source.
+        """
+        diag_raw = last_error + "\n" + stdout_tail + "\n" + stderr_tail
+        diag_lower = diag_raw.lower()
+        if "implicit declaration of function" not in diag_lower and "undeclared identifier" not in diag_lower:
+            return False
+
+        # Parse symbol and source file from clang diagnostic lines like:
+        #   harness.c:42:5: error: call to undeclared function 'foo'
+        #   harness.c:42:14: error: use of undeclared identifier 'BAR'
+        import re as _re_local
+        _changes = 0
+        _diag_lines = diag_raw.splitlines()
+        for _dl in _diag_lines:
+            # Clang: "<file>:<line>:<col>: error: ... 'symbol'"
+            _m = _re_local.search(
+                r"(?P<file>[^\s:]+\.(?:c|cc|cpp|cxx)):\d+:\d+:\s+(?:error|fatal error):\s+.*?(?:undeclared identifier|implicit declaration of function).*?(?:'|\")(?P<sym>[A-Za-z_][A-Za-z0-9_]*)(?:'|\")",
+                _dl,
+            )
+            if not _m:
+                continue
+            _src_name = _m.group("file")
+            _symbol = _m.group("sym")
+            _src_path = Path(_src_name)
+            if not _src_path.is_absolute():
+                _src_path = gen.repo_root / _src_path
+            if not _src_path.is_file() or _src_path.parent.name != "fuzz":
+                continue  # only patch harness sources in fuzz/
+
+            try:
+                _src_text = _src_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            if f"extern " in _src_text and _symbol in _src_text:
+                continue  # already has extern
+
+            # Also check for well-known header hints
+            _stb_header = 'stb' in _src_name.lower() or 'stb' in _symbol.lower()
+            _include_line = ""
+            if _stb_header:
+                # stb single-file libs often need CGLTF_IMPLEMENTATION or STB_* before include
+                pass  # fall through to extern declaration
+
+            # Insert extern declaration after the last #include line
+            _lines = _src_text.splitlines()
+            _insert_at = 0
+            for _j, _line in enumerate(_lines):
+                if _line.lstrip().startswith("#include") or _line.lstrip().startswith("#define"):
+                    _insert_at = _j + 1
+            # Also after any #ifdef / #ifndef guards
+            if _insert_at == 0:
+                for _j, _line in enumerate(_lines):
+                    if _line.lstrip().startswith("#if"):
+                        _insert_at = _j + 1
+
+            _decl = f"extern void {_symbol}(void);  /* sherpa-hotfix: forward declaration for header-only lib */"
+            _lines.insert(_insert_at, _decl)
+            _new_text = "\n".join(_lines) + ("\n" if _src_text.endswith("\n") else "")
+            if _new_text == _src_text:
+                continue
+
+            try:
+                _src_path.write_text(_new_text, encoding="utf-8", errors="replace")
+                _changes += 1
+                rel = str(_src_path.relative_to(gen.repo_root))
+                _wf_log(cast(dict[str, Any], state), f"fix_build: added extern {_symbol}() to {rel}")
+            except Exception:
+                continue
+
+        return _changes > 0
+
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():
             out = _success_out(
@@ -11625,6 +11714,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 outcome="rule_fixed",
                 rule_hit="missing_system_packages_declared",
                 last_diff_paths=["fuzz/system_packages.txt"],
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_decl():
+            out = _success_out(
+                "local hotfix for missing declarations in harness source applied",
+                outcome="rule_fixed",
+                rule_hit="missing_harness_decl",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
