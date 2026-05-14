@@ -1,34 +1,37 @@
-# Sherpa for Competition
+# TianHeng Frontend
 
-Sherpa 的比赛展示版本。前后端一体，使用 Next.js API Routes 模拟 Sherpa 后端 API，数据持久化到本地 JSON 文件，可在前端面板手动调整任意字段。
+TianHeng 前端，基于 Next.js 14 + MUI + TanStack Query。
 
 ## 启动
 
 ```bash
 npm install
-npm run dev    # 默认端口 3001
+npm run dev    # 端口 3000
 ```
-
-首次启动自动从 `data/seed.json` 初始化 `data/runtime.json`。
 
 ## 页面
 
 | 路径 | 功能 |
 |---|---|
-| `/` | 监控台——只显示统计数据与任务总览，隐藏技术细节 |
-| `/run` | 发起任务——填写仓库 URL 与预算后提交 |
-| `/admin` | 数据控制面板——手动调整任务状态、漏洞候选、覆盖率等所有字段 |
+| `/` | 监控台——任务列表、状态总览、漏洞候选统计 |
+| `/run` | 任务发起——填写仓库 URL 与预算后提交 |
 
-## 调数据流程
+## 架构
 
-1. 访问 `/admin`，左侧选择任务，右侧修改字段
-2. 点击"保存此任务"——立即写入 `data/runtime.json`
-3. 监控台（`/`）自动轮询，2 秒内反映变化
-4. 点击右上角"重置 Seed"可恢复初始演示数据
+- 通过 `/api` 前缀与后端 FastAPI 通信（nginx gateway 代理）
+- 使用 TanStack React Query 进行 2-3s 轮询刷新
+- Zod schema 校验请求/响应
+- Zustand 存储客户端 UI 状态
+- `NEXT_PUBLIC_API_TARGET` 环境变量可配置本地开发时的后端代理目标
 
-## 与真实 Sherpa 的差异
+## 与后端的接口
 
-- API 路径完全一致（`/api/config`、`/api/system`、`/api/tasks`、`/api/task/:id`、`/api/task/:id/stop`）
-- 后端改为 Next.js API Routes + 本地 JSON，无需 Python 环境
-- 监控台移除了日志面板和 frontier/replay 技术细节，只保留任务状态与漏洞候选统计
-- 新增 `/admin` 数据控制面板
+| 端点 | 用途 |
+|------|------|
+| `GET /api/config` | 读取配置 |
+| `PUT /api/config` | 更新配置 |
+| `GET /api/system` | 系统概览 |
+| `GET /api/tasks` | 任务列表 |
+| `POST /api/task` | 提交新任务 |
+| `GET /api/task/:id` | 任务详情 |
+| `POST /api/task/:id/stop` | 停止任务 |
