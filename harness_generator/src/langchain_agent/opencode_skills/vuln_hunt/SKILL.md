@@ -36,7 +36,9 @@ Use this skill in the internal hunt subphase before `plan` materializes `selecte
 8. Write a concise `fuzz/vuln_hunt_summary.md` explaining top candidates, strategy changes, and iteration-specific findings.
 
 ## Constraints
-- Candidate output is advisory. Do not write workflow control fields directly.
+- Do not promote candidates from `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories to high priority.
+  Mark such candidates with `validation_status=degraded_test_code` (test/demo) or `validation_status=deprecated` (deprecated/legacy).
+  Only raise their priority when crash evidence from a production build confirms reachability.
 - Do not change `workflow_context`, `selected_targets.json`, or `execution_plan.json`.
 - Evidence references should point to `analysis_evidence.security_evidence[].evidence_id` when available.
 - Do not reclassify `target_type` or `seed_profile`; those are normalized by the coordinator.
