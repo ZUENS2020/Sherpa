@@ -952,6 +952,64 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
     return "\n\n".join(texts).strip()
 
 
+def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
+    """Install a compiler wrapper that auto-injects -fsanitize-coverage flags.
+
+    Returns the wrapper directory path (add it to ``PATH`` before the real
+    compiler).  The wrapper delegates every call to the system clang/clang++
+    and silently appends ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    unless the command already contains ``-fsanitize-coverage`` or
+    ``-fprofile-instr-generate`` (replay builds).
+
+    The wrapper directory contains symlinks ``clang`` and ``clang++`` pointing
+    to the wrapper script, so build scripts that hardcode ``clang`` pick it up
+    automatically when the directory is first in ``PATH``.
+    """
+    wrapper_dir = repo_root / "fuzz" / ".sherpa-cc"
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+
+    _COV_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+
+    wrapper_sh = wrapper_dir / "sherpa-cc-wrapper.sh"
+    wrapper_sh.write_text(textwrap.dedent(f"""\
+        #!/bin/bash
+        set -euo pipefail
+        # sherpa-cc-wrapper: inject coverage flags for primary fuzz builds.
+        # Symlinked as 'clang' and 'clang++'; delegates to the real compiler
+        # while appending coverage instrumentation unless the command is a
+        # replay build (already has -fprofile-instr-generate).
+        COV_FLAGS="{_COV_FLAGS}"
+        HAS_COV=0
+        HAS_REPLAY=0
+        for arg in "$@"; do
+            [[ "$arg" == *fsanitize-coverage* ]] && HAS_COV=1
+            [[ "$arg" == *fprofile-instr-generate* ]] && HAS_REPLAY=1
+        done
+        REAL_CC=$(basename "$0")
+        REAL_PATH=$(command -v "$REAL_CC" 2>/dev/null || echo "")
+        if [[ -z "$REAL_PATH" || "$REAL_PATH" == "$0" ]]; then
+            # Fall back to PATH search excluding this directory
+            REAL_PATH=$(PATH=${{PATH#*:}} command -v "$REAL_CC" 2>/dev/null || echo "/usr/bin/$REAL_CC")
+        fi
+        if [[ $HAS_COV -eq 0 && $HAS_REPLAY -eq 0 ]]; then
+            exec "$REAL_PATH" "$@" $COV_FLAGS
+        else
+            exec "$REAL_PATH" "$@"
+        fi
+    """))
+    wrapper_sh.chmod(0o755)
+
+    # Create symlinks so that 'clang' and 'clang++' in this directory
+    # resolve to the wrapper.
+    for name in ("clang", "clang++"):
+        link = wrapper_dir / name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(wrapper_sh.name)
+
+    return wrapper_dir
+
+
 def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) -> None:
     """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
 
@@ -9713,10 +9771,6 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             fallback_cwd = gen.repo_root
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
-            # Ensure coverage instrumentation flags are present in primary fuzz
-            # binaries. The synthesize agent may omit -fsanitize-coverage flags
-            # even when the SKILL.md contract requires them.
-            _inject_coverage_instrumentation(str(build_py), state)
         elif build_sh.is_file():
             shell = "bash"
             if not getattr(gen, "docker_image", None):
@@ -9737,21 +9791,19 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
         build_env = os.environ.copy()
-        # Ensure coverage feedback flags are always present regardless of
-        # build.py output format.  The synthesize agent may produce a variety
-        # of flag placements; environment injection is format-agnostic.
-        _cov_flags = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
-        build_env.setdefault("SHERPA_FUZZ_COVERAGE_FLAGS", _cov_flags)
+        # Install a compiler wrapper that automatically appends coverage
+        # instrumentation flags to every clang/clang++ invocation.  This
+        # approach is format-agnostic — it works regardless of how build.py
+        # structures its compile/link commands — and does not conflict with
+        # replay builds that already carry -fprofile-instr-generate.
+        _cc_wrapper_dir = _install_coverage_cc_wrapper(gen.repo_root)
+        build_env["PATH"] = f"{_cc_wrapper_dir}:{build_env.get('PATH', '')}"
+        build_env["CC"] = "clang"
+        build_env["CXX"] = "clang++"
+        build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
+        build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
         if getattr(gen, "docker_image", None):
             include_root = "/work"
-            build_env.setdefault("CC", "clang")
-            build_env.setdefault("CXX", "clang++")
-            # Append coverage flags to CFLAGS/CXXFLAGS so cmake/configure
-            # builds pick them up even when build.py hardcodes flags.
-            _prev_cflags = build_env.get("CFLAGS", "").strip()
-            build_env["CFLAGS"] = f"{_prev_cflags} {_cov_flags}" if _prev_cflags else _cov_flags
-            _prev_cxxflags = build_env.get("CXXFLAGS", "").strip()
-            build_env["CXXFLAGS"] = f"{_prev_cxxflags} {_cov_flags}" if _prev_cxxflags else _cov_flags
             for stale_dir in (gen.repo_root / "fuzz" / "build", gen.repo_root / "build"):
                 if stale_dir.exists():
                     try:
@@ -9818,10 +9870,6 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             build_cmd_timeout = _remaining_time_budget_sec(state, min_timeout=0)
             if build_cmd_timeout <= 0:
                 return _time_budget_exceeded_state(state, step_name="build")
-            # Re-inject coverage flags every retry because the fix_build agent
-            # may regenerate build.py without them.
-            if build_py.is_file():
-                _inject_coverage_instrumentation(str(build_py), state)
             _wf_log(cast(dict[str, Any], state), f"build cmd attempt {attempt}/{max_local_attempts} -> {' '.join(build_cmd)}")
             rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=build_cmd_timeout)
             _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
