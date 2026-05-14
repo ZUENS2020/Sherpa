@@ -9737,12 +9737,21 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
         build_env = os.environ.copy()
+        # Ensure coverage feedback flags are always present regardless of
+        # build.py output format.  The synthesize agent may produce a variety
+        # of flag placements; environment injection is format-agnostic.
+        _cov_flags = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+        build_env.setdefault("SHERPA_FUZZ_COVERAGE_FLAGS", _cov_flags)
         if getattr(gen, "docker_image", None):
             include_root = "/work"
             build_env.setdefault("CC", "clang")
             build_env.setdefault("CXX", "clang++")
-            build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
-            build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
+            # Append coverage flags to CFLAGS/CXXFLAGS so cmake/configure
+            # builds pick them up even when build.py hardcodes flags.
+            _prev_cflags = build_env.get("CFLAGS", "").strip()
+            build_env["CFLAGS"] = f"{_prev_cflags} {_cov_flags}" if _prev_cflags else _cov_flags
+            _prev_cxxflags = build_env.get("CXXFLAGS", "").strip()
+            build_env["CXXFLAGS"] = f"{_prev_cxxflags} {_cov_flags}" if _prev_cxxflags else _cov_flags
             for stale_dir in (gen.repo_root / "fuzz" / "build", gen.repo_root / "build"):
                 if stale_dir.exists():
                     try:
