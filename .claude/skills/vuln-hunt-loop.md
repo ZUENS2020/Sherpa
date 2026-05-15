@@ -149,3 +149,7 @@ ssh -i ~/.ssh/id_ed25519 deploy@frp-jar.com -p 63893 \
 | #410 | Ensure selected_targets.json exists | Integration |
 | #411 | Fix NameError target_api→api | Bugfix |
 | #413 | Revert synthetic target injection | Cleanup |
+
+## Documentation Upkeep
+
+After each monitoring session: if you discovered a new issue, behavior, or insight, check whether CLAUDE.md (Session State, Known Issues), project-journal.md, or habits.md need updating. Follow the self-update rules in CLAUDE.md.

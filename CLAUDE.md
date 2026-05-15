@@ -118,6 +118,14 @@ run → crash-triage
 - **K8s**: `sudo kubectl --kubeconfig /etc/kubernetes/admin.conf <cmd> -n sherpa-dev`
 - Branch strategy: PRs target `dev`, never `main`. Deploy via CI.
 
+## Session State
+
+<!-- SESSION-START -->
+last_session: 2026-05-15
+last_deploy: b5784efc1 — CK2 idle timeout fix (vuln_hunt 1800s, plan 1200s)
+active_jobs: cJSON (7e3fe1bc), uriparser (9fd5d884), libwebp (d3ae0b32)
+<!-- SESSION-END -->
+
 ## Key Env Vars
 
 | Var | Default | Purpose |
@@ -131,6 +139,14 @@ run → crash-triage
 | `SHERPA_VERIFY_STAGE_NO_AI` | 0 | Skip AI seed generation in run stage |
 
 ## Common Issues & Debugging
+
+### Known Issues
+
+<!-- ISSUES-START -->
+| ID | Issue | Status | Mitigation |
+|---|---|---|---|
+| CK2 | vuln_hunt large JSON → 600s idle timeout | Mitigated | 1800s override (env var) |
+<!-- ISSUES-END -->
 
 ### CK2: Agent Idle Timeout (600s too short for large file generation)
 - **Symptom**: Agent reads files, outputs "Now I have a complete picture...", then 10 min of `running… elapsed=Xs` → `idle timeout after 600s without activity; terminating agent`
@@ -157,3 +173,19 @@ kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8001/ap
 # Check API task detail
 kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8001/api/task/<job_id>
 ```
+
+## Documentation Maintenance
+
+This file and related docs (`.claude/project-journal.md`, `.claude/habits.md`, `.claude/skills/`) are self-evolving. Update them silently when these events occur:
+
+1. **Bug fix deployed to dev** → Update `last_deploy` in Session State + add entry to project-journal.md
+2. **New issue discovered** → Add/update row in Known Issues table (remove if fixed)
+3. **New job submitted** → Update `active_jobs` in Session State (remove completed ones)
+4. **Monitoring insight** → Append discovery to project-journal.md
+5. **New user habit observed** → Update `.claude/habits.md` (only clear patterns, not one-offs)
+
+Rules:
+- Be silent — don't announce doc updates
+- One line per event in journal
+- Remove stale entries
+- Don't update if nothing changed
