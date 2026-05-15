@@ -873,6 +873,7 @@ class CodexHelper:
 
         self.last_cli_error_kind = ""
         self.last_cli_error_message = ""
+        self.last_cli_stdout = ""
 
         LOGGER.debug("OpenCodeHelper working directory: %s", self.working_dir)
 
@@ -1075,6 +1076,7 @@ class CodexHelper:
         done_path = self.working_dir / SENTINEL
         self.last_cli_error_kind = ""
         self.last_cli_error_message = ""
+        self.last_cli_stdout = ""
         watch_specs: List[str] = []
         for spec in (activity_watch_paths or ()):
             txt = str(spec).strip()
@@ -1971,6 +1973,10 @@ class CodexHelper:
         if not self.last_cli_error_kind:
             self.last_cli_error_kind = "exhausted_no_edits"
             self.last_cli_error_message = "OpenCode exhausted attempts without producing edits"
+        try:
+            self.last_cli_stdout = ("".join(captured_chunks))[-8000:]
+        except Exception:
+            self.last_cli_stdout = ""
         _record_session_attempt("exhausted")
         _append_opencode_metadata(
             self.working_dir,
