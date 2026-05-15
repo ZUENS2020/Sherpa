@@ -2958,6 +2958,7 @@ def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     timeout=_remaining_time_budget_sec(state),
                     max_attempts=1,
                     max_cli_retries=_opencode_cli_retries(),
+                    idle_timeout_override=_vuln_hunt_idle_timeout_sec(),
                 )
 
                 # Validate vuln_candidates.json; restore snapshot if agent
@@ -5531,6 +5532,22 @@ def _analysis_opencode_idle_timeout_sec() -> int:
         return max(10, min(int(raw), 600))
     except Exception:
         return 75
+
+
+def _vuln_hunt_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_VULN_HUNT_SEC") or "1800").strip()
+    try:
+        return max(60, min(int(raw), 7200))
+    except Exception:
+        return 1800
+
+
+def _plan_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC") or "1200").strip()
+    try:
+        return max(60, min(int(raw), 7200))
+    except Exception:
+        return 1200
 
 
 def _fix_build_max_noop_streak() -> int:
@@ -8256,7 +8273,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
-                idle_timeout_override=600,
+                idle_timeout_override=_plan_idle_timeout_sec(),
             )
         else:
             gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
@@ -8289,7 +8306,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
-                idle_timeout_override=600,
+                idle_timeout_override=_plan_idle_timeout_sec(),
             )
             ok_targets, targets_err = _validate_targets_json(gen.repo_root)
             plan_targets_schema_valid_after_retry = bool(ok_targets)
