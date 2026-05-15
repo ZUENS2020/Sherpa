@@ -8723,7 +8723,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             error_text=str(e),
             state=cast(dict[str, Any], state),
         )
-        out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
+        out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed", "failed": True}
         out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -9695,7 +9695,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             error_text=str(e),
             state=cast(dict[str, Any], state),
         )
-        out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
+        out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed", "failed": True}
         out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -10432,6 +10432,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_step": "build",
             "last_error": str(e),
             "message": "build failed",
+            "failed": True,
             "build_error_kind": "unknown",
             "build_error_code": "build_node_exception",
             "restart_to_plan": True,
@@ -16526,8 +16527,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             msg = f"{terminal_reason}: {msg}"
         raise RuntimeError(msg or "workflow failed")
     # If we stopped due to an error but didn't mark failed, still surface it.
+    # crash_found alone is not enough to suppress — if we're still in an
+    # unrecovered repair (e.g. crash_triage→harness_bug→plan_repair failed),
+    # the error must surface as a workflow failure.
     last_error = str(out.get("last_error") or err.get("message") or "").strip()
-    if last_error and not bool(out.get("crash_found")):
+    repair_unrecovered = bool(out.get("repair_mode")) and bool(last_error)
+    should_surface = bool(last_error) and (not bool(out.get("crash_found")) or repair_unrecovered)
+    if should_surface:
         if stop_after_step and recommended_next != "stop":
             _wf_log(
                 out,
@@ -16540,7 +16546,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             _wf_log(out, f"workflow end status=error dt={_fmt_dt(time.perf_counter()-t0)}")
             raise RuntimeError(last_error)
 
-    if not (last_error and not bool(out.get("crash_found")) and stop_after_step and recommended_next != "stop"):
+    if not (should_surface and stop_after_step and recommended_next != "stop"):
         _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
