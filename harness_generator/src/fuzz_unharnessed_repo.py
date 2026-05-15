@@ -2969,9 +2969,95 @@ EOF
             if partial_outputs:
                 print("[warn] Codex exited without done sentinel, but partial synth outputs exist; deferring completeness check")
                 return
+            self._dump_synthesize_failure_diagnostic(
+                error_kind=last_kind,
+                error_message=last_msg,
+            )
+            stdout_tail = str(getattr(self.patcher, "last_cli_stdout", "") or "")
+            print(
+                "[error] synthesize agent produced no scaffold. "
+                f"cli_error_kind={last_kind or '<empty>'}, "
+                f"cli_error_message={(last_msg or '<empty>')[:300]}",
+                file=sys.stderr,
+            )
+            if stdout_tail:
+                print(
+                    "[error] OpenCode stdout tail (last 2000 chars):\n"
+                    + stdout_tail[-2000:],
+                    file=sys.stderr,
+                )
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
 
         print(f"[*] Codex synthesis done (truncated):\n{stdout[:900]}")
+
+    def _dump_synthesize_failure_diagnostic(
+        self,
+        *,
+        error_kind: str,
+        error_message: str,
+    ) -> None:
+        """Write a diagnostic snapshot when synthesize returns stdout=None.
+
+        The k8s job error log only captures the Python traceback, which makes
+        100%-failure regressions hard to triage. This dump records:
+        - timestamp, OpenCode CLI error kind/message
+        - tail of the OpenCode subprocess stdout (captured in CodexHelper)
+        - fuzz/ directory listing (so we can see what the agent *did* write)
+        - synthesize-relevant env vars (idle timeout, retry knobs)
+
+        Output: ``fuzz/.synth_failure.log`` (gitignored via fuzz/** scope).
+        Best-effort: any exception is swallowed so the original
+        HarnessGeneratorError remains the surfaced failure.
+        """
+        try:
+            log_path = self.fuzz_dir / ".synth_failure.log"
+            self.fuzz_dir.mkdir(parents=True, exist_ok=True)
+            stdout_tail = str(getattr(self.patcher, "last_cli_stdout", "") or "")
+            fuzz_entries: list[str] = []
+            try:
+                for p in sorted(self.fuzz_dir.rglob("*")):
+                    if not p.exists():
+                        continue
+                    try:
+                        rel = p.relative_to(self.fuzz_dir).as_posix()
+                    except Exception:
+                        continue
+                    if rel.startswith(".sherpa-cc"):
+                        continue
+                    kind = "dir" if p.is_dir() else "file"
+                    size = p.stat().st_size if p.is_file() else 0
+                    fuzz_entries.append(f"{kind:4s} {size:>10d} {rel}")
+                    if len(fuzz_entries) >= 200:
+                        fuzz_entries.append("... (truncated)")
+                        break
+            except Exception as exc:
+                fuzz_entries.append(f"<listing failed: {exc}>")
+            env_keys = (
+                "SHERPA_OPENCODE_IDLE_TIMEOUT_SEC",
+                "SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC",
+                "SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES",
+                "SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC",
+                "SHERPA_OPENCODE_PARTIAL_SUCCESS_STAGE_SKILLS",
+            )
+            env_snapshot = "\n".join(
+                f"{k}={os.environ.get(k, '<unset>')}" for k in env_keys
+            )
+            body = (
+                f"=== synth_failure @ {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ===\n"
+                f"error_kind={error_kind or '<empty>'}\n"
+                f"error_message={error_message or '<empty>'}\n"
+                f"\n=== env ===\n{env_snapshot}\n"
+                f"\n=== fuzz/ listing ({len(fuzz_entries)} entries) ===\n"
+                + "\n".join(fuzz_entries) + "\n"
+                f"\n=== OpenCode stdout tail (last {len(stdout_tail)} chars) ===\n"
+                + (stdout_tail or "<empty>")
+                + "\n=== end ===\n\n"
+            )
+            with log_path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write(body)
+            print(f"[*] synthesize failure diagnostic appended: {log_path}")
+        except Exception as exc:
+            print(f"[warn] could not write synth failure diagnostic: {exc}")
 
     # ────────────────────────────────────────────────────────────────────
     # Step C – Build with retries (feedback to Codex)
