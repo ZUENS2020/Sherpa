@@ -10129,6 +10129,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 next_state["restart_to_plan_reason"] = "build_same_error_repeated" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
+                _mark_build_repair_state(
+                    kind=str(next_state.get("build_error_kind") or build_error_kind or "build_failure_generic"),
+                    code=str(next_state.get("build_error_code") or build_error_code or ""),
+                    sig=sig,
+                )
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-error "
@@ -10185,6 +10190,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 next_state["restart_to_plan_reason"] = "build_no_fuzzer_repeated" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
+                _mark_build_repair_state(
+                    kind=build_error_kind or "build_failure_generic",
+                    code=build_error_code,
+                    sig=sig,
+                )
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-no-fuzzer "
