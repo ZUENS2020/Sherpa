@@ -1,147 +1,151 @@
 ---
 name: vuln-hunt-loop
-description: Monitor vuln-hunt pipeline on dev, find bugs, fix them, deploy, and re-test in a continuous cycle.
+description: Monitor vuln-hunt pipeline on dev, find bugs, fix them, deploy, and re-test in a continuous cycle. Also use for one-off dev monitoring.
 arguments: []
 ---
 
 # Vuln-Hunt Dev Loop
 
-Continuous cycle: monitor → find bugs → fix → PR → deploy → run libpng → monitor.
+Continuous cycle: monitor → find bugs → fix → PR → deploy → run jobs → monitor.
 
 ## Server Access
 
-```
+```bash
 ssh -i ~/.ssh/id_ed25519 -o ConnectTimeout=15 deploy@frp-jar.com -p 63893
 ```
 
 K8s access on server:
-```
+```bash
 sudo kubectl --kubeconfig /etc/kubernetes/admin.conf <cmd> -n sherpa-dev
 ```
 
-API port inside web pod: **8001** (not 8000).
+API port inside web pod: **8001**.
 
-## Step 1: Check Deploy Status
-
-```bash
-gh run view <RUN_ID> --repo ZUENS2020/Sherpa --json status,conclusion
-```
-
-If not completed, wait (deploy takes 5-7 min typically).
-
-## Step 2: Start New libpng Job
+## Quick Status (one-liner)
 
 ```bash
-ssh ... "sudo kubectl exec -n sherpa-dev deploy/sherpa-web -- python3 -c \"
-import urllib.request, json
-payload = json.dumps({'jobs': [{'code_url': 'https://github.com/pnggroup/libpng.git', 'time_budget': 900, 'run_time_budget': 900, 'model': 'deepseek-v4-pro', 'timeout': 10}]}).encode()
-req = urllib.request.Request('http://localhost:8001/api/task', data=payload, headers={'Content-Type': 'application/json'})
-r = urllib.request.urlopen(req)
-print('JOB_ID:', json.loads(r.read())['job_id'])
-\""
+ssh -i ~/.ssh/id_ed25519 deploy@frp-jar.com -p 63893 \
+  "kubectl exec -n sherpa-dev \$(kubectl get pods -n sherpa-dev -l app=sherpa-web -o jsonpath='{.items[0].metadata.name}') -- curl -s http://localhost:8001/api/tasks" \
+  | python3 -c "
+import json, sys
+for t in json.load(sys.stdin)['items']:
+    c = t.get('children_status', {})
+    print(f\"{t['job_id'][:12]} | {t['status']} | {t.get('stage','?')} | repo:{t.get('repo','?')} | child:{c.get('running',0)}R/{c.get('success',0)}S/{c.get('error',0)}E | cov:{t.get('fuzz_max_cov','?')}% ft:{t.get('fuzz_max_ft','?')}\")
+"
 ```
 
-## Step 3: Monitor Pipeline — 7 Critical Checkpoints
+## Fuzz Pod Monitoring
 
-### Checkpoint 1: TypedDict State Fields
-After vuln-hunt stage completes, verify:
-```python
-d = json.load(open('stage-*-vuln-hunt.json'))
-r = d['result']
-# Must be > 0:
-r.get('vuln_hunt_iteration')  # Should be 1, 2, 3...
-r.get('vuln_hunt_highest_priority')  # Should be ~0.67
-# Must be non-empty:
-r.get('vuln_hunt_active_candidate_id')  # e.g. "integer_overflow_017"
-```
-- **If broken**: Missing TypedDict fields → PR #405 fix
-- **Check**: `grep 'vuln_hunt_iteration\|vuln_hunt_highest_priority' workflow_graph.py` at FuzzWorkflowState TypedDict
-
-### Checkpoint 2: Vuln-Hunt Agent Completion
 ```bash
-kubectl logs <pod> | grep -E 'Write|Edit|done'
+# List fuzz pods
+kubectl get pods -n sherpa-dev | grep fuzz
+
+# Follow active fuzz output (stdout = LibFuzzer stats)
+kubectl logs -n sherpa-dev <pod> | grep -E '(cov:|INITED|pulse|exec/s|DONE|NEW)'
+
+# Follow workflow stage logs
+kubectl logs -n sherpa-dev <pod> | grep -E '(\[wf\]|\[k8s|step=|Entering)'
+
+# Follow agent activity
+kubectl logs -n sherpa-dev <pod> | grep -E '(Read|Write|Glob|running…|idle timeout)'
 ```
-- **Symptom**: No Write/Edit lines, only elapsed= counters
-- **If broken**: Write persistence bug → PR #402 fix
-- **Timeout behavior**: Agent idles 300s → restart → may eventually complete
 
-### Checkpoint 3: Routing Decision
-After vuln-hunt, next pod should be:
-- `plan` if `vuln_hunt_highest_priority >= 0.65` (replan path)
-- `improve-harness` if `< 0.65` (continue improving same target)
-- `build` if entry source was `improve-harness`
-- **If broken**: `_vuln_hunt_entry_source` not propagated → PR #405 fix
+## 7 Critical Checkpoints
 
-### Checkpoint 4: Synthesize Harness Match
-Build stage should succeed. If not:
-```
-RuntimeError: synthesize incomplete: execution_plan_harness_mismatch
-  missing harness source: safe_read, readpng2_decode_data
-  extra_harnesses: fuzz/png_read_image_fuzz.c
-```
-- **Root cause**: Synthesize reads `targets.json` (old), not `selected_targets.json` (new vuln-driven)
-- **Fix**: Add `selected_targets.json` + `execution_plan.json` to synthesize context → PR #406
-- **Check**: `_pass_synthesize_harness` in `fuzz_unharnessed_repo.py`
-
-### Checkpoint 5: Build Not Stalling
-Build pod should complete in < 5 min. LibFuzzer compile output expected.
-- **If broken**: Same as Checkpoint 2 (Write persistence)
-
-### Checkpoint 6: Run Actually Fuzzing
+### CK1: TypedDict State Fields
+After vuln-hunt stage completes, query the API:
 ```bash
-kubectl logs <pod> | tail -3
-# Should show LibFuzzer output: "cov: XXXX ft: XXXX exec/s: XXX"
+kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8001/api/task/<job_id> \
+  | python3 -c "import json,sys; t=json.load(sys.stdin); print('iter:', t.get('vuln_hunt_iteration'), 'pri:', t.get('vuln_hunt_highest_priority'))"
 ```
-- **If broken**: Write persistence + idle loop → PR #402
+- `vuln_hunt_iteration` > 0 (1, 2, 3...)
+- `vuln_hunt_highest_priority` > 0 (~0.67)
+- **Fixed in**: PR #405
 
-### Checkpoint 7: Vuln-Hunt Second Trigger
-After coverage-analysis completes, count vuln-hunt files:
+### CK2: Vuln-Hunt Agent Completion
+- **Symptom**: Agent reads files, outputs analysis, then idles — only `running… elapsed=Xs` for 10+ min
+- **Root cause**: opencode CLI buffers large Write tool calls (e.g., 79KB vuln_candidates.json) internally. Model takes 10+ min to generate, zero stdout = codex_helper idle detector fires at 600s.
+- **Fix**: Stage-specific idle timeout overrides. vuln_hunt → 1800s, plan → 1200s.
+  - `SHERPA_OPENCODE_IDLE_TIMEOUT_VULN_HUNT_SEC` (default 1800)
+  - `SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC` (default 1200)
+- **Check**: `kubectl logs <pod> | grep "idle timeout"`
+- **Fixed in**: PR #402 (Write persistence) + `workflow_graph.py` idle_timeout_override
+
+### CK3: Routing Decision
+After vuln-hunt, routing depends on `_vuln_hunt_entry_source` (set before stage runs):
+
+| Source | Priority ≥ 0.65 | Priority < 0.65 |
+|---|---|---|
+| `analysis` | → plan (always) | → plan (always) |
+| `coverage-analysis` | → plan (replan with vuln targets) | → improve-harness |
+| `improve-harness` | → build (always) | → build (always) |
+
+Threshold: `_VULN_REPLAN_PRIORITY_THRESHOLD = 0.65` (env `SHERPA_VULN_REPLAN_PRIORITY_THRESHOLD`)
+
+### CK4: Synthesize Harness Match
+- **Symptom**: `execution_plan_harness_mismatch` — missing harness source
+- **Root cause**: Synthesize reads outdated targets.json instead of selected_targets.json
+- **Fixed in**: PR #406, #407, #408, #410
+
+### CK5: Build Not Stalling
+- Build pod should complete < 5 min
+- **Fixed in**: PR #402
+
+### CK6: Run Actually Fuzzing
 ```bash
-ls stage-*-vuln-hunt.json | wc -l  # Should be >= 2
+kubectl logs <pod> | grep -E '(cov:|INITED|pulse|exec/s)'
 ```
-- **If 1**: Routing not triggering vuln-hunt in coverage loop → PR #403 fix
-- Also verify iteration increments: `vuln_hunt_iteration = 2`
+- Should see LibFuzzer output: `cov: X ft: Y exec/s: Z`
+- If coverage stuck at initial value (e.g., `cov: 35 ft: 35`), fuzzer may be hitting a trivial code path
+- RSS growing rapidly (e.g., 100MB → 12GB) may indicate target memory leak
+- **Fixed in**: PR #402
 
-## Step 4: Quick Status Command
+### CK7: Vuln-Hunt Second Trigger
+After coverage-analysis completes → vuln-hunt should trigger again
+- Check API for `vuln_hunt_iteration >= 2`
+- **Fixed in**: PR #403
 
-Copy this script to server as `/tmp/metrics.py`:
-```python
-import json, glob, os
-dirs = glob.glob('/home/deploy/output/dev/_k8s_jobs/<JOB_PREFIX>*')
-if dirs:
-    base = dirs[0]
-    for f in sorted(glob.glob(base + '/stage-*-vuln-hunt.json')):
-        d = json.load(open(f)); r = d['result']
-        print(f'{os.path.basename(f)}: iter={r.get("vuln_hunt_iteration","?")} pri={r.get("vuln_hunt_highest_priority","?")} active={str(r.get("vuln_hunt_active_candidate_id","?"))[:40]}')
-    for f in sorted(glob.glob(base + '/stage-*.json')):
-        print(os.path.basename(f))
+## Submitting Jobs
+
+```bash
+ssh -i ~/.ssh/id_ed25519 deploy@frp-jar.com -p 63893 \
+  "POD=\$(kubectl get pods -n sherpa-dev -l app=sherpa-web -o jsonpath='{.items[0].metadata.name}') && \
+   kubectl exec -n sherpa-dev \$POD -- curl -s -X POST http://localhost:8001/api/task \
+   -H 'Content-Type: application/json' \
+   -d '{\"jobs\":[{\"code_url\":\"https://github.com/<owner>/<repo>\",\"timeout\":10,\"time_budget\":1800,\"total_time_budget\":3600,\"docker\":true,\"docker_image\":\"auto\"}],\"auto_init\":true,\"build_images\":true}'"
 ```
 
-Run: `scp /tmp/metrics.py deploy@frp-jar.com:/tmp/ && ssh ... "python3 /tmp/metrics.py"`
+## Fix → PR → Deploy Cycle
 
-## Step 5: Fix → PR → Deploy Cycle
+1. Fix code locally
+2. Syntax check: `python3 -c "import py_compile; py_compile.compile('<file>', doraise=True)"`
+3. Commit: `git add <files> && git commit -m "fix: short description"`
+4. Push to dev: `git pull --rebase origin dev && git push origin dev`
+5. Deploy auto-triggers on push to dev. Monitor: `gh run list --repo ZUENS2020/Sherpa --workflow=deploy-dev.yml --limit=1`
+6. Wait for deploy (~5-7 min), then submit new jobs to verify
 
-When a bug is found:
-1. Fix the code locally
-2. Run syntax check + tests: `python3 -c "import ast; ast.parse(open('...').read())" && pytest tests/test_workflow_target_selection.py -x`
-3. Commit and push to `codex/vuln-hunt-every-loop` branch
-4. Create PR: `gh pr create --title "..." --body "..." --base dev --head codex/vuln-hunt-every-loop`
-5. Merge: `gh pr merge <N> --merge --subject "..."`
-6. Deploy: `gh workflow run "Deploy Dev" --repo ZUENS2020/Sherpa --ref dev`
-7. Wait for deploy, then go to Step 2
+## Idle Timeout Reference
 
-## Key Server Paths
-- Job outputs: `/home/deploy/output/dev/_k8s_jobs/<CHILD_JOB_ID>/stage-*.json`
-- Repo root: `/home/deploy/output/dev/libpng-<shortid>/`
-- Vuln candidates: `fuzz/vuln_candidates.json`
-- Selected targets: `fuzz/selected_targets.json`
-- Execution plan: `fuzz/execution_plan.json`
+| Stage | Env Var | Default |
+|---|---|---|
+| All (fallback) | `SHERPA_OPENCODE_IDLE_TIMEOUT_SEC` | 600s |
+| vuln_hunt | `SHERPA_OPENCODE_IDLE_TIMEOUT_VULN_HUNT_SEC` | 1800s |
+| plan | `SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC` | 1200s |
+| synthesize | `SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC` | 300s |
+| analysis | `SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC` | 75s |
 
 ## PR Reference
-| PR | Fix |
-|---|---|
-| #402 | Write persistence — done file flush grace period |
-| #403 | Vuln-hunt every loop + pure vuln scoring |
-| #404 | Stale score formula in plan SKILL |
-| #405 | TypedDict fields + routing state mutation |
-| #406 | Synthesize reads selected_targets.json |
+
+| PR | Fix | Layer |
+|---|---|---|
+| #402 | Write persistence + idle timeout | Infrastructure |
+| #403 | Vuln-hunt every loop + pure vuln scoring | Routing + Scoring |
+| #404 | Score formula in plan SKILL | Prompts |
+| #405 | TypedDict state persistence | Infrastructure |
+| #406 | Synthesize reads selected_targets | Integration |
+| #407 | Prioritize must_run targets in synthesize | Integration |
+| #408 | Rewrite targets.json with must_run | Integration |
+| #409 | Vuln→plan priority bridge | Scoring |
+| #410 | Ensure selected_targets.json exists | Integration |
+| #411 | Fix NameError target_api→api | Bugfix |
+| #413 | Revert synthetic target injection | Cleanup |
