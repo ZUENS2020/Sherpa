@@ -12,6 +12,30 @@ import shutil
 
 from ..build import BinaryBuilder
 
+_SIMD_SUFFIXES = {
+    "_neon", "_sse", "_sse2", "_sse3", "_sse4", "_sse41", "_sse42",
+    "_ssse3", "_msa", "_avx", "_avx2", "_avx512", "_altivec", "_vsx",
+}
+
+
+def _is_simd_file(path: Path) -> bool:
+    stem = path.stem.lower()
+    return any(stem.endswith(s) for s in _SIMD_SUFFIXES)
+
+
+def _scan_include_dirs(repo_root: Path) -> list[str]:
+    dirs: list[str] = []
+    for candidate in (
+        repo_root / "include",
+        repo_root / "src",
+        repo_root / "source",
+        repo_root / "lib",
+        repo_root,
+    ):
+        if candidate.is_dir():
+            dirs.append(str(candidate))
+    return dirs
+
 
 class Meta:
     """Metadata container."""
@@ -54,6 +78,7 @@ class ASTPreprocessor:
         self.pool_size = pool_size
         self.source_files: list[Path] = []
         self.invalid_meta_files: list[str] = []
+        self._extra_include_args: str = ""
 
         # Get binary builder
         self.builder = BinaryBuilder()
@@ -61,16 +86,39 @@ class ASTPreprocessor:
         # Collect source files
         self._collect_source_files()
 
+        # Precompute -I args once when no compile_commands.json is available.
+        if not self.compile_commands_path:
+            repo_root = self._infer_repo_root()
+            if repo_root is not None:
+                self._extra_include_args = "".join(
+                    f" --extra-arg=-I{inc}" for inc in _scan_include_dirs(repo_root)
+                )
+
+    def _infer_repo_root(self) -> Optional[Path]:
+        for sp in self.source_paths:
+            if sp.is_dir():
+                return sp.parent if sp.name in ("src", "source", "lib") else sp
+            if sp.is_file():
+                return sp.parent.parent if sp.parent.name in ("src", "source", "lib") else sp.parent
+        return None
+
     def _collect_source_files(self):
         """Collect all source files from source paths."""
         suffixes = [".c", ".cpp", ".cc", ".cxx", ".c++"]
 
         for source_path in self.source_paths:
             if source_path.is_file():
-                self.source_files.append(source_path)
+                if not _is_simd_file(source_path):
+                    self.source_files.append(source_path)
             elif source_path.is_dir():
                 for suffix in suffixes:
-                    self.source_files.extend(source_path.rglob(f"*{suffix}"))
+                    for f in source_path.rglob(f"*{suffix}"):
+                        if _is_simd_file(f):
+                            continue
+                        if any(part in ("test", "tests", "demo", "demos", "examples", "example")
+                               for part in f.parts):
+                            continue
+                        self.source_files.append(f)
 
         logger.info(f"Found {len(self.source_files)} source files")
 
@@ -119,24 +167,30 @@ class ASTPreprocessor:
             cmd = f"{preprocessor_bin} {source_file} -o {meta_file}"
             if self.compile_commands_path:
                 cmd += f" -p {self.compile_commands_path.resolve().parent}"
+            else:
+                cmd += self._extra_include_args
 
             logger.debug(f"Running: {cmd}")
 
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout (30s) processing {source_file}")
+                return Meta({})
 
             if result.returncode != 0:
-                logger.warning(f"Failed to process {source_file}: {result.stderr}")
+                logger.warning(f"Failed to process {source_file}: {result.stderr[:200]}")
                 return Meta({})
 
             if meta_file.exists():
                 meta = Meta.load(meta_file)
                 if not meta.meta:
-                    # Keep record for visibility when a source produced unusable metadata.
                     self.invalid_meta_files.append(str(source_file))
                 return meta
 

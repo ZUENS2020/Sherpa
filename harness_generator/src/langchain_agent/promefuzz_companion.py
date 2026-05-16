@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -284,6 +285,57 @@ def _compile_commands_path(repo_root: Path) -> Path | None:
     return None
 
 
+def _try_generate_compile_commands(repo_root: Path) -> Path | None:
+    existing = _compile_commands_path(repo_root)
+    if existing:
+        return existing
+    cmake_file = (repo_root / "CMakeLists.txt")
+    if cmake_file.is_file() and shutil.which("cmake"):
+        build_dir = repo_root / "build-work"
+        build_dir_preexisted = build_dir.exists()
+        build_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cp = subprocess.run(
+                ["cmake", "-S", str(repo_root), "-B", str(build_dir),
+                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", "-DCMAKE_BUILD_TYPE=Debug"],
+                capture_output=True, text=True, timeout=120, cwd=str(repo_root),
+            )
+            cc = build_dir / "compile_commands.json"
+            if cc.is_file():
+                return cc
+            print(
+                f"[promefuzz-companion] cmake completed rc={cp.returncode} but no compile_commands.json; stderr={cp.stderr[:200]!r}",
+                flush=True,
+            )
+        except subprocess.TimeoutExpired:
+            print("[promefuzz-companion] cmake timed out after 120s", flush=True)
+        except Exception as e:
+            print(f"[promefuzz-companion] cmake failed: {e}", flush=True)
+        # We created build_dir but cmake did not produce compile_commands.json; clean up so
+        # future _compile_commands_path lookups aren't misled by stale half-built state.
+        if not build_dir_preexisted:
+            shutil.rmtree(build_dir, ignore_errors=True)
+    makefile = repo_root / "Makefile"
+    if makefile.is_file() and shutil.which("bear"):
+        try:
+            cp = subprocess.run(
+                ["bear", "--", "make", "-C", str(repo_root)],
+                capture_output=True, text=True, timeout=120,
+            )
+            cc = repo_root / "compile_commands.json"
+            if cc.is_file():
+                return cc
+            print(
+                f"[promefuzz-companion] bear/make completed rc={cp.returncode} but no compile_commands.json; stderr={cp.stderr[:200]!r}",
+                flush=True,
+            )
+        except subprocess.TimeoutExpired:
+            print("[promefuzz-companion] bear/make timed out after 120s", flush=True)
+        except Exception as e:
+            print(f"[promefuzz-companion] bear/make failed: {e}", flush=True)
+    return None
+
+
 def _promefuzz_available() -> bool:
     root = Path(str(os.environ.get("SHERPA_PROMEFUZZ_MCP_ROOT") or "/app/promefuzz-mcp")).expanduser()
     return root.is_dir()
@@ -322,6 +374,8 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
 
     source_paths = [repo_root / "src"] if (repo_root / "src").is_dir() else [repo_root]
     compile_commands = _compile_commands_path(repo_root)
+    if not compile_commands:
+        compile_commands = _try_generate_compile_commands(repo_root)
     preprocessor = ASTPreprocessor(source_paths=source_paths, compile_commands_path=compile_commands)
     source_file_count = len(preprocessor.source_files)
     result["source_file_count"] = source_file_count
