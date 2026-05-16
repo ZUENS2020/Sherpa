@@ -56,6 +56,7 @@ _RECOVERABLE_RUN_ERROR_KINDS = {
     "run_finalize_timeout",
     "run_resource_exhaustion",
     "dict_parse_error",
+    "run_stalled_after_coverage",
 }
 
 _FATAL_RUN_ERROR_KINDS = {
@@ -12872,6 +12873,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if not crash_candidates and not run_last_error:
             no_progress_fuzzers: list[str] = []
             seed_rejected_fuzzers: list[str] = []
+            stalled_after_cov_fuzzers: list[str] = []
             for detail in run_details:
                 if bool(detail.get("crash_found")):
                     continue
@@ -12894,6 +12896,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     seed_rejected_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
                 if final_execs <= 0 and warned_no_progress:
                     no_progress_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
+                if warned_no_progress and final_execs > 0 and (final_cov > 0 or final_ft > 0):
+                    stalled_after_cov_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
             if seed_rejected_fuzzers:
                 run_error_kind = "run_seed_rejected"
                 joined = ", ".join(seed_rejected_fuzzers[:5])
@@ -12908,6 +12912,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     run_last_error = (
                         "fuzzer run made no measurable progress "
                         f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    )
+            if stalled_after_cov_fuzzers:
+                if not run_error_kind:
+                    run_error_kind = "run_stalled_after_coverage"
+                    joined = ", ".join(stalled_after_cov_fuzzers[:5])
+                    run_last_error = (
+                        "fuzzer stalled after finding initial coverage "
+                        f"(exec/s=0 with cov>0 but no further progress): {joined}"
                     )
 
         # Auto-repair corrupted dict files on dict_parse_error so next build

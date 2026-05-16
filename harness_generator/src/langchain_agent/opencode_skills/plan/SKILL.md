@@ -49,6 +49,7 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
 - Rank runtime-executable/public targets first. Prefer functions declared in public headers (`include/`, `lib/`, `src/*.h`). Internal/static functions (`static` keyword, file-local scope) require `api_surface_exception` with `vuln_likelihood >= 0.75`.
 - Deprioritize functions in `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories.
+- Deprioritize format-gated entry points (e.g., image decoders with strict header checks like PNM/PNG) that reject nearly all fuzzer mutations at the format-validation gate. Prefer raw-buffer consumers. Only select a format-gated entry when coverage feedback from a prior run confirms the fuzzer passes the gate.
 - Deprioritize cleanup/lifecycle functions whose name matches `Delete`, `Dealloc`, `Deallocate`, `Free`, `Destroy`, `Cleanup`, `Release`, `Dispose`, `Close`, `Uninit`. These are resource management, not attack surface. Only select when `vuln_likelihood >= 0.75` with crash evidence from production builds.
   Check the `file`/`source_hint` field.  Prefer public API equivalents from `lib/` or `src/` instead.
   Only select a deprecated-path target when no public alternative exists; mark it with `api_surface_exception` and `vuln_likelihood` ≤ 0.3.
