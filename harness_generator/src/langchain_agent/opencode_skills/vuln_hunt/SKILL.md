@@ -39,6 +39,15 @@ Use this skill in the internal hunt subphase before `plan` materializes `selecte
 - Do not promote candidates from `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories to high priority.
   Mark such candidates with `validation_status=degraded_test_code` (test/demo) or `validation_status=deprecated` (deprecated/legacy).
   Only raise their priority when crash evidence from a production build confirms reachability.
+- Do not promote candidates whose target function name indicates cleanup / resource management.
+  Mark with `validation_status=degraded_cleanup` when the function name matches:
+  `Delete`, `Dealloc`, `Deallocate`, `Free`, `Destroy`, `Cleanup`, `Release`, `Dispose`, `Close`, `Uninit`.
+  These are lifecycle helpers, not exploitable attack surface. Override only when crash evidence
+  from production builds confirms a real vulnerability.
+- Do not promote candidates whose target function name matches generic test-helper patterns:
+  `MyRead`, `MyWrite`, `ReadFunc`, `WriteFunc`, `HelperFunc`, `TestFunc`, `Dummy*`, `Fake*`.
+  Mark with `validation_status=degraded_test_helper`. When a candidate is found in a test/ directory
+  AND the name matches a test-helper pattern, prefer `degraded_test_code`.
 - Do not change `workflow_context`, `selected_targets.json`, or `execution_plan.json`.
 - Evidence references should point to `analysis_evidence.security_evidence[].evidence_id` when available.
 - Do not reclassify `target_type` or `seed_profile`; those are normalized by the coordinator.

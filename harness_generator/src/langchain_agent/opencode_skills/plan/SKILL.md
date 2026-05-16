@@ -41,13 +41,15 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 7. Write concise implementation guidance into `fuzz/PLAN.md`.
 
 ## Constraints
-- In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
+- In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`, `risk_type`.
+- `risk_type` must be carried forward from `fuzz/vuln_candidates.json` when a candidate is selected. Valid values: `mem_oob_candidate`, `integer_overflow_candidate`, `use_after_free_candidate`, `null_deref_candidate`, `type_confusion_candidate`. If no candidate maps, use `none`.
 - Treat `fuzz/targets.json` as advisory candidate input. The coordinator will normalize target identity, seed profile, and execution metadata before writing `fuzz/selected_targets.json`.
 - `api` must describe an API identifier, not a harness path.
 - Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
-- Rank runtime-executable/public targets first.
+- Rank runtime-executable/public targets first. Prefer functions declared in public headers (`include/`, `lib/`, `src/*.h`). Internal/static functions (`static` keyword, file-local scope) require `api_surface_exception` with `vuln_likelihood >= 0.75`.
 - Deprioritize functions in `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories.
+- Deprioritize cleanup/lifecycle functions whose name matches `Delete`, `Dealloc`, `Deallocate`, `Free`, `Destroy`, `Cleanup`, `Release`, `Dispose`, `Close`, `Uninit`. These are resource management, not attack surface. Only select when `vuln_likelihood >= 0.75` with crash evidence from production builds.
   Check the `file`/`source_hint` field.  Prefer public API equivalents from `lib/` or `src/` instead.
   Only select a deprecated-path target when no public alternative exists; mark it with `api_surface_exception` and `vuln_likelihood` ≤ 0.3.
 - Keep vulnerability candidates primary; coverage/complexity are secondary references.

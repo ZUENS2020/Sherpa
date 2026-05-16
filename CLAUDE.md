@@ -121,9 +121,9 @@ run → crash-triage
 ## Session State
 
 <!-- SESSION-START -->
-last_session: 2026-05-15
-last_deploy: b5784efc1 — CK2 idle timeout fix (vuln_hunt 1800s, plan 1200s)
-active_jobs: cJSON (7e3fe1bc), uriparser (9fd5d884), libwebp (d3ae0b32)
+last_session: 2026-05-16
+last_deploy: 6b3626b31 — self-evolving docs (journal, habits, auto sections)
+active_jobs: cJSON (d0b0cb5c), uriparser (3c3c2c8e), libwebp (3504b418) — all in analysis
 <!-- SESSION-END -->
 
 ## Key Env Vars
