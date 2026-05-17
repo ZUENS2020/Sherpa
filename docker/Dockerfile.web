@@ -144,10 +144,10 @@ RUN set -e; \
     kubectl version --client --output=yaml >/dev/null
 
 COPY docker/requirements.web.txt /app/docker/requirements.web.txt
-RUN python -m pip install -r /app/docker/requirements.web.txt
+RUN python -m pip install --timeout 120 --retries 5 -r /app/docker/requirements.web.txt
 
 COPY . /app
-RUN python -m pip install -e /app/promefuzz-mcp
+RUN python -m pip install --timeout 120 --retries 5 -e /app/promefuzz-mcp
 RUN set -e; \
     cd /app/promefuzz-mcp; \
     python -m promefuzz_mcp.server build; \
