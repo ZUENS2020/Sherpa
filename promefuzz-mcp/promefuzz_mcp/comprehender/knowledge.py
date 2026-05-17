@@ -8,6 +8,7 @@ import json
 import math
 import re
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -152,6 +153,9 @@ class KnowledgeBase:
         self.rag_degraded_reason = str(metadata.get("rag_degraded_reason") or "")
         self.initialized = True
         self.cache_loaded = True
+        if self.rag_degraded and self.chunks and not self.chunk_vectors:
+            self._build_chunk_embeddings()
+            self._persist_metadata()
         return True
 
     @staticmethod
@@ -183,27 +187,36 @@ class KnowledgeBase:
         if not key:
             raise RuntimeError("openrouter_embedding_key_missing")
         payload = {"model": model, "input": texts}
-        req = urllib.request.Request(
-            _OPENROUTER_EMBEDDING_URL,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            body = ""
+        last_err: str | None = None
+        for attempt in range(3):
+            req = urllib.request.Request(
+                _OPENROUTER_EMBEDDING_URL,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+            )
             try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = str(e)
-            raise RuntimeError(f"openrouter_embedding_http_error:{e.code}:{body[:240]}") from e
-        except Exception as e:
-            raise RuntimeError(f"openrouter_embedding_request_failed:{e}") from e
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = str(e)
+                raise RuntimeError(f"openrouter_embedding_http_error:{e.code}:{body[:240]}") from e
+            except Exception as e:
+                last_err = f"openrouter_embedding_request_failed:{e}"
+                if attempt < 2:
+                    logger.warning(f"embedding attempt {attempt + 1}/3 failed: {e}; retrying...")
+                    time.sleep(2.0 * (attempt + 1))
+                continue
+            break
+        else:
+            raise RuntimeError(last_err or "openrouter_embedding_request_failed")
         try:
             parsed = json.loads(body)
         except Exception as e:
@@ -407,6 +420,46 @@ class KnowledgeBase:
             encoding="utf-8",
         )
         return True, self.output_path
+
+    def _persist_metadata(self) -> None:
+        if not self._metadata_file.parent.exists():
+            return
+        self._metadata_file.write_text(
+            json.dumps(
+                {
+                    "document_count": len(self.documents),
+                    "chunk_count": len(self.chunks),
+                    "embedding_model": self.embedding_model,
+                    "embedding_provider": self.embedding_provider,
+                    "embedding_model_used": self.embedding_model_used,
+                    "embedding_ok": self.embedding_ok,
+                    "rag_degraded": self.rag_degraded,
+                    "rag_degraded_reason": self.rag_degraded_reason,
+                    "documents": [
+                        {k: v for k, v in doc.items() if k != "text"}
+                        for doc in self.documents
+                        if isinstance(doc, dict)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._vectors_file.write_text(
+            json.dumps(
+                {
+                    "embedding_provider": self.embedding_provider,
+                    "embedding_model": self.embedding_model_used,
+                    "chunk_vectors": self.chunk_vectors,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _collect_documents(self) -> List[dict]:
         """Collect documents from specified paths."""
