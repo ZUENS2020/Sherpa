@@ -142,8 +142,9 @@ class ASTPreprocessor:
 
         all_meta: dict[str, Any] = {}
         self.invalid_meta_files = []
+        total = len(self.source_files)
 
-        for source_file in self.source_files:
+        for idx, source_file in enumerate(self.source_files):
             meta = self._process_file(source_file, preprocessor_bin)
             meta_payload = getattr(meta, "meta", None)
             if not isinstance(meta_payload, dict):
@@ -151,6 +152,8 @@ class ASTPreprocessor:
                 self.invalid_meta_files.append(str(source_file))
                 continue
             all_meta.update(meta_payload)
+            if (idx + 1) % 100 == 0 or (idx + 1) == total:
+                logger.info(f"AST preprocessing progress: {idx + 1}/{total} files ({int((idx + 1) / total * 100)}%)")
 
         # Persist to file
         final_meta = Meta(all_meta)
