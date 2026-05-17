@@ -199,7 +199,7 @@ class KnowledgeBase:
                 },
             )
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=30) as resp:
                     body = resp.read().decode("utf-8", errors="replace")
             except urllib.error.HTTPError as e:
                 body = ""
@@ -279,7 +279,7 @@ class KnowledgeBase:
             self.rag_degraded = True
             self.rag_degraded_reason = "no_chunks_for_embedding"
             return
-        batch_size = 16
+        batch_size = 128
         vectors: dict[str, list[float]] = {}
         try:
             for i in range(0, len(self.chunks), batch_size):
