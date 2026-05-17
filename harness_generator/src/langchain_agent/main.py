@@ -785,11 +785,13 @@ def _k8s_analysis_require_rag_ready() -> bool:
 
 
 def _k8s_analysis_rag_wait_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC", "120") or "").strip()
-    try:
-        return max(10, min(int(raw), 3600))
-    except (ValueError, TypeError):
-        return 120
+    env_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC") or "").strip()
+    if env_raw:
+        try:
+            return max(10, min(int(env_raw), 7200))
+        except (ValueError, TypeError):
+            pass
+    return 1800  # 30 min default; embedding with 4 workers finishes in 2-5 min typically
 
 
 def _analysis_companion_is_ready(status_doc: dict[str, object], *, require_rag: bool) -> bool:

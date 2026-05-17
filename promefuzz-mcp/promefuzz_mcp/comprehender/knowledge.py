@@ -12,6 +12,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, List, Tuple
@@ -20,6 +21,21 @@ try:
 except Exception:  # pragma: no cover - fallback for minimal test env
     import logging
     logger = logging.getLogger("promefuzz.knowledge")
+
+def _env_int(name: str, default: int, min_value: int = 0, max_value: int | None = None) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except (ValueError, TypeError):
+        return default
+    if v < min_value:
+        v = min_value
+    if max_value is not None and v > max_value:
+        v = max_value
+    return v
+
 
 _TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_:+./-]*")
 _DEFAULT_SUFFIXES = [".md", ".txt", ".rst", ".html", ".json", ".xml", ".yaml", ".yml", ".c", ".h", ".cc", ".cpp"]
@@ -282,21 +298,45 @@ class KnowledgeBase:
             self.rag_degraded_reason = "no_chunks_for_embedding"
             return
         batch_size = 128
+        workers = _env_int("SHERPA_EMBEDDING_CONCURRENCY", 4, min_value=1, max_value=8)
         vectors: dict[str, list[float]] = {}
+        failed_batches = 0
         try:
-            for i in range(0, len(self.chunks), batch_size):
-                batch = self.chunks[i:i + batch_size]
-                texts = [c.text for c in batch]
-                embs = self._embed_texts_openrouter(texts, model=model)
-                for c, emb in zip(batch, embs):
-                    vectors[c.chunk_id] = emb
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_batch: dict[Any, list[_Chunk]] = {}
+                for i in range(0, len(self.chunks), batch_size):
+                    batch = self.chunks[i:i + batch_size]
+                    texts = [c.text for c in batch]
+                    future = executor.submit(self._embed_texts_openrouter, texts, model=model)
+                    future_to_batch[future] = list(batch)
+                batch_total = len(future_to_batch)
+                batch_done = 0
+                for future in as_completed(future_to_batch):
+                    batch = future_to_batch[future]
+                    batch_done += 1
+                    try:
+                        embs = future.result(timeout=90)
+                        for c, emb in zip(batch, embs):
+                            vectors[c.chunk_id] = emb
+                    except Exception as e:
+                        failed_batches += 1
+                        chunk_ids = [c.chunk_id for c in batch]
+                        logger.warning(
+                            f"embedding batch {batch_done}/{batch_total} failed "
+                            f"(chunks={len(chunk_ids)}): {e}"
+                        )
+                if batch_done > 1:
+                    logger.info(
+                        f"embedding batches complete: {batch_done - failed_batches}/{batch_total} ok, "
+                        f"{failed_batches} failed, {len(vectors)}/{len(self.chunks)} chunks embedded"
+                    )
             self.chunk_vectors = vectors
             self.embedding_ok = bool(self.chunk_vectors)
             self.rag_degraded = not self.embedding_ok
             self.rag_degraded_reason = "" if self.embedding_ok else "embedding_empty_result"
         except Exception as e:
-            self.embedding_ok = False
-            self.chunk_vectors = {}
+            self.embedding_ok = bool(vectors)
+            self.chunk_vectors = vectors
             self.rag_degraded = True
             self.rag_degraded_reason = str(e)
             logger.warning(f"embedding degraded; fallback to lexical retrieval: {e}")
