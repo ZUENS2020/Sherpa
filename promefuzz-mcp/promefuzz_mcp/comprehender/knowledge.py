@@ -8,6 +8,7 @@ import json
 import math
 import re
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -188,6 +189,7 @@ class KnowledgeBase:
             raise RuntimeError("openrouter_embedding_key_missing")
         payload = {"model": model, "input": texts}
         last_err: str | None = None
+        socket.setdefaulttimeout(30)
         for attempt in range(3):
             req = urllib.request.Request(
                 _OPENROUTER_EMBEDDING_URL,
