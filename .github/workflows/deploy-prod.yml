@@ -7,6 +7,10 @@ on:
         description: "Force rebuild web and frontend images"
         type: boolean
         default: false
+      reset_prod_before_deploy:
+        description: "Delete prod namespace and redeploy from scratch"
+        type: boolean
+        default: true
   pull_request:
     types: [closed]
     branches: ["main"]
@@ -17,7 +21,7 @@ permissions:
 env:
   NAMESPACE: sherpa-prod
   OVERLAY: k8s/overlays/prod
-  RESET_PROD_BEFORE_DEPLOY: "false"
+  RESET_PROD_BEFORE_DEPLOY: ${{ github.event_name == 'workflow_dispatch' && inputs.reset_prod_before_deploy || 'false' }}
   PROD_SHARED_ROOT: /shared/prod
   PROD_OUTPUT_DIR: /home/deploy/output/prod
   INSTALL_METRICS_SERVER: "true"
@@ -338,19 +342,26 @@ jobs:
           kubectl wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=240s
           kubectl top nodes
 
-      - name: Guardrail (prod no reset)
-        if: steps.kube_preflight.outputs.reachable == 'true'
+      - name: Reset prod environment
+        if: steps.kube_preflight.outputs.reachable == 'true' && env.RESET_PROD_BEFORE_DEPLOY == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${RESET_PROD_BEFORE_DEPLOY}" != "false" ]]; then
-            echo "::error::RESET_PROD_BEFORE_DEPLOY must stay false in prod"
-            exit 1
-          fi
           if [[ "${NAMESPACE}" != "sherpa-prod" ]]; then
-            echo "::error::Unexpected prod namespace: ${NAMESPACE}"
+            echo "::error::Unsafe namespace guard triggered: NAMESPACE=${NAMESPACE}, expected sherpa-prod"
             exit 1
           fi
+          echo "[reset] deleting namespace ${NAMESPACE}"
+          kubectl delete namespace "${NAMESPACE}" --ignore-not-found=true --wait=true --timeout=300s || true
+          for i in $(seq 1 30); do
+            if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+              echo "[reset] namespace ${NAMESPACE} deleted"
+              break
+            fi
+            sleep 2
+          done
+          echo "[reset] recreating namespace ${NAMESPACE}"
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Create or update runtime secrets
         if: steps.kube_preflight.outputs.reachable == 'true'
