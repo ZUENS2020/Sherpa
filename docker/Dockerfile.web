@@ -150,7 +150,12 @@ COPY docker/requirements.web.txt /app/docker/requirements.web.txt
 RUN python -m pip install --timeout 300 --retries 10 -r /app/docker/requirements.web.txt
 
 COPY . /app
-RUN python -m pip install --timeout 300 --retries 10 -e /app/promefuzz-mcp
+# Retry loop: pip install of promefuzz-mcp may fail on slow CN→PyPI connections
+RUN set -e; for i in 1 2 3 4 5; do \
+      python -m pip install --timeout 600 --retries 15 -e /app/promefuzz-mcp && exit 0; \
+      echo "pip install promefuzz-mcp attempt $i failed, retrying..."; \
+      sleep 5; \
+    done; echo "pip install promefuzz-mcp FAILED after 5 attempts"; exit 1
 RUN set -e; \
     cd /app/promefuzz-mcp; \
     python -m promefuzz_mcp.server build; \
