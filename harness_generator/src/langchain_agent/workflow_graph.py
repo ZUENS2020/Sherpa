@@ -8776,20 +8776,26 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     selected_target_api = str(state.get("selected_target_api") or "").strip()
     selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
     selected_target_doc = _load_selected_targets_doc(gen.repo_root)
-    # Overwrite targets.json with only must_run targets so the synthesize
+    # Overwrite targets.json with only selected targets so the synthesize
     # agent generates harnesses for the correct execution targets.
-    if selected_target_doc and _vuln_hunting_enabled():
-        _must_run = [t for t in selected_target_doc if bool(t.get("must_run") or False)]
-        if _must_run:
-            _filtered_targets_path = gen.repo_root / "fuzz" / "targets.json"
-            _filtered_targets_path.parent.mkdir(parents=True, exist_ok=True)
-            _filtered_targets_path.write_text(
-                json.dumps(_must_run, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-    # Ensure selected_targets.json exists even if plan failed to write it.
-    # Rebuild from targets.json if the file is missing.
-    if not selected_target_doc:
+    if selected_target_doc:
+        if _vuln_hunting_enabled():
+            _must_run = [t for t in selected_target_doc if bool(t.get("must_run") or False)]
+            _filtered = _must_run if _must_run else selected_target_doc
+        else:
+            _filtered = selected_target_doc
+        _filtered_targets_path = gen.repo_root / "fuzz" / "targets.json"
+        _filtered_targets_path.parent.mkdir(parents=True, exist_ok=True)
+        _filtered_targets_path.write_text(
+            json.dumps(_filtered, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    # Sync execution_plan.json from selected_targets.json before AI runs
+    # so the agent sees a consistent contract. Also rebuild selected_targets
+    # from targets.json if the file is missing.
+    if selected_target_doc:
+        _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+    else:
         _targets_doc = _load_targets_doc(gen.repo_root)
         if _targets_doc:
             selected_target_doc = _targets_doc
