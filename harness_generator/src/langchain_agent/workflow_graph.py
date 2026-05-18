@@ -4744,12 +4744,23 @@ def _validate_execution_plan_harness_consistency(
     execution_plan_doc: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     doc = _build_harness_index_doc(repo_root, execution_plan_doc=execution_plan_doc)
-    missing_targets = [str(x).strip() for x in list(doc.get("missing_targets") or []) if str(x).strip()]
-    if missing_targets:
+    missing_all = [str(x).strip() for x in list(doc.get("missing_targets") or []) if str(x).strip()]
+    if not missing_all:
+        return True, "", doc
+    # Only fail if must_run targets are missing; extra harnesses are harmless.
+    ep = dict(execution_plan_doc or _load_execution_plan_doc(repo_root))
+    must_run_names: set[str] = set()
+    for t in ep.get("execution_targets") or []:
+        if isinstance(t, dict) and t.get("must_run"):
+            name = str(t.get("target_name") or t.get("expected_fuzzer_name") or "").strip()
+            if name:
+                must_run_names.add(name)
+    must_run_missing = [n for n in missing_all if n in must_run_names]
+    if must_run_missing:
         extras = [str(x).strip() for x in list(doc.get("extra_harnesses") or []) if str(x).strip()]
         msg = (
-            "execution_plan_harness_mismatch: missing harness source for targets="
-            + ",".join(missing_targets)
+            "execution_plan_harness_mismatch: missing harness source for must_run targets="
+            + ",".join(must_run_missing)
             + (f"; extra_harnesses={','.join(extras[:8])}" if extras else "")
         )
         return False, msg, doc
