@@ -28,6 +28,7 @@ Use this skill in the primary `synthesize` stage after `plan`.
   - semantic (if enabled): `init_knowledge_base`, `retrieve_documents`, `comprehend_*`
 
 ## Required outputs
+- **CRITICAL**: Only generate harness source files for targets listed in `fuzz/targets.json`. Do NOT generate harnesses for arbitrary targets not in this file. Extra harnesses will be rejected by the execution plan validation.
 - at least one harness source file under `fuzz/` (`*.c`, `*.cc`, `*.cpp`, `*.cxx`, or `*.java`) before docs/json completion
 - `fuzz/build.py` or `fuzz/build.sh`
 - `fuzz/README.md`
