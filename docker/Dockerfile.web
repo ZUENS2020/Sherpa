@@ -5,7 +5,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
-    PIP_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn" \
+    PIP_EXTRA_INDEX_URL="https://pypi.org/simple" \
+    PIP_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn pypi.org files.pythonhosted.org" \
+    PIP_RETRIES=10 \
+    PIP_TIMEOUT=300 \
     NPM_CONFIG_REGISTRY="https://registry.npmmirror.com" \
     DEBIAN_FRONTEND=noninteractive
 
@@ -144,10 +147,15 @@ RUN set -e; \
     kubectl version --client --output=yaml >/dev/null
 
 COPY docker/requirements.web.txt /app/docker/requirements.web.txt
-RUN python -m pip install -r /app/docker/requirements.web.txt
+RUN python -m pip install --timeout 300 --retries 10 -r /app/docker/requirements.web.txt
 
 COPY . /app
-RUN python -m pip install -e /app/promefuzz-mcp
+# Retry loop: pip install of promefuzz-mcp may fail on slow CN→PyPI connections
+RUN set -e; for i in 1 2 3 4 5; do \
+      python -m pip install --timeout 600 --retries 15 -e /app/promefuzz-mcp && exit 0; \
+      echo "pip install promefuzz-mcp attempt $i failed, retrying..."; \
+      sleep 5; \
+    done; echo "pip install promefuzz-mcp FAILED after 5 attempts"; exit 1
 RUN set -e; \
     cd /app/promefuzz-mcp; \
     python -m promefuzz_mcp.server build; \
@@ -165,8 +173,8 @@ RUN set -e; \
 #   --build-arg INSTALL_OPENCODE=0
 ARG INSTALL_OPENCODE=1
 ARG NODE_VERSION="20.11.1"
-ARG NODE_MIRROR="https://npmmirror.com/mirrors/node"
-ARG NPM_REGISTRY_CANDIDATES="https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm https://registry.npmjs.org"
+ARG NODE_MIRROR_CANDIDATES="https://nodejs.org/dist https://npmmirror.com/mirrors/node"
+ARG NPM_REGISTRY_CANDIDATES="https://registry.npmjs.org https://registry.npmmirror.com https://mirrors.cloud.tencent.com/npm https://mirrors.huaweicloud.com/repository/npm"
 ARG TARGETARCH
 RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing Node.js (for CLI tools)..."; \
@@ -176,47 +184,73 @@ RUN if [ "$INSTALL_OPENCODE" = "1" ]; then \
                 arm64|aarch64) node_arch="arm64" ;; \
                 *) echo "Unsupported architecture for Node.js: $arch" >&2; exit 1 ;; \
             esac; \
-            curl -fsSL "$NODE_MIRROR/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" -o /tmp/node.tar.xz; \
+            node_download_ok=""; \
+            for base in $NODE_MIRROR_CANDIDATES; do \
+              echo "[node] trying mirror: $base"; \
+              rm -f /tmp/node.tar.xz; \
+              if curl --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 180 \
+                --connect-timeout 10 --max-time 90 --speed-time 20 --speed-limit 32768 \
+                -fsSL "$base/v$NODE_VERSION/node-v$NODE_VERSION-linux-$node_arch.tar.xz" -o /tmp/node.tar.xz; then \
+                node_download_ok="1"; \
+                echo "[node] selected mirror: $base"; \
+                break; \
+              fi; \
+              echo "[node] mirror failed: $base"; \
+            done; \
+            if [ -z "$node_download_ok" ]; then \
+              echo "[node] failed to download Node.js v$NODE_VERSION for $node_arch from all mirrors" >&2; \
+              exit 1; \
+            fi; \
             tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
             rm -f /tmp/node.tar.xz; \
             npm --version; node --version; \
         fi \
     && if [ "$INSTALL_OPENCODE" = "1" ]; then \
             echo "Installing OpenCode CLI..."; \
-            selected=""; \
-            for r in $NPM_REGISTRY_CANDIDATES; do \
-              echo "[npm] probing registry: $r"; \
-              if npm --fetch-timeout=12000 --loglevel=error --registry "$r" view lodash version >/dev/null 2>&1; then \
-                selected="$r"; \
-                echo "[npm] selected registry: $selected"; \
-                break; \
-              fi; \
-            done; \
-            if [ -z "$selected" ]; then \
-              selected="$NPM_CONFIG_REGISTRY"; \
-              echo "[npm] probe failed; fallback registry: $selected"; \
-            fi; \
-            npm config set registry "$selected"; \
             npm config set fetch-retries 5; \
             npm config set fetch-retry-factor 2; \
             npm config set fetch-retry-mintimeout 2000; \
             npm config set fetch-retry-maxtimeout 30000; \
             npm config set fetch-timeout 180000; \
-            ok=0; \
-            for attempt in 1 2 3; do \
-              echo "[npm] installing opencode-ai (attempt $attempt/3)"; \
-              if npm i -g --loglevel=info opencode-ai; then \
-                ok=1; \
-                echo "[npm] installed opencode-ai"; \
+            arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+            case "$arch" in \
+              amd64|x86_64) opencode_pkg="opencode-linux-x64" ;; \
+              arm64|aarch64) opencode_pkg="opencode-linux-arm64" ;; \
+              *) echo "Unsupported architecture for OpenCode: $arch" >&2; exit 1 ;; \
+            esac; \
+            selected=""; \
+            tarball_url=""; \
+            tmp_dir="$(mktemp -d)"; \
+            download_ok=""; \
+            for r in $NPM_REGISTRY_CANDIDATES; do \
+              echo "[npm] resolving ${opencode_pkg} via registry: $r"; \
+              candidate="$(npm --registry "$r" --fetch-timeout=12000 --loglevel=error view "$opencode_pkg" dist.tarball 2>/dev/null | tail -n 1 | tr -d '\"')"; \
+              if [ -z "$candidate" ]; then \
+                echo "[npm] registry $r missing $opencode_pkg, trying next"; \
+                continue; \
+              fi; \
+              echo "[npm] trying download from registry: $r"; \
+              rm -f "${tmp_dir}/opencode.tgz"; \
+              if curl --retry 2 --retry-delay 2 --retry-all-errors --retry-max-time 240 \
+                --connect-timeout 10 --max-time 90 --speed-time 20 --speed-limit 32768 \
+                -fL "$candidate" -o "${tmp_dir}/opencode.tgz"; then \
+                selected="$r"; \
+                tarball_url="$candidate"; \
+                download_ok="1"; \
+                echo "[npm] selected registry: $selected"; \
                 break; \
               fi; \
-              echo "[npm] failed to install opencode-ai on attempt $attempt/3"; \
-              sleep $((attempt * 2)); \
+              echo "[npm] download failed from $r, trying next"; \
             done; \
-            if [ "$ok" -ne 1 ]; then \
-              echo "[npm] failed to install opencode-ai after retries"; \
+            if [ -z "$download_ok" ]; then \
+              echo "[npm] failed to download tarball for $opencode_pkg from any candidate registry"; \
+              rm -rf "${tmp_dir}"; \
               exit 1; \
             fi; \
+            npm config set registry "$selected"; \
+            tar -xzf "${tmp_dir}/opencode.tgz" -C "${tmp_dir}"; \
+            install -m 0755 "${tmp_dir}/package/bin/opencode" /usr/local/bin/opencode; \
+            rm -rf "${tmp_dir}"; \
             opencode --version || true; \
         else \
             echo "Skipping OpenCode CLI install"; \

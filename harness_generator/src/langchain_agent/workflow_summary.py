@@ -149,6 +149,25 @@ def _build_fuzz_performance(run_details: list[dict[str, Any]], out: dict[str, An
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
         "coverage_source_report": dict(out.get("coverage_source_report") or {}),
+        "coverage_run_feedback_path": str(out.get("coverage_run_feedback_path") or ""),
+        "coverage_run_feedback_summary": dict(out.get("coverage_run_feedback_summary") or {}),
+        "coverage_per_input_manifest_path": str(out.get("coverage_per_input_manifest_path") or ""),
+        "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),
+        "coverage_replay_runtime_sec": float(out.get("coverage_replay_runtime_sec") or 0.0),
+        "coverage_replay_binary_hash": str(out.get("coverage_replay_binary_hash") or ""),
+        "coverage_replay_binary_dir": str(out.get("coverage_replay_binary_dir") or ""),
+        "coverage_replay_binary_count": int(out.get("coverage_replay_binary_count") or 0),
+        "coverage_replay_stage_success": bool(out.get("coverage_replay_stage_success") or False),
+        "coverage_replay_error": str(out.get("coverage_replay_error") or ""),
+        "coverage_replay_manifest_fresh_for_current_binary": bool(
+            out.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        ),
+        "coverage_replay_queue_drained": bool(out.get("coverage_replay_queue_drained") or False),
+        "coverage_replay_pending_inputs": int(out.get("coverage_replay_pending_inputs") or 0),
+        "coverage_replay_failed_inputs": int(out.get("coverage_replay_failed_inputs") or 0),
+        "coverage_replay_processed_inputs": int(out.get("coverage_replay_processed_inputs") or 0),
+        "coverage_replay_total_inputs": int(out.get("coverage_replay_total_inputs") or 0),
     }
 
 
@@ -269,6 +288,11 @@ def write_run_summary(out: dict[str, Any]) -> None:
         "crash_signature_dedup_hit": bool(out.get("crash_signature_dedup_hit") or False),
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
+        "coverage_source_report": dict(out.get("coverage_source_report") or {}),
+        "coverage_run_feedback_path": str(out.get("coverage_run_feedback_path") or ""),
+        "coverage_run_feedback_summary": dict(out.get("coverage_run_feedback_summary") or {}),
+        "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),
         "fix_patch_path": out.get("fix_patch_path") or "",
         "fix_patch_files": out.get("fix_patch_files") or [],
         "fix_patch_bytes": out.get("fix_patch_bytes") or 0,
@@ -545,6 +569,11 @@ def write_run_summary(out: dict[str, Any]) -> None:
             "crash_evidence": data.get("crash_evidence"),
             "run_details": run_details,
             "fuzz_inventory": fuzz_inventory,
+            "coverage_source_report": dict(data.get("coverage_source_report") or {}),
+            "coverage_run_feedback_path": str(data.get("coverage_run_feedback_path") or ""),
+            "coverage_run_feedback_summary": dict(data.get("coverage_run_feedback_summary") or {}),
+            "coverage_frontier_path": str(data.get("coverage_frontier_path") or ""),
+            "coverage_frontier_summary": dict(data.get("coverage_frontier_summary") or {}),
             "timestamp": data.get("timestamp"),
         }
         try:

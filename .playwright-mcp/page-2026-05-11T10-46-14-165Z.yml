@@ -1,0 +1,113 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: TH
+        - generic [ref=e8]:
+          - paragraph [ref=e9]: XDU TianHeng Lab
+          - generic [ref=e10]: Industrial vulnerability hunting console
+      - generic [ref=e11]:
+        - link "MONITOR / 监控台" [ref=e12] [cursor=pointer]:
+          - /url: /
+        - link "RUN / 跑任务" [ref=e13] [cursor=pointer]:
+          - /url: /run
+    - generic [ref=e15]:
+      - generic [ref=e16]:
+        - paragraph [ref=e17]: Run / Controlled launch
+        - heading "TianHeng 任务发起" [level=4] [ref=e18]
+        - paragraph [ref=e19]: 面向操作员提交新仓库和调整执行预算。页面只处理配置与启动动作；提交后可切回监控台观察阶段、日志和漏洞候选。
+      - generic [ref=e20]:
+        - paragraph [ref=e21]: CONTROLLED INPUT
+        - paragraph [ref=e22]: AUDITABLE LAUNCH
+    - generic [ref=e23]:
+      - generic [ref=e27]:
+        - generic [ref=e28]:
+          - paragraph [ref=e29]: Launch Parameters
+          - heading "任务发起与预算" [level=6] [ref=e30]
+          - paragraph [ref=e31]: 这里是唯一允许提交新任务的页面。参数保存和任务提交分开执行，便于值班环境审计。
+        - progressbar [ref=e33]:
+          - img [ref=e34]
+        - generic [ref=e36]:
+          - generic: 目标仓库 URL
+          - generic [ref=e37]:
+            - textbox "目标仓库 URL" [ref=e38]:
+              - /placeholder: https://github.com/madler/zlib.git
+            - group:
+              - generic: 目标仓库 URL
+        - generic [ref=e39]:
+          - generic [ref=e40]:
+            - generic [ref=e41]:
+              - generic [ref=e42]: 任务总预算(秒)
+              - generic [ref=e43]:
+                - spinbutton "任务总预算(秒)" [ref=e44]: "900"
+                - group:
+                  - generic: 任务总预算(秒)
+            - generic [ref=e45] [cursor=pointer]:
+              - switch "不限时" [ref=e48]
+              - generic [ref=e51]: 不限时
+          - generic [ref=e52]:
+            - generic [ref=e53]:
+              - generic [ref=e54]: 单轮 run 预算(秒)
+              - generic [ref=e55]:
+                - spinbutton "单轮 run 预算(秒)" [ref=e56]: "900"
+                - group:
+                  - generic: 单轮 run 预算(秒)
+            - generic [ref=e57] [cursor=pointer]:
+              - switch "不限时" [ref=e60]
+              - generic [ref=e63]: 不限时
+        - generic [ref=e64]:
+          - generic [ref=e65]: Max Tokens
+          - generic [ref=e66]:
+            - spinbutton "Max Tokens" [ref=e67]: "0"
+            - group:
+              - generic: Max Tokens
+        - generic [ref=e68]:
+          - generic [ref=e69]: 不限时时单轮保护上限(秒)
+          - generic [ref=e70]:
+            - spinbutton "不限时时单轮保护上限(秒)" [ref=e71]: "7200"
+            - group:
+              - generic: 不限时时单轮保护上限(秒)
+          - paragraph [ref=e72]: 0 表示完全不限时；建议默认 7200（2小时）
+        - generic [ref=e73]:
+          - generic [ref=e74]: 覆盖停滞判定窗口(秒)
+          - generic [ref=e75]:
+            - spinbutton "覆盖停滞判定窗口(秒)" [ref=e76]: "600"
+            - group:
+              - generic: 覆盖停滞判定窗口(秒)
+          - paragraph [ref=e77]: 平台期判定间隔，范围 30-86400 秒（默认 600）
+        - generic [ref=e78]:
+          - button "保存参数" [disabled]
+          - button "发起任务" [ref=e79] [cursor=pointer]
+      - generic [ref=e81]:
+        - generic [ref=e84]:
+          - generic [ref=e85]:
+            - heading "TianHeng 任务总览" [level=6] [ref=e86]
+            - generic [ref=e88]: 离线
+          - generic [ref=e89]:
+            - paragraph [ref=e90]: 总任务：0
+            - paragraph [ref=e91]: 排队：0
+            - paragraph [ref=e92]: 运行中：0
+            - paragraph [ref=e93]: 成功：0
+            - paragraph [ref=e94]: 失败：0
+          - generic [ref=e95]:
+            - generic [ref=e97]: 漏洞导向：未开启
+            - generic [ref=e99]: 分析候选：0
+            - generic [ref=e101]: Crash 候选：0
+          - generic [ref=e102]: 服务时间：-- | Uptime：--
+        - generic [ref=e104]:
+          - heading "工业操作约束" [level=6] [ref=e105]
+          - paragraph [ref=e106]: 任务发起页只暴露仓库地址、总预算、单轮预算和平台期窗口。验证阶段仍由后端控制，run/repro 不引入 AI 判定，避免执行结果被策略层污染。
+          - generic [ref=e107]:
+            - generic [ref=e108]:
+              - paragraph [ref=e109]: "01"
+              - heading "输入收口" [level=6] [ref=e110]
+              - generic [ref=e111]: 仓库 URL 与预算集中填写，避免监控页误提交。
+            - generic [ref=e112]:
+              - paragraph [ref=e113]: "02"
+              - heading "执行隔离" [level=6] [ref=e114]
+              - generic [ref=e115]: 配置保存与任务提交显式分离，可审计、可回滚。
+            - generic [ref=e116]:
+              - paragraph [ref=e117]: "03"
+              - heading "监控分流" [level=6] [ref=e118]
+              - generic [ref=e119]: 提交成功后记录 active task，监控台自动跟踪。
+  - alert [ref=e120]

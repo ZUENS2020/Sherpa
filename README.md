@@ -1,18 +1,18 @@
 <p align="center">
-  <img src="./assets/banner.svg" alt="Sherpa Banner" width="100%" />
+  <img src="./assets/banner.svg" alt="TianHeng Banner" width="100%" />
 </p>
 
-# Sherpa
+# TianHeng
 
-Sherpa 是一个面向公开仓库的 fuzz 编排系统。它解决的不是“单次生成一个 harness”这一个动作，而是把一个仓库的 fuzz 工作拆成可恢复、可观测、可复现的阶段闭环。
+TianHeng 是一个面向公开仓库的 fuzz 编排系统。它解决的不是“单次生成一个 harness”这一个动作，而是把一个仓库的 fuzz 工作拆成可恢复、可观测、可复现的阶段闭环。
 
-Sherpa 当前关注的是完整流程：
+TianHeng 当前关注的是完整流程：
 
 - 选目标
 - 产脚手架
-- 构建
-- 运行
-- 覆盖率改进
+- 构建（含自动 coverage 插桩注入）
+- 运行（libFuzzer + `-fsanitize-coverage`）
+- 覆盖率改进（per-input replay + frontier 分析）
 - 崩溃分诊
 - 崩溃复现与分析
 
@@ -34,11 +34,13 @@ flowchart LR
 - 控制面：[`harness_generator/src/langchain_agent/main.py`](harness_generator/src/langchain_agent/main.py)
 - 工作流状态机：[`harness_generator/src/langchain_agent/workflow_graph.py`](harness_generator/src/langchain_agent/workflow_graph.py)
 - 执行原语：[`harness_generator/src/fuzz_unharnessed_repo.py`](harness_generator/src/fuzz_unharnessed_repo.py)
+- 覆盖率回放：[`harness_generator/src/langchain_agent/coverage_replay.py`](harness_generator/src/langchain_agent/coverage_replay.py)
 - 阶段级 AI 契约：[`harness_generator/src/langchain_agent/opencode_skills/`](harness_generator/src/langchain_agent/opencode_skills/)
+- 前端：[`frontend-next/`](frontend-next/)（Next.js 14 + MUI + TanStack Query）
 
 ## 当前主工作流
 
-Sherpa 的主线可以按三条闭环理解：
+TianHeng 的主线可以按三条闭环理解：
 
 ```mermaid
 flowchart TD
@@ -48,7 +50,8 @@ flowchart TD
   BUILD --> RUN["run"]
 
   RUN --> CA["coverage-analysis"]
-  CA --> IH["improve-harness"]
+  CA --> RP["per-input-replay"]
+  RP --> IH["improve-harness"]
   IH --> BUILD
   IH --> PLAN
 
@@ -65,9 +68,10 @@ flowchart TD
 
 - `plan`：生成目标规划、执行意图和目标元数据。
 - `synthesize`：在 `fuzz/` 下生成可构建脚手架。
-- `build`：编译脚手架并校验目标覆盖是否真的落地。
+- `build`：编译脚手架并自动注入 `-fsanitize-coverage=trace-pc-guard,inline-8bit-counters`，校验目标覆盖是否真的落地。
 - `run`：初始化种子、执行 fuzzer、采集 coverage / execs / crash 信号。
 - `coverage-analysis`：判断是继续原地改进还是重新规划。
+- `per-input-replay`：用 replay 二进制逐种子回放，通过 `llvm-cov export` 导出源级覆盖，生成 frontier summary 喂给 AI。
 - `improve-harness`：在不切换目标的前提下提升当前目标表现。
 - `crash-triage`：把候选 crash 分成 harness 问题、上游问题或不确定。
 - `fix-harness`：只修 harness 侧缺陷。
@@ -77,6 +81,8 @@ flowchart TD
 补充（当前实现口径）：
 
 - plateau 检测窗口固定为 30 秒（`idle_no_growth=30s`）。
+- OpenCode agent 空闲超时默认 600 秒（`SHERPA_OPENCODE_IDLE_TIMEOUT_SEC=600`），适配 deepseek-reasoner 长推理时间。
+- build 阶段自动注入 `-fsanitize-coverage` 标志到 `build.py`，确保 libFuzzer 覆盖率反馈可用。
 - `run_no_progress`、`run_timeout`、`run_idle_timeout`、`run_finalize_timeout`、`run_resource_exhaustion` 属于可恢复 run 信号，会进入 `coverage-analysis` 持续改进闭环。
 
 说明：
@@ -129,7 +135,7 @@ flowchart TD
 
 ## 部署模型
 
-Sherpa 当前采用的运行形态是：
+TianHeng 当前采用的运行形态是：
 
 - FastAPI 后端 + Postgres 常驻
 - 前端独立部署

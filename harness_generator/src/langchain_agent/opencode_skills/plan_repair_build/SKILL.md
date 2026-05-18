@@ -4,7 +4,7 @@ description: Re-plan targets and scaffold strategy after build-stage failures us
 compatibility: opencode
 metadata:
   stage: plan-repair-build
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -37,6 +37,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 
 ## Constraints
 - Do not produce doc-only updates disconnected from build recovery.
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only in build-repair planning.
 - `fuzz/PLAN.md` must include `Known Issues` with current build blockers, suspected root cause, and next corrective action.
 - `fuzz/PLAN.md` must include `Strategy Delta` with explicit changes versus the previous failed build-repair attempt.
 - `fuzz/PLAN.md` must include `Output Path Contract` and state expected executable stems in `fuzz/out/`.
@@ -62,4 +63,4 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - `Known Issues` exists and names concrete unresolved blockers for this build-repair cycle.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).

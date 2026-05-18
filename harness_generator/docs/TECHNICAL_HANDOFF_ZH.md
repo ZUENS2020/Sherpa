@@ -1,4 +1,4 @@
-# Sherpa 后端技术交接（中文）
+# TianHeng 后端技术交接（中文）
 
 这是 `harness_generator/` 的中文交接摘要。完整解析见：
 

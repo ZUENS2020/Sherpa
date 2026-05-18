@@ -1,6 +1,6 @@
 # 本地 Kubernetes 快速开始
 
-本文档面向希望在本地 Kubernetes 集群上拉起最小 Sherpa 栈并做 smoke test 的开发者。它不是生产部署指南。
+本文档面向希望在本地 Kubernetes 集群上拉起最小 TianHeng 栈并做 smoke test 的开发者。它不是生产部署指南。
 
 ## 目标
 

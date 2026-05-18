@@ -4,7 +4,7 @@ description: Repair scaffold for coverage replan cycles using seed and harness f
 compatibility: opencode
 metadata:
   stage: synthesize-repair-coverage
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -51,4 +51,4 @@ Use this skill when `coverage-analysis` selected replan and returned coverage di
 - Execution-plan/harness-index consistency is preserved.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

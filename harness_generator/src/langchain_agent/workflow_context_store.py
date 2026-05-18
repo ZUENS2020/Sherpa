@@ -5,8 +5,76 @@ import time
 from pathlib import Path
 from typing import Any
 
+import workflow_normalization as _wf_norm
+
 
 SCHEMA_VERSION = 1
+
+# Owner vocabulary mirrors docs/CONTROL_PLANE_CONTRACT.md.
+# - system-owned: routing/execution truth, only system may finalize
+# - agent-suggested: advisory data from LLM/tooling, normalized before use
+# - runtime-derived: observed from build/run/crash artifacts
+CONTROL_CONTEXT_OWNERS = {
+    "system-owned": sorted(
+        [
+            "time_budget",
+            "run_time_budget",
+            "coverage_loop_max_rounds",
+            "max_fix_rounds",
+            "same_error_max_retries",
+            "run_oom_retry_count",
+            "run_rss_limit_mb_override",
+            "run_parallel_fuzzers_override",
+            "run_timeout_budget_sec_override",
+            "target_node_name",
+            "resume_repo_root",
+            "last_fuzzer",
+            "last_crash_artifact",
+            "re_workspace_root",
+        ]
+    ),
+}
+
+WORKFLOW_CONTEXT_OWNERS = {
+    "system-owned": sorted(
+        [
+            "coverage_target_name",
+            "coverage_target_api",
+            "coverage_target_type",
+            "coverage_seed_profile",
+            "coverage_attempted_targets",
+            "coverage_should_improve",
+            "coverage_improve_mode",
+            "coverage_replan_required",
+            "restart_to_plan",
+            "restart_to_plan_reason",
+            "last_step",
+            "last_error",
+            "failed",
+        ]
+    ),
+    "agent-suggested": sorted(
+        [
+            "coverage_seed_families_suggested",
+            "analysis_context_path",
+            "plan_hint",
+            "prompt_render_issue",
+            "latest_decision_snapshot",
+            "latest_vuln_decision_snapshot",
+            "vuln_hunt_summary_path",
+        ]
+    ),
+    "runtime-derived": sorted(
+        [
+            "coverage_seed_families_covered",
+            "coverage_seed_families_missing",
+            "coverage_seed_quality",
+            "coverage_quality_flags",
+            "run_details",
+            "crash_signature_dedup_hit",
+        ]
+    ),
+}
 
 CONTROL_CONTEXT_KEYS = {
     "time_budget",
@@ -58,6 +126,13 @@ WORKFLOW_CONTEXT_KEYS = {
     "vuln_candidate_count",
     "security_priority_mode",
     "latest_vuln_decision_snapshot",
+    "vuln_hunt_enabled",
+    "vuln_hunt_iteration",
+    "vuln_hunt_active_candidate_id",
+    "vuln_hunt_candidate_count",
+    "vuln_hunt_degraded",
+    "vuln_hunt_last_reason",
+    "vuln_hunt_summary_path",
 }
 
 WORKFLOW_CONTEXT_PREFIXES = (
@@ -86,6 +161,7 @@ WORKFLOW_CONTEXT_PREFIXES = (
     "selected_",
     "synthesize_",
     "target_",
+    "vuln_hunt_",
 )
 
 WORKFLOW_CONTEXT_KEY_SUFFIXES = (
@@ -185,6 +261,8 @@ def _sanitize_doc(
             if not _is_workflow_key(key):
                 continue
         out[key] = _coerce_json_value(raw_value)
+    if kind == "workflow":
+        out = _wf_norm.normalize_workflow_context(out)
     return out
 
 
@@ -227,7 +305,7 @@ def merge_result_into_contexts(result: dict[str, Any], *, control: dict[str, Any
             continue
         if _is_workflow_key(key):
             out_workflow[key] = _coerce_json_value(raw_value)
-    return out_control, out_workflow
+    return out_control, _wf_norm.normalize_workflow_context(out_workflow)
 
 
 def strip_meta(doc: dict[str, Any]) -> dict[str, Any]:

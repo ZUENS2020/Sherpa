@@ -101,6 +101,8 @@ class APIExtractor:
         for func_loc, func_obj in functions.items():
             decl_loc = func_obj.get("declLoc", "")
             decl_file = decl_loc.split(":")[0] if decl_loc else ""
+            if not decl_file:
+                decl_file = func_loc.split(":")[0] if func_loc else ""
 
             for header_file in self.header_files:
                 if str(header_file) == decl_file:

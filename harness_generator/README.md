@@ -1,6 +1,6 @@
 # Harness Generator 后端
 
-`harness_generator/` 是 Sherpa 的后端实现目录，包含 Web API、阶段工作流、OpenCode 封装、以及针对非 OSS-Fuzz 仓库的 fuzz 编排逻辑。
+`harness_generator/` 是 TianHeng 的后端实现目录，包含 Web API、阶段工作流、OpenCode 封装、以及针对非 OSS-Fuzz 仓库的 fuzz 编排逻辑。
 
 当前线上主路径是：
 

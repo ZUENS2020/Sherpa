@@ -9,6 +9,7 @@
 当前阶段包括：
 
 - `analysis`
+- `vuln_hunt`
 - `plan`
 - `plan_fix_targets_schema`
 - `synthesize`

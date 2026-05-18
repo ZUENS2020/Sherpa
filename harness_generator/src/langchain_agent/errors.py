@@ -1,25 +1,25 @@
-"""Sherpa domain-specific exceptions."""
+"""TianHeng domain-specific exceptions."""
 
 
-class SherpaError(RuntimeError):
-    """Base exception for all Sherpa-specific errors."""
+class TianHengError(RuntimeError):
+    """Base exception for all TianHeng-specific errors."""
 
 
-class BuildError(SherpaError):
+class BuildError(TianHengError):
     """Harness compilation or build script failure."""
 
 
-class RunError(SherpaError):
+class RunError(TianHengError):
     """Fuzzer execution failure."""
 
 
-class TriageError(SherpaError):
+class TriageError(TianHengError):
     """Crash triage or analysis failure."""
 
 
-class ConfigError(SherpaError):
+class ConfigError(TianHengError):
     """Configuration validation or loading failure."""
 
 
-class K8sJobError(SherpaError):
+class K8sJobError(TianHengError):
     """Kubernetes job submission, execution, or timeout failure."""

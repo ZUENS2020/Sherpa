@@ -4,7 +4,7 @@ description: Generate high-signal seed corpus with real samples first and contro
 compatibility: opencode
 metadata:
   stage: seed-generation
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -19,6 +19,8 @@ Use this skill during pre-run seed generation and seed repair cycles.
 - `fuzz/target_analysis.json`
 - harness source under `fuzz/`
 - current corpus directory for active fuzzer
+
+`fuzz/selected_targets.json` is the normalized truth source for target identity and preliminary seed guidance. Do not treat raw analysis hints or stale workflow state as authoritative.
 
 ## Required outputs
 - seed files under `fuzz/corpus/<fuzzer_name>/`
@@ -97,6 +99,8 @@ Use this skill during pre-run seed generation and seed repair cycles.
   - keep malformed/truncated seeds <= 30%
   - ensure at least one semantically valid archive sample exists
 - `seed_exploration_*.json` and `seed_check_*.json` must follow coordinator-required schema.
+- `seed_profile` may have been normalized by the system; follow the normalized target semantics rather than any earlier unnormalized suggestion.
+- Empty `seed_families_suggested` is valid and must not be treated as a missing value that should inherit older families.
 - When diagnostics include concrete paths, use `Read and fix <path>[:line]`.
 
 ## Command policy
@@ -110,4 +114,4 @@ Use this skill during pre-run seed generation and seed repair cycles.
 - Seed format matches the function's actual input requirements (not just the preliminary `seed_profile` from `target_analysis.json`).
 
 ## Done contract
-- Write one created/updated seed file path into `./done`.
+- Write one created/updated seed file path as the sole text of `./done` (a relative path string like `fuzz/foo.c`; do **not** copy file contents).

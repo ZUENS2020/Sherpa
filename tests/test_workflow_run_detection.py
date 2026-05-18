@@ -67,6 +67,38 @@ class _FailingSeedGenerator(_FakeRunGenerator):
         raise RuntimeError(f"seed generation failed for {fuzzer_name}")
 
 
+class _SeedMetadataRunGenerator(_FakeRunGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, bootstrap_by_fuzzer: dict[str, dict[str, object]]) -> None:
+        super().__init__(tmp_path, run_results)
+        self.last_seed_bootstrap_by_fuzzer = dict(bootstrap_by_fuzzer)
+        self.last_seed_profile_by_fuzzer = {
+            name: str(meta.get("seed_profile") or "")
+            for name, meta in bootstrap_by_fuzzer.items()
+        }
+
+
+class _DeterministicSeedBootstrapGenerator(_SlowSeedGenerator):
+    def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, run_results, seed_sleep_sec=1.5)
+        self.deterministic_seed_calls: list[str] = []
+        self.last_seed_bootstrap_by_fuzzer: dict[str, dict[str, object]] = {}
+        self.last_seed_profile_by_fuzzer: dict[str, str] = {}
+
+    def _bootstrap_deterministic_seed_corpus(self, fuzzer_name: str) -> dict[str, object]:
+        self.deterministic_seed_calls.append(fuzzer_name)
+        meta = {
+            "counts": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "seed_counts_raw": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "seed_counts_filtered": {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 2, "total": 2},
+            "sources": ["deterministic"],
+            "seed_profile": "decoder-binary",
+            "seed_family_coverage": {"required": [], "covered": ["png_signature"], "missing": []},
+        }
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = meta
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = "decoder-binary"
+        return meta
+
+
 class _MultiRunGenerator(_FakeRunGenerator):
     def __init__(self, tmp_path: Path, run_results: list[FuzzerRunResult], *, run_sleep_sec: float = 0.0) -> None:
         super().__init__(tmp_path, run_results)
@@ -107,6 +139,43 @@ class _DeterministicParallelGenerator(_FakeRunGenerator):
         self.terminate_calls.append(reason)
 
 
+class _PlanFilteredRunGenerator(_DeterministicParallelGenerator):
+    def __init__(self, tmp_path: Path, results_by_name: dict[str, FuzzerRunResult]) -> None:
+        super().__init__(tmp_path, results_by_name)
+        self.ran_bins: list[str] = []
+
+    def _run_fuzzer(self, bin_path: Path) -> FuzzerRunResult:
+        self.ran_bins.append(bin_path.name)
+        return super()._run_fuzzer(bin_path)
+
+
+class _CoverageBindingGenerator:
+    def __init__(self, tmp_path: Path) -> None:
+        self.repo_root = tmp_path
+        self.fuzz_out_dir = tmp_path / "fuzz" / "out"
+        self.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+        self.collect_calls: list[str] = []
+
+    def collect_source_coverage(self, bin_path: Path) -> dict[str, object]:
+        self.collect_calls.append(bin_path.name)
+        return {
+            "coverage_pct": 61.5,
+            "covered_functions": 8,
+            "total_functions": 13,
+            "uncovered_functions": ["decode_row"],
+            "uncovered_function_details": [
+                {
+                    "name": "decode_row",
+                    "file": "pngread.c",
+                    "line": 101,
+                    "execution_count": 0,
+                    "region_coverage_ratio": 0.0,
+                }
+            ],
+            "partial_function_details": [],
+        }
+
+
 def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: Path):
     gen = _FakeRunGenerator(
         tmp_path,
@@ -132,6 +201,128 @@ def test_node_run_marks_error_when_fuzzer_exits_nonzero_without_crash(tmp_path: 
     assert out["run_rc"] == 127
     assert out["crash_evidence"] == "none"
     assert out["run_error_kind"] == "nonzero_exit_without_crash"
+
+
+def test_node_run_maps_fuzz_suffix_binary_to_execution_target_identity(tmp_path: Path):
+    gen = _FakeRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=11,
+                final_ft=21,
+                final_execs_per_sec=100,
+            )
+        ],
+    )
+    gen._bin = gen.fuzz_out_dir / "png_process_data_fuzz"
+    gen._bin.write_text("", encoding="utf-8")
+    (tmp_path / "fuzz" / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "execution_targets": [
+                    {
+                        "target_name": "png_process_data",
+                        "expected_fuzzer_name": "png_process_data",
+                        "api": "png_process_data",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["run_details"][0]["fuzzer"] == "png_process_data_fuzz"
+    assert out["run_details"][0]["target_name"] == "png_process_data"
+    assert out["run_details"][0]["target_api"] == "png_process_data"
+    assert out["run_details"][0]["target_type"] == "parser"
+    assert out["coverage_target_type"] == "parser"
+
+
+def test_node_run_filters_stale_binaries_not_in_execution_plan(tmp_path: Path):
+    gen = _PlanFilteredRunGenerator(
+        tmp_path,
+        results_by_name={
+            "demo_fuzz_2": FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+                final_cov=17,
+                final_ft=31,
+                final_execs_per_sec=100,
+            )
+        },
+    )
+    (tmp_path / "fuzz" / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "execution_targets": [
+                    {
+                        "target_name": "demo_fuzz_2",
+                        "expected_fuzzer_name": "demo_fuzz_2",
+                        "api": "demo_api",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert gen.ran_bins == ["demo_fuzz_2"]
+    assert [detail["fuzzer"] for detail in out["run_details"]] == ["demo_fuzz_2"]
+    assert out["coverage_target_name"] == "demo_fuzz_2"
+    assert out["coverage_target_api"] == "demo_api"
+
+
+def test_build_harness_index_preserves_execution_target_type(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "png_process_data_fuzz.c").write_text("int x;\n", encoding="utf-8")
+
+    doc = workflow_graph._build_harness_index_doc(
+        tmp_path,
+        execution_plan_doc={
+            "schema_version": 1,
+            "execution_targets": [
+                {
+                    "target_name": "png_process_data",
+                    "expected_fuzzer_name": "png_process_data",
+                    "api": "png_process_data",
+                    "target_type": "parser",
+                    "seed_profile": "decoder-binary",
+                    "must_run": True,
+                }
+            ],
+        },
+    )
+
+    assert doc["mappings"][0]["target_name"] == "png_process_data"
+    assert doc["mappings"][0]["target_type"] == "parser"
+    assert doc["mappings"][0]["seed_profile"] == "decoder-binary"
 
 
 def test_node_run_accepts_sanitizer_log_crash_without_native_artifact(tmp_path: Path):
@@ -163,6 +354,88 @@ def test_node_run_accepts_sanitizer_log_crash_without_native_artifact(tmp_path: 
     assert out["run_rc"] == 76
     assert out["crash_evidence"] == "sanitizer_log"
     assert out["last_crash_artifact"] == str(artifact)
+
+
+def test_node_coverage_analysis_binds_source_coverage_to_current_fuzzer(tmp_path: Path):
+    gen = _CoverageBindingGenerator(tmp_path)
+    first_bin = gen.fuzz_out_dir / "aaa_fuzz"
+    target_bin = gen.fuzz_out_dir / "target_fuzz"
+    for path in (first_bin, target_bin):
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o755)
+
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "generator": gen,
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "target_fuzz",
+            "coverage_target_api": "readpng2_decode_data",
+            "coverage_seed_profile": "png-structured",
+            "run_details": [
+                {
+                    "fuzzer": "target_fuzz",
+                    "final_cov": 13,
+                    "final_ft": 27,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert gen.collect_calls == ["target_fuzz"]
+    assert out["coverage_source_report"]["coverage_pct"] == 61.5
+    assert out["coverage_uncovered_functions"] == ["decode_row"]
+    assert out["coverage_run_feedback_summary"]["function_gap_count"] == 1
+
+
+def test_node_run_keeps_empty_seed_families_from_current_target(tmp_path: Path):
+    gen = _SeedMetadataRunGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            )
+        ],
+        bootstrap_by_fuzzer={
+            "demo_fuzz": {
+                "seed_profile": "decoder-binary",
+                "seed_families_suggested": [],
+                "seed_family_coverage": {"covered": [], "missing": []},
+            }
+        },
+    )
+
+    out = workflow_graph._node_run(
+        {
+            "generator": gen,
+            "crash_fix_attempts": 0,
+            "coverage_seed_families_suggested": ["document_markers"],
+            "coverage_seed_families_covered": ["document_markers"],
+            "coverage_seed_families_missing": ["block_scalars"],
+            "synthesize_selected_target_name": "decode",
+            "synthesize_observed_target_api": "png_read_image",
+            "selected_target_api": "png_read_image",
+        }
+    )
+
+    assert out["coverage_target_name"] == "decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_seed_families_suggested"] == []
+    assert out["coverage_seed_families_covered"] == []
+    assert out["coverage_seed_families_missing"] == []
 
 
 def test_node_run_writes_repro_context_on_crash(tmp_path: Path):
@@ -287,7 +560,8 @@ def test_node_run_writes_seed_feedback_json(tmp_path: Path):
     assert by_fuzzer["demo_fuzz"]["cold_start_failure"] is True
 
 
-def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path):
+def test_node_run_marks_seed_generation_degraded_on_seed_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _FailingSeedGenerator(
         tmp_path,
         run_results=[
@@ -385,6 +659,7 @@ def test_node_run_aggregates_seed_quality_across_all_fuzzers(tmp_path: Path):
 
 
 def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -427,7 +702,85 @@ def test_node_run_stops_when_total_budget_exhausted_during_seed_generation(tmp_p
     assert out["message"] == "workflow stopped (time budget exceeded)"
 
 
-def test_node_run_default_generates_ai_seeds(tmp_path: Path):
+def test_node_run_default_skips_ai_seed_generation(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("SHERPA_VERIFY_STAGE_NO_AI", raising=False)
+    gen = _SlowSeedGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+        seed_sleep_sec=1.5,
+    )
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+    assert out["last_step"] == "run"
+    assert out.get("failed") is not True
+    assert gen.seed_calls == 0
+    assert out["coverage_seed_generation_skipped_reason"] == "verify_stage_no_ai"
+
+
+def test_node_run_default_uses_deterministic_seed_bootstrap_when_available(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("SHERPA_VERIFY_STAGE_NO_AI", raising=False)
+    gen = _DeterministicSeedBootstrapGenerator(
+        tmp_path,
+        run_results=[
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+            FuzzerRunResult(
+                rc=0,
+                new_artifacts=[],
+                crash_found=False,
+                crash_evidence="none",
+                first_artifact="",
+                log_tail="ok",
+                error="",
+                run_error_kind="",
+            ),
+        ],
+    )
+
+    out = workflow_graph._node_run({"generator": gen, "crash_fix_attempts": 0})
+
+    assert out["last_step"] == "run"
+    assert out.get("failed") is not True
+    assert gen.seed_calls == 0
+    assert gen.deterministic_seed_calls == ["demo_fuzz_1", "demo_fuzz_2"]
+    assert out["coverage_seed_generation_skipped_reason"] == "verify_stage_no_ai"
+    assert out["coverage_seed_counts"]["deterministic"] == 4
+    assert out["coverage_seed_counts_raw"]["deterministic"] == 4
+    assert out["coverage_seed_counts_filtered"]["deterministic"] == 4
+    assert "deterministic" in out["coverage_corpus_sources"]
+    assert out["coverage_seed_profile"] == "decoder-binary"
+
+
+def test_node_run_generates_ai_seeds_when_verify_no_ai_disabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SHERPA_VERIFY_STAGE_NO_AI", "0")
     gen = _SlowSeedGenerator(
         tmp_path,
         run_results=[
@@ -806,21 +1159,21 @@ def test_node_run_marks_seed_rejected_for_no_interesting_with_zero_cov_and_tiny_
     assert "inputs were likely rejected" in out["last_error"]
 
 
-def test_route_after_run_routes_recoverable_run_errors_to_coverage_analysis():
+def test_route_after_run_routes_recoverable_run_errors_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_no_progress", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_seed_rejected_to_coverage_analysis():
+def test_route_after_run_routes_seed_rejected_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_seed_rejected", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+def test_route_after_run_routes_coverage_plateau_to_per_input_replay_even_with_run_error_kind():
     route = workflow_graph._route_after_run_state(
         {
             "run_terminal_reason": "coverage_plateau",
@@ -829,10 +1182,10 @@ def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_
             "crash_found": False,
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_run_error_kind():
+def test_route_after_run_routes_coverage_plateau_to_per_input_replay_even_with_run_error_kind_duplicate():
     route = workflow_graph._route_after_run_state(
         {
             "run_terminal_reason": "coverage_plateau",
@@ -841,7 +1194,7 @@ def test_route_after_run_routes_coverage_plateau_to_coverage_analysis_even_with_
             "crash_found": False,
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_route_after_run_routes_crash_to_repro_stage():
@@ -851,28 +1204,225 @@ def test_route_after_run_routes_crash_to_repro_stage():
     assert route == "crash-triage"
 
 
-def test_route_after_run_routes_clean_result_to_coverage_analysis():
+def test_materialize_replay_binaries_uses_profile_instrumented_replay_binary(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("bin", encoding="utf-8")
+    primary.chmod(0o755)
+    source_replay = fuzz_out / "demo_fuzz_replay"
+    source_replay.write_text("bin __llvm_prf", encoding="utf-8")
+    source_replay.chmod(0o755)
+
+    replay_bins = workflow_graph._materialize_replay_binaries(repo_root, [primary])
+    assert len(replay_bins) == 1
+    replay_bin = replay_bins[0]
+    assert replay_bin.parent == repo_root / "fuzz" / "out" / "replay"
+    assert replay_bin.name == "demo_fuzz"
+    assert replay_bin.exists()
+
+
+def test_materialize_replay_binaries_does_not_symlink_plain_fuzzer(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("plain fuzzer", encoding="utf-8")
+    primary.chmod(0o755)
+
+    replay_bins = workflow_graph._materialize_replay_binaries(repo_root, [primary])
+    assert replay_bins == []
+    assert not (repo_root / "fuzz" / "out" / "replay" / "demo_fuzz").exists()
+
+
+def test_resolve_per_input_replay_binary_prefers_replay_dir(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    replay_out = fuzz_out / "replay"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    replay_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    replay = replay_out / "demo_fuzz"
+    primary.write_text("primary", encoding="utf-8")
+    replay.write_text("replay __llvm_prf", encoding="utf-8")
+    primary.chmod(0o755)
+    replay.chmod(0o755)
+
+    resolved = workflow_graph._resolve_per_input_replay_binary(repo_root, "demo_fuzz")
+    assert resolved == replay
+
+
+def test_resolve_per_input_replay_binary_rejects_plain_primary_fuzzer(tmp_path: Path):
+    repo_root = tmp_path
+    fuzz_out = repo_root / "fuzz" / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "demo_fuzz"
+    primary.write_text("primary", encoding="utf-8")
+    primary.chmod(0o755)
+
+    resolved = workflow_graph._resolve_per_input_replay_binary(repo_root, "demo_fuzz")
+    assert resolved is None
+
+
+def test_execution_plan_prefers_primary_target_over_first_run_detail(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_out = fuzz_dir / "out"
+    fuzz_out.mkdir(parents=True, exist_ok=True)
+    primary = fuzz_out / "png_read_image_decode_fuzz"
+    secondary = fuzz_out / "png_process_data_progressive_fuzz"
+    primary.write_text("bin", encoding="utf-8")
+    secondary.write_text("bin", encoding="utf-8")
+    plan = {
+        "execution_targets": [
+            {
+                "target_name": "png_read_image_decode",
+                "expected_fuzzer_name": "png_read_image_decode_fuzz",
+                "api": "png_read_image",
+                "target_type": "image",
+                "seed_profile": "decoder-binary",
+                "must_run": True,
+                "execution_priority": 1,
+            },
+            {
+                "target_name": "png_process_data_progressive",
+                "expected_fuzzer_name": "png_process_data_progressive_fuzz",
+                "api": "png_process_data",
+                "target_type": "parser",
+                "seed_profile": "decoder-binary",
+                "must_run": True,
+                "execution_priority": 2,
+            },
+        ]
+    }
+    (fuzz_dir / "execution_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+    targets = workflow_graph._execution_plan_targets(tmp_path)
+    ordered = workflow_graph._order_fuzzer_bins_by_execution_plan([secondary, primary], targets)
+    preferred = workflow_graph._preferred_execution_target(
+        targets,
+        {
+            "latest_vuln_decision_snapshot": {
+                "selected_target": "png_read_image_decode",
+                "selected_api": "png_read_image",
+            },
+            # This is the polluted state shape observed from an older run. It
+            # must not override the authoritative vuln decision / plan primary.
+            "coverage_target_name": "png_process_data_progressive_fuzz",
+            "coverage_target_api": "png_process_data_progressive_fuzz",
+        },
+        run_details=[{"fuzzer": "png_process_data_progressive_fuzz"}],
+    )
+    identity = workflow_graph._execution_target_identity(preferred)
+
+    assert [p.name for p in ordered] == [
+        "png_read_image_decode_fuzz",
+        "png_process_data_progressive_fuzz",
+    ]
+    assert identity["target_name"] == "png_read_image_decode"
+    assert identity["target_api"] == "png_read_image"
+    assert identity["expected_fuzzer_name"] == "png_read_image_decode_fuzz"
+
+
+def test_coverage_analysis_restores_target_api_from_execution_plan(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "png_read_image_decode",
+                        "expected_fuzzer_name": "png_read_image_decode_fuzz",
+                        "api": "png_read_image",
+                        "target_type": "image",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                        "execution_priority": 1,
+                    },
+                    {
+                        "target_name": "png_process_data_progressive",
+                        "expected_fuzzer_name": "png_process_data_progressive_fuzz",
+                        "api": "png_process_data",
+                        "target_type": "parser",
+                        "seed_profile": "decoder-binary",
+                        "must_run": True,
+                        "execution_priority": 2,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "repo_root": str(tmp_path),
+            "coverage_loop_max_rounds": 0,
+            "coverage_loop_round": 0,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data_progressive_fuzz",
+            "coverage_target_api": "png_process_data_progressive_fuzz",
+            "coverage_seed_profile": "decoder-binary",
+            "latest_vuln_decision_snapshot": {
+                "selected_target": "png_read_image_decode",
+                "selected_api": "png_read_image",
+            },
+            "coverage_seed_quality": {
+                "seed_score": 0.9,
+                "early_new_units_30s": 10,
+                "cold_start_failure": False,
+                "quality_flags": [],
+            },
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data_progressive_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 22,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                },
+                {
+                    "fuzzer": "png_read_image_decode_fuzz",
+                    "final_cov": 30,
+                    "final_ft": 134,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                },
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "png_read_image_decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_target_type"] == "image"
+
+
+def test_route_after_run_routes_clean_result_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_idle_timeout_to_coverage_analysis():
+def test_route_after_run_routes_idle_timeout_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_idle_timeout", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_routes_resource_exhaustion_to_coverage_analysis():
+def test_route_after_run_routes_resource_exhaustion_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {"run_error_kind": "run_resource_exhaustion", "failed": False, "crash_found": False}
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
-def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_coverage_analysis():
+def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_per_input_replay():
     route = workflow_graph._route_after_run_state(
         {
             "run_error_kind": "nonzero_exit_without_crash",
@@ -884,7 +1434,7 @@ def test_route_after_run_demotes_nonzero_exit_with_timeout_artifact_to_coverage_
             ],
         }
     )
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_route_after_run_routes_fatal_error_to_plan():
@@ -899,6 +1449,20 @@ def test_route_after_coverage_analysis_routes_to_improve_harness():
         {"failed": False, "last_error": "", "coverage_should_improve": True}
     )
     assert route == "improve-harness"
+
+
+def test_route_after_coverage_analysis_routes_replan_to_vuln_hunt(monkeypatch):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    route = workflow_graph._route_after_coverage_analysis_state(
+        {
+            "failed": False,
+            "last_error": "",
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+        }
+    )
+    assert route == "vuln-hunt"
 
 
 def test_route_after_coverage_analysis_continues_run_when_no_improve_in_hard_fail_only(monkeypatch):
@@ -990,6 +1554,31 @@ def test_route_after_improve_harness_stops_when_round_budget_exhausted_in_legacy
     assert route == "stop"
 
 
+def test_node_improve_harness_accepts_structured_exhausted_targets(tmp_path: Path):
+    gen = SimpleNamespace(repo_root=tmp_path)
+    out = workflow_graph._node_improve_harness(
+        {
+            "generator": gen,
+            "coverage_should_improve": True,
+            "coverage_improve_mode": "replan",
+            "coverage_replan_required": True,
+            "coverage_exhausted_targets": [
+                {"name": "png_process_data", "round": 7},
+                {"name": "png_read_image", "round": 6},
+            ],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_quality_flags": ["low_early_yield"],
+        }
+    )
+
+    assert out["last_step"] == "improve-harness"
+    assert out["last_error"] == ""
+    assert "png_process_data" in out["codex_hint"]
+    assert "png_read_image" in out["codex_hint"]
+
+
 def test_node_coverage_analysis_keeps_first_plateau_in_place():
     out = workflow_graph._node_coverage_analysis(
         {
@@ -1049,6 +1638,39 @@ def test_node_coverage_analysis_replans_after_second_plateau_without_gain():
     assert out["coverage_improve_mode"] == "replan"
     assert out["coverage_replan_required"] is True
     assert out["coverage_plateau_streak"] == 2
+
+
+def test_node_coverage_analysis_preserves_best_coverage_state():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 2,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_last_max_cov": 185,
+            "coverage_last_ft": 384,
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data",
+                    "final_cov": 183,
+                    "final_ft": 380,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_last_max_cov"] == 185
+    assert out["coverage_last_ft"] == 384
+    assert out["coverage_history"][-1]["max_cov"] == 183
+    assert out["coverage_history"][-1]["max_ft"] == 380
+    assert out["coverage_history"][-1]["prev_cov"] == 185
+    assert out["coverage_history"][-1]["prev_ft"] == 384
 
 
 def test_node_coverage_analysis_stops_when_replan_budget_exhausted():
@@ -1220,7 +1842,7 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
             "coverage_seed_families_suggested": ["flow_structures", "anchors_aliases"],
             "coverage_seed_families_covered": ["anchors_aliases"],
             "coverage_seed_families_missing": ["flow_structures"],
-            "coverage_plateau_streak": 1,
+            "coverage_plateau_streak": 0,
             "coverage_last_max_cov": 5,
             "coverage_last_ft": 19,
             "run_details": [
@@ -1245,6 +1867,94 @@ def test_node_coverage_analysis_prioritizes_seed_quality_issue_over_replan():
     assert out["coverage_quality_oracle"] == "quality_degraded"
     assert isinstance(out.get("coverage_seed_feedback"), dict)
     assert isinstance(out.get("coverage_harness_feedback"), dict)
+
+
+def test_coverage_frontier_feedback_lines_include_frontier_functions_and_inverse_index() -> None:
+    lines = workflow_graph._coverage_frontier_feedback_lines(
+        {
+            "top_inputs": [
+                {
+                    "input_relpath": "fuzz/corpus/demo_fuzz/frontier.bin",
+                    "covered_function_count": 8,
+                    "covered_region_count": 12,
+                    "frontier_score": 4.25,
+                    "unique_frontier_functions": 2,
+                    "nearby_uncovered_regions": 6,
+                    "target_relevance_count": 1,
+                    "closest_target_distance": 0,
+                    "covered_functions_sample": ["png_handle_iCCP"],
+                    "frontier_functions": [
+                        {
+                            "name": "png_handle_iCCP",
+                            "file": "src/pngrutil.c",
+                            "line": 1843,
+                            "uncovered_regions_nearby": 6,
+                            "region_coverage_ratio": 0.33,
+                            "distance_to_target": 0,
+                            "target_signal": 2,
+                        }
+                    ],
+                }
+            ],
+            "top_frontier_functions": [
+                {
+                    "name": "png_handle_iCCP",
+                    "input_relpaths": ["fuzz/corpus/demo_fuzz/frontier.bin"],
+                    "best_distance_to_target": 0,
+                }
+            ],
+            "pending_input_count": 1,
+            "failed_input_count": 0,
+        }
+    )
+    joined = "\n".join(lines)
+    assert "frontier_score=4.250" in joined
+    assert "target_relevance=1, target_distance=0" in joined
+    assert "png_handle_iCCP (src/pngrutil.c:1843)" in joined
+    assert "per_input_frontier_inverse_index" in joined
+    assert "best_target_distance=0" in joined
+    assert "pending=1, failed=0" in joined
+
+
+def test_node_coverage_analysis_mentions_attack_hint_boundary_gaps():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "parse_zip_fuzz",
+            "coverage_target_api": "parse_zip",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_quality": {
+                "quality_flags": ["attack_hint_boundary_values_missing"],
+                "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                "attack_hint_coverage_ratio": 0.33,
+            },
+            "coverage_quality_flags": ["attack_hint_boundary_values_missing"],
+            "run_details": [
+                {
+                    "fuzzer": "parse_zip_fuzz",
+                    "final_cov": 5,
+                    "final_ft": 19,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 180,
+                    "seed_quality": {
+                        "quality_flags": ["attack_hint_boundary_values_missing"],
+                        "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                        "attack_hint_coverage_ratio": 0.33,
+                    },
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_should_improve"] is True
+    assert "attack_hint_missing_values=len=0xFFFFFFFF" in out["coverage_improve_reason"]
+    feedback = dict(out.get("coverage_seed_feedback") or {})
+    assert feedback.get("attack_hint_missing_values") == ["len=0xFFFFFFFF"]
+    assert float(feedback.get("attack_hint_coverage_ratio") or 0.0) == 0.33
 
 
 def test_node_coverage_analysis_marks_parallel_resource_underutilized():
@@ -1317,7 +2027,7 @@ def test_node_coverage_analysis_marks_parallel_strategy_mismatch():
             "coverage_history": [],
             "coverage_target_name": "yaml_parser_parse_fuzz",
             "coverage_seed_profile": "parser-structure",
-            "coverage_plateau_streak": 1,
+            "coverage_plateau_streak": 0,
             "coverage_last_max_cov": 7,
             "coverage_last_ft": 28,
             "run_parallel_engine": "fork",
@@ -1373,6 +2083,72 @@ def test_node_coverage_analysis_sets_seed_limited_bottleneck_on_cold_start():
     )
     assert out["coverage_bottleneck_kind"] == "seed_limited"
     assert out["coverage_bottleneck_reason"] == "cold_start_failure"
+
+
+def test_node_coverage_analysis_blocks_harness_limited_until_replay_frontier_ready():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 0,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "coverage_replay_stage_success": False,
+            "coverage_replay_manifest_fresh_for_current_binary": False,
+            "coverage_replay_queue_drained": False,
+            "coverage_frontier_summary": {"top_input_count": 0},
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "none"
+    assert out["coverage_bottleneck_reason"] == "replay_frontier_not_ready"
+
+
+def test_node_coverage_analysis_marks_harness_limited_when_replay_frontier_ready_and_empty():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 3,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "yaml_parser_parse_fuzz",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_plateau_streak": 0,
+            "coverage_last_max_cov": 7,
+            "coverage_last_ft": 28,
+            "coverage_replay_stage_success": True,
+            "coverage_replay_manifest_fresh_for_current_binary": True,
+            "coverage_replay_queue_drained": True,
+            "coverage_frontier_summary": {"top_input_count": 0},
+            "run_details": [
+                {
+                    "fuzzer": "yaml_parser_parse_fuzz",
+                    "final_cov": 7,
+                    "final_ft": 28,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 240,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+    assert out["coverage_bottleneck_kind"] == "harness_limited"
+    assert out["coverage_bottleneck_reason"] == "plateau_without_seed_or_target_signal"
 
 
 def test_node_coverage_analysis_cold_start_triggers_seed_replan(monkeypatch):
@@ -1453,6 +2229,77 @@ def test_node_coverage_analysis_cold_start_stays_in_place_when_threshold_not_met
     assert out["cold_start_seed_replan_triggered"] is False
 
 
+def test_node_coverage_analysis_uses_current_target_seed_quality(monkeypatch):
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
+    monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 6,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_target_type": "decoder",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": ["low_early_yield"],
+                "cold_start_failure": True,
+                "seed_score": 0.31,
+                "early_new_units_30s": 0,
+            },
+            "coverage_quality_flags": ["low_early_yield"],
+            "run_details": [
+                {
+                    "fuzzer": "png_read_image",
+                    "target_name": "png_read_image",
+                    "target_api": "png_read_image",
+                    "target_type": "decoder",
+                    "final_cov": 0,
+                    "final_ft": 0,
+                    "plateau_detected": True,
+                    "plateau_idle_seconds": 60,
+                    "seed_quality": {
+                        "quality_flags": ["low_early_yield"],
+                        "cold_start_failure": True,
+                        "seed_score": 0.31,
+                        "early_new_units_30s": 0,
+                    },
+                },
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "decoder",
+                    "final_cov": 28,
+                    "final_ft": 60,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                    "seed_quality": {
+                        "quality_flags": ["repo_examples_missing"],
+                        "cold_start_failure": False,
+                        "seed_score": 0.82,
+                        "early_new_units_30s": 18,
+                        "final_cov": 28,
+                        "final_ft": 60,
+                    },
+                },
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_seed_quality"]["seed_score"] == 0.82
+    assert out["coverage_quality_flags"] == ["repo_examples_missing"]
+    assert out["cold_start_seed_replan_triggered"] is False
+    assert out["degraded_seed_replan_triggered"] is False
+    assert out["coverage_improve_mode"] == "in_place"
+    snap = dict(out.get("cold_start_trigger_snapshot") or {})
+    assert snap.get("cold_start_failure") is False
+    assert snap.get("early_new_units_30s") == 18
+
+
 def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(monkeypatch):
     monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_QUALITY_THRESHOLD", "0.55")
     monkeypatch.setenv("SHERPA_RUN_COLD_START_SEED_REPLAN_EARLY_UNITS_30S_THRESHOLD", "0")
@@ -1501,6 +2348,81 @@ def test_node_coverage_analysis_seed_generation_degraded_triggers_seed_replan(mo
     assert snap.get("seed_generation_degraded") is True
 
 
+def test_node_coverage_analysis_preserves_target_identity_separate_from_api():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 2,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "decode",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "image",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": [],
+                "cold_start_failure": False,
+                "seed_score": 0.9,
+                "early_new_units_30s": 4,
+            },
+            "run_details": [
+                {
+                    "fuzzer": "decode_fuzz",
+                    "final_cov": 10,
+                    "final_ft": 20,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "decode"
+    assert out["coverage_target_api"] == "png_read_image"
+    assert out["coverage_target_type"] == "image"
+
+
+def test_node_coverage_analysis_restores_target_type_from_run_details():
+    out = workflow_graph._node_coverage_analysis(
+        {
+            "coverage_loop_max_rounds": 2,
+            "coverage_loop_round": 1,
+            "coverage_history": [],
+            "coverage_target_name": "png_process_data",
+            "coverage_target_api": "png_process_data",
+            "coverage_target_type": "",
+            "coverage_seed_profile": "decoder-binary",
+            "coverage_seed_quality": {
+                "quality_flags": [],
+                "cold_start_failure": False,
+                "seed_score": 0.9,
+                "early_new_units_30s": 4,
+            },
+            "run_details": [
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "decoder",
+                    "final_cov": 10,
+                    "final_ft": 20,
+                    "plateau_detected": False,
+                    "plateau_idle_seconds": 0,
+                }
+            ],
+            "crash_found": False,
+            "failed": False,
+            "run_error_kind": "",
+        }
+    )
+
+    assert out["coverage_target_name"] == "png_process_data"
+    assert out["coverage_target_api"] == "png_process_data"
+    assert out["coverage_target_type"] == "decoder"
+
+
 def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -1547,6 +2469,44 @@ def test_build_selected_targets_doc_applies_seed_runtime_penalty(tmp_path: Path)
     top = selected[0]
     assert float(top.get("target_score_penalty") or 0.0) > 0.0
     assert str(top.get("target_score_penalty_reason") or "") == "cold_start_low_yield"
+
+
+def test_build_execution_plan_doc_dedupes_duplicate_api_targets(tmp_path: Path):
+    selected_doc = [
+        {
+            "target_name": "readpng_decode",
+            "name": "readpng_decode",
+            "api": "png_read_image",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 1,
+            "must_run": True,
+        },
+        {
+            "target_name": "png_read_image",
+            "name": "png_read_image",
+            "api": "png_read_image",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 2,
+            "must_run": True,
+        },
+        {
+            "target_name": "progressive_decode",
+            "name": "progressive_decode",
+            "api": "png_process_data",
+            "seed_profile": "decoder-binary",
+            "target_type": "image",
+            "execution_priority": 3,
+            "must_run": False,
+        },
+    ]
+
+    doc = workflow_graph._build_execution_plan_doc(tmp_path, selected_doc)
+    rows = list(doc.get("execution_targets") or [])
+
+    assert [row["target_name"] for row in rows] == ["readpng_decode", "progressive_decode"]
+    assert [row["api"] for row in rows] == ["png_read_image", "png_process_data"]
 
 
 def test_build_selected_targets_doc_prefers_high_vuln_signal_when_base_factors_equal(
@@ -1650,6 +2610,79 @@ def test_build_selected_targets_doc_risk_ranks_above_reference_score(
     # reference-heavy target, but must not drive the ranking in risk-first mode.
     assert float(selected[0]["score_total"]) <= float(selected[1]["score_total"])
     assert selected[0]["security_priority_mode"] is True
+
+
+def test_build_selected_targets_doc_breaks_libpng_style_callback_ties(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
+    monkeypatch.setenv("SHERPA_VULN_SCORE_MODE", "risk_first_v1")
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "readpng2_end_callback",
+                    "api": "readpng2_end_callback",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 3,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "risk_signals": ["integer_overflow_candidate"],
+                    "risk_signal_source_breakdown": {"regex": ["integer_overflow_candidate"], "weak_file": []},
+                    "security_signal_scores": {
+                        "mem_oob_candidate": 0.0,
+                        "integer_overflow_candidate": 0.63,
+                        "format_string_candidate": 0.0,
+                        "path_traversal_candidate": 0.0,
+                        "command_injection_candidate": 0.0,
+                        "authz_bypass_candidate": 0.0,
+                        "null_deref_candidate": 0.0,
+                        "uaf_candidate": 0.0,
+                    },
+                    "vuln_likelihood": 0.63,
+                    "exploitability": 0.18,
+                    "reachability_confidence": 0.62,
+                },
+                {
+                    "name": "readpng2_decode_row",
+                    "api": "readpng2_decode_row",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "depth_score": 3,
+                    "depth_class": "medium",
+                    "runtime_viability": "medium",
+                    "risk_signals": ["integer_overflow_candidate"],
+                    "risk_signal_source_breakdown": {"regex": ["integer_overflow_candidate"], "weak_file": []},
+                    "security_signal_scores": {
+                        "mem_oob_candidate": 0.0,
+                        "integer_overflow_candidate": 0.63,
+                        "format_string_candidate": 0.0,
+                        "path_traversal_candidate": 0.0,
+                        "command_injection_candidate": 0.0,
+                        "authz_bypass_candidate": 0.0,
+                        "null_deref_candidate": 0.0,
+                        "uaf_candidate": 0.0,
+                    },
+                    "vuln_likelihood": 0.63,
+                    "exploitability": 0.18,
+                    "reachability_confidence": 0.62,
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = workflow_graph._build_selected_targets_doc(tmp_path)
+    assert [row["target"] for row in selected] == ["readpng2_decode_row", "readpng2_end_callback"]
+    assert float(selected[0]["score_total"]) > float(selected[1]["score_total"])
+    assert float(selected[0]["callback_penalty"]) < float(selected[1]["callback_penalty"])
+    assert float(selected[0]["execution_depth_bias"]) > float(selected[1]["execution_depth_bias"])
 
 
 def test_build_selected_targets_doc_internal_api_threshold_contract(
@@ -1847,6 +2880,71 @@ def test_node_crash_triage_records_constraint_memory_after_repeat_threshold(tmp_
     assert entry.get("source_stage") == "crash-triage"
 
 
+def test_node_crash_triage_writes_vuln_candidate_for_upstream_bug(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_zip",
+                    "api": "parse_zip",
+                    "wrapper_fuzzer_name": "parse_zip_fuzz",
+                    "attack_hint": {
+                        "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                        "boundary_values": ["len=0xFFFFFFFF"],
+                    },
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_info.md").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 copy_entry_data\n",
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_triage.json").write_text(
+                json.dumps(
+                    {
+                        "label": "upstream_bug",
+                        "confidence": 0.82,
+                        "reason": "sanitizer trace reaches selected parser copy path",
+                        "evidence": ["ERROR: AddressSanitizer: heap-buffer-overflow", "#0 copy_entry_data"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_triage(
+        {
+            "generator": gen,
+            "last_fuzzer": "parse_zip_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-upstream-1",
+        }
+    )
+
+    assert out["crash_triage_label"] == "upstream_bug"
+    candidate = dict(out.get("latest_crash_vuln_candidate") or {})
+    assert candidate["validation_status"] == "likely_bug"
+    assert candidate["target_api"] == "parse_zip"
+    assert candidate["sanitizer"] == "AddressSanitizer"
+    assert candidate["crash_type"] == "heap-buffer-overflow"
+    assert candidate["attack_hint"]["boundary_values"] == ["len=0xFFFFFFFF"]
+    path = Path(str(out.get("vuln_candidates_path") or ""))
+    assert path.is_file()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc["candidate_count"] == 1
+    assert doc["candidates"][0]["candidate_id"].startswith("crash_sigupstream")
+
+
 def test_node_crash_analysis_defaults_to_unknown_when_model_output_invalid(tmp_path: Path):
     class _Patcher:
         def run_codex_command(self, *_args, **_kwargs):
@@ -1909,6 +3007,86 @@ def test_node_crash_analysis_records_constraint_memory_when_model_returns_false_
     entry = dict((doc.get("entries") or {}).get("sig-constraint-2") or {})
     assert entry.get("classification") == "false_positive"
     assert entry.get("source_stage") == "crash-analysis"
+
+
+def test_node_crash_analysis_writes_real_bug_vuln_candidate(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_zip",
+                    "api": "parse_zip",
+                    "wrapper_fuzzer_name": "parse_zip_fuzz",
+                    "attack_hint": {
+                        "trigger_condition": "declared length exceeds allocated output buffer",
+                        "key_code_path": ["parse_zip", "copy_entry_data", "memcpy"],
+                        "boundary_values": ["len=0xFFFFFFFF"],
+                    },
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_info.md").write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n#0 copy_entry_data\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "re_run_report.md").write_text(
+        "re-run reproduced crash\nSUMMARY: AddressSanitizer: heap-buffer-overflow\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "crash_triage.json").write_text(
+        json.dumps(
+            {
+                "label": "upstream_bug",
+                "confidence": 0.9,
+                "reason": "trace reaches parser copy path",
+                "evidence": ["#0 copy_entry_data"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class _Patcher:
+        def run_codex_command(self, *_args, **_kwargs):
+            (tmp_path / "crash_analysis.json").write_text(
+                json.dumps(
+                    {
+                        "verdict": "real_bug",
+                        "reason": "re-run reproduces sanitizer crash in upstream copy path",
+                        "evidence": ["SUMMARY: AddressSanitizer: heap-buffer-overflow", "#0 copy_entry_data"],
+                        "recommended_action": "stop_report",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return None
+
+    gen = SimpleNamespace(repo_root=tmp_path, patcher=_Patcher())
+    out = workflow_graph._node_crash_analysis(
+        {
+            "generator": gen,
+            "last_fuzzer": "parse_zip_fuzz",
+            "last_crash_artifact": str(tmp_path / "fuzz" / "out" / "artifacts" / "crash-1"),
+            "crash_signature": "sig-real-1",
+            "re_run_ok": True,
+        }
+    )
+
+    assert out["crash_analysis_verdict"] == "real_bug"
+    candidate = dict(out.get("latest_crash_vuln_candidate") or {})
+    assert candidate["validation_status"] == "real_bug"
+    assert candidate["reproduction_status"] == "reproduced"
+    assert candidate["triage_label"] == "upstream_bug"
+    assert candidate["analysis_verdict"] == "real_bug"
+    assert candidate["sanitizer"] == "AddressSanitizer"
+    assert candidate["crash_type"] == "heap-buffer-overflow"
+    assert Path(str(out.get("crash_vuln_report_path") or "")).is_file()
 
 
 def test_constraint_memory_observation_has_m1_alias_fields(tmp_path: Path):
@@ -2099,7 +3277,7 @@ def test_node_run_timeout_artifact_does_not_trigger_crash_packaging(tmp_path: Pa
     assert out["run_error_kind"] == "run_timeout"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
@@ -2129,7 +3307,7 @@ def test_node_run_oom_artifact_is_resource_exhaustion_not_crash(tmp_path: Path):
     assert out["run_error_kind"] == "run_resource_exhaustion"
     assert gen.analysis_calls == []
     route = workflow_graph._route_after_run_state(out)
-    assert route == "coverage-analysis"
+    assert route == "per-input-replay"
 
 
 def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_path: Path):
@@ -2147,6 +3325,20 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
         "repair_signature": "abcdef123456",
         "repair_recent_attempts": [{"origin": "fix-harness", "error_kind": "harness_bug"}],
         "repair_error_digest": {"error_code": "crash_triage_harness_bug"},
+        "coverage_target_name": "png_read_image",
+        "coverage_target_api": "png_read_image",
+        "coverage_target_type": "image",
+        "coverage_seed_profile": "decoder-binary",
+        "coverage_should_improve": True,
+        "coverage_improve_mode": "in_place",
+        "coverage_replan_required": False,
+        "coverage_plateau_streak": 1,
+        "coverage_last_max_cov": 18,
+        "coverage_last_ft": 37,
+        "coverage_quality_flags": ["repo_examples_missing"],
+        "coverage_seed_families_suggested": [],
+        "coverage_seed_families_covered": [],
+        "coverage_seed_families_missing": [],
     }
 
     class _FakeCompiledWorkflow:
@@ -2179,12 +3371,24 @@ def test_run_fuzz_workflow_stage_returns_recoverable_run_error(monkeypatch, tmp_
     )
 
     assert result["workflow_last_step"] == "run"
-    assert result["workflow_recommended_next"] == "coverage-analysis"
+    assert result["workflow_recommended_next"] == "per-input-replay"
     assert result["repair_mode"] is True
     assert result["repair_origin_stage"] == "fix-harness"
     assert result["repair_error_kind"] == "harness_bug"
     assert result["repair_error_code"] == "crash_triage_harness_bug"
     assert result["repair_signature"] == "abcdef123456"
+    assert result["coverage_target_name"] == "png_read_image"
+    assert result["coverage_target_api"] == "png_read_image"
+    assert result["coverage_target_type"] == "image"
+    assert result["coverage_seed_profile"] == "decoder-binary"
+    assert result["coverage_should_improve"] is True
+    assert result["coverage_improve_mode"] == "in_place"
+    assert result["coverage_replan_required"] is False
+    assert result["coverage_plateau_streak"] == 1
+    assert result["coverage_last_max_cov"] == 18
+    assert result["coverage_last_ft"] == 37
+    assert result["coverage_quality_flags"] == ["repo_examples_missing"]
+    assert result["coverage_seed_families_suggested"] == []
     assert isinstance(result["repair_recent_attempts"], list)
     assert isinstance(result["repair_error_digest"], dict)
 

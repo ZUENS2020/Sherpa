@@ -3,8 +3,8 @@ import { Providers } from './providers';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Sherpa 控制台',
-  description: 'Sherpa task monitor and fuzz workflow console',
+  title: 'TianHeng 控制台',
+  description: 'TianHeng risk-first vulnerability hunting console by XDU TianHeng Lab',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

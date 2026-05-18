@@ -1,10 +1,10 @@
-# Sherpa 技术深潜
+# TianHeng 技术深潜
 
 这是一份“怎么快速把项目读懂”的资料，不是交接流水账。
 
 ## 1. 先建立心智模型
 
-Sherpa 不是“一个 harness 生成器”，而是一个 fuzz 编排系统。
+TianHeng 不是“一个 harness 生成器”，而是一个 fuzz 编排系统。
 
 你可以把它拆成四层：
 

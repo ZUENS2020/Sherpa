@@ -771,17 +771,27 @@ def _k8s_analysis_companion_timeout_sec() -> int:
         return 180
 
 
+def _k8s_analysis_stage_timeout_floor_sec() -> int:
+    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_TIMEOUT_SEC") or "10800").strip()
+    try:
+        return max(300, min(int(raw), 86400))
+    except (ValueError, TypeError):
+        return 10800
+
+
 def _k8s_analysis_require_rag_ready() -> bool:
     raw = (os.environ.get("SHERPA_K8S_ANALYSIS_REQUIRE_RAG_READY", "1") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
 def _k8s_analysis_rag_wait_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC", "120") or "").strip()
-    try:
-        return max(10, min(int(raw), 3600))
-    except (ValueError, TypeError):
-        return 120
+    env_raw = (os.environ.get("SHERPA_K8S_ANALYSIS_RAG_WAIT_TIMEOUT_SEC") or "").strip()
+    if env_raw:
+        try:
+            return max(10, min(int(env_raw), 7200))
+        except (ValueError, TypeError):
+            pass
+    return 1800  # 30 min default; embedding with 4 workers finishes in 2-5 min typically
 
 
 def _analysis_companion_is_ready(status_doc: dict[str, object], *, require_rag: bool) -> bool:
@@ -1629,6 +1639,8 @@ def _k8s_stage_wait_timeout_sec(
     run_unlimited_round_budget = max(300, run_unlimited_round_budget)
 
     total_base = total_time_budget_sec if total_time_budget_sec > 0 else 7200
+    if stage == "analysis":
+        return max(300, total_base + grace_default, _k8s_analysis_stage_timeout_floor_sec())
     if stage != "run":
         return max(300, total_base + grace_default)
 
@@ -1699,6 +1711,331 @@ def _estimate_run_parallelism(stage_ctx: dict[str, object]) -> int:
         return max(1, min(int(raw), 64))
     except (ValueError, TypeError):
         return 3
+
+
+def _build_stage_payload(
+    *,
+    job_id: str,
+    repo_url: str,
+    max_tokens: int,
+    total_time_budget_value: int,
+    run_time_budget_value: int,
+    coverage_loop_max_rounds: int,
+    max_fix_rounds: int,
+    same_error_max_retries: int,
+    email: str,
+    docker_image: str,
+    model_value: str,
+    stage: str,
+    current_repo_root: str,
+    context_dir: str,
+    control_ctx: dict[str, object],
+    unlimited_round_limit_value: int,
+    companion_url: str,
+    companion_mcp_ready: bool,
+    result_path: Path,
+    error_path: Path,
+    current_node_name: str,
+    can_pin_node: bool,
+) -> dict[str, object]:
+    return {
+        "job_id": job_id,
+        "repo_url": repo_url,
+        "max_len": int(max_tokens),
+        "time_budget": int(total_time_budget_value),
+        "run_time_budget": int(run_time_budget_value),
+        "coverage_loop_max_rounds": int(coverage_loop_max_rounds),
+        "max_fix_rounds": int(max_fix_rounds),
+        "same_error_max_retries": int(same_error_max_retries),
+        "email": email,
+        "docker_image": docker_image,
+        "ai_key_path": str(opencode_env_path()),
+        "model": model_value,
+        "resume_from_step": stage,
+        "resume_repo_root": (current_repo_root or None),
+        "stop_after_step": stage,
+        "context_dir": (context_dir or None),
+        "run_unlimited_round_budget_sec": int(
+            control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
+        ),
+        "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
+        "analysis_companion_ready": bool(companion_mcp_ready),
+        "result_path": str(result_path),
+        "error_path": str(error_path),
+        "target_node_name": (current_node_name if can_pin_node else None),
+    }
+
+
+def _handle_k8s_job_failure(
+    *,
+    stage: str,
+    failure: _K8sJobFailure,
+    control_ctx: dict[str, object],
+    current_repo_root: str,
+    job_id: str,
+) -> tuple[dict[str, object], bool, str, str]:
+    stage_failed = True
+    stage_fail_error = _redact_sensitive_text(str(failure))
+    failure_doc = dict(failure.result or {})
+    stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
+    oom_retry_count = int(control_ctx.get("run_oom_retry_count") or 0)
+    if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
+        rss_raw = str(control_ctx.get("run_rss_limit_mb_override") or "").strip()
+        if not rss_raw:
+            rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
+        try:
+            base_rss = int(rss_raw) if rss_raw else 131072
+        except Exception:
+            base_rss = 131072
+        retry_rss = max(2048, int(base_rss * 0.75))
+        # Keep libFuzzer rss below pod cgroup limit to avoid repeated OOMKilled loops.
+        pod_limit_mb = _k8s_worker_memory_limit_mb()
+        if pod_limit_mb > 0:
+            capped_rss = max(2048, int(pod_limit_mb * 0.8))
+            retry_rss = min(retry_rss, capped_rss)
+        control_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
+        control_ctx["run_rss_limit_mb_override"] = str(retry_rss)
+        control_ctx["run_parallel_fuzzers_override"] = "1"
+        stage_result = {
+            "message": "run stage oom_killed; retrying run once with reduced rss/parallel",
+            "repo_root": current_repo_root,
+            "workflow_last_step": stage,
+            "workflow_recommended_next": "run",
+            "restart_to_plan": False,
+            "run_oom_retry_count": control_ctx["run_oom_retry_count"],
+            "run_rss_limit_mb_override": control_ctx["run_rss_limit_mb_override"],
+            "run_parallel_fuzzers_override": control_ctx["run_parallel_fuzzers_override"],
+        }
+        stage_failed = False
+        stage_fail_reason = ""
+        stage_fail_error = ""
+    else:
+        stage_result = {
+            "message": f"stage {stage} failed in k8s worker; restarting from plan",
+            "repo_root": current_repo_root,
+            "workflow_last_step": stage,
+            "workflow_recommended_next": "plan",
+            "restart_to_plan": True,
+            "restart_to_plan_reason": stage_fail_reason,
+            "restart_to_plan_stage": stage,
+            "restart_to_plan_error_text": stage_fail_error,
+            "restart_to_plan_report_path": "",
+            "error": stage_fail_error,
+        }
+    return stage_result, stage_failed, stage_fail_error, stage_fail_reason
+
+
+def _handle_stage_dispatch_exception(
+    *,
+    stage: str,
+    exc: Exception,
+    control_ctx: dict[str, object],
+    wait_timeout: int,
+    wait_override_key: str,
+    unlimited_round_limit_value: int,
+    current_repo_root: str,
+    job_id: str,
+) -> tuple[dict[str, object], bool, str, str]:
+    is_k8s_timeout = "k8s_job_timeout" in str(exc)
+    timeout_retry_key = f"{stage}_timeout_retry_count"
+    timeout_retry_count = int(control_ctx.get(timeout_retry_key) or 0)
+    try:
+        max_timeout_retries = int(os.environ.get("SHERPA_K8S_TIMEOUT_MAX_RETRIES", "0"))
+        if max_timeout_retries <= 0:
+            max_timeout_retries = int(os.environ.get("SHERPA_RUN_TIMEOUT_MAX_RETRIES", "3"))
+    except Exception:
+        max_timeout_retries = 3
+
+    if stage in ("run", "build") and is_k8s_timeout and timeout_retry_count < max_timeout_retries:
+        current_wait = max(300, wait_timeout)
+        try:
+            current_wait = max(
+                current_wait, int(control_ctx.get(wait_override_key) or current_wait)
+            )
+        except Exception:
+            pass
+        extended_wait = int(current_wait * 1.5)
+        control_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
+        control_ctx[wait_override_key] = str(extended_wait)
+        if stage == "run":
+            control_ctx["run_timeout_budget_sec_override"] = str(
+                int(
+                    int(control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
+                    * 1.5
+                )
+            )
+        logger.info(
+            f"[job {job_id}] {stage} stage k8s_job_timeout; "
+            f"retrying with extended timeout "
+            f"(retry {timeout_retry_count + 1}, "
+            f"wait {current_wait}s -> {extended_wait}s)"
+        )
+        stage_result = {
+            "message": (
+                f"{stage} stage k8s_job_timeout; retrying with extended timeout "
+                f"(retry {timeout_retry_count + 1}, "
+                f"wait {current_wait}s -> {extended_wait}s)"
+            ),
+            "repo_root": current_repo_root,
+            "workflow_last_step": stage,
+            "workflow_recommended_next": stage,
+            "restart_to_plan": False,
+            timeout_retry_key: control_ctx[timeout_retry_key],
+            wait_override_key: control_ctx[wait_override_key],
+        }
+        if stage == "run":
+            stage_result["run_timeout_budget_sec_override"] = control_ctx.get(
+                "run_timeout_budget_sec_override", ""
+            )
+        return stage_result, False, "", ""
+
+    stage_fail_error = _redact_sensitive_text(str(exc))
+    if is_k8s_timeout:
+        stage_fail_reason = "k8s_job_timeout"
+        logger.info(
+            f"[job {job_id}] {stage} stage k8s_job_timeout; "
+            f"max retries exhausted ({timeout_retry_count}/{max_timeout_retries}) "
+            f"-> fallback to plan"
+        )
+    else:
+        stage_fail_reason = "stage_dispatch_exception"
+    stage_result = {
+        "message": f"stage {stage} dispatch failed; restarting from plan",
+        "repo_root": current_repo_root,
+        "workflow_last_step": stage,
+        "workflow_recommended_next": "plan",
+        "restart_to_plan": True,
+        "restart_to_plan_reason": stage_fail_reason,
+        "restart_to_plan_stage": stage,
+        "restart_to_plan_error_text": stage_fail_error,
+        "restart_to_plan_report_path": "",
+        "error": stage_fail_error,
+    }
+    return stage_result, True, stage_fail_error, stage_fail_reason
+
+
+def _finalize_stage_result(
+    *,
+    stage_result: object,
+    stage: str,
+    job_name: str,
+    stage_failed: bool,
+    current_repo_root: str,
+    context_dir: str,
+    control_ctx: dict[str, object],
+    workflow_ctx: dict[str, object],
+    job_id: str,
+) -> tuple[str, str, dict[str, object], dict[str, object], dict[str, object]]:
+    if isinstance(stage_result, dict):
+        current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
+        next_context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
+        if next_context_dir and next_context_dir != context_dir:
+            context_dir = next_context_dir
+        if context_dir:
+            control_doc, workflow_doc = read_context_docs(
+                context_dir,
+                job_id=job_id,
+            )
+            control_ctx = strip_meta(control_doc)
+            workflow_ctx = strip_meta(workflow_doc)
+        control_ctx, workflow_ctx = merge_result_into_contexts(
+            stage_result,
+            control=control_ctx,
+            workflow=workflow_ctx,
+        )
+        if not bool(stage_result.get("restart_to_plan")):
+            workflow_ctx["restart_to_plan_reason"] = ""
+            workflow_ctx["restart_to_plan_stage"] = ""
+            workflow_ctx["restart_to_plan_error_text"] = ""
+            workflow_ctx["restart_to_plan_report_path"] = ""
+        if context_dir:
+            write_context_docs(
+                context_dir,
+                control=control_ctx,
+                workflow=workflow_ctx,
+                job_id=job_id,
+            )
+        stage_record = {
+            "stage": stage,
+            "job_name": job_name,
+            "ok": (not stage_failed),
+            "repo_root": current_repo_root,
+            "control_context": dict(control_ctx),
+            "workflow_context": dict(workflow_ctx),
+            "result": stage_result,
+        }
+        if current_repo_root:
+            _job_update(job_id, workflow_repo_root=current_repo_root, resume_repo_root=current_repo_root)
+        return current_repo_root, context_dir, control_ctx, workflow_ctx, stage_record
+
+    stage_record = {
+        "stage": stage,
+        "job_name": job_name,
+        "ok": True,
+        "repo_root": current_repo_root,
+    }
+    return current_repo_root, context_dir, control_ctx, workflow_ctx, stage_record
+
+
+def _update_stage_node_pin(
+    *,
+    stage: str,
+    stage_node_name: str,
+    current_node_name: str,
+    job_id: str,
+) -> str:
+    if stage_node_name:
+        if current_node_name and stage_node_name != current_node_name:
+            logger.info(
+                f"[job {job_id}] stage {stage} node drift {current_node_name} -> {stage_node_name}, updating pin"
+            )
+        elif not current_node_name:
+            logger.info(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
+        return stage_node_name
+
+    logger.info(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
+    return current_node_name
+
+
+def _next_stage_from_result(stage_result: object) -> str:
+    if not isinstance(stage_result, dict):
+        return ""
+    next_raw = str(stage_result.get("workflow_recommended_next") or "").strip()
+    if not next_raw:
+        return ""
+    return _normalize_resume_step(next_raw)
+
+
+def _workflow_result_has_terminal_error(res: dict[str, object]) -> bool:
+    if bool(res.get("failed")):
+        return True
+    next_stage = _next_stage_from_result(res)
+    if next_stage:
+        return False
+    last_error = str(res.get("last_error") or res.get("error") or "").strip()
+    message = str(res.get("message") or "").strip().lower()
+    if last_error and (
+        message.endswith("failed")
+        or " failed" in message
+        or message.startswith("failed")
+    ):
+        return True
+    if last_error and str(res.get("status") or "").strip().lower() in {"error", "failed"}:
+        return True
+    return False
+
+
+def _final_status_from_workflow_result(*, resumed: bool, res: dict[str, object]) -> tuple[str, str | None]:
+    if _workflow_result_has_terminal_error(res):
+        run_terminal_reason = str(res.get("run_terminal_reason") or "").strip()
+        final_error = str(
+            res.get("last_error")
+            or res.get("error")
+            or run_terminal_reason
+            or "workflow_failed"
+        ).strip()
+        return "error", final_error
+    return ("resumed" if resumed else "success"), None
 
 
 def _list_runtime_containers_for_repo(repo_root: str) -> list[str]:
@@ -1923,18 +2260,41 @@ def _update_workflow_checkpoint_from_line(job_id: str, line: str) -> None:
                 fuzz_crash_found=bool(payload.get("crash_found")),
                 fuzz_coverage_history=payload.get("coverage_history") or [],
                 fuzz_coverage_source_report=payload.get("coverage_source_report") or {},
+                fuzz_coverage_run_feedback_path=str(payload.get("coverage_run_feedback_path") or ""),
+                fuzz_coverage_run_feedback_summary=payload.get("coverage_run_feedback_summary") or {},
+                fuzz_coverage_per_input_manifest_path=str(payload.get("coverage_per_input_manifest_path") or ""),
+                fuzz_coverage_frontier_path=str(payload.get("coverage_frontier_path") or ""),
+                fuzz_coverage_frontier_summary=payload.get("coverage_frontier_summary") or {},
+                fuzz_coverage_replay_runtime_sec=float(payload.get("coverage_replay_runtime_sec") or 0.0),
+                fuzz_coverage_replay_binary_hash=str(payload.get("coverage_replay_binary_hash") or ""),
                 fuzz_coverage_loop_round=int(payload.get("coverage_loop_round") or 0),
                 fuzz_coverage_loop_max_rounds=int(payload.get("coverage_loop_max_rounds") or 0),
                 fuzz_coverage_plateau_streak=int(payload.get("coverage_plateau_streak") or 0),
                 fuzz_coverage_seed_profile=str(payload.get("coverage_seed_profile") or ""),
                 fuzz_coverage_quality_flags=payload.get("coverage_quality_flags") or [],
                 fuzz_coverage_bottleneck_kind=str(payload.get("coverage_bottleneck_kind") or ""),
+                fuzz_coverage_replay_binary_dir=str(payload.get("coverage_replay_binary_dir") or ""),
+                fuzz_coverage_replay_binary_count=int(payload.get("coverage_replay_binary_count") or 0),
+                fuzz_coverage_replay_stage_success=bool(payload.get("coverage_replay_stage_success") or False),
+                fuzz_coverage_replay_error=str(payload.get("coverage_replay_error") or ""),
+                fuzz_coverage_replay_manifest_fresh_for_current_binary=bool(
+                    payload.get("coverage_replay_manifest_fresh_for_current_binary") or False
+                ),
+                fuzz_coverage_replay_queue_drained=bool(payload.get("coverage_replay_queue_drained") or False),
+                fuzz_coverage_replay_pending_inputs=int(payload.get("coverage_replay_pending_inputs") or 0),
+                fuzz_coverage_replay_failed_inputs=int(payload.get("coverage_replay_failed_inputs") or 0),
+                fuzz_coverage_replay_processed_inputs=int(payload.get("coverage_replay_processed_inputs") or 0),
+                fuzz_coverage_replay_total_inputs=int(payload.get("coverage_replay_total_inputs") or 0),
                 analysis_evidence_count=int(payload.get("analysis_evidence_count") or 0),
                 security_evidence_count=int(payload.get("security_evidence_count") or 0),
                 vuln_candidate_count=int(payload.get("vuln_candidate_count") or 0),
                 vuln_hunting_enabled=bool(payload.get("vuln_hunting_enabled") or False),
                 security_priority_mode=bool(payload.get("security_priority_mode") or False),
                 latest_vuln_decision_snapshot=dict(payload.get("latest_vuln_decision_snapshot") or {}),
+                vuln_candidates_path=str(payload.get("vuln_candidates_path") or ""),
+                crash_vuln_report_path=str(payload.get("crash_vuln_report_path") or ""),
+                latest_crash_vuln_candidate=dict(payload.get("latest_crash_vuln_candidate") or {}),
+                crash_vuln_candidate_count=int(payload.get("crash_vuln_candidate_count") or 0),
                 target_scoring_enabled=bool(payload.get("target_scoring_enabled") or False),
                 target_score_breakdown_available=bool(payload.get("target_score_breakdown_available") or False),
                 constraint_memory_count=int(payload.get("constraint_memory_count") or 0),
@@ -2155,10 +2515,12 @@ def _is_status_terminal(raw: str | None) -> bool:
 
 _RESUMABLE_WORKFLOW_STEPS = {
     "analysis",
+    "vuln-hunt",
     "plan",
     "synthesize",
     "build",
     "run",
+    "per-input-replay",
     "crash-triage",
     "coverage-analysis",
     "improve-harness",
@@ -2168,10 +2530,12 @@ _RESUMABLE_WORKFLOW_STEPS = {
 }
 _STAGED_WORKFLOW_STEPS = (
     "analysis",
+    "vuln-hunt",
     "plan",
     "synthesize",
     "build",
     "run",
+    "per-input-replay",
     "crash-triage",
     "coverage-analysis",
     "improve-harness",
@@ -2187,6 +2551,8 @@ def _normalize_resume_step(raw: str | None) -> str:
         return "stop"
     if s == "repro_crash":
         return "re-build"
+    if s in {"vuln_hunt", "vuln-hunt"}:
+        return "vuln-hunt"
     if s in {"crash_triage", "crash-triage"}:
         return "crash-triage"
     if s in {"fix_harness", "fix-harness"}:
@@ -2845,6 +3211,13 @@ def _system_status() -> dict:
     avg_coverage = (sum(coverage_values) / float(len(coverage_values))) if coverage_values else None
 
     running_fuzz = sum(1 for j in fuzz_jobs if _status_bucket(str(j.get("status") or "")) == "running")
+    crash_vuln_candidates = sum(int(j.get("crash_vuln_candidate_count") or 0) for j in fuzz_jobs)
+    latest_crash_vuln_candidate: dict[str, object] = {}
+    for j in sorted(fuzz_jobs, key=lambda item: float(_safe_float(item.get("updated_at")) or 0.0), reverse=True):
+        candidate = j.get("latest_crash_vuln_candidate")
+        if isinstance(candidate, dict) and candidate:
+            latest_crash_vuln_candidate = dict(candidate)
+            break
 
     cgroup_ratio = _safe_float(memory.get("cgroup_usage_ratio"))
     cluster_load_pct = (max(0.0, min(100.0, cgroup_ratio * 100.0)) if cgroup_ratio is not None else None)
@@ -2980,6 +3353,13 @@ def _system_status() -> dict:
             "max": _MAX_WORKERS,
         },
         "active_jobs": active[:8],
+        "security": {
+            "vuln_hunting_enabled": any(bool(j.get("vuln_hunting_enabled")) for j in fuzz_jobs),
+            "security_priority_mode": any(bool(j.get("security_priority_mode")) for j in fuzz_jobs),
+            "analysis_vuln_candidate_count": sum(int(j.get("vuln_candidate_count") or 0) for j in fuzz_jobs),
+            "crash_vuln_candidate_count": int(crash_vuln_candidates),
+            "latest_crash_vuln_candidate": latest_crash_vuln_candidate,
+        },
         "logs": {
             "dir": str(log_dir),
             "exists": log_dir.exists(),
@@ -3571,6 +3951,119 @@ def _job_snapshot(job_id: str) -> dict | None:
     return view
 
 
+def _context_value_present(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _assign_context_value(view: dict, target_key: str, value, *, cast=None, allow_empty: bool = False) -> None:
+    if not allow_empty and not _context_value_present(value):
+        return
+    try:
+        view[target_key] = cast(value) if cast else value
+    except Exception:
+        return
+
+
+def _workflow_context_for_job_view(view: dict) -> dict:
+    repo_root = str(
+        view.get("workflow_repo_root")
+        or view.get("resume_repo_root")
+        or view.get("analysis_companion_repo_root")
+        or ""
+    ).strip()
+    context_dir = context_dir_for_repo_root(repo_root)
+    if not context_dir:
+        return {}
+    try:
+        _control_doc, workflow_doc = read_context_docs(context_dir, job_id=str(view.get("job_id") or view.get("id") or ""))
+    except Exception:
+        return {}
+    return strip_meta(workflow_doc)
+
+
+def _enrich_job_view_from_workflow_context(view: dict) -> None:
+    """Mirror the current double-file workflow context into API job fields.
+
+    The DB/log-derived fields are still used, but active k8s stages can update
+    fuzz/context/workflow_context.json without emitting a metrics log line yet.
+    Reading the context here keeps /api/task* aligned with the workflow truth.
+    """
+    workflow_ctx = _workflow_context_for_job_view(view)
+    if not workflow_ctx:
+        return
+
+    seed_quality = workflow_ctx.get("coverage_seed_quality")
+    if isinstance(seed_quality, dict):
+        final_cov = seed_quality.get("final_cov")
+        final_ft = seed_quality.get("final_ft")
+        if _context_value_present(final_cov) and int(view.get("fuzz_max_cov") or 0) <= 0:
+            _assign_context_value(view, "fuzz_max_cov", final_cov, cast=int)
+        if _context_value_present(final_ft) and int(view.get("fuzz_max_ft") or 0) <= 0:
+            _assign_context_value(view, "fuzz_max_ft", final_ft, cast=int)
+
+    mappings = (
+        ("coverage_loop_round", "fuzz_coverage_loop_round", int),
+        ("coverage_loop_max_rounds", "fuzz_coverage_loop_max_rounds", int),
+        ("coverage_plateau_streak", "fuzz_coverage_plateau_streak", int),
+        ("coverage_seed_profile", "fuzz_coverage_seed_profile", str),
+        ("coverage_quality_flags", "fuzz_coverage_quality_flags", list),
+        ("coverage_bottleneck_kind", "fuzz_coverage_bottleneck_kind", str),
+        ("coverage_run_feedback_path", "fuzz_coverage_run_feedback_path", str),
+        ("coverage_run_feedback_summary", "fuzz_coverage_run_feedback_summary", dict),
+        ("coverage_per_input_manifest_path", "fuzz_coverage_per_input_manifest_path", str),
+        ("coverage_frontier_path", "fuzz_coverage_frontier_path", str),
+        ("coverage_frontier_summary", "fuzz_coverage_frontier_summary", dict),
+        ("coverage_replay_runtime_sec", "fuzz_coverage_replay_runtime_sec", float),
+        ("coverage_replay_binary_hash", "fuzz_coverage_replay_binary_hash", str),
+        ("coverage_replay_binary_dir", "fuzz_coverage_replay_binary_dir", str),
+        ("coverage_replay_binary_count", "fuzz_coverage_replay_binary_count", int),
+        ("coverage_replay_stage_success", "fuzz_coverage_replay_stage_success", bool),
+        ("coverage_replay_error", "fuzz_coverage_replay_error", str),
+        (
+            "coverage_replay_manifest_fresh_for_current_binary",
+            "fuzz_coverage_replay_manifest_fresh_for_current_binary",
+            bool,
+        ),
+        ("coverage_replay_queue_drained", "fuzz_coverage_replay_queue_drained", bool),
+        ("coverage_replay_pending_inputs", "fuzz_coverage_replay_pending_inputs", int),
+        ("coverage_replay_failed_inputs", "fuzz_coverage_replay_failed_inputs", int),
+        ("coverage_replay_processed_inputs", "fuzz_coverage_replay_processed_inputs", int),
+        ("coverage_replay_total_inputs", "fuzz_coverage_replay_total_inputs", int),
+        ("analysis_evidence_count", "analysis_evidence_count", int),
+        ("security_evidence_count", "security_evidence_count", int),
+        ("vuln_candidate_count", "vuln_candidate_count", int),
+        ("vuln_hunting_enabled", "vuln_hunting_enabled", bool),
+        ("vuln_hunt_enabled", "vuln_hunt_enabled", bool),
+        ("vuln_hunt_candidate_count", "vuln_hunt_candidate_count", int),
+        ("vuln_hunt_active_candidate_id", "vuln_hunt_active_candidate_id", str),
+        ("vuln_hunt_degraded", "vuln_hunt_degraded", bool),
+        ("vuln_hunt_last_reason", "vuln_hunt_last_reason", str),
+        ("vuln_hunt_summary_path", "vuln_hunt_summary_path", str),
+        ("security_priority_mode", "security_priority_mode", bool),
+        ("latest_vuln_decision_snapshot", "latest_vuln_decision_snapshot", dict),
+        ("vuln_candidates_path", "vuln_candidates_path", str),
+        ("crash_vuln_report_path", "crash_vuln_report_path", str),
+        ("latest_crash_vuln_candidate", "latest_crash_vuln_candidate", dict),
+        ("crash_vuln_candidate_count", "crash_vuln_candidate_count", int),
+        ("target_scoring_enabled", "target_scoring_enabled", bool),
+        ("target_score_breakdown_available", "target_score_breakdown_available", bool),
+        ("constraint_memory_count", "constraint_memory_count", int),
+        ("decision_trace_count", "decision_trace_count", int),
+        ("latest_decision_snapshot", "latest_decision_snapshot", dict),
+        ("crash_signature_dedup_hit", "crash_signature_dedup_hit", bool),
+    )
+    for source_key, target_key, cast in mappings:
+        if source_key not in workflow_ctx:
+            continue
+        _assign_context_value(view, target_key, workflow_ctx.get(source_key), cast=cast, allow_empty=True)
+
+
 def _enrich_job_view(view: dict) -> None:
     """Add workflow/resume/cancel tracking fields and fuzz metrics to a job API view."""
     # -- workflow & resume tracking --
@@ -3630,24 +4123,55 @@ def _enrich_job_view(view: dict) -> None:
     view.setdefault("fuzz_crash_found", False)
     view.setdefault("fuzz_coverage_history", [])
     view.setdefault("fuzz_coverage_source_report", {})
+    view.setdefault("fuzz_coverage_run_feedback_path", "")
+    view.setdefault("fuzz_coverage_run_feedback_summary", {})
+    view.setdefault("fuzz_coverage_per_input_manifest_path", "")
+    view.setdefault("fuzz_coverage_frontier_path", "")
+    view.setdefault("fuzz_coverage_frontier_summary", {})
+    view.setdefault("fuzz_coverage_replay_runtime_sec", 0.0)
+    view.setdefault("fuzz_coverage_replay_binary_hash", "")
     view.setdefault("fuzz_coverage_loop_round", 0)
     view.setdefault("fuzz_coverage_loop_max_rounds", 0)
     view.setdefault("fuzz_coverage_plateau_streak", 0)
     view.setdefault("fuzz_coverage_seed_profile", "")
     view.setdefault("fuzz_coverage_quality_flags", [])
     view.setdefault("fuzz_coverage_bottleneck_kind", "")
+    view.setdefault("fuzz_coverage_replay_binary_dir", "")
+    view.setdefault("fuzz_coverage_replay_binary_count", 0)
+    view.setdefault("fuzz_coverage_replay_stage_success", False)
+    view.setdefault("fuzz_coverage_replay_error", "")
+    view.setdefault("fuzz_coverage_replay_manifest_fresh_for_current_binary", False)
+    view.setdefault("fuzz_coverage_replay_queue_drained", False)
+    view.setdefault("fuzz_coverage_replay_pending_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_failed_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_processed_inputs", 0)
+    view.setdefault("fuzz_coverage_replay_total_inputs", 0)
     view.setdefault("analysis_evidence_count", 0)
     view.setdefault("security_evidence_count", 0)
     view.setdefault("vuln_candidate_count", 0)
     view.setdefault("vuln_hunting_enabled", False)
+    view.setdefault("vuln_hunt_enabled", False)
+    if bool(view.get("vuln_hunting_enabled")) and not bool(view.get("vuln_hunt_enabled")):
+        view["vuln_hunt_enabled"] = True
+    view.setdefault("vuln_hunt_candidate_count", 0)
+    view.setdefault("vuln_hunt_active_candidate_id", "")
+    view.setdefault("vuln_hunt_degraded", False)
+    view.setdefault("vuln_hunt_last_reason", "")
+    view.setdefault("vuln_hunt_summary_path", "")
     view.setdefault("security_priority_mode", False)
     view.setdefault("latest_vuln_decision_snapshot", {})
+    view.setdefault("vuln_candidates_path", "")
+    view.setdefault("crash_vuln_report_path", "")
+    view.setdefault("latest_crash_vuln_candidate", {})
+    view.setdefault("crash_vuln_candidate_count", 0)
     view.setdefault("target_scoring_enabled", False)
     view.setdefault("target_score_breakdown_available", False)
     view.setdefault("constraint_memory_count", 0)
     view.setdefault("decision_trace_count", 0)
     view.setdefault("latest_decision_snapshot", {})
     view.setdefault("crash_signature_dedup_hit", False)
+
+    _enrich_job_view_from_workflow_context(view)
 
     companion_status = _analysis_companion_status_for_job(str(view.get("id") or ""))
     if companion_status:
@@ -3759,6 +4283,9 @@ def _derive_task_status(job: dict) -> dict:
         c["phase"] = _phase_for_job(c)
         c["runtime_mode"] = _runtime_mode_for_job(c)
         _enrich_job_view(c)
+    # Aggregate coverage from children to parent view
+    view["fuzz_max_cov"] = max(int(c.get("fuzz_max_cov") or 0) for c in child_jobs) if child_jobs else 0
+    view["fuzz_max_ft"] = max(int(c.get("fuzz_max_ft") or 0) for c in child_jobs) if child_jobs else 0
     view["children"] = child_jobs
     err = _error_object_for_job(view)
     view["error"] = err
@@ -3778,7 +4305,14 @@ def _derive_task_status(job: dict) -> dict:
 
 def _derive_task_status_from_snapshot(job: dict, jobs_snapshot: dict[str, dict]) -> tuple[str, dict, list[dict]]:
     child_ids = list(job.get("children") or [])
-    child_jobs = [dict(jobs_snapshot[cid]) for cid in child_ids if cid in jobs_snapshot]
+    child_jobs = []
+    for cid in child_ids:
+        if cid not in jobs_snapshot:
+            continue
+        child_view = dict(jobs_snapshot[cid])
+        _hydrate_job_log_from_disk(child_view)
+        _enrich_job_view(child_view)
+        child_jobs.append(child_view)
     total = len(child_jobs)
     buckets = [_status_for_parent(str(j.get("status") or "")) for j in child_jobs]
     queued = sum(1 for b in buckets if b == "queued")
@@ -3876,12 +4410,44 @@ def _list_tasks(limit: int = 50) -> list[dict]:
                 "fuzz_coverage_seed_profile": (active_child or job).get("fuzz_coverage_seed_profile", ""),
                 "fuzz_coverage_quality_flags": (active_child or job).get("fuzz_coverage_quality_flags", []),
                 "fuzz_coverage_bottleneck_kind": (active_child or job).get("fuzz_coverage_bottleneck_kind", ""),
+                "fuzz_coverage_run_feedback_path": (active_child or job).get("fuzz_coverage_run_feedback_path", ""),
+                "fuzz_coverage_run_feedback_summary": (active_child or job).get("fuzz_coverage_run_feedback_summary", {}),
+                "fuzz_coverage_per_input_manifest_path": (active_child or job).get("fuzz_coverage_per_input_manifest_path", ""),
+                "fuzz_coverage_frontier_path": (active_child or job).get("fuzz_coverage_frontier_path", ""),
+                "fuzz_coverage_frontier_summary": (active_child or job).get("fuzz_coverage_frontier_summary", {}),
+                "fuzz_coverage_replay_runtime_sec": (active_child or job).get("fuzz_coverage_replay_runtime_sec", 0.0),
+                "fuzz_coverage_replay_binary_hash": (active_child or job).get("fuzz_coverage_replay_binary_hash", ""),
+                "fuzz_coverage_replay_binary_dir": (active_child or job).get("fuzz_coverage_replay_binary_dir", ""),
+                "fuzz_coverage_replay_binary_count": (active_child or job).get("fuzz_coverage_replay_binary_count", 0),
+                "fuzz_coverage_replay_stage_success": (active_child or job).get("fuzz_coverage_replay_stage_success", False),
+                "fuzz_coverage_replay_error": (active_child or job).get("fuzz_coverage_replay_error", ""),
+                "fuzz_coverage_replay_manifest_fresh_for_current_binary": (
+                    active_child or job
+                ).get("fuzz_coverage_replay_manifest_fresh_for_current_binary", False),
+                "fuzz_coverage_replay_queue_drained": (active_child or job).get("fuzz_coverage_replay_queue_drained", False),
+                "fuzz_coverage_replay_pending_inputs": (active_child or job).get("fuzz_coverage_replay_pending_inputs", 0),
+                "fuzz_coverage_replay_failed_inputs": (active_child or job).get("fuzz_coverage_replay_failed_inputs", 0),
+                "fuzz_coverage_replay_processed_inputs": (active_child or job).get("fuzz_coverage_replay_processed_inputs", 0),
+                "fuzz_coverage_replay_total_inputs": (active_child or job).get("fuzz_coverage_replay_total_inputs", 0),
                 "analysis_evidence_count": int((active_child or job).get("analysis_evidence_count", 0) or 0),
                 "security_evidence_count": int((active_child or job).get("security_evidence_count", 0) or 0),
                 "vuln_candidate_count": int((active_child or job).get("vuln_candidate_count", 0) or 0),
                 "vuln_hunting_enabled": bool((active_child or job).get("vuln_hunting_enabled", False)),
+                "vuln_hunt_enabled": bool(
+                    (active_child or job).get("vuln_hunt_enabled", False)
+                    or (active_child or job).get("vuln_hunting_enabled", False)
+                ),
+                "vuln_hunt_candidate_count": int((active_child or job).get("vuln_hunt_candidate_count", 0) or 0),
+                "vuln_hunt_active_candidate_id": str((active_child or job).get("vuln_hunt_active_candidate_id") or ""),
+                "vuln_hunt_degraded": bool((active_child or job).get("vuln_hunt_degraded", False)),
+                "vuln_hunt_last_reason": str((active_child or job).get("vuln_hunt_last_reason") or ""),
+                "vuln_hunt_summary_path": str((active_child or job).get("vuln_hunt_summary_path") or ""),
                 "security_priority_mode": bool((active_child or job).get("security_priority_mode", False)),
                 "latest_vuln_decision_snapshot": dict((active_child or job).get("latest_vuln_decision_snapshot") or {}),
+                "vuln_candidates_path": str((active_child or job).get("vuln_candidates_path") or ""),
+                "crash_vuln_report_path": str((active_child or job).get("crash_vuln_report_path") or ""),
+                "latest_crash_vuln_candidate": dict((active_child or job).get("latest_crash_vuln_candidate") or {}),
+                "crash_vuln_candidate_count": int((active_child or job).get("crash_vuln_candidate_count", 0) or 0),
                 "target_scoring_enabled": bool((active_child or job).get("target_scoring_enabled", False)),
                 "target_score_breakdown_available": bool((active_child or job).get("target_score_breakdown_available", False)),
                 "constraint_memory_count": int((active_child or job).get("constraint_memory_count", 0) or 0),
@@ -4115,7 +4681,7 @@ def _run_fuzz_job(
                     if _is_cancel_requested(job_id):
                         raise RuntimeError(cancel_error)
                     if (
-                        stage == "plan"
+                        stage in {"vuln-hunt", "plan"}
                         and companion_pod
                         and _k8s_analysis_require_rag_ready()
                     ):
@@ -4159,7 +4725,7 @@ def _run_fuzz_job(
                             "message": "analysis skipped: reuse existing analysis context",
                             "repo_root": current_repo_root,
                             "workflow_last_step": "analysis",
-                            "workflow_recommended_next": "plan",
+                            "workflow_recommended_next": "vuln-hunt",
                             "restart_to_plan": False,
                             "analysis_done": True,
                             "analysis_degraded": False,
@@ -4189,7 +4755,7 @@ def _run_fuzz_job(
                             f"{reusable_path or '(unknown path)'}"
                         )
                         last_result = stage_result
-                        current_stage = "plan"
+                        current_stage = "vuln-hunt"
                         continue
                     if current_repo_root:
                         context_dir = str(context_dir_for_repo_root(current_repo_root) or context_dir).strip()
@@ -4220,32 +4786,30 @@ def _run_fuzz_job(
                                     f"[job {job_id}] stage {stage} node pinning on {current_node_name}: {node_check_reason}"
                                 )
 
-                    payload = {
-                        "job_id": job_id,
-                        "repo_url": request.code_url,
-                        "max_len": int(request.max_tokens),
-                        "time_budget": int(total_time_budget_value),
-                        "run_time_budget": int(run_time_budget_value),
-                        "coverage_loop_max_rounds": int(coverage_loop_max_rounds),
-                        "max_fix_rounds": int(max_fix_rounds),
-                        "same_error_max_retries": int(same_error_max_retries),
-                        "email": request.email,
-                        "docker_image": docker_image,
-                        "ai_key_path": str(opencode_env_path()),
-                        "model": model_value,
-                        "resume_from_step": stage,
-                        "resume_repo_root": (current_repo_root or None),
-                        "stop_after_step": stage,
-                        "context_dir": (context_dir or None),
-                        "run_unlimited_round_budget_sec": int(
-                            control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value
-                        ),
-                        "analysis_companion_url": ((companion_url or None) if companion_mcp_ready else None),
-                        "analysis_companion_ready": bool(companion_mcp_ready),
-                        "result_path": str(result_path),
-                        "error_path": str(error_path),
-                        "target_node_name": (current_node_name if can_pin_node else None),
-                    }
+                    payload = _build_stage_payload(
+                        job_id=job_id,
+                        repo_url=request.code_url,
+                        max_tokens=int(request.max_tokens),
+                        total_time_budget_value=int(total_time_budget_value),
+                        run_time_budget_value=int(run_time_budget_value),
+                        coverage_loop_max_rounds=int(coverage_loop_max_rounds),
+                        max_fix_rounds=int(max_fix_rounds),
+                        same_error_max_retries=int(same_error_max_retries),
+                        email=request.email,
+                        docker_image=docker_image,
+                        model_value=model_value,
+                        stage=stage,
+                        current_repo_root=current_repo_root,
+                        context_dir=context_dir,
+                        control_ctx=control_ctx,
+                        unlimited_round_limit_value=int(unlimited_round_limit_value),
+                        companion_url=companion_url,
+                        companion_mcp_ready=bool(companion_mcp_ready),
+                        result_path=result_path,
+                        error_path=error_path,
+                        current_node_name=current_node_name,
+                        can_pin_node=bool(can_pin_node),
+                    )
                     control_ctx["target_node_name"] = (current_node_name if can_pin_node else "")
                     run_fuzzer_count = 1
                     run_parallelism = 1
@@ -4285,193 +4849,47 @@ def _run_fuzz_job(
                             wait_timeout=wait_timeout,
                         )
                     except _K8sJobFailure as e:
-                        stage_failed = True
-                        stage_fail_error = _redact_sensitive_text(str(e))
-                        failure_doc = dict(e.result or {})
-                        stage_fail_reason = str(failure_doc.get("error_code") or "").strip() or "k8s_job_failed"
-                        oom_retry_count = int(control_ctx.get("run_oom_retry_count") or 0)
-                        if stage == "run" and stage_fail_reason == "oom_killed" and oom_retry_count < 1:
-                            rss_raw = str(control_ctx.get("run_rss_limit_mb_override") or "").strip()
-                            if not rss_raw:
-                                rss_raw = (os.environ.get("SHERPA_RUN_RSS_LIMIT_MB") or "").strip()
-                            try:
-                                base_rss = int(rss_raw) if rss_raw else 131072
-                            except Exception:
-                                base_rss = 131072
-                            retry_rss = max(2048, int(base_rss * 0.75))
-                            # Keep libFuzzer rss below pod cgroup limit to avoid repeated OOMKilled loops.
-                            pod_limit_mb = _k8s_worker_memory_limit_mb()
-                            if pod_limit_mb > 0:
-                                capped_rss = max(2048, int(pod_limit_mb * 0.8))
-                                retry_rss = min(retry_rss, capped_rss)
-                            control_ctx["run_oom_retry_count"] = str(oom_retry_count + 1)
-                            control_ctx["run_rss_limit_mb_override"] = str(retry_rss)
-                            control_ctx["run_parallel_fuzzers_override"] = "1"
-                            stage_result = {
-                                "message": "run stage oom_killed; retrying run once with reduced rss/parallel",
-                                "repo_root": current_repo_root,
-                                "workflow_last_step": stage,
-                                "workflow_recommended_next": "run",
-                                "restart_to_plan": False,
-                                "run_oom_retry_count": control_ctx["run_oom_retry_count"],
-                                "run_rss_limit_mb_override": control_ctx["run_rss_limit_mb_override"],
-                                "run_parallel_fuzzers_override": control_ctx["run_parallel_fuzzers_override"],
-                            }
-                            stage_failed = False
-                            stage_fail_reason = ""
-                            stage_fail_error = ""
-                        else:
-                            stage_result = {
-                                "message": f"stage {stage} failed in k8s worker; restarting from plan",
-                                "repo_root": current_repo_root,
-                                "workflow_last_step": stage,
-                                "workflow_recommended_next": "plan",
-                                "restart_to_plan": True,
-                                "restart_to_plan_reason": stage_fail_reason,
-                                "restart_to_plan_stage": stage,
-                                "restart_to_plan_error_text": stage_fail_error,
-                                "restart_to_plan_report_path": "",
-                                "error": stage_fail_error,
-                            }
+                        stage_result, stage_failed, stage_fail_error, stage_fail_reason = (
+                            _handle_k8s_job_failure(
+                                stage=stage,
+                                failure=e,
+                                control_ctx=control_ctx,
+                                current_repo_root=current_repo_root,
+                                job_id=job_id,
+                            )
+                        )
                     except Exception as e:
-                        is_k8s_timeout = "k8s_job_timeout" in str(e)
-                        timeout_retry_key = f"{stage}_timeout_retry_count"
-                        timeout_retry_count = int(control_ctx.get(timeout_retry_key) or 0)
-                        try:
-                            max_timeout_retries = int(os.environ.get("SHERPA_K8S_TIMEOUT_MAX_RETRIES", "0"))
-                            if max_timeout_retries <= 0:
-                                max_timeout_retries = int(os.environ.get("SHERPA_RUN_TIMEOUT_MAX_RETRIES", "3"))
-                        except Exception:
-                            max_timeout_retries = 3
-                        if stage in ("run", "build") and is_k8s_timeout and timeout_retry_count < max_timeout_retries:
-                            current_wait = max(300, wait_timeout)
-                            try:
-                                current_wait = max(
-                                    current_wait, int(control_ctx.get(wait_override_key) or current_wait)
-                                )
-                            except Exception:
-                                pass
-                            extended_wait = int(current_wait * 1.5)
-                            control_ctx[timeout_retry_key] = str(timeout_retry_count + 1)
-                            control_ctx[wait_override_key] = str(extended_wait)
-                            if stage == "run":
-                                control_ctx["run_timeout_budget_sec_override"] = str(
-                                    int(
-                                        int(control_ctx.get("run_timeout_budget_sec_override") or unlimited_round_limit_value or 7200)
-                                        * 1.5
-                                    )
-                                )
-                            logger.info(
-                                f"[job {job_id}] {stage} stage k8s_job_timeout; "
-                                f"retrying with extended timeout "
-                                f"(retry {timeout_retry_count + 1}, "
-                                f"wait {current_wait}s -> {extended_wait}s)"
+                        stage_result, stage_failed, stage_fail_error, stage_fail_reason = (
+                            _handle_stage_dispatch_exception(
+                                stage=stage,
+                                exc=e,
+                                control_ctx=control_ctx,
+                                wait_timeout=wait_timeout,
+                                wait_override_key=wait_override_key,
+                                unlimited_round_limit_value=unlimited_round_limit_value,
+                                current_repo_root=current_repo_root,
+                                job_id=job_id,
                             )
-                            stage_result = {
-                                "message": (
-                                    f"{stage} stage k8s_job_timeout; retrying with extended timeout "
-                                    f"(retry {timeout_retry_count + 1}, "
-                                    f"wait {current_wait}s -> {extended_wait}s)"
-                                ),
-                                "repo_root": current_repo_root,
-                                "workflow_last_step": stage,
-                                "workflow_recommended_next": stage,
-                                "restart_to_plan": False,
-                                timeout_retry_key: control_ctx[timeout_retry_key],
-                                wait_override_key: control_ctx[wait_override_key],
-                            }
-                            if stage == "run":
-                                stage_result["run_timeout_budget_sec_override"] = control_ctx.get(
-                                    "run_timeout_budget_sec_override", ""
-                                )
-                            stage_failed = False
-                            stage_fail_reason = ""
-                            stage_fail_error = ""
-                        else:
-                            stage_failed = True
-                            stage_fail_error = _redact_sensitive_text(str(e))
-                            if is_k8s_timeout:
-                                stage_fail_reason = "k8s_job_timeout"
-                                logger.info(
-                                    f"[job {job_id}] {stage} stage k8s_job_timeout; "
-                                    f"max retries exhausted ({timeout_retry_count}/{max_timeout_retries}) "
-                                    f"-> fallback to plan"
-                                )
-                            else:
-                                stage_fail_reason = "stage_dispatch_exception"
-                            stage_result = {
-                                "message": f"stage {stage} dispatch failed; restarting from plan",
-                                "repo_root": current_repo_root,
-                                "workflow_last_step": stage,
-                                "workflow_recommended_next": "plan",
-                                "restart_to_plan": True,
-                                "restart_to_plan_reason": stage_fail_reason,
-                                "restart_to_plan_stage": stage,
-                                "restart_to_plan_error_text": stage_fail_error,
-                                "restart_to_plan_report_path": "",
-                                "error": stage_fail_error,
-                            }
-                    if stage_node_name:
-                        if current_node_name and stage_node_name != current_node_name:
-                            logger.info(
-                                f"[job {job_id}] stage {stage} node drift {current_node_name} -> {stage_node_name}, updating pin"
-                            )
-                        elif not current_node_name:
-                            logger.info(f"[job {job_id}] stage {stage} node selected: {stage_node_name}")
-                        current_node_name = stage_node_name
-                    else:
-                        logger.info(f"[job {job_id}] stage {stage} node unknown, continue without updating pin")
+                        )
+                    current_node_name = _update_stage_node_pin(
+                        stage=stage,
+                        stage_node_name=stage_node_name,
+                        current_node_name=current_node_name,
+                        job_id=job_id,
+                    )
 
-                    if isinstance(stage_result, dict):
-                        current_repo_root = str(stage_result.get("repo_root") or current_repo_root).strip()
-                        next_context_dir = str(context_dir_for_repo_root(current_repo_root) or "").strip()
-                        if next_context_dir and next_context_dir != context_dir:
-                            context_dir = next_context_dir
-                            control_doc, workflow_doc = read_context_docs(
-                                context_dir,
-                                job_id=job_id,
-                            )
-                            control_ctx = strip_meta(control_doc)
-                            workflow_ctx = strip_meta(workflow_doc)
-                        control_ctx, workflow_ctx = merge_result_into_contexts(
-                            stage_result,
-                            control=control_ctx,
-                            workflow=workflow_ctx,
-                        )
-                        if not bool(stage_result.get("restart_to_plan")):
-                            workflow_ctx["restart_to_plan_reason"] = ""
-                            workflow_ctx["restart_to_plan_stage"] = ""
-                            workflow_ctx["restart_to_plan_error_text"] = ""
-                            workflow_ctx["restart_to_plan_report_path"] = ""
-                        if context_dir:
-                            write_context_docs(
-                                context_dir,
-                                control=control_ctx,
-                                workflow=workflow_ctx,
-                                job_id=job_id,
-                            )
-                        stage_results.append(
-                            {
-                                "stage": stage,
-                                "job_name": job_name,
-                                "ok": (not stage_failed),
-                                "repo_root": current_repo_root,
-                                "control_context": dict(control_ctx),
-                                "workflow_context": dict(workflow_ctx),
-                                "result": stage_result,
-                            }
-                        )
-                        if current_repo_root:
-                            _job_update(job_id, workflow_repo_root=current_repo_root, resume_repo_root=current_repo_root)
-                    else:
-                        stage_results.append(
-                            {
-                                "stage": stage,
-                                "job_name": job_name,
-                                "ok": True,
-                                "repo_root": current_repo_root,
-                            }
-                        )
+                    current_repo_root, context_dir, control_ctx, workflow_ctx, stage_record = _finalize_stage_result(
+                        stage_result=stage_result,
+                        stage=stage,
+                        job_name=job_name,
+                        stage_failed=stage_failed,
+                        current_repo_root=current_repo_root,
+                        context_dir=context_dir,
+                        control_ctx=control_ctx,
+                        workflow_ctx=workflow_ctx,
+                        job_id=job_id,
+                    )
+                    stage_results.append(stage_record)
                     _job_update(
                         job_id,
                         workflow_last_step=stage,
@@ -4486,11 +4904,7 @@ def _run_fuzz_job(
                         )
                     else:
                         logger.info(f"[job {job_id}] stage {stage} completed via job {job_name}")
-                    next_stage = ""
-                    if isinstance(stage_result, dict):
-                        next_raw = str(stage_result.get("workflow_recommended_next") or "").strip()
-                        if next_raw:
-                            next_stage = _normalize_resume_step(next_raw)
+                    next_stage = _next_stage_from_result(stage_result)
                     if next_stage in {"", "stop"}:
                         break
                     current_stage = next_stage
@@ -4522,21 +4936,10 @@ def _run_fuzz_job(
                 last_resume_finished_at=time.time() if resumed else None,
             )
             return
-        res_failed = bool(isinstance(res, dict) and res.get("failed"))
-        run_terminal_reason = str((res.get("run_terminal_reason") if isinstance(res, dict) else "") or "").strip()
         final_status = ("resumed" if resumed else "success")
         final_error = None
-        if res_failed:
-            final_status = "error"
-            final_error = str(
-                (
-                    res.get("last_error")
-                    if isinstance(res, dict)
-                    else ""
-                )
-                or run_terminal_reason
-                or "workflow_failed"
-            ).strip()
+        if isinstance(res, dict):
+            final_status, final_error = _final_status_from_workflow_result(resumed=resumed, res=res)
         final_metric_fields: dict[str, object] = {}
         if isinstance(res, dict):
             final_metric_fields = {
@@ -4544,8 +4947,18 @@ def _run_fuzz_job(
                 "security_evidence_count": int(res.get("security_evidence_count") or 0),
                 "vuln_candidate_count": int(res.get("vuln_candidate_count") or 0),
                 "vuln_hunting_enabled": bool(res.get("vuln_hunting_enabled") or False),
+                "vuln_hunt_enabled": bool(res.get("vuln_hunt_enabled") or res.get("vuln_hunting_enabled") or False),
+                "vuln_hunt_candidate_count": int(res.get("vuln_hunt_candidate_count") or 0),
+                "vuln_hunt_active_candidate_id": str(res.get("vuln_hunt_active_candidate_id") or ""),
+                "vuln_hunt_degraded": bool(res.get("vuln_hunt_degraded") or False),
+                "vuln_hunt_last_reason": str(res.get("vuln_hunt_last_reason") or ""),
+                "vuln_hunt_summary_path": str(res.get("vuln_hunt_summary_path") or ""),
                 "security_priority_mode": bool(res.get("security_priority_mode") or False),
                 "latest_vuln_decision_snapshot": dict(res.get("latest_vuln_decision_snapshot") or {}),
+                "vuln_candidates_path": str(res.get("vuln_candidates_path") or ""),
+                "crash_vuln_report_path": str(res.get("crash_vuln_report_path") or ""),
+                "latest_crash_vuln_candidate": dict(res.get("latest_crash_vuln_candidate") or {}),
+                "crash_vuln_candidate_count": int(res.get("crash_vuln_candidate_count") or 0),
                 "target_scoring_enabled": bool(res.get("target_scoring_enabled") or False),
                 "target_score_breakdown_available": bool(res.get("target_score_breakdown_available") or False),
                 "decision_trace_count": int(res.get("decision_trace_count") or 0),

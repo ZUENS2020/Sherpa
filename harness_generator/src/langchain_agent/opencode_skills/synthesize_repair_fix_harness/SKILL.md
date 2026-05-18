@@ -4,7 +4,7 @@ description: Repair harness/build glue for crash-triaged harness bugs using evid
 compatibility: opencode
 metadata:
   stage: synthesize-repair-fix-harness
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -14,9 +14,9 @@ Produces concrete `fuzz/` code changes to fix harness bugs while preserving exec
 Use this skill when `repair_origin_stage=fix-harness` after crash triage labeled the crash as `harness_bug`.
 
 ## Required inputs
-- `crash_info.md`
-- `crash_analysis.md`
-- `crash_triage.json`
+- repo-root `crash_info.md`
+- repo-root `crash_triage.json`
+- repo-root `crash_analysis.md` when present; if absent on the crash-triage repair path, continue with explicit degraded reasoning
 - `repair_error_digest` and recent repair attempts
 - current `fuzz/` scaffold files
 - MCP tools from task-scoped PromeFuzz companion (if available)
@@ -27,7 +27,7 @@ Use this skill when `repair_origin_stage=fix-harness` after crash triage labeled
 - consistent `fuzz/README.md`, `fuzz/repo_understanding.json`, and `fuzz/build_strategy.json`
 
 ## Workflow
-1. Read crash evidence first and identify the failing harness path.
+1. Read repo-root crash evidence first and identify the failing harness path.
 2. Query MCP evidence first when available (preprocessor first, semantic evidence second).
 3. Apply one material strategy change compared with the previous failed cycle.
 4. Edit offending harness/build glue files and keep target mapping consistent.
@@ -37,10 +37,12 @@ Use this skill when `repair_origin_stage=fix-harness` after crash triage labeled
 - Forbidden: build/execute commands.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).
 
 ## Constraints
 - Must modify executable `fuzz/` code paths; doc-only/no-op patches are invalid.
+- Treat repo-root crash artifact paths as authoritative; do not guess `fuzz/crash_*` paths.
+- If `crash_analysis.md` is unavailable on this route, proceed from `crash_info.md` + `crash_triage.json` and document `crash_analysis_not_available_yet` in `fuzz/repo_understanding.json`.
 - Preserve libFuzzer entry contract:
   - no custom `main()` in harness source
   - use `LLVMFuzzerTestOneInput` (or language-equivalent fuzz entrypoint only)

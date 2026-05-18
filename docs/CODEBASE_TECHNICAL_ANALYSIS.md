@@ -1,10 +1,10 @@
-# Sherpa 代码库技术分析
+# TianHeng 代码库技术分析
 
-本文档从代码结构出发，解释 Sherpa 当前是如何把 fuzz 工程闭环跑起来的。
+本文档从代码结构出发，解释 TianHeng 当前是如何把 fuzz 工程闭环跑起来的。
 
 ## 1. 系统目标
 
-Sherpa 自动化的是整个 fuzz 编排闭环，而不是单点 harness 生成。
+TianHeng 自动化的是整个 fuzz 编排闭环，而不是单点 harness 生成。
 
 目标包括：
 

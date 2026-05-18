@@ -8,7 +8,7 @@ from pathlib import Path
 
 from workflow_graph import FuzzWorkflowInput, run_fuzz_workflow
 from persistent_config import load_config, normalize_model_for_opencode
-from errors import SherpaError, RunError
+from errors import TianHengError, RunError
 
 load_dotenv()
 
@@ -98,8 +98,8 @@ def fuzz_logic(
         )
         print(f"[DEBUG] run_fuzz_workflow returned successfully")
         return result
-    except SherpaError as e:
-        print(f"[DEBUG] run_fuzz_workflow failed with SherpaError: {e}")
+    except TianHengError as e:
+        print(f"[DEBUG] run_fuzz_workflow failed with TianHengError: {e}")
         import traceback
         traceback.print_exc()
         raise

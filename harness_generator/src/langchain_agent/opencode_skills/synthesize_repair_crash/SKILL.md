@@ -4,7 +4,7 @@ description: Repair scaffold for crash/repro failures while preserving crash-pat
 compatibility: opencode
 metadata:
   stage: synthesize-repair-crash
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -52,4 +52,4 @@ Use this skill in repair mode for crash/repro failures.
 - Execution target mapping remains valid.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

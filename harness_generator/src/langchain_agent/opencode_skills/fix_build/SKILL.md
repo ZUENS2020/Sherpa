@@ -4,7 +4,7 @@ description: Apply minimal evidence-driven build fixes in fuzz scaffold files fo
 compatibility: opencode
 metadata:
   stage: fix-build
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -27,6 +27,7 @@ Use this skill when build diagnostics exist and coordinator requests targeted bu
 ## Key template contract (`fuzz/build.py`)
 - Keep:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
+  - invoke CMake with the system `cmake` binary (for example `["cmake", "-S", ...]` and `["cmake", "--build", ...]`); do not use `sys.executable, "-m", "cmake"` or `python -m cmake`
   - exact static-lib discovery block:
 ```python
 def find_static_lib(repo_root):
@@ -79,4 +80,4 @@ def find_static_lib(repo_root):
 - Build/scaffold behavior remains aligned with execution-plan expectations.
 
 ## Done contract
-- Write one key modified path under `fuzz/` into `./done`.
+- Write one key modified path under `fuzz/` as the sole text of `./done` (a relative path string like `fuzz/foo.c`; do **not** copy file contents).

@@ -1,4 +1,4 @@
-# Sherpa 系统改进计划（5 天）
+# TianHeng 系统改进计划（5 天）
 
 > **状态: 🟡 主要项已收口，剩余回归阻塞待清理** — 2026-04-02
 >
@@ -12,7 +12,7 @@
 
 ## 背景
 
-Sherpa 是基于 LangGraph 的模糊测试编排平台，自动化完成目标选择 → 用例生成 → 构建 → 模糊测试 → 崩溃分流的全流程。
+TianHeng 是基于 LangGraph 的模糊测试编排平台，自动化完成目标选择 → 用例生成 → 构建 → 模糊测试 → 崩溃分流的全流程。
 
 经过对整个代码库的全面探索，识别出 15 项改进方向。本文档聚焦 **5 天内可落地、影响最大** 的项目，按天拆分为可执行任务。
 
@@ -264,7 +264,7 @@ pytest tests/ --tb=short -q  # 确认无破坏
 
 ## Day 4: 收窄异常捕获（main.py）
 
-### 任务 4.1: 建立 SherpaError 异常层次
+### 任务 4.1: 建立 TianHengError 异常层次
 
 **问题**: 全代码库 411 个 `except Exception:` 块（main.py 87 个，workflow_graph.py 195 个，fuzz_unharnessed_repo.py 129 个）。这种过度宽泛的捕获已导致实际问题被掩盖——例如 `fix_plan.md` 中记录的 k8s timeout bug 就是因为 timeout 异常被通用 `except Exception` 吞掉。
 
@@ -273,22 +273,22 @@ pytest tests/ --tb=short -q  # 确认无破坏
 **新建文件**: `harness_generator/src/langchain_agent/errors.py`
 
 ```python
-class SherpaError(RuntimeError):
-    """Base exception for all Sherpa-specific errors."""
+class TianHengError(RuntimeError):
+    """Base exception for all TianHeng-specific errors."""
 
-class BuildError(SherpaError):
+class BuildError(TianHengError):
     """Harness compilation or build script failure."""
 
-class RunError(SherpaError):
+class RunError(TianHengError):
     """Fuzzer execution failure."""
 
-class TriageError(SherpaError):
+class TriageError(TianHengError):
     """Crash triage or analysis failure."""
 
-class ConfigError(SherpaError):
+class ConfigError(TianHengError):
     """Configuration validation or loading failure."""
 
-class K8sJobError(SherpaError):
+class K8sJobError(TianHengError):
     """Kubernetes job submission, execution, or timeout failure."""
 ```
 
@@ -743,7 +743,7 @@ grep -i "minimax only" .env.example docs/ promefuzz-mcp/  # 目标: 0
 ### 日志 & 异常（Day 3-4）
 - [x] `grep -c "print(" main.py` 接近 0（当前为 0）
 - [x] `grep -c "except Exception" main.py` < 50（当前为 39）
-- [x] `errors.py` 中定义了 `SherpaError` 异常层次（已存在）
+- [x] `errors.py` 中定义了 `TianHengError` 异常层次（已存在）
 
 ### 清理（Day 5）
 - [x] `ossfuzz_auto.py` 和 `main_brain.py` 已删除（当前文件已不存在）

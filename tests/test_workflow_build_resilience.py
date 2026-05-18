@@ -444,6 +444,131 @@ def test_execution_plan_harness_consistency_maps_all_targets(tmp_path: Path):
     assert len(list(written.get("mappings") or [])) == 2
 
 
+def test_execution_plan_harness_consistency_allows_duplicate_api_target(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "readpng_decode",
+                        "expected_fuzzer_name": "readpng_decode",
+                        "api": "png_read_image",
+                    },
+                    {
+                        "target_name": "png_read_image",
+                        "expected_fuzzer_name": "png_read_image",
+                        "api": "png_read_image",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "readpng_decode_fuzzer.c").write_text("int x;", encoding="utf-8")
+
+    ok, reason, doc = workflow_graph._validate_execution_plan_harness_consistency(tmp_path)
+
+    assert ok is True
+    assert reason == ""
+    assert list(doc.get("missing_targets") or []) == []
+    mappings = list(doc.get("mappings") or [])
+    assert mappings[1]["matched_by"] == "api_equivalent"
+    assert mappings[1]["source_path"] == "fuzz/readpng_decode_fuzzer.c"
+
+
+def test_sync_execution_plan_derives_from_selected_targets(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "png_read_info",
+                    "api": "png_read_info",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "parser",
+                    "execution_priority": 1,
+                    "must_run": True,
+                },
+                {
+                    "target_name": "png_read_image",
+                    "api": "png_read_image",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "image",
+                    "execution_priority": 2,
+                    "must_run": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "execution_plan.json").write_text(
+        json.dumps(
+            {
+                "execution_targets": [
+                    {
+                        "target_name": "png_process_data",
+                        "expected_fuzzer_name": "png_process_data",
+                        "api": "png_process_data",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, doc = workflow_graph._sync_execution_plan_doc_from_selected_targets(tmp_path)
+
+    targets = list(doc.get("execution_targets") or [])
+    assert [item["target_name"] for item in targets] == ["png_read_info", "png_read_image"]
+    assert "png_process_data" not in json.dumps(doc)
+
+
+def test_workflow_target_state_follows_synced_execution_plan(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "parse_chunks",
+                    "target": "parse_chunks",
+                    "api": "png_read_info",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "parser",
+                    "score_total": 1.3,
+                    "score_breakdown": {"coverage_gap": 7.5},
+                    "security_priority_mode": True,
+                    "security_score_breakdown": {"vuln_likelihood": 0.78},
+                    "execution_priority": 1,
+                    "must_run": True,
+                },
+                {
+                    "target_name": "decode_full",
+                    "target": "decode_full",
+                    "api": "png_read_image",
+                    "seed_profile": "decoder-binary",
+                    "target_type": "image",
+                    "execution_priority": 2,
+                    "must_run": False,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _, execution_doc = workflow_graph._sync_execution_plan_doc_from_selected_targets(tmp_path)
+
+    state = workflow_graph._workflow_target_state_from_execution_plan(tmp_path, execution_doc)
+
+    assert state["coverage_target_name"] == "parse_chunks"
+    assert state["coverage_target_api"] == "png_read_info"
+    assert state["coverage_seed_profile"] == "decoder-binary"
+    assert state["latest_decision_snapshot"]["selected_target"] == "parse_chunks"
+    assert state["latest_vuln_decision_snapshot"]["selected_api"] == "png_read_info"
+
+
 def test_build_gate_accepts_suffix_normalized_execution_target_names(tmp_path: Path, monkeypatch, _no_sleep):
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
@@ -808,12 +933,20 @@ def test_route_after_init_defaults_to_analysis_for_invalid_resume_step() -> None
     assert route == "analysis"
 
 
-def test_route_after_analysis_goes_to_plan_on_success_or_degraded() -> None:
+def test_route_after_analysis_goes_to_vuln_hunt_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "1")
     assert workflow_graph._route_after_analysis_state(
         {"failed": False, "last_error": "", "analysis_degraded": False}
-    ) == "plan"
+    ) == "vuln-hunt"
     assert workflow_graph._route_after_analysis_state(
         {"failed": False, "last_error": "analysis failed", "analysis_degraded": True}
+    ) == "vuln-hunt"
+
+
+def test_route_after_analysis_goes_to_plan_when_vuln_hunt_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "0")
+    assert workflow_graph._route_after_analysis_state(
+        {"failed": False, "last_error": "", "analysis_degraded": False}
     ) == "plan"
 
 

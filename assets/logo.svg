@@ -68,13 +68,13 @@
     <!-- Ground baseline -->
     <rect x="14" y="94" width="92" height="1.5" rx="0.75" fill="#aaa" opacity="0.3"/>
 
-    <!-- SHERPA label -->
+    <!-- TIANHENG label -->
     <text x="60" y="110"
           font-family="'Courier New', monospace"
           font-size="8.5" font-weight="bold"
           letter-spacing="3"
           fill="#555" opacity="0.55"
-          text-anchor="middle">SHERPA</text>
+          text-anchor="middle">TIANHENG</text>
 
   </g>
 

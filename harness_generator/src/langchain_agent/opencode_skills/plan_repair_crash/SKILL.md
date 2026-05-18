@@ -4,7 +4,7 @@ description: Re-plan after crash/repro failures while preserving crash-path reac
 compatibility: opencode
 metadata:
   stage: plan-repair-crash
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -58,4 +58,4 @@ Use this skill when workflow is in repair mode with `repair_origin_stage` relate
 - `Known Issues` exists and lists concrete unresolved crash risks for this cycle.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).

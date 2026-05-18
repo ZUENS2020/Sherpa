@@ -47,6 +47,7 @@ from __future__ import annotations
 from loguru import logger
 
 import logging
+import fnmatch
 import json
 import hashlib
 import os
@@ -305,6 +306,44 @@ def _extract_changed_paths_from_diff(diff_text: str, *, limit: int = 20) -> list
                 out.append(p)
                 if len(out) >= limit:
                     return out
+    return out
+
+
+def _path_allowed_by_specs(path: str, specs: Sequence[str] | None) -> bool:
+    if specs is None:
+        return True
+    rel = str(path or "").strip().lstrip("./")
+    if not rel:
+        return False
+    for raw in specs:
+        spec = str(raw or "").strip().lstrip("./")
+        if not spec:
+            continue
+        if spec.endswith("/"):
+            if rel.startswith(spec):
+                return True
+            continue
+        if any(ch in spec for ch in "*?[]"):
+            if fnmatch.fnmatch(rel, spec):
+                return True
+            continue
+        if rel == spec or rel.startswith(spec.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _disallowed_changed_paths(paths: Sequence[str], specs: Sequence[str] | None) -> list[str]:
+    if specs is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        rel = str(path or "").strip().lstrip("./")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        if not _path_allowed_by_specs(rel, specs):
+            out.append(rel)
     return out
 
 
@@ -834,6 +873,7 @@ class CodexHelper:
 
         self.last_cli_error_kind = ""
         self.last_cli_error_message = ""
+        self.last_cli_stdout = ""
 
         LOGGER.debug("OpenCodeHelper working directory: %s", self.working_dir)
 
@@ -923,6 +963,33 @@ class CodexHelper:
             return f"{diff_text}\n\n=== status ===\n{status_text}"
         return diff_text or status_text
 
+    def _git_restore_paths(self, paths: Sequence[str]) -> None:
+        rels = [str(p).strip().lstrip("./") for p in paths if str(p).strip()]
+        if not rels:
+            return
+        if self.git_docker_image:
+            self._docker_git(["restore", "--worktree", "--staged", "--"] + rels, check=False)
+            self._docker_git(["clean", "-fd", "--"] + rels, check=False)
+            return
+        subprocess.run(
+            ["git", "restore", "--worktree", "--staged", "--"] + rels,
+            cwd=self.working_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["git", "clean", "-fd", "--"] + rels,
+            cwd=self.working_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -940,6 +1007,7 @@ class CodexHelper:
         idle_timeout_override: int | None = None,
         activity_watch_paths: Sequence[str] | None = None,
         activity_probe_interval_sec: float | None = None,
+        allowed_edit_paths: Sequence[str] | None = None,
     ) -> str | None:
         """Execute OpenCode with robust retry logic and return its stdout or *None*."""
 
@@ -951,7 +1019,7 @@ class CodexHelper:
                     return max(0, min(int(v), 86_400))
                 except Exception:
                     return 300
-            raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "300").strip()
+            raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SEC") or "600").strip()
             try:
                 return max(0, min(int(raw), 86_400))
             except Exception:
@@ -1008,11 +1076,23 @@ class CodexHelper:
         done_path = self.working_dir / SENTINEL
         self.last_cli_error_kind = ""
         self.last_cli_error_message = ""
+        self.last_cli_stdout = ""
         watch_specs: List[str] = []
         for spec in (activity_watch_paths or ()):
             txt = str(spec).strip()
             if txt:
                 watch_specs.append(txt)
+
+        def _clear_done_path() -> None:
+            if not done_path.exists():
+                return
+            if done_path.is_dir():
+                shutil.rmtree(done_path)
+                return
+            done_path.unlink(missing_ok=True)
+
+        def _has_valid_done_file() -> bool:
+            return done_path.exists() and done_path.is_file()
 
         def _watch_targets(spec: str) -> List[Path]:
             p = Path(spec)
@@ -1238,7 +1318,7 @@ class CodexHelper:
             LOGGER.info("[OpenCodeHelper] patch attempt %d/%d", attempt, max_attempts)
 
             try:
-                done_path.unlink(missing_ok=True)
+                _clear_done_path()
             except Exception as e:
                 LOGGER.warning("[OpenCodeHelper] failed to clear pre-attempt done flag: %s", e)
 
@@ -1382,6 +1462,12 @@ class CodexHelper:
                         errors="replace",
                         start_new_session=(os.name != "nt"),
                     )
+                    proc_pgid = int(getattr(proc, "pid", 0) or 0)
+                    if os.name != "nt":
+                        try:
+                            proc_pgid = int(os.getpgid(proc.pid))
+                        except Exception:
+                            proc_pgid = int(getattr(proc, "pid", 0) or 0)
                 except FileNotFoundError as e:
                     raise FileNotFoundError(
                         f"Failed to launch OpenCode CLI: {cli_exe} (cwd={self.working_dir}). "
@@ -1462,13 +1548,13 @@ class CodexHelper:
                     return reaped, status
 
                 def _terminate_or_kill_proc(force: bool) -> None:
-                    if proc.poll() is not None:
-                        return
                     if os.name != "nt":
                         try:
-                            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+                            os.killpg(proc_pgid, signal.SIGKILL if force else signal.SIGTERM)
                         except Exception:
                             pass
+                    if proc.poll() is not None:
+                        return
                     try:
                         if force:
                             proc.kill()
@@ -1486,20 +1572,27 @@ class CodexHelper:
                     cleanup_error = ""
                     cleanup_reaped_count = 0
                     cleanup_reap_status = "ok"
-                    proc_pgid = int(getattr(proc, "pid", 0) or 0)
                     try:
-                        if proc.stdout is not None:
-                            try:
-                                proc.stdout.close()
-                            except Exception:
-                                pass
+                        # Terminate first. Closing the stdout pipe while the reader
+                        # thread is blocked in a buffered read can block on the
+                        # reader's internal lock, preventing the kill path from ever
+                        # running and leaving orphaned opencode processes alive.
+                        _terminate_or_kill_proc(force=False)
+                        # For done_flag, give Node.js event loop more time to flush
+                        # async writes before escalating to SIGKILL.
+                        _done_flag_wait = 2.0 if reason == "done_flag" else 0.5
+                        _wait_proc_with_timeout(_done_flag_wait)
                         if proc.poll() is None:
-                            _terminate_or_kill_proc(force=False)
                             if not _wait_proc_with_timeout(4.0):
                                 _terminate_or_kill_proc(force=True if force_kill else False)
                                 if not _wait_proc_with_timeout(4.0):
                                     cleanup_status = "failed"
                                     cleanup_error = "process did not exit after terminate/kill sequence"
+                        if proc.stdout is not None:
+                            try:
+                                proc.stdout.close()
+                            except Exception:
+                                pass
                         reaped_pg, reap_status_pg = _reap_process_group_children(proc_pgid, 1.0)
                         cleanup_reaped_count += int(reaped_pg)
                         if reap_status_pg == "failed":
@@ -1613,6 +1706,19 @@ class CodexHelper:
                             logger.info(f"[OpenCodeHelper] running… elapsed={elapsed:.0f}s")
 
                         if done_path.exists():
+                            if not done_path.is_file():
+                                LOGGER.warning(
+                                    "[OpenCodeHelper] invalid done flag type at %s; removing and continuing",
+                                    done_path,
+                                )
+                                logger.info("[OpenCodeHelper] invalid done flag type; removing and continuing")
+                                try:
+                                    _clear_done_path()
+                                except Exception as e:
+                                    raise RuntimeError(
+                                        f"stale done flag could not be removed: {done_path} ({e})"
+                                    ) from e
+                                continue
                             stale_done = False
                             done_mtime = 0.0
                             try:
@@ -1628,14 +1734,53 @@ class CodexHelper:
                                 )
                                 logger.info("[OpenCodeHelper] stale done flag detected; removing and continuing")
                                 try:
-                                    done_path.unlink(missing_ok=True)
+                                    _clear_done_path()
                                 except Exception as e:
                                     raise RuntimeError(
                                         f"stale done flag could not be removed: {done_path} ({e})"
                                     ) from e
                             else:
                                 LOGGER.info("[OpenCodeHelper] done flag detected")
-                                logger.info("[OpenCodeHelper] done flag detected; terminating")
+                                logger.info("[OpenCodeHelper] done flag detected; graceful flush")
+
+                                # Read done content to find the referenced artifact path.
+                                _done_content = ""
+                                try:
+                                    _done_content = done_path.read_text(encoding="utf-8", errors="replace").strip()
+                                except Exception:
+                                    pass
+
+                                # Wait for referenced artifact to appear on disk.
+                                # OpenCode (Node.js) uses async I/O; the done file can be
+                                # flushed before the actual output files.  Give the event
+                                # loop time to complete pending writes.
+                                # Guard: only treat done content as a path if it looks like one
+                                # (no newlines, short enough for the filesystem).  Agents
+                                # occasionally write the file's *content* rather than just its
+                                # path (e.g. `cat fuzz/PLAN.md > ./done`), which would cause
+                                # ENAMETOOLONG when passed to the OS.
+                                _done_is_valid_path = (
+                                    bool(_done_content)
+                                    and "\n" not in _done_content
+                                    and len(_done_content) < 512
+                                )
+                                if _done_is_valid_path:
+                                    _ref_path = (self.working_dir / _done_content).resolve()
+                                    if not _ref_path.exists() or (_ref_path.is_file() and _ref_path.stat().st_size == 0):
+                                        _flush_deadline = time.time() + 3.0
+                                        while time.time() < _flush_deadline:
+                                            if _ref_path.exists() and _ref_path.stat().st_size > 0:
+                                                break
+                                            time.sleep(0.3)
+
+                                # Kernel dirty-page writeback window.
+                                try:
+                                    os.sync()
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+
+                                logger.info("[OpenCodeHelper] done flag verified; terminating")
                                 _kill_proc("done_flag")
                                 break
 
@@ -1721,7 +1866,55 @@ class CodexHelper:
 
             diff_changed = bool(diff_now) and diff_now != baseline_diff
 
-            if not done_path.exists():
+            if not _has_valid_done_file():
+                partial_success_stages = {
+                    item.strip()
+                    for item in (
+                        os.environ.get(
+                            "SHERPA_OPENCODE_PARTIAL_SUCCESS_STAGE_SKILLS",
+                            "plan",
+                        )
+                        or ""
+                    ).split(",")
+                    if item.strip()
+                }
+                if diff_changed and stage_skill_name in partial_success_stages:
+                    changed_paths = _extract_changed_paths_from_diff(diff_now, limit=200)
+                    disallowed_paths = _disallowed_changed_paths(changed_paths, allowed_edit_paths)
+                    if disallowed_paths:
+                        LOGGER.warning(
+                            "[OpenCodeHelper] restoring disallowed edits outside allowed paths: %s",
+                            ", ".join(disallowed_paths[:20]),
+                        )
+                        logger.info(
+                            "[OpenCodeHelper] restoring disallowed edits outside allowed paths: "
+                            + ", ".join(disallowed_paths[:20])
+                        )
+                        run_meta["disallowed_edit_paths"] = disallowed_paths[:50]
+                        self._git_restore_paths(disallowed_paths)
+                        try:
+                            diff_now = self._git_diff_head()
+                        except Exception:
+                            diff_now = ""
+                        diff_changed = bool(diff_now) and diff_now != baseline_diff
+                    if diff_changed:
+                        self._git_add_all()
+                        LOGGER.info(
+                            "[OpenCodeHelper] partial diff produced without sentinel for stage=%s — accepting",
+                            stage_skill_name,
+                        )
+                        logger.info(
+                            "[OpenCodeHelper] partial diff produced without sentinel; accepting for "
+                            f"stage={stage_skill_name}"
+                        )
+                        _record_session_attempt(
+                            "partial_success_no_sentinel",
+                            changed_paths=_extract_changed_paths_from_diff(diff_now, limit=20),
+                        )
+                        run_meta["status"] = "partial_success_no_sentinel"
+                        run_meta["cli_retries_used"] = cli_try
+                        _append_opencode_metadata(self.working_dir, run_meta)
+                        return "".join(captured_chunks)
                 if not self.last_cli_error_kind:
                     self.last_cli_error_kind = "missing_sentinel"
                     self.last_cli_error_message = "OpenCode did not create done sentinel"
@@ -1737,6 +1930,25 @@ class CodexHelper:
                 continue  # outer attempt loop
 
             # Refresh repo to ensure it sees new changes.
+            changed_paths = _extract_changed_paths_from_diff(diff_now, limit=200)
+            disallowed_paths = _disallowed_changed_paths(changed_paths, allowed_edit_paths)
+            if disallowed_paths:
+                LOGGER.warning(
+                    "[OpenCodeHelper] restoring disallowed edits outside allowed paths: %s",
+                    ", ".join(disallowed_paths[:20]),
+                )
+                logger.info(
+                    "[OpenCodeHelper] restoring disallowed edits outside allowed paths: "
+                    + ", ".join(disallowed_paths[:20])
+                )
+                run_meta["disallowed_edit_paths"] = disallowed_paths[:50]
+                self._git_restore_paths(disallowed_paths)
+                try:
+                    diff_now = self._git_diff_head()
+                except Exception:
+                    diff_now = ""
+                diff_changed = bool(diff_now) and diff_now != baseline_diff
+
             self._git_add_all()
 
             if diff_changed or self._git_diff_head() != baseline_diff:
@@ -1761,6 +1973,10 @@ class CodexHelper:
         if not self.last_cli_error_kind:
             self.last_cli_error_kind = "exhausted_no_edits"
             self.last_cli_error_message = "OpenCode exhausted attempts without producing edits"
+        try:
+            self.last_cli_stdout = ("".join(captured_chunks))[-8000:]
+        except Exception:
+            self.last_cli_stdout = ""
         _record_session_attempt("exhausted")
         _append_opencode_metadata(
             self.working_dir,

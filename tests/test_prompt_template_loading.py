@@ -61,6 +61,9 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "score_total = 0.45*vuln_likelihood" in out
     assert "`security_score_breakdown`" in out
     assert "`api_surface_exception`" in out
+    assert "normalized system result" in out
+    assert "Empty `seed_families_suggested` is valid" in out
+    assert "`workflow_context` is system-owned state" in out
 
 
 def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
@@ -81,6 +84,15 @@ def test_analysis_prompt_references_stage_skill_and_outputs() -> None:
     assert legacy_security_path not in out
     assert "MUST classify each one" not in out
     assert "Keep `target_type` and `seed_profile` unchanged in analysis." in out
+    assert "Do not treat analysis output as execution truth." in out
+    assert "Do not rewrite the full `fuzz/analysis_context.json`" in out
+    assert "Do not rewrite `fuzz/vuln_candidates.json`" in out
+    assert "Write `fuzz/vuln_candidates.json`" not in out
+    assert "Bounded analysis mode" in out
+    assert "use at most 6 additional MCP/tool reads" in out
+    assert "Do not call semantic/comprehension MCP tools" in out
+    assert "under 120 lines" in out
+    assert "`fuzz/vuln_hypotheses.md`" in out
 
 
 def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
@@ -106,6 +118,16 @@ def test_analysis_prompt_and_skill_contracts_are_aligned() -> None:
     legacy_security_path = "security_evidence" + ".vuln_patterns"
     assert legacy_security_path not in prompt_text
     assert "Do not reclassify target_type or seed_profile here." in skill_text
+    assert "Do not rewrite the full `fuzz/analysis_context.json`" in skill_text
+    assert "Do not rewrite `fuzz/vuln_candidates.json`" in skill_text
+    assert "Write `fuzz/vuln_candidates.json`" not in skill_text
+    assert "Bounded analysis mode" in prompt_text
+    assert "Bounded analysis mode" in skill_text
+    assert "use at most 6 additional MCP/tool reads" in prompt_text
+    assert "use at most 6 additional MCP/tool reads" in skill_text
+    assert "Do not call semantic/comprehension MCP tools" in prompt_text
+    assert "Do not call semantic/comprehension MCP tools" in skill_text
+    assert "`fuzz/vuln_hypotheses.md`" in skill_text
     assert "must classify" not in prompt_text.lower()
 
 
@@ -125,6 +147,7 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "Known Issues" in build_repair
     assert "Strategy Delta" in build_repair
     assert "Output Path Contract" in build_repair
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in build_repair
     assert "api_surface_exception" in crash_repair
     assert "non_public_api_usage" in crash_repair
     assert "coverage plateau / replan trigger" in coverage_repair
@@ -133,6 +156,8 @@ def test_repair_plan_prompts_are_split_by_origin() -> None:
     assert "crash_info.md" in fix_harness_repair
     assert "crash_analysis.md" in fix_harness_repair
     assert "crash_triage.json" in fix_harness_repair
+    assert "repo-root" in fix_harness_repair
+    assert "crash_analysis_not_available_yet" in fix_harness_repair
     assert "fix-harness-diag" in fix_harness_repair
     assert "MCP is unavailable, continue in degraded mode" in build_repair
     assert "Query MCP evidence first" in coverage_repair
@@ -152,13 +177,21 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "DEFAULT_CMAKE_ARGS" in synth
     assert "-DENABLE_TEST=OFF" in synth
     assert "-DENABLE_INSTALL=OFF" in synth
+    assert "do not use `python -m cmake`" in synth
     assert "read-only exploration commands are allowed" in synth.lower()
     assert "Do NOT run build/execute commands." in synth
     assert "Prefer public/stable repository APIs for harness logic." in synth
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth
+    assert "If upstream source appears syntactically broken" in synth
     assert "Query MCP evidence first" in synth
     assert "do not define custom `main()` in harness source" in synth
     assert "LLVMFuzzerTestOneInput" in synth
     assert "fopen(argv[1], ...)" in synth
+    assert "coverage-instrumented repository/library objects" in synth
+    assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "never `/usr/bin/cc`/GCC" in synth
+    assert "never as `cmd[0]`" in synth
 
     assert "Follow the STAGE SKILL loaded by the runner as primary instructions." in scaffold
     assert "partial scaffold" in scaffold
@@ -180,6 +213,7 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "Known Issues" in synth_build_repair
     assert "Strategy Delta" in synth_build_repair
     assert "Output Path Contract" in synth_build_repair
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth_build_repair
     assert "MCP is unavailable, continue in degraded mode" in synth_build_repair
     assert "no custom `main()` in harness source" in synth_build_repair
     assert "LLVMFuzzerTestOneInput" in synth_build_repair
@@ -198,6 +232,8 @@ def test_synthesize_prompts_keep_stage_contracts_but_are_short():
     assert "crash_info.md" in synth_fix_harness_repair
     assert "crash_analysis.md" in synth_fix_harness_repair
     assert "crash_triage.json" in synth_fix_harness_repair
+    assert "repo-root" in synth_fix_harness_repair
+    assert "crash_analysis_not_available_yet" in synth_fix_harness_repair
     assert "fix-harness-fail" in synth_fix_harness_repair
     assert "doc-only/no-op is invalid" in synth_fix_harness_repair
     assert "LLVMFuzzerTestOneInput" in synth_fix_harness_repair
@@ -255,6 +291,8 @@ def test_stage_skills_include_exact_build_template_block():
         assert "## Command policy" in text
         assert "## Done contract" in text
         assert 'DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]' in text
+        assert "python -m cmake" in text
+        assert "system `cmake` binary" in text
         assert "def find_static_lib(repo_root):" in text
         assert '["find", str(repo_root), "-name", "*.a", "-type", "f"]' in text
         assert "capture_output=True, text=True, timeout=60" in text
@@ -284,6 +322,16 @@ def test_synthesize_skills_require_harness_output_and_self_check():
     assert ".c` sources" in synth or ".c -> clang" in synth
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
+    assert "generated headers" in synth.lower()
+    assert "cmake build directory" in synth.lower()
+    assert "coverage-instrumented repository/library objects" in synth
+    assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "never as `cmd[0]`" in synth
+    assert "owning source" in synth.lower()
+    assert "static example helper" in synth.lower()
+    assert "<stdint.h>" in synth
+    assert "<stddef.h>" in synth
 
     assert "if harness source is missing" in complete
     assert "harness exists after this step" in complete or "create at least one harness source file" in complete
@@ -322,6 +370,16 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "build failure" in synth_repair_build.lower() or "build-stage failures" in synth_repair_build.lower()
     assert "`.c` sources must use `clang`" in synth_repair_build
     assert "`.cc/.cpp/.cxx` sources must use `clang++`" in synth_repair_build
+    assert "generated headers" in synth_repair_build.lower()
+    assert "cmake build directory" in synth_repair_build.lower()
+    assert "coverage-instrumented repository/library objects" in synth_repair_build
+    assert "non-instrumented static libraries" in synth_repair_build
+    assert "-DCMAKE_C_COMPILER=clang" in synth_repair_build
+    assert "never as `cmd[0]`" in synth_repair_build
+    assert "owning source" in synth_repair_build.lower()
+    assert "static example helper" in synth_repair_build.lower()
+    assert "<stdint.h>" in synth_repair_build
+    assert "<stddef.h>" in synth_repair_build
     assert "crash/repro" in synth_repair_crash.lower()
     assert "coverage" in synth_repair_coverage.lower()
     assert "in-place" in improve_in_place.lower()
@@ -330,3 +388,18 @@ def test_other_stage_skills_include_runtime_contract_clauses():
     assert "api_surface_exception" in plan_repair_crash
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
+
+
+def test_build_repair_contracts_protect_upstream_sources() -> None:
+    workflow_common.load_opencode_prompt_templates.cache_clear()
+    plan_prompt = workflow_common.render_opencode_prompt("plan_repair_build_with_hint", hint="build-fail")
+    synth_prompt = workflow_common.render_opencode_prompt("synthesize_repair_build_with_hint", hint="build-fail")
+    skill_root = ROOT / "harness_generator" / "src" / "langchain_agent" / "opencode_skills"
+    plan_skill = (skill_root / "plan_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    synth_skill = (skill_root / "synthesize_repair_build" / "SKILL.md").read_text(encoding="utf-8")
+    required = "Do not modify repository source files outside `fuzz/` and `./done`"
+
+    assert required in plan_prompt
+    assert required in synth_prompt
+    assert required in plan_skill
+    assert required in synth_skill

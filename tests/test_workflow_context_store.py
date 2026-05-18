@@ -56,6 +56,27 @@ def test_merge_result_into_contexts_persists_run_and_coverage_fields() -> None:
     assert merged_workflow["latest_vuln_decision_snapshot"]["selected_target"] == "parse_zip"
 
 
+def test_merge_result_into_contexts_persists_vuln_hunt_status_fields() -> None:
+    merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "vuln_hunt_enabled": True,
+            "vuln_hunt_candidate_count": 3,
+            "vuln_hunt_active_candidate_id": "cand_1",
+            "vuln_hunt_degraded": False,
+            "vuln_hunt_summary_path": "fuzz/vuln_hunt_summary.md",
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_control == {}
+    assert merged_workflow["vuln_hunt_enabled"] is True
+    assert merged_workflow["vuln_hunt_candidate_count"] == 3
+    assert merged_workflow["vuln_hunt_active_candidate_id"] == "cand_1"
+    assert merged_workflow["vuln_hunt_degraded"] is False
+    assert merged_workflow["vuln_hunt_summary_path"] == "fuzz/vuln_hunt_summary.md"
+
+
 def test_write_read_context_docs_keep_control_workflow_boundary(tmp_path: Path) -> None:
     context_dir = tmp_path / "fuzz" / "context"
     control = {
@@ -108,3 +129,71 @@ def test_context_store_rejects_generator_key() -> None:
     assert "generator" not in merged_control
     assert "generator" not in merged_workflow
     assert merged_workflow["coverage_should_improve"] is True
+
+
+def test_merge_result_into_contexts_normalizes_target_identity_and_seed_profile() -> None:
+    merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "coverage_target_name": "",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "image",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_families_suggested": [],
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_control == {}
+    assert merged_workflow["coverage_target_name"] == "png_read_image"
+    assert merged_workflow["coverage_target_api"] == "png_read_image"
+    assert merged_workflow["coverage_target_type"] == "image"
+    assert merged_workflow["coverage_seed_profile"] == "decoder-binary"
+    assert merged_workflow["coverage_seed_families_suggested"] == []
+
+
+def test_merge_result_into_contexts_restores_target_type_from_run_details() -> None:
+    _merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "coverage_target_name": "png_read_image",
+            "coverage_target_api": "png_read_image",
+            "coverage_target_type": "",
+            "coverage_seed_profile": "decoder-binary",
+            "run_details": [
+                {
+                    "fuzzer": "png_read_image",
+                    "target_name": "png_read_image",
+                    "target_api": "png_read_image",
+                    "target_type": "image",
+                },
+                {
+                    "fuzzer": "png_process_data",
+                    "target_name": "png_process_data",
+                    "target_api": "png_process_data",
+                    "target_type": "parser",
+                },
+            ],
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_workflow["coverage_target_type"] == "image"
+    assert merged_workflow["coverage_seed_profile"] == "decoder-binary"
+
+
+def test_merge_result_into_contexts_normalizes_binary_parser_seed_profile() -> None:
+    _merged_control, merged_workflow = store.merge_result_into_contexts(
+        {
+            "coverage_target_name": "png_read_info",
+            "coverage_target_api": "png_read_info",
+            "coverage_target_type": "parser",
+            "coverage_seed_profile": "parser-structure",
+            "coverage_seed_families_suggested": [],
+        },
+        control={},
+        workflow={},
+    )
+
+    assert merged_workflow["coverage_seed_profile"] == "decoder-binary"
+    assert merged_workflow["coverage_seed_families_suggested"] == []

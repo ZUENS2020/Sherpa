@@ -4,7 +4,7 @@ description: Analyze reproduced crash evidence and produce a structured verdict 
 compatibility: opencode
 metadata:
   stage: crash-analysis
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -58,4 +58,4 @@ Use this skill in the `crash-analysis` stage after `re-run` has produced crash e
 
 ## Done contract
 - Create `./done`.
-- Write exactly `crash_analysis.json` into `./done`.
+- Write the path string `crash_analysis.json` as the sole text of `./done` (run `echo 'crash_analysis.json' > ./done`; do **not** copy the file's contents).

@@ -4,7 +4,7 @@ description: Complete missing scaffold artifacts with minimal changes while pres
 compatibility: opencode
 metadata:
   stage: synthesize-complete-scaffold
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -38,6 +38,10 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - `build_system.lower() != "unknown"`.
 - `evidence` must be non-empty string array.
 - If `fuzz/build.py` uses invalid parallel style (`$(nproc)`), repair to `["-j", str(os.cpu_count() or 1)]`.
+- If native fuzzers are built under `fuzz/out/`, `fuzz/build.py` must also build real coverage replay siblings under `fuzz/out/replay/` with `-fprofile-instr-generate -fcoverage-mapping`; do not use symlinks/copies of primary fuzzers as replay binaries.
+- Coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; do not link replay binaries against non-instrumented static libraries when function/path coverage is expected.
+- Coverage/replay CMake builds that use LLVM coverage flags must configure with `clang`/`clang++`, not `/usr/bin/cc`/GCC.
+- Generated `subprocess` compile commands must start with the compiler executable (`clang` or `clang++`); sanitizer/coverage flags must not become `cmd[0]`.
 - Keep multi-target buildability when `fuzz/execution_plan.json` contains multiple targets.
 - Use explicit path actions: `Read and fix <path>[:line]`.
 
@@ -50,6 +54,7 @@ Use this skill when coordinator reports missing scaffold files after synthesize.
 - If harness was missing before this step, harness exists after this step.
 - `fuzz/harness_index.json` contains no missing execution-target mappings.
 - `repo_understanding.json` is semantically valid.
+- `fuzz/out/replay/<fuzzer>` exists for native fuzzers and is profile-instrumented for per-input replay.
 
 ## Done contract
-- Write `fuzz/out/` into `./done`.
+- Write the path string `fuzz/out/` as the sole text of `./done` (run `echo 'fuzz/out/' > ./done`; do **not** copy the file's contents).

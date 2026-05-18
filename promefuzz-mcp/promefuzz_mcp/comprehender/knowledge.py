@@ -8,8 +8,11 @@ import json
 import math
 import re
 import os
+import socket
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, List, Tuple
@@ -18,6 +21,21 @@ try:
 except Exception:  # pragma: no cover - fallback for minimal test env
     import logging
     logger = logging.getLogger("promefuzz.knowledge")
+
+def _env_int(name: str, default: int, min_value: int = 0, max_value: int | None = None) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except (ValueError, TypeError):
+        return default
+    if v < min_value:
+        v = min_value
+    if max_value is not None and v > max_value:
+        v = max_value
+    return v
+
 
 _TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_:+./-]*")
 _DEFAULT_SUFFIXES = [".md", ".txt", ".rst", ".html", ".json", ".xml", ".yaml", ".yml", ".c", ".h", ".cc", ".cpp"]
@@ -152,6 +170,9 @@ class KnowledgeBase:
         self.rag_degraded_reason = str(metadata.get("rag_degraded_reason") or "")
         self.initialized = True
         self.cache_loaded = True
+        if self.rag_degraded and self.chunks and not self.chunk_vectors:
+            self._build_chunk_embeddings()
+            self._persist_metadata()
         return True
 
     @staticmethod
@@ -183,27 +204,37 @@ class KnowledgeBase:
         if not key:
             raise RuntimeError("openrouter_embedding_key_missing")
         payload = {"model": model, "input": texts}
-        req = urllib.request.Request(
-            _OPENROUTER_EMBEDDING_URL,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            body = ""
+        last_err: str | None = None
+        socket.setdefaulttimeout(30)
+        for attempt in range(3):
+            req = urllib.request.Request(
+                _OPENROUTER_EMBEDDING_URL,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+            )
             try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = str(e)
-            raise RuntimeError(f"openrouter_embedding_http_error:{e.code}:{body[:240]}") from e
-        except Exception as e:
-            raise RuntimeError(f"openrouter_embedding_request_failed:{e}") from e
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = str(e)
+                raise RuntimeError(f"openrouter_embedding_http_error:{e.code}:{body[:240]}") from e
+            except Exception as e:
+                last_err = f"openrouter_embedding_request_failed:{e}"
+                if attempt < 2:
+                    logger.warning(f"embedding attempt {attempt + 1}/3 failed: {e}; retrying...")
+                    time.sleep(2.0 * (attempt + 1))
+                continue
+            break
+        else:
+            raise RuntimeError(last_err or "openrouter_embedding_request_failed")
         try:
             parsed = json.loads(body)
         except Exception as e:
@@ -266,22 +297,46 @@ class KnowledgeBase:
             self.rag_degraded = True
             self.rag_degraded_reason = "no_chunks_for_embedding"
             return
-        batch_size = 16
+        batch_size = 128
+        workers = _env_int("SHERPA_EMBEDDING_CONCURRENCY", 4, min_value=1, max_value=8)
         vectors: dict[str, list[float]] = {}
+        failed_batches = 0
         try:
-            for i in range(0, len(self.chunks), batch_size):
-                batch = self.chunks[i:i + batch_size]
-                texts = [c.text for c in batch]
-                embs = self._embed_texts_openrouter(texts, model=model)
-                for c, emb in zip(batch, embs):
-                    vectors[c.chunk_id] = emb
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_batch: dict[Any, list[_Chunk]] = {}
+                for i in range(0, len(self.chunks), batch_size):
+                    batch = self.chunks[i:i + batch_size]
+                    texts = [c.text for c in batch]
+                    future = executor.submit(self._embed_texts_openrouter, texts, model=model)
+                    future_to_batch[future] = list(batch)
+                batch_total = len(future_to_batch)
+                batch_done = 0
+                for future in as_completed(future_to_batch):
+                    batch = future_to_batch[future]
+                    batch_done += 1
+                    try:
+                        embs = future.result(timeout=90)
+                        for c, emb in zip(batch, embs):
+                            vectors[c.chunk_id] = emb
+                    except Exception as e:
+                        failed_batches += 1
+                        chunk_ids = [c.chunk_id for c in batch]
+                        logger.warning(
+                            f"embedding batch {batch_done}/{batch_total} failed "
+                            f"(chunks={len(chunk_ids)}): {e}"
+                        )
+                if batch_done > 1:
+                    logger.info(
+                        f"embedding batches complete: {batch_done - failed_batches}/{batch_total} ok, "
+                        f"{failed_batches} failed, {len(vectors)}/{len(self.chunks)} chunks embedded"
+                    )
             self.chunk_vectors = vectors
             self.embedding_ok = bool(self.chunk_vectors)
             self.rag_degraded = not self.embedding_ok
             self.rag_degraded_reason = "" if self.embedding_ok else "embedding_empty_result"
         except Exception as e:
-            self.embedding_ok = False
-            self.chunk_vectors = {}
+            self.embedding_ok = bool(vectors)
+            self.chunk_vectors = vectors
             self.rag_degraded = True
             self.rag_degraded_reason = str(e)
             logger.warning(f"embedding degraded; fallback to lexical retrieval: {e}")
@@ -407,6 +462,46 @@ class KnowledgeBase:
             encoding="utf-8",
         )
         return True, self.output_path
+
+    def _persist_metadata(self) -> None:
+        if not self._metadata_file.parent.exists():
+            return
+        self._metadata_file.write_text(
+            json.dumps(
+                {
+                    "document_count": len(self.documents),
+                    "chunk_count": len(self.chunks),
+                    "embedding_model": self.embedding_model,
+                    "embedding_provider": self.embedding_provider,
+                    "embedding_model_used": self.embedding_model_used,
+                    "embedding_ok": self.embedding_ok,
+                    "rag_degraded": self.rag_degraded,
+                    "rag_degraded_reason": self.rag_degraded_reason,
+                    "documents": [
+                        {k: v for k, v in doc.items() if k != "text"}
+                        for doc in self.documents
+                        if isinstance(doc, dict)
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self._vectors_file.write_text(
+            json.dumps(
+                {
+                    "embedding_provider": self.embedding_provider,
+                    "embedding_model": self.embedding_model_used,
+                    "chunk_vectors": self.chunk_vectors,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _collect_documents(self) -> List[dict]:
         """Collect documents from specified paths."""

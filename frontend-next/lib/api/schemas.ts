@@ -65,6 +65,124 @@ export const childStatusSchema = z.object({
   error: z.number().int().default(0),
 });
 
+export const vulnCandidateSchema = z
+  .object({
+    candidate_id: z.string().optional().default(''),
+    validation_status: z.string().optional().default(''),
+    classification: z.string().optional().default(''),
+    confidence: z.number().optional().default(0),
+    target_api: z.string().optional().default(''),
+    target_name: z.string().optional().default(''),
+    fuzzer: z.string().optional().default(''),
+    sanitizer: z.string().optional().default(''),
+    crash_type: z.string().optional().default(''),
+    triage_label: z.string().optional().default(''),
+    analysis_verdict: z.string().optional().default(''),
+    reproduction_status: z.string().optional().default(''),
+    reason: z.string().optional().default(''),
+  })
+  .passthrough()
+  .default({});
+
+export const frontierInputSchema = z.object({
+  input_relpath: z.string().optional().default(''),
+  size_bytes: z.number().int().optional().default(0),
+  covered_function_count: z.number().int().optional().default(0),
+  covered_region_count: z.number().int().optional().default(0),
+  exec_time_us: z.number().int().optional().default(0),
+  unique_frontier_functions: z.number().int().optional().default(0),
+  nearby_uncovered_regions: z.number().int().optional().default(0),
+  target_relevance_count: z.number().int().optional().default(0),
+  closest_target_distance: z.number().int().optional().default(0),
+  frontier_score: z.number().optional().default(0),
+  covered_functions_sample: z.array(z.string()).optional().default([]),
+  frontier_functions: z.array(z.object({
+    name: z.string().optional().default(''),
+    file: z.string().optional().default(''),
+    line: z.number().int().optional().default(0),
+    covered_region_count: z.number().int().optional().default(0),
+    total_region_count: z.number().int().optional().default(0),
+    uncovered_regions_nearby: z.number().int().optional().default(0),
+    region_coverage_ratio: z.number().optional().default(0),
+    distance_to_target: z.number().int().optional().default(0),
+    target_signal: z.number().int().optional().default(0),
+  })).optional().default([]),
+  rationale: z.string().optional().default(''),
+  repo_file_count: z.number().int().optional().default(0),
+});
+
+export const frontierFunctionSchema = z.object({
+  name: z.string().optional().default(''),
+  input_count: z.number().int().optional().default(0),
+  input_relpaths: z.array(z.string()).optional().default([]),
+  best_distance_to_target: z.number().int().optional().default(0),
+});
+
+export const frontierSummarySchema = z.object({
+  version: z.number().int().optional().default(0),
+  binary_hash: z.string().optional().default(''),
+  replay_binary: z.string().optional().default(''),
+  generated_at: z.number().int().optional().default(0),
+  top_inputs: z.array(frontierInputSchema).optional().default([]),
+  top_input_count: z.number().int().optional().default(0),
+  top_frontier_functions: z.array(frontierFunctionSchema).optional().default([]),
+  top_frontier_function_count: z.number().int().optional().default(0),
+  failed_input_count: z.number().int().optional().default(0),
+  pending_input_count: z.number().int().optional().default(0),
+  covered_function_union_sample: z.array(z.string()).optional().default([]),
+});
+
+export const runFeedbackFunctionGapSchema = z.object({
+  name: z.string().optional().default(''),
+  file: z.string().optional().default(''),
+  line: z.number().int().optional().default(0),
+  kind: z.string().optional().default(''),
+  execution_count: z.number().int().optional().default(0),
+  region_coverage_ratio: z.number().optional().default(0),
+});
+
+export const runFeedbackFrontierFunctionSchema = z.object({
+  name: z.string().optional().default(''),
+  file: z.string().optional().default(''),
+  line: z.number().int().optional().default(0),
+  uncovered_regions_nearby: z.number().int().optional().default(0),
+  region_coverage_ratio: z.number().optional().default(0),
+});
+
+export const runFeedbackPathFrontierSchema = z.object({
+  input_relpath: z.string().optional().default(''),
+  frontier_score: z.number().optional().default(0),
+  covered_function_count: z.number().int().optional().default(0),
+  covered_region_count: z.number().int().optional().default(0),
+  covered_functions_sample: z.array(z.string()).optional().default([]),
+  frontier_functions: z.array(runFeedbackFrontierFunctionSchema).optional().default([]),
+});
+
+export const runFeedbackTopFileSchema = z.object({
+  path: z.string().optional().default(''),
+  issue_count: z.number().int().optional().default(0),
+  functions: z.array(z.object({
+    name: z.string().optional().default(''),
+    line: z.number().int().optional().default(0),
+    kind: z.string().optional().default(''),
+  })).optional().default([]),
+});
+
+export const runFeedbackSummarySchema = z.object({
+  repo_root: z.string().optional().default(''),
+  generated_at: z.number().int().optional().default(0),
+  function_gap_count: z.number().int().optional().default(0),
+  path_frontier_count: z.number().int().optional().default(0),
+  frontier_function_count: z.number().int().optional().default(0),
+  top_function_gaps: z.array(runFeedbackFunctionGapSchema).optional().default([]),
+  top_path_frontiers: z.array(runFeedbackPathFrontierSchema).optional().default([]),
+  top_frontier_functions: z.array(frontierFunctionSchema).optional().default([]),
+  top_files: z.array(runFeedbackTopFileSchema).optional().default([]),
+  coverage_pct: z.number().optional().default(0),
+  covered_functions: z.number().int().optional().default(0),
+  total_functions: z.number().int().optional().default(0),
+});
+
 export const taskSummarySchema = z.object({
   job_id: z.string(),
   status: z.string(),
@@ -77,6 +195,28 @@ export const taskSummarySchema = z.object({
   active_child_status: z.string().nullable().optional(),
   error: normalizedErrorSchema.optional(),
   result: z.string().nullable().optional(),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+  fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
+  fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
+  fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_count: z.number().int().optional().default(0),
+  fuzz_coverage_replay_stage_success: z.boolean().optional().default(false),
+  fuzz_coverage_replay_error: z.string().optional().default(''),
+  fuzz_coverage_replay_manifest_fresh_for_current_binary: z.boolean().optional().default(false),
+  fuzz_coverage_replay_queue_drained: z.boolean().optional().default(false),
+  fuzz_coverage_replay_pending_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_failed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_processed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_total_inputs: z.number().int().optional().default(0),
 });
 
 export const taskListSchema = z.object({
@@ -90,6 +230,30 @@ export const childJobSchema = z.object({
   error: normalizedErrorSchema.optional(),
   result: z.any().optional(),
   log: z.string().optional().default(''),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+  vuln_candidates_path: z.string().optional().default(''),
+  crash_vuln_report_path: z.string().optional().default(''),
+  fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
+  fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
+  fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_count: z.number().int().optional().default(0),
+  fuzz_coverage_replay_stage_success: z.boolean().optional().default(false),
+  fuzz_coverage_replay_error: z.string().optional().default(''),
+  fuzz_coverage_replay_manifest_fresh_for_current_binary: z.boolean().optional().default(false),
+  fuzz_coverage_replay_queue_drained: z.boolean().optional().default(false),
+  fuzz_coverage_replay_pending_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_failed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_processed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_total_inputs: z.number().int().optional().default(0),
   updated_at: z.number().optional(),
   started_at: z.number().nullable().optional(),
   finished_at: z.number().nullable().optional(),
@@ -103,6 +267,30 @@ export const taskDetailSchema = z.object({
   result: z.any().optional(),
   children_status: childStatusSchema.optional(),
   children: z.array(childJobSchema).optional().default([]),
+  vuln_hunting_enabled: z.boolean().optional().default(false),
+  security_priority_mode: z.boolean().optional().default(false),
+  vuln_candidate_count: z.number().int().optional().default(0),
+  crash_vuln_candidate_count: z.number().int().optional().default(0),
+  latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+  vuln_candidates_path: z.string().optional().default(''),
+  crash_vuln_report_path: z.string().optional().default(''),
+  fuzz_coverage_per_input_manifest_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_path: z.string().optional().default(''),
+  fuzz_coverage_frontier_summary: frontierSummarySchema.optional().default({}),
+  fuzz_coverage_run_feedback_path: z.string().optional().default(''),
+  fuzz_coverage_run_feedback_summary: runFeedbackSummarySchema.optional().default({}),
+  fuzz_coverage_replay_runtime_sec: z.number().optional().default(0),
+  fuzz_coverage_replay_binary_hash: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_dir: z.string().optional().default(''),
+  fuzz_coverage_replay_binary_count: z.number().int().optional().default(0),
+  fuzz_coverage_replay_stage_success: z.boolean().optional().default(false),
+  fuzz_coverage_replay_error: z.string().optional().default(''),
+  fuzz_coverage_replay_manifest_fresh_for_current_binary: z.boolean().optional().default(false),
+  fuzz_coverage_replay_queue_drained: z.boolean().optional().default(false),
+  fuzz_coverage_replay_pending_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_failed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_processed_inputs: z.number().int().optional().default(0),
+  fuzz_coverage_replay_total_inputs: z.number().int().optional().default(0),
 });
 
 export const systemSchema = z.object({
@@ -119,6 +307,22 @@ export const systemSchema = z.object({
     })
     .default({ total: 0, queued: 0, running: 0, success: 0, error: 0 }),
   active_jobs: z.array(z.any()).optional().default([]),
+  security: z
+    .object({
+      vuln_hunting_enabled: z.boolean().default(false),
+      security_priority_mode: z.boolean().default(false),
+      analysis_vuln_candidate_count: z.number().int().default(0),
+      crash_vuln_candidate_count: z.number().int().default(0),
+      latest_crash_vuln_candidate: vulnCandidateSchema.optional().default({}),
+    })
+    .optional()
+    .default({
+      vuln_hunting_enabled: false,
+      security_priority_mode: false,
+      analysis_vuln_candidate_count: 0,
+      crash_vuln_candidate_count: 0,
+      latest_crash_vuln_candidate: {},
+    }),
   workers: z.object({ max: z.number().int().default(0) }).optional(),
 });
 

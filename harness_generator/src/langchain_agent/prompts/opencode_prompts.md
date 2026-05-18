@@ -24,6 +24,10 @@ Constraints:
 - `lang` must be one of: `c-cpp`, `cpp`, `c`, `c++`, `java`.
 - `target_type` must be one of: `parser`, `decoder`, `archive`, `image`, `document`, `network`, `database`, `serializer`, `interpreter`, `generic`.
 - `seed_profile` must be one of: `parser-structure`, `parser-token`, `parser-format`, `parser-numeric`, `decoder-binary`, `archive-container`, `serializer-structured`, `document-text`, `network-message`, `generic`.
+- `targets.json` is an advisory candidate list. The system may normalize `seed_profile`, `target_name`, and related metadata before execution.
+- `fuzz/selected_targets.json` is the normalized system result and must be treated as the execution truth source.
+- Empty `seed_families_suggested` is valid and means "no required advisory family guidance for this target".
+- `workflow_context` is system-owned state, not a free-form suggestion sink.
 - Keep runtime-viable/public entrypoints first.
 - Internal/private API handling:
   - allow internal/private API only when `vuln_likelihood >= 0.75`.
@@ -32,7 +36,7 @@ Constraints:
 - Target selection is vulnerability-first by default (`security_priority_mode=true`):
   - ranking must be driven by risk dimensions first: `vuln_likelihood`, then `exploitability`, then `reachability_confidence`
   - treat `score_total` and non-security dimensions (coverage/complexity/api-relevance) as reference output only, not the primary ordering basis.
-  - `score_total = 0.45*vuln_likelihood + 0.25*exploitability + 0.18*reachability_confidence + 0.05*coverage_gap + 0.04*complexity_depth + 0.02*api_relevance + 0.01*consumer_order_support - recent_yield_penalty` is retained for observability/comparison.
+  - `score_total = 0.50*vuln_likelihood + 0.30*exploitability + 0.20*reachability_confidence - recent_yield_penalty`. Non-vuln dimensions (coverage_gap, complexity_depth, api_relevance, consumer_order_support) are NOT scored.
 - `fuzz/selected_targets.json` must include per-target:
   - `security_score_breakdown`
   - `api_surface_exception`
@@ -59,7 +63,9 @@ Goal:
 - keep outputs under `fuzz/` for downstream `plan` and `synthesize`
 
 Required outputs:
-- `fuzz/analysis_context.json`
+- `fuzz/analysis_context.json` (system-generated context marker; read it, do not rewrite it wholesale)
+- `fuzz/vuln_hypotheses.md` (small AI advisory output)
+- `fuzz/vuln_candidates.json` is system-generated input; read it, do not rewrite it
 - preserve/refresh `fuzz/antlr_plan_context.json` when available
 - preserve/refresh `fuzz/target_analysis.json` when available
 - `fuzz/analysis_context.json.analysis_evidence.security_evidence`
@@ -71,12 +77,19 @@ Constraints:
 - Read-only exploration commands are allowed.
 - This stage is analysis-only: do not modify repository business source files.
 - Use companion outputs (if present) from `/shared/output/_k8s_jobs/<job-id>/promefuzz/`.
-- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`), then semantic MCP tools (`init_knowledge_base`, `retrieve_documents`, `comprehend_*`) for evidence-backed findings.
-- If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/analysis_context.json`.
+- Bounded analysis mode: after reading required files, use at most 6 additional MCP/tool reads in the first pass.
+- Prefer existing system-generated `security_evidence[]` and `vuln_candidates.json`; treat them as sufficient unless empty or corrupt.
+- When MCP tools are available, use code-navigation MCP tools first (`list_definitions`, `read_definition`, `read_source`, `find_references`), then preprocessor MCP tools only if needed (`run_ast_preprocessor`, `extract_api_functions`, `build_library_callgraph`).
+- Do not call semantic/comprehension MCP tools in the first pass unless the coordinator explicitly asks for semantic enrichment.
+- After one bounded evidence pass, write `fuzz/vuln_hypotheses.md` and `./done` immediately. Do not keep exploring after producing a coherent top 3-8 hypothesis set.
+- If MCP is unavailable, continue in degraded mode and record the reason in `fuzz/vuln_hypotheses.md`.
 - Keep summaries concise and evidence-based; include concrete file/symbol references when possible.
+- Do not rewrite the full `fuzz/analysis_context.json`; it is a system-generated fact artifact and can be large.
+- Write concise AI advisory analysis to `fuzz/vuln_hypotheses.md` instead. Keep it under 120 lines and cite existing `evidence_id` values.
 - For each vulnerability hypothesis, include:
   - `signal_id`, `severity`, `confidence`, `source_path`, `line`, `summary`
   - stable `evidence_id` references that map into `analysis_evidence.security_evidence`.
+- Do not write `fuzz/vuln_candidates.json`; it is the system-generated machine-readable vulnerability candidate worklist.
 
 Security analysis (vulnerability-directed):
 - Identify unsafe memory operations: unchecked memcpy/memmove/strcpy, raw pointer arithmetic, manual buffer management without bounds validation
@@ -84,7 +97,8 @@ Security analysis (vulnerability-directed):
 - Locate format string sinks: printf-family calls with non-literal format arguments
 - Detect path/command injection surfaces: file open with user-controlled input, system()/popen()/exec()
 - Map trust boundaries: where external/untrusted data first enters internal processing functions
-- For each finding, append an entry to `analysis_evidence.security_evidence[]`:
+- Do not rewrite `fuzz/vuln_candidates.json`; it is a system-generated machine-readable worklist. Read it only as input and keep AI-authored guidance in `fuzz/vuln_hypotheses.md`.
+- For each finding, summarize an advisory entry in `fuzz/vuln_hypotheses.md` that references existing `analysis_evidence.security_evidence[]` IDs:
   - `evidence_id`: stable ID string
   - `signal_id`: one of mem_oob_candidate, integer_overflow_candidate, format_string_candidate, path_traversal_candidate, command_injection_candidate, authz_bypass_candidate, null_deref_candidate, uaf_candidate
   - `severity`: low|medium|high
@@ -93,10 +107,41 @@ Security analysis (vulnerability-directed):
   - `line`: integer source line (0 allowed when unknown)
   - `summary`: concrete risk explanation
 - Keep `target_type` and `seed_profile` unchanged in analysis. This stage records evidence and candidate inventory only.
+- Do not treat analysis output as execution truth. Any target or seed observations here are advisory until the system normalizes them in planning.
 
 MANDATORY:
 - create `./done`
 - write `fuzz/analysis_context.json` into `./done` (single line)
+
+Additional instruction from coordinator:
+{{hint}}
+<!-- END TEMPLATE -->
+
+<!-- TEMPLATE: vuln_hunt_with_hint -->
+You are coordinating an internal vulnerability-hunt subphase before execution planning.
+Follow the STAGE SKILL loaded by the runner as primary instructions.
+Use GLOBAL POLICY only as fallback.
+
+Goal:
+- discover or update vulnerability-first candidate worklist
+- keep outputs advisory; the coordinator will normalize candidates before execution
+
+Required outputs:
+- `fuzz/vuln_candidates.json`
+- `fuzz/vuln_hunt_summary.md`
+
+Constraints:
+- Do NOT run build/execute commands.
+- Read-only exploration commands are allowed.
+- Do not modify repository business source files.
+- Do not write `workflow_context`, `selected_targets.json`, or `execution_plan.json`.
+- Preserve useful existing candidate state: `validation_status`, `attempt_count`, `last_result`.
+- Every candidate should include evidence references, concrete attack hint, risk scores, and validation status.
+- If feedback shows plateau, false positive, exhausted candidate, or repeated harness failure, change candidate focus.
+
+MANDATORY:
+- create `./done`
+- write `fuzz/vuln_hunt_summary.md` into `./done` (single line)
 
 Additional instruction from coordinator:
 {{hint}}
@@ -128,6 +173,7 @@ Constraints:
 - If MCP is unavailable, continue in degraded mode and explicitly state missing MCP evidence in `fuzz/PLAN.md`.
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only in build-repair planning.
 
 Required planning sections in `fuzz/PLAN.md`:
 - `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
@@ -221,7 +267,7 @@ Goal:
 - keep `fuzz/execution_plan.json` aligned with reproducible harness-fix strategy
 
 Fix-harness planning focus:
-- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- consume repo-root `crash_info.md`, repo-root `crash_triage.json`, optional repo-root `crash_analysis.md`, and `repair_error_digest` first
 - output explicit strategy changes versus the latest failed cycle (must be material)
 - prioritize fixes under `fuzz/` harness/build glue, not documentation
 - prefer public/stable APIs and avoid internal/private symbols by default
@@ -232,6 +278,8 @@ Constraints:
 - Read-only exploration commands are allowed.
 - Query MCP evidence first when available (code-navigation first, preprocessor second, semantic evidence third).
 - If MCP is unavailable, continue in degraded mode and explicitly state it in `fuzz/PLAN.md`.
+- Treat repo-root crash artifact paths as authoritative; do not guess `fuzz/crash_*` paths.
+- If `crash_analysis.md` is unavailable on this crash-triage repair path, continue in degraded mode and record `crash_analysis_not_available_yet` in `Known Issues`.
 - when diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - doc-only or no-op repair plans are invalid
 
@@ -263,6 +311,8 @@ Required outputs:
 Stage requirements:
 - Do NOT run build/execute commands.
 - Read-only exploration commands are allowed.
+- Do not modify repository source files outside `fuzz/` and `./done`.
+- If upstream source appears syntactically broken, do not edit it; adapt the external harness/build glue, avoid that example/demo source, or record the limitation in `fuzz/repo_understanding.json`.
 - Query MCP evidence first when available and reflect cited findings in scaffold choices (code-navigation first).
 - Prefer code-navigation + preprocessor outputs first; when semantic MCP evidence is available, cite it with concrete evidence lines.
 - If MCP is unavailable, continue in degraded mode and note the missing MCP evidence in `fuzz/README.md` or `fuzz/repo_understanding.json`.
@@ -271,6 +321,8 @@ Stage requirements:
 - Keep `fuzz/observed_target.json` consistent with scaffold when present.
 - Prefer public/stable repository APIs for harness logic. Avoid internal/private namespaces such as `detail`, `_internal`, or equivalent implementation-only symbols unless diagnostics prove they are the only valid entrypoints.
 - LibFuzzer harness contract is mandatory: do not define custom `main()` in harness source; expose fuzz entry via `extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)` (or language-equivalent entrypoint only).
+- C/C++ harnesses using `uint8_t` or `size_t` must include the standard headers that define them (`<stdint.h>` and `<stddef.h>` or C++ equivalents).
+- LibFuzzer link contract is mandatory: every runnable executable under `fuzz/out/`, including `fuzz/out/replay/<name>`, must link a runnable entrypoint. Prefer `-fsanitize=fuzzer,address,undefined` for both primary and replay executables; do not use `-fsanitize=fuzzer-no-link` alone for any runnable binary unless you compile and link a separate replay `main()` wrapper that calls `LLVMFuzzerTestOneInput`.
 - Do not use argv/file-driven harness entry logic in libFuzzer mode (forbidden patterns include `fopen(argv[1], ...)`, `read(argv[1], ...)`, and manual corpus file loops).
 - `fuzz/README.md` must include:
   - `Selected target: ...`
@@ -282,9 +334,17 @@ Stage requirements:
 - If external deps are required, write canonical vcpkg port names to `fuzz/system_packages.txt` (one per line).
 - In `fuzz/build.py`, include:
   - `DEFAULT_CMAKE_ARGS = ["-DENABLE_TEST=OFF", "-DENABLE_INSTALL=OFF"]`
+  - CMake projects: invoke the system `cmake` binary directly; do not use `python -m cmake` or `sys.executable, "-m", "cmake"`
   - runtime artifact discovery (do not hardcode a single static library path)
   - multi-target build intent: avoid single-target-only output when execution plan has multiple targets
+  - generated headers include path: if CMake/configure emits headers into a build directory, include that CMake build directory in both primary and replay compile commands
+  - owning source linkage: if a harness calls a contrib/example/demo function outside the main static library, compile the owning source file or use a public library API instead
+  - never call a static example helper directly; example files that define `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
   - compiler-by-suffix rule: compile `.c` harnesses with `clang`; compile `.cc/.cpp/.cxx` harnesses with `clang++`
+  - coverage replay siblings: for each primary native fuzzer `fuzz/out/<name>`, also build `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`; replay siblings must be runnable executables and must not be symlinks/copies or `fuzzer-no-link` binaries without `main()`
+  - coverage replay library instrumentation: replay binaries must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`; do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
+  - coverage replay compiler selection: CMake/configure coverage builds using LLVM coverage flags must use `clang`/`clang++` (`-DCMAKE_C_COMPILER=clang`, `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`), never `/usr/bin/cc`/GCC
+  - generated `subprocess` compile commands must start with the compiler executable (`clang` or `clang++`); append sanitizer/coverage flags after the compiler, never as `cmd[0]`
 
 MANDATORY:
 - create `./done`
@@ -313,14 +373,24 @@ Required outputs:
 
 Build-repair constraints:
 - consume `repair_*` diagnostics first
+- Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only and repair must adapt harness/build glue instead
 - query MCP evidence first when available before applying repair strategy changes
 - change strategy if previous attempt signatures repeat
 - avoid no-op doc-only edits
 - keep target/build fields consistent across README + JSONs + build script
 - update `fuzz/harness_index.json` so execution targets map to real harness files; do not leave stale/missing mappings
 - enforce compiler-by-suffix in `fuzz/build.py`: `.c -> clang`, `.cc/.cpp/.cxx -> clang++`; do not compile C sources with `clang++` by default
+- keep coverage replay siblings real, runnable, and instrumented: `fuzz/out/replay/<name>` must be linked with `-fprofile-instr-generate -fcoverage-mapping` and a runnable entrypoint, never a symlink/copy of the primary fuzzer and never a `fuzzer-no-link` binary without `main()`
+- ensure coverage replay links coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects use a separate replay/coverage build directory or rebuild static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`, and do not link replay binaries against non-instrumented static libraries when function/path coverage is expected
+- ensure CMake/configure coverage replay builds use `clang`/`clang++` rather than `/usr/bin/cc`/GCC when using LLVM coverage flags (`-DCMAKE_C_COMPILER=clang`, `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`)
+- ensure generated `subprocess` compile commands start with the compiler executable (`clang` or `clang++`), with sanitizer/coverage flags appended after it and never used as `cmd[0]`
+- include generated headers from the CMake/configure build directory in both primary and replay compile commands when the project emits configured headers
+- resolve contrib/example/demo API calls by compiling the owning source file or switching to a public library API
+- never call a static example helper directly; do not link example files with their own `main()` into libFuzzer harnesses unless rewritten/guarded
 - prefer public/stable APIs; internal/private APIs require explicit `api_surface_exception` with evidence in `fuzz/repo_understanding.json`
 - enforce libFuzzer harness contract: no custom `main()` in harness source; require `LLVMFuzzerTestOneInput` (or language-equivalent entrypoint) as the fuzz entry
+- enforce libFuzzer link contract: every runnable executable under `fuzz/out/`, including `fuzz/out/replay/<name>`, must link a runnable entrypoint; prefer `-fsanitize=fuzzer,address,undefined` for primary and replay executables. `-fsanitize=fuzzer-no-link` alone is invalid for runnable binaries and causes `undefined reference to main` unless a separate replay `main()` wrapper is compiled and linked
+- ensure C/C++ harnesses include standard definitions for `uint8_t` and `size_t` (`<stdint.h>` and `<stddef.h>` or C++ equivalents)
 - forbid argv/file-driven harness entry logic in libFuzzer mode (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
@@ -436,13 +506,15 @@ Required outputs:
 - `fuzz/harness_index.json` aligned to `fuzz/execution_plan.json`
 
 Fix-harness constraints:
-- consume `crash_info.md`, `crash_analysis.md`, `crash_triage.json`, and `repair_error_digest` first
+- consume repo-root `crash_info.md`, repo-root `crash_triage.json`, optional repo-root `crash_analysis.md`, and `repair_error_digest` first
 - include at least one material strategy change relative to previous failed attempt
 - apply concrete edits in offending `fuzz/` harness/build glue files (doc-only/no-op is invalid)
 - preserve libFuzzer entry contract: no custom `main()`, use `LLVMFuzzerTestOneInput` (or language-equivalent only)
 - forbid argv/file-driven harness entry logic (`fopen(argv[1], ...)`, `read(argv[1], ...)`, manual corpus file loops)
 - prefer public/stable APIs; internal/private APIs require `api_surface_exception` with non-empty evidence
 - if diagnostics include `non_public_api_usage`, replace offending symbols first
+- Treat repo-root crash artifact paths as authoritative; do not guess `fuzz/crash_*` paths.
+- If `crash_analysis.md` is unavailable on this crash-triage repair path, continue in degraded mode and document `crash_analysis_not_available_yet`.
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - query MCP evidence first when available; if unavailable, continue in degraded mode and document it

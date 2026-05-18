@@ -1,4 +1,4 @@
-# Sherpa API Reference
+# TianHeng API Reference
 
 本文档以当前分支代码实现为准，覆盖前端联调所需的主要 API。  
 后端入口实现位于 `harness_generator/src/langchain_agent/main.py`。

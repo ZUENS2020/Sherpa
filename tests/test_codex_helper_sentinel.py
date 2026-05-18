@@ -44,6 +44,32 @@ class _FakeProc:
         self.returncode = -9
 
 
+class _RecordingStdout:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def __iter__(self):
+        return iter(())
+
+    def close(self) -> None:
+        self.events.append("stdout.close")
+
+
+class _RecordingProc(_FakeProc):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(stdout_text="")
+        self.stdout = _RecordingStdout(events)
+        self._events = events
+
+    def terminate(self) -> None:
+        self._events.append("proc.terminate")
+        super().terminate()
+
+    def kill(self) -> None:
+        self._events.append("proc.kill")
+        super().kill()
+
+
 class _NoopThread:
     def __init__(self, *args, **kwargs) -> None:
         self.args = args
@@ -97,6 +123,37 @@ def test_run_codex_command_requires_done_even_when_diff_exists(monkeypatch: pyte
     assert not (helper.working_dir / "done").exists()
 
 
+def test_run_codex_command_accepts_plan_partial_diff_without_done(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: _FakeProc(stdout_text="wrote targets\n"))
+
+    diff_calls = {"n": 0}
+    add_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        return "M fuzz/targets.json"
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: add_calls.__setitem__("n", add_calls["n"] + 1))
+
+    out = helper.run_codex_command(
+        "produce fuzz plan",
+        stage_skill="plan",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+    )
+
+    assert out is not None
+    assert "wrote targets" in out
+    assert add_calls["n"] == 1
+    assert not (helper.working_dir / "done").exists()
+
+
 def test_run_codex_command_succeeds_only_when_done_and_diff_exist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     helper = _prepare_helper(tmp_path)
     _patch_common(monkeypatch, helper)
@@ -128,6 +185,49 @@ def test_run_codex_command_succeeds_only_when_done_and_diff_exist(monkeypatch: p
 
     assert out is not None
     assert done_path.is_file()
+
+
+def test_run_codex_command_restores_disallowed_edits(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    restored: list[str] = []
+    add_calls = {"n": 0}
+
+    def _fake_popen(*args, **kwargs):
+        done_path.write_text("fuzz/out/\n", encoding="utf-8")
+        return _FakeProc(stdout_text="ok\n")
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+
+    diff_calls = {"n": 0}
+
+    def _fake_git_diff_head() -> str:
+        diff_calls["n"] += 1
+        if diff_calls["n"] == 1:
+            return ""
+        if restored:
+            return "M fuzz/build.py"
+        return "M fuzz/build.py\nM contrib/gregbook/readpng.c"
+
+    def _fake_restore(paths):
+        restored.extend(paths)
+
+    monkeypatch.setattr(helper, "_git_diff_head", _fake_git_diff_head)
+    monkeypatch.setattr(helper, "_git_restore_paths", _fake_restore)
+    monkeypatch.setattr(helper, "_git_add_all", lambda: add_calls.__setitem__("n", add_calls["n"] + 1))
+
+    out = helper.run_codex_command(
+        "produce fuzz scaffold",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=3,
+        allowed_edit_paths=("fuzz/**", "done"),
+    )
+
+    assert out is not None
+    assert restored == ["contrib/gregbook/readpng.c"]
+    assert add_calls["n"] == 1
 
 
 def test_run_codex_command_ignores_stale_done_until_fresh_sentinel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -170,6 +270,48 @@ def test_run_codex_command_ignores_stale_done_until_fresh_sentinel(monkeypatch: 
 
     assert calls["n"] == 2
     assert out is not None
+    assert done_path.read_text(encoding="utf-8", errors="replace").strip() == "fuzz/build.py"
+
+
+def test_run_codex_command_removes_stale_done_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    done_path = helper.working_dir / "done"
+    calls = {"n": 0}
+
+    def _fake_popen(*args, **kwargs):
+        calls["n"] += 1
+        proc = _FakeProc(stdout_text="")
+        proc.returncode = 0
+        if calls["n"] == 1:
+            done_path.mkdir()
+            old = time.time() - 3600
+            os.utime(done_path, (old, old))
+        else:
+            done_path.write_text("fuzz/build.py\n", encoding="utf-8")
+        return proc
+
+    monkeypatch.setattr(ch.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        helper,
+        "_git_diff_head",
+        lambda: "M fuzz/build.py" if done_path.is_file() else "",
+    )
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "produce fuzz build script",
+        max_attempts=2,
+        max_cli_retries=1,
+        timeout=10,
+        initial_backoff=0,
+    )
+
+    assert calls["n"] == 2
+    assert out is not None
+    assert done_path.is_file()
     assert done_path.read_text(encoding="utf-8", errors="replace").strip() == "fuzz/build.py"
 
 
@@ -841,6 +983,65 @@ def test_run_codex_command_reaps_process_on_eof_without_done(monkeypatch: pytest
 
     assert out is None
     assert proc.wait_calls >= 1
+
+
+def test_run_codex_command_terminates_before_closing_stdout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    events: list[str] = []
+    proc = _RecordingProc(events)
+
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(helper, "_git_diff_head", lambda: "")
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "repair build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=0.1,
+        initial_backoff=0,
+    )
+
+    assert out is None
+    assert "proc.terminate" in events
+    assert "stdout.close" in events
+    assert events.index("proc.terminate") < events.index("stdout.close")
+
+
+def test_run_codex_command_kills_process_group_even_when_wrapper_exited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    helper = _prepare_helper(tmp_path)
+    _patch_common(monkeypatch, helper)
+    proc = _FakeProc(stdout_text="")
+    proc.returncode = 0
+    killed: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(ch.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(ch.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(ch.os, "getpgid", lambda pid: 4242)
+    monkeypatch.setattr(ch.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    monkeypatch.setattr(ch.time, "sleep", lambda _: None)
+    monkeypatch.setattr(helper, "_git_diff_head", lambda: "")
+    monkeypatch.setattr(helper, "_git_add_all", lambda: None)
+
+    out = helper.run_codex_command(
+        "repair build",
+        stage_skill="fix_build",
+        max_attempts=1,
+        max_cli_retries=1,
+        timeout=5,
+        initial_backoff=0,
+    )
+
+    assert out is None
+    assert killed, "cleanup must kill the remembered process group even if the wrapper exited"
 
 
 def test_run_codex_command_retries_when_cleanup_reap_failed(

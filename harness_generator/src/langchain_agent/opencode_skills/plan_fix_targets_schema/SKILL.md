@@ -4,7 +4,7 @@ description: Repair targets.json into strict schema-valid shape without losing p
 compatibility: opencode
 metadata:
   stage: plan-fix-targets-schema
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -45,4 +45,4 @@ Use this skill when coordinator reports `targets.json` schema errors.
 - Array remains non-empty.
 
 ## Done contract
-- Write `fuzz/targets.json` into `./done`.
+- Write the path string `fuzz/targets.json` as the sole text of `./done` (run `echo 'fuzz/targets.json' > ./done`; do **not** copy the file's contents).

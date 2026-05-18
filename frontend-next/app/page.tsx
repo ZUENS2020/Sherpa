@@ -2,11 +2,10 @@
 
 import { useEffect, useMemo } from 'react';
 import { Alert, Box, Stack, Typography } from '@mui/material';
-import { ConfigPanel } from '@/components/ConfigPanel';
-import { LogPanel } from '@/components/LogPanel';
-import { SessionPanel } from '@/components/SessionPanel';
+import { AppShell } from '@/components/AppShell';
 import { SystemOverviewCard } from '@/components/SystemOverviewCard';
-import { TaskProgressPanel } from '@/components/TaskProgressPanel';
+import { TaskOverviewPanel } from '@/components/TaskOverviewPanel';
+import { TaskDetailCard } from '@/components/TaskDetailCard';
 import { useStopTaskMutation, useSystemQuery, useTaskDetailQuery, useTasksQuery } from '@/lib/api/hooks';
 import { useUiStore } from '@/store/useUiStore';
 
@@ -35,60 +34,61 @@ export default function HomePage() {
     setActiveTaskId(tasks.data[0].job_id);
   }, [tasks.data, activeTaskId, setActiveTaskId]);
 
+  const activeStatus = detail.data?.status || '';
+  const canStop = ['queued', 'running', 'resuming', 'recoverable'].includes(activeStatus.toLowerCase());
+
   const activeSummary = useMemo(
     () => tasks.data?.find((t) => t.job_id === activeTaskId),
     [tasks.data, activeTaskId],
   );
 
-  const activeStatus = detail.data?.status || activeSummary?.status || '';
-  const canStopTask = ['queued', 'running', 'resuming', 'recoverable'].includes(String(activeStatus).toLowerCase());
-
-  const handleStopTask = async () => {
-    if (!activeTaskId) return;
-    await stopTask.mutateAsync(activeTaskId);
-  };
-
   return (
-    <Box sx={{ maxWidth: 1600, mx: 'auto', px: 2.5, py: 2.5 }}>
-      <Stack spacing={2}>
-        <Stack>
-          <Typography variant="h4" fontWeight={700}>Sherpa 控制台</Typography>
-          <Typography variant="body2" color="text.secondary">
-            重点视图：任务进度、子任务状态、日志与错误摘要。
-          </Typography>
-        </Stack>
-
+    <AppShell
+      dense
+      eyebrow="Monitor / Live operations"
+      title="TianHeng 监控台"
+      description="任务状态与漏洞候选总览。选择左侧任务查看详情。"
+      rail={
+        <>
+          <Typography className="suzuka-kicker">LIVE</Typography>
+          <Typography className="suzuka-kicker">READ-ONLY</Typography>
+        </>
+      }
+    >
+      <Stack spacing={1.25} sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <SystemOverviewCard
           data={system.data}
           error={system.isError ? (system.error as Error).message : undefined}
         />
 
-        <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="stretch">
-          <Box sx={{ width: { xs: '100%', md: 360, lg: 420 }, flexShrink: 0 }}>
-            <Stack spacing={2}>
-              <ConfigPanel />
-              <SessionPanel tasks={tasks.data || []} />
-            </Stack>
+        {tasks.isError ? <Alert severity="warning">任务列表加载失败</Alert> : null}
+        {activeSummary?.error ? <Alert severity="error">{activeSummary.error}</Alert> : null}
+        {stopTask.isError ? (
+          <Alert severity="error">停止失败：{(stopTask.error as Error).message}</Alert>
+        ) : null}
+
+        <Stack
+          direction="row"
+          spacing={1.25}
+          alignItems="stretch"
+          sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}
+        >
+          {/* Task list — left column */}
+          <Box sx={{ width: 340, flexShrink: 0, minHeight: 0, overflow: 'auto' }}>
+            <TaskOverviewPanel tasks={tasks.data ?? []} />
           </Box>
 
-          <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Stack spacing={2}>
-              {tasks.isError ? <Alert severity="warning">任务列表加载失败</Alert> : null}
-              {activeSummary?.error ? <Alert severity="error">{activeSummary.error}</Alert> : null}
-              {stopTask.isError ? (
-                <Alert severity="error">停止任务失败：{(stopTask.error as Error).message}</Alert>
-              ) : null}
-              <TaskProgressPanel
-                detail={detail.data}
-                onStopTask={handleStopTask}
-                stopDisabled={!activeTaskId || !canStopTask}
-                stopLoading={stopTask.isPending}
-              />
-              <LogPanel detail={detail.data} />
-            </Stack>
+          {/* Task detail — right column */}
+          <Box sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
+            <TaskDetailCard
+              detail={detail.data}
+              onStopTask={() => activeTaskId && stopTask.mutate(activeTaskId)}
+              stopDisabled={!activeTaskId || !canStop}
+              stopLoading={stopTask.isPending}
+            />
           </Box>
         </Stack>
       </Stack>
-    </Box>
+    </AppShell>
   );
 }

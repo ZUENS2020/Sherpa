@@ -22,7 +22,14 @@ from langgraph.graph import END, StateGraph
 from persistent_config import load_config
 
 import workflow_common as _wf_common
+import workflow_observability as _wf_obs
+import workflow_coverage_decision as _wf_coverage_decision
+import workflow_normalization as _wf_norm
+import workflow_target_scoring as _wf_target_scoring
+import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
+from coverage_replay import collect_per_input_frontier
+from seed_families import seed_families_for_target as _seed_families_for_target
 from workflow_context_store import (
     context_dir_for_repo_root,
     merge_result_into_contexts,
@@ -36,7 +43,6 @@ from fuzz_unharnessed_repo import (
     HarnessGeneratorError,
     NonOssFuzzHarnessGenerator,
     RepoSpec,
-    _seed_families_for_target,
     extract_crash_stack_signature,
     snapshot_repo_text,
     write_patch_from_snapshot,
@@ -50,6 +56,7 @@ _RECOVERABLE_RUN_ERROR_KINDS = {
     "run_finalize_timeout",
     "run_resource_exhaustion",
     "dict_parse_error",
+    "run_stalled_after_coverage",
 }
 
 _FATAL_RUN_ERROR_KINDS = {
@@ -149,8 +156,25 @@ class FuzzWorkflowState(TypedDict, total=False):
     coverage_repo_examples_filtered: bool
     coverage_repo_examples_rejected_count: int
     coverage_repo_examples_accepted_count: int
+    coverage_per_input_manifest_path: str
+    coverage_frontier_path: str
+    coverage_frontier_summary: dict[str, Any]
+    coverage_replay_runtime_sec: float
+    coverage_replay_binary_hash: str
+    coverage_replay_binary_dir: str
+    coverage_replay_binary_count: int
+    coverage_replay_stage_success: bool
+    coverage_replay_error: str
+    coverage_replay_manifest_fresh_for_current_binary: bool
+    coverage_replay_queue_drained: bool
+    coverage_replay_pending_inputs: int
+    coverage_replay_failed_inputs: int
+    coverage_replay_processed_inputs: int
+    coverage_replay_total_inputs: int
     coverage_source_report: dict[str, Any]
     coverage_uncovered_functions: list[str]
+    coverage_run_feedback_path: str
+    coverage_run_feedback_summary: dict[str, Any]
     coverage_exhausted_targets: list[str]
     coverage_attempted_targets: list[str]
     coverage_feedback_for_plan: str
@@ -197,6 +221,17 @@ class FuzzWorkflowState(TypedDict, total=False):
     replan_effective: bool
     replan_stop_reason: str
     vuln_hunting_enabled: bool
+    vuln_hunt_iteration: int
+    vuln_hunt_highest_priority: float
+    vuln_hunt_enabled: bool
+    vuln_hunt_active_candidate_id: str
+    vuln_hunt_candidate_count: int
+    vuln_hunt_degraded: bool
+    vuln_hunt_last_reason: str
+    vuln_hunt_summary_path: str
+    vuln_hunt_events_path: str
+    vuln_hunt_rerun_requested: bool
+    _vuln_hunt_entry_source: str
     vuln_focus_profile: str
     target_surface_policy: str
     security_evidence_count: int
@@ -283,6 +318,10 @@ class FuzzWorkflowState(TypedDict, total=False):
     crash_analysis_reason: str
     crash_analysis_report_path: str
     crash_analysis_json_path: str
+    vuln_candidates_path: str
+    crash_vuln_report_path: str
+    latest_crash_vuln_candidate: dict[str, Any]
+    crash_vuln_candidate_count: int
     re_build_done: bool
     re_build_ok: bool
     re_build_rc: int
@@ -499,31 +538,6 @@ def _wf_log(state: dict[str, Any] | None, msg: str) -> None:
     _wf_common.wf_log(state, msg)
 
 
-def _decision_trace_path(state: dict[str, Any]) -> Path | None:
-    repo_root = str(state.get("repo_root") or "").strip()
-    if not repo_root:
-        gen = state.get("generator")
-        if gen is not None:
-            try:
-                repo_root = str(getattr(gen, "repo_root", "") or "").strip()
-            except Exception:
-                repo_root = ""
-    if not repo_root:
-        return None
-    try:
-        return Path(repo_root) / "fuzz" / "decision_trace.jsonl"
-    except Exception:
-        return None
-
-
-def _decision_trace_max_items() -> int:
-    raw = (os.environ.get("SHERPA_DECISION_TRACE_MAX_ITEMS") or "200").strip()
-    try:
-        return max(20, min(int(raw), 2000))
-    except Exception:
-        return 200
-
-
 def _record_decision_trace(
     state: dict[str, Any],
     *,
@@ -537,111 +551,38 @@ def _record_decision_trace(
     retry_count: int = 0,
     decision_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    out = dict(state)
-    traces = list(out.get("decision_traces") or [])
-    existing_count = max(int(out.get("decision_trace_count") or 0), len(traces))
-    trace = {
-        "ts": int(time.time()),
-        "stage": str(stage or "").strip(),
-        "tool": str(tool or "").strip(),
-        "model": str(model or "").strip(),
-        "latency_ms": int(latency_ms or 0),
-        "token_usage": dict(token_usage or {}),
-        "error_kind": str(error_kind or "").strip(),
-        "error_code": str(error_code or "").strip(),
-        "retry_count": int(retry_count or 0),
-        "decision_snapshot": dict(decision_snapshot or {}),
-    }
-    traces.append(trace)
-    max_items = _decision_trace_max_items()
-    if len(traces) > max_items:
-        traces = traces[-max_items:]
-    out["decision_traces"] = traces
-    out["decision_trace_count"] = int(max(existing_count + 1, len(traces)))
-    out["latest_decision_snapshot"] = dict(decision_snapshot or {})
-    trace_path = _decision_trace_path(out)
-    if trace_path is not None:
-        try:
-            trace_path.parent.mkdir(parents=True, exist_ok=True)
-            with trace_path.open("a", encoding="utf-8") as fp:
-                fp.write(json.dumps(trace, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except Exception:
-            pass
-    return out
+    return _wf_obs.record_decision_trace(
+        state,
+        stage=stage,
+        tool=tool,
+        model=model,
+        latency_ms=latency_ms,
+        token_usage=token_usage,
+        error_kind=error_kind,
+        error_code=error_code,
+        retry_count=retry_count,
+        decision_snapshot=decision_snapshot,
+    )
 
 
 def _emit_fuzz_metrics(state: dict[str, Any]) -> None:
-    """Emit a structured ``[wf-metrics]`` JSON line so that the control-plane
-    (main.py) can capture per-fuzzer performance data and expose it via the API.
+    _wf_obs.emit_fuzz_metrics(state)
+
+
+def _grace_wait_for_file(path: Path, max_sec: int = 5, *, min_size: int = 1) -> bool:
+    """Wait up to max_sec for a file to appear on disk with minimum size.
+
+    This handles filesystem flush delays when OpenCode (Node.js async I/O)
+    signals completion via ./done before output files are fully written.
     """
-    run_details = list(state.get("run_details") or [])
-    coverage_history = list(state.get("coverage_history") or [])
-
-    # Build per-fuzzer metrics keyed by fuzzer name
-    fuzzers: dict[str, dict[str, Any]] = {}
-    for detail in run_details:
-        name = str(detail.get("fuzzer") or "unknown")
-        fuzzers[name] = {
-            "fuzzer": name,
-            "final_cov": int(detail.get("final_cov") or 0),
-            "final_ft": int(detail.get("final_ft") or 0),
-            "final_execs_per_sec": int(detail.get("final_execs_per_sec") or 0),
-            "final_iteration": int(detail.get("final_iteration") or 0),
-            "final_rss_mb": int(detail.get("final_rss_mb") or 0),
-            "final_corpus_files": int(detail.get("final_corpus_files") or 0),
-            "final_corpus_size_bytes": int(detail.get("final_corpus_size_bytes") or 0),
-            "corpus_files": int(detail.get("corpus_files") or 0),
-            "corpus_size_bytes": int(detail.get("corpus_size_bytes") or 0),
-            "crash_found": bool(detail.get("crash_found")),
-            "rc": int(detail.get("rc") or 0),
-            "run_error_kind": str(detail.get("run_error_kind") or ""),
-            "terminal_reason": str(detail.get("terminal_reason") or ""),
-            "plateau_detected": bool(detail.get("plateau_detected")),
-            "plateau_idle_seconds": int(detail.get("plateau_idle_seconds") or 0),
-            "seed_quality": dict(detail.get("seed_quality") or {}),
-        }
-
-    # Aggregate summary
-    max_cov = max((f["final_cov"] for f in fuzzers.values()), default=0)
-    max_ft = max((f["final_ft"] for f in fuzzers.values()), default=0)
-    total_execs = sum(f["final_execs_per_sec"] for f in fuzzers.values())
-    any_crash = any(f["crash_found"] for f in fuzzers.values())
-
-    payload = {
-        "ts": int(time.time()),
-        "stage": str(state.get("last_step") or ""),
-        "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
-        "coverage_loop_max_rounds": int(state.get("coverage_loop_max_rounds") or 0),
-        "max_cov": max_cov,
-        "max_ft": max_ft,
-        "total_execs_per_sec": total_execs,
-        "crash_found": any_crash,
-        "fuzzers": fuzzers,
-        "coverage_history": coverage_history,
-        "coverage_source_report": dict(state.get("coverage_source_report") or {}),
-        "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
-        "coverage_seed_profile": str(state.get("coverage_seed_profile") or ""),
-        "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
-        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
-        "coverage_bottleneck_reason": str(state.get("coverage_bottleneck_reason") or ""),
-        "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
-        "security_evidence_count": int(state.get("security_evidence_count") or 0),
-        "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
-        "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or False),
-        "security_priority_mode": bool(state.get("security_priority_mode") or False),
-        "latest_vuln_decision_snapshot": dict(state.get("latest_vuln_decision_snapshot") or {}),
-        "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
-        "target_score_breakdown_available": bool(state.get("target_score_breakdown_available") or False),
-        "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
-        "decision_trace_count": int(state.get("decision_trace_count") or 0),
-        "latest_decision_snapshot": dict(state.get("latest_decision_snapshot") or {}),
-        "crash_signature_dedup_hit": bool(state.get("crash_signature_dedup_hit") or False),
-    }
-    try:
-        line = json.dumps(payload, separators=(",", ":"), default=str)
-    except Exception:
-        return
-    logger.info("[wf-metrics] {}", line)
+    if max_sec <= 0:
+        return path.is_file() and path.stat().st_size >= min_size
+    deadline = time.time() + max_sec
+    while time.time() < deadline:
+        if path.is_file() and path.stat().st_size >= min_size:
+            return True
+        time.sleep(0.5)
+    return path.is_file() and path.stat().st_size >= min_size
 
 
 def _fmt_dt(seconds: float) -> str:
@@ -878,6 +819,38 @@ def _trim_feedback_text(text: str) -> str:
     return out
 
 
+def _build_fix_harness_crash_context(
+    repo_root: Path,
+    *,
+    include_contents: bool,
+) -> tuple[str, list[str]]:
+    crash_info = repo_root / "crash_info.md"
+    crash_analysis = repo_root / "crash_analysis.md"
+    triage_json = repo_root / "crash_triage.json"
+    known_issues: list[str] = []
+    lines = [
+        "Repo-root crash evidence for fix-harness repair:",
+        f"- crash_info_path: {crash_info}",
+        f"- crash_triage_json_path: {triage_json}",
+        f"- crash_analysis_path: {crash_analysis}",
+        "- Do not guess `fuzz/crash_*` paths; these artifacts live at repo root unless an explicit path says otherwise.",
+    ]
+    info_text = crash_info.read_text(encoding="utf-8", errors="replace") if crash_info.is_file() else ""
+    triage_text = triage_json.read_text(encoding="utf-8", errors="replace") if triage_json.is_file() else ""
+    analysis_text = crash_analysis.read_text(encoding="utf-8", errors="replace") if crash_analysis.is_file() else ""
+    if not crash_analysis.is_file():
+        known_issues.append("crash_analysis_not_available_yet")
+        lines.append("- crash_analysis_status: unavailable during crash-triage repair path; rely on crash_info.md and crash_triage.json first.")
+    if include_contents:
+        if info_text:
+            lines.append("=== repo-root crash_info.md ===\n" + _trim_feedback_text(info_text))
+        if triage_text:
+            lines.append("=== repo-root crash_triage.json ===\n" + _trim_feedback_text(triage_text))
+        if analysis_text:
+            lines.append("=== repo-root crash_analysis.md ===\n" + _trim_feedback_text(analysis_text))
+    return "\n".join(lines).strip(), known_issues
+
+
 def _write_stage_feedback(
     repo_root: Path,
     *,
@@ -980,11 +953,210 @@ def _collect_feedback_for_group(repo_root: Path, group: str, *, limit: int = 3) 
     return "\n\n".join(texts).strip()
 
 
+def _try_hotfix_missing_decl(state: dict[str, Any], build_py_path: str) -> bool:
+    """Detect implicit-function-decl / undeclared-identifier build errors
+    and insert ``extern`` declarations into harness source files.
+
+    Called from the build retry loop so header-only / single-file library
+    harnesses can be patched in-place without going through a full
+    plan→synthesize→build cycle.
+    """
+    last_error = str(state.get("last_error") or state.get("build_stdout_tail") or "").strip()
+    stdout_tail = str(state.get("build_stdout_tail") or "").strip()
+    stderr_tail = str(state.get("build_stderr_tail") or "").strip()
+    diag_raw = (last_error + "\n" + stdout_tail + "\n" + stderr_tail)
+    diag_lower = diag_raw.lower()
+    if "implicit declaration of function" not in diag_lower and "undeclared identifier" not in diag_lower:
+        return False
+
+    gen = state.get("generator")
+    if gen is None:
+        return False
+    repo_root = gen.repo_root
+
+    import re as _re_local
+    _changes = 0
+    _diag_lines = diag_raw.splitlines()
+    for _dl in _diag_lines:
+        _m = _re_local.search(
+            r"(?P<file>[^\s:]+\.(?:c|cc|cpp|cxx)):\d+:\d+:\s+(?:error|fatal error):\s+.*?(?:undeclared identifier|implicit declaration of function).*?(?:'|\")(?P<sym>[A-Za-z_][A-Za-z0-9_]*)(?:'|\")",
+            _dl,
+        )
+        if not _m:
+            continue
+        _src_name = _m.group("file")
+        _symbol = _m.group("sym")
+        _src_path = Path(_src_name)
+        if not _src_path.is_absolute():
+            _src_path = repo_root / _src_path
+        if not _src_path.is_file() or _src_path.parent.name != "fuzz":
+            continue
+        try:
+            _src_text = _src_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if "extern " in _src_text and _symbol in _src_text:
+            continue
+        _lines = _src_text.splitlines()
+        _insert_at = 0
+        for _j, _line in enumerate(_lines):
+            if _line.lstrip().startswith("#include") or _line.lstrip().startswith("#define"):
+                _insert_at = _j + 1
+        if _insert_at == 0:
+            for _j, _line in enumerate(_lines):
+                if _line.lstrip().startswith("#if"):
+                    _insert_at = _j + 1
+        _decl = f"extern void {_symbol}(void);  /* sherpa-hotfix: forward declaration for header-only lib */"
+        _lines.insert(_insert_at, _decl)
+        _new_text = "\n".join(_lines) + ("\n" if _src_text.endswith("\n") else "")
+        if _new_text == _src_text:
+            continue
+        try:
+            _src_path.write_text(_new_text, encoding="utf-8", errors="replace")
+            _changes += 1
+            _wf_log(state, f"build: added extern {_symbol}() to {_src_path.relative_to(repo_root)}")
+        except Exception:
+            continue
+    return _changes > 0
+
+
+def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
+    """Install a compiler wrapper that auto-injects -fsanitize-coverage flags.
+
+    Returns the wrapper directory path (add it to ``PATH`` before the real
+    compiler).  The wrapper delegates every call to the system clang/clang++
+    and silently appends ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    unless the command already contains ``-fsanitize-coverage`` or
+    ``-fprofile-instr-generate`` (replay builds).
+
+    The wrapper directory contains symlinks ``clang`` and ``clang++`` pointing
+    to the wrapper script, so build scripts that hardcode ``clang`` pick it up
+    automatically when the directory is first in ``PATH``.
+    """
+    wrapper_dir = repo_root / "fuzz" / ".sherpa-cc"
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+
+    _COV_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+
+    wrapper_sh = wrapper_dir / "sherpa-cc-wrapper.sh"
+    wrapper_sh.write_text(textwrap.dedent(f"""\
+        #!/bin/bash
+        set -euo pipefail
+        # sherpa-cc-wrapper: inject coverage flags for primary fuzz builds.
+        # Symlinked as 'clang' and 'clang++'; delegates to the real compiler
+        # while appending coverage instrumentation unless the command is a
+        # replay build (already has -fprofile-instr-generate).
+        COV_FLAGS="{_COV_FLAGS}"
+        HAS_COV=0
+        HAS_REPLAY=0
+        for arg in "$@"; do
+            [[ "$arg" == *fsanitize-coverage* ]] && HAS_COV=1
+            [[ "$arg" == *fprofile-instr-generate* ]] && HAS_REPLAY=1
+        done
+        REAL_CC=$(basename "$0")
+        REAL_PATH=$(command -v "$REAL_CC" 2>/dev/null || echo "")
+        if [[ -z "$REAL_PATH" || "$REAL_PATH" == "$0" ]]; then
+            # Fall back to PATH search excluding this directory
+            REAL_PATH=$(PATH=${{PATH#*:}} command -v "$REAL_CC" 2>/dev/null || echo "/usr/bin/$REAL_CC")
+        fi
+        if [[ $HAS_COV -eq 0 && $HAS_REPLAY -eq 0 ]]; then
+            exec "$REAL_PATH" "$@" $COV_FLAGS
+        else
+            exec "$REAL_PATH" "$@"
+        fi
+    """))
+    wrapper_sh.chmod(0o755)
+
+    # Create symlinks so that 'clang' and 'clang++' in this directory
+    # resolve to the wrapper.
+    for name in ("clang", "clang++"):
+        link = wrapper_dir / name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(wrapper_sh.name)
+
+    return wrapper_dir
+
+
+def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) -> None:
+    """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
+
+    LibFuzzer requires coverage feedback instrumentation to guide its mutation
+    engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
+    occasionally omits these flags even when the SKILL.md contract requires them.
+    This function inserts a separate ``'-fsanitize-coverage=...'`` list element
+    after the ``-fsanitize=fuzzer`` element so that clang receives them as
+    distinct arguments.
+    """
+    COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    bp = Path(build_py_path)
+    if not bp.is_file():
+        return
+    try:
+        text = bp.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+    if COVERAGE_FLAGS in text:
+        return
+
+    lines = text.splitlines()
+    changed = False
+    for i, line in enumerate(lines):
+        if "-fsanitize=fuzzer" not in line:
+            continue
+        if "-fsanitize-coverage" in line:
+            continue
+        if "-fprofile-instr-generate" in line or "-fcoverage-mapping" in line:
+            continue
+
+        indent = line[:len(line) - len(line.lstrip())]
+
+        # Case 1: standalone flag line: "    '-fsanitize=fuzzer,address,undefined',"
+        m = re.match(r"^(\s*)(['\"])(-fsanitize=fuzzer[^'\"]*)\2\s*,?\s*$", line)
+        if m:
+            q = m.group(2)
+            lines.insert(i + 1, f"{indent}{q}{COVERAGE_FLAGS}{q},")
+            changed = True
+            break
+
+        # Case 2: flag inside a longer line — insert after the sanitize element
+        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"]\s*,?\s*)", line)
+        if m2:
+            q = m2.group(1)[0]
+            ins = f"{q}{COVERAGE_FLAGS}{q}, "
+            lines[i] = line[:m2.end()] + ins + line[m2.end():]
+            changed = True
+            break
+
+    if not changed:
+        for i, line in enumerate(lines):
+            if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower() and "-fprofile" not in line:
+                lines[i] = line.replace(
+                    "-fsanitize=fuzzer,address,undefined",
+                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
+                )
+                if lines[i] != line:
+                    changed = True
+                    break
+
+    if changed:
+        new_text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        try:
+            bp.write_text(new_text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into build.py")
+        except Exception:
+            pass
+
+
 def _clear_opencode_done_sentinel(repo_root: Path) -> bool:
     done_path = _opencode_done_path(repo_root)
     if not done_path.exists():
         return False
     try:
+        if done_path.is_dir():
+            shutil.rmtree(done_path)
+            return True
         done_path.unlink()
         return True
     except Exception:
@@ -1002,7 +1174,7 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
         return "fix-harness"
     if restart_stage in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
-    if restart_stage in {"coverage-analysis", "improve-harness"}:
+    if restart_stage in {"per-input-replay", "coverage-analysis", "improve-harness"}:
         return "coverage"
     last_step = str(state.get("last_step") or "").strip().lower()
     if last_step == "build":
@@ -1011,7 +1183,7 @@ def _infer_repair_origin_stage(state: dict[str, Any]) -> str:
         return "fix-harness"
     if last_step in {"run", "crash-triage", "re-build", "re-run", "fix_crash"}:
         return "crash"
-    if last_step in {"coverage-analysis", "improve-harness"}:
+    if last_step in {"per-input-replay", "coverage-analysis", "improve-harness"}:
         return "coverage"
     if bool(state.get("crash_found")):
         return "crash"
@@ -1227,23 +1399,26 @@ def _infer_target_lang_from_repo(repo_root: Path, *, file_hint: str = "") -> str
 
 
 def _infer_seed_profile(name: str, context: str, *, target_type: str) -> str:
-    text = f"{name}\n{context}".lower()
-    if target_type == "parser":
-        if any(tok in text for tok in ("arg_id", "argument id", "positional", "named argument", "named arg", "number", "numeric")):
-            return "parser-numeric"
-        if any(tok in text for tok in ("format", "replacement field", "specifier", "brace", "printf", "fmt")):
-            return "parser-format"
-        if any(tok in text for tok in ("token", "lexer", "lex", "scan", "scanner", "read_", "readline", "read line")):
-            return "parser-token"
-        return "parser-structure"
-    mapping = {
-        "decoder": "decoder-binary",
-        "archive": "archive-container",
-        "serializer": "serializer-structured",
-        "document": "document-text",
-        "network": "network-message",
-    }
-    return mapping.get(target_type, "generic")
+    return _wf_norm.infer_seed_profile(
+        name,
+        context,
+        target_type=str(target_type or "").strip().lower(),
+    )
+
+
+def _normalize_seed_profile(
+    seed_profile: str,
+    *,
+    target_type: str,
+    name: str,
+    context: str,
+) -> str:
+    return _wf_norm.normalize_seed_profile(
+        seed_profile,
+        target_type=str(target_type or "").strip().lower(),
+        name=name,
+        context=context,
+    )
 
 
 def _score_target_depth(
@@ -1325,6 +1500,11 @@ def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") 
     if any(tok in text for tok in ("test/fuzzing", "/fuzz", "fuzzing", "oss-fuzz")):
         score += 4
         reasons.append("existing-fuzz-infra")
+    if _is_test_or_demo_helper_target(name=name, api=context, file_hint=file_hint):
+        score -= 8
+        reasons.append("test-demo-helper")
+        if "png" in text:
+            replacements.extend(["png_read_image", "png_process_data", "png_read_info"])
     if any(tok in text for tok in ("println", "logger.info(", "format_to", "vformat", "fmt::format", "fmt::print", "fmt::println")):
         score += 5
         reasons.append("public-runtime-api")
@@ -1357,6 +1537,47 @@ def _runtime_viability_details(name: str, context: str, *, file_hint: str = "") 
             deduped.append(item)
     rationale = ", ".join(reasons[:5]) or "neutral-runtime-signal"
     return viability, rationale, deduped
+
+
+def _is_test_or_demo_helper_target(*, name: str, api: str, file_hint: str = "") -> bool:
+    text = f"{name}\n{api}\n{file_hint}".lower()
+    basename = Path(str(file_hint or "")).name.lower()
+    symbol = str(name or api or "").strip().lower()
+    public_like_symbol = symbol.startswith(("png_", "xml", "yaml_", "json_", "sqlite3_"))
+    helper_name = (
+        str(name or "").lower().startswith(("test_", "do_test"))
+        or str(api or "").lower().startswith(("test_", "do_test"))
+        or str(name or "").lower() in {"testonefile", "test_one_file"}
+        or str(api or "").lower() in {"testonefile", "test_one_file"}
+    )
+    test_file = any(
+        token in text
+        for token in (
+            "/contrib/libtests/",
+            "contrib/libtests/",
+            "/tests/",
+            "tests/",
+            "/test/",
+            "test/",
+            "/contrib/gregbook/",
+            "contrib/gregbook/",
+            "/contrib/examples/",
+            "contrib/examples/",
+            "/examples/",
+            "examples/",
+            "/demo/",
+            "demo/",
+            "/demos/",
+            "demos/",
+            "/deprecated/",
+            "deprecated/",
+            "/legacy/",
+            "legacy/",
+            "examples/",
+        )
+    )
+    demo_file = any(token in basename for token in ("test", "demo", "example", "deprecated", "legacy"))
+    return bool((helper_name and (test_file or demo_file)) or ((test_file or demo_file) and not public_like_symbol))
 
 
 def _load_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
@@ -1524,17 +1745,33 @@ def _vuln_topk() -> int:
         return 24
 
 
+def _vuln_max_iterations_per_candidate() -> int:
+    raw = (os.environ.get("SHERPA_VULN_MAX_ITERATIONS_PER_CANDIDATE") or "5").strip()
+    try:
+        return max(1, min(int(raw), 50))
+    except Exception:
+        return 5
+
+
+_VULN_REPLAN_PRIORITY_THRESHOLD = 0.65
+
+
+def _vuln_replan_priority_threshold() -> float:
+    raw = os.environ.get("SHERPA_VULN_REPLAN_PRIORITY_THRESHOLD") or ""
+    if raw:
+        try:
+            return max(0.0, min(float(raw.strip()), 1.0))
+        except ValueError:
+            pass
+    return _VULN_REPLAN_PRIORITY_THRESHOLD
+
+
 def _vuln_score_weights() -> dict[str, float]:
-    # Vulnerability scores dominate (0.88); coverage/complexity are
-    # reference tiebreakers only (0.12).
+    # Pure vuln-driven scoring. All non-vuln factors removed.
     return {
-        "vuln_likelihood": 0.45,
-        "exploitability": 0.25,
-        "reachability_confidence": 0.18,
-        "coverage_gap": 0.05,
-        "complexity_depth": 0.04,
-        "api_relevance": 0.02,
-        "consumer_order_support": 0.01,
+        "vuln_likelihood": 0.50,
+        "exploitability": 0.30,
+        "reachability_confidence": 0.20,
     }
 
 
@@ -1554,7 +1791,14 @@ def _security_signal_ids() -> tuple[str, ...]:
 def _security_signal_patterns() -> dict[str, str]:
     return {
         "mem_oob_candidate": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|\[[^\]]+\]|pointer|offset|index|bounds?)",
-        "integer_overflow_candidate": r"(overflow|underflow|size_t|ssize_t|uint|int\d+_t|length|len|count|capacity|shift|multiply|\*)",
+        "integer_overflow_candidate": (
+            r"(overflow|underflow|wrap(?:around)?|truncat|narrow(?:ing)?|"
+            r"(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)"
+            r"\s*(?:[\*\+\-]|<<)|"
+            r"(?:[\*\+\-]|<<)\s*(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)|"
+            r"(?:size_t|ssize_t|uint(?:8|16|32|64)?_t|int(?:8|16|32|64)?_t)\s*\)|"
+            r"(?:alloc|malloc|calloc|realloc)[^;\n]{0,80}(?:width|height|stride|rowbytes|rowsize|size|len|length|capacity))"
+        ),
         "format_string_candidate": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)",
         "path_traversal_candidate": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)",
         "command_injection_candidate": r"(system\(|popen\(|exec\(|spawn\(|shell|command)",
@@ -1574,15 +1818,27 @@ def _compute_security_signal_scores(
     signature: str,
     file_hint: str,
     risk_signals: list[str] | None = None,
+    risk_signal_source_breakdown: dict[str, list[str]] | None = None,
 ) -> dict[str, float]:
     text = f"{name}\n{signature}\n{file_hint}".lower()
     scores = _empty_security_scores()
     signals = {str(x).strip().lower() for x in list(risk_signals or []) if str(x).strip()}
+    source_breakdown: dict[str, set[str]] = {}
+    for source_name, values in dict(risk_signal_source_breakdown or {}).items():
+        if not isinstance(values, list):
+            continue
+        source_breakdown[str(source_name).strip().lower()] = {
+            str(x).strip().lower() for x in values if str(x).strip()
+        }
     for signal_id, pattern in _security_signal_patterns().items():
         if re.search(pattern, text, re.IGNORECASE):
             scores[signal_id] = max(scores[signal_id], 0.62)
-        if signal_id in signals:
+        if signal_id in source_breakdown.get("regex", set()) or signal_id in source_breakdown.get("semantic", set()):
             scores[signal_id] = max(scores[signal_id], 0.78)
+        elif signal_id in source_breakdown.get("weak_file", set()) or signal_id in source_breakdown.get("file", set()):
+            scores[signal_id] = max(scores[signal_id], 0.44)
+        elif signal_id in signals:
+            scores[signal_id] = max(scores[signal_id], 0.68)
     if "bounds" in signals:
         scores["mem_oob_candidate"] = max(scores["mem_oob_candidate"], 0.68)
         scores["integer_overflow_candidate"] = max(scores["integer_overflow_candidate"], 0.56)
@@ -1671,6 +1927,152 @@ def _top_security_signals(
     return [sig for sig, score in pairs if score >= th]
 
 
+def _signal_slug(signal_id: str) -> str:
+    raw = str(signal_id or "").strip().lower()
+    if not raw:
+        return "generic"
+    raw = re.sub(r"_candidate$", "", raw)
+    raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return raw or "generic"
+
+
+def _signal_vuln_category(signal_id: str) -> str:
+    mapping = {
+        "mem_oob_candidate": "heap-buffer-overflow",
+        "integer_overflow_candidate": "integer-overflow",
+        "format_string_candidate": "format-string",
+        "path_traversal_candidate": "path-traversal",
+        "command_injection_candidate": "command-injection",
+        "authz_bypass_candidate": "authorization-bypass",
+        "null_deref_candidate": "null-dereference",
+        "uaf_candidate": "use-after-free",
+    }
+    return mapping.get(str(signal_id or "").strip().lower(), "memory-corruption")
+
+
+def _signal_sanitizer_hint(signal_id: str) -> str:
+    mapping = {
+        "mem_oob_candidate": "address",
+        "integer_overflow_candidate": "undefined",
+        "format_string_candidate": "address",
+        "path_traversal_candidate": "address",
+        "command_injection_candidate": "address",
+        "authz_bypass_candidate": "address",
+        "null_deref_candidate": "address",
+        "uaf_candidate": "address",
+    }
+    return mapping.get(str(signal_id or "").strip().lower(), "address")
+
+
+def _attack_boundary_values(signal_id: str, *, target_type: str, api: str) -> list[str]:
+    signal = str(signal_id or "").strip().lower()
+    target_type_l = str(target_type or "").strip().lower()
+    api_l = str(api or "").strip().lower()
+
+    if signal == "mem_oob_candidate":
+        return ["len=0", "len=1", "len=4096", "offset=len-1", "offset=0xFFFFFFFF"]
+    if signal == "integer_overflow_candidate":
+        return ["count=0x7FFFFFFF", "count=0x80000000", "size=0xFFFFFFFF", "count*stride overflow"]
+    if signal == "format_string_candidate":
+        return ["fmt=%n", "fmt=%999999s", "fmt=%p%p%p", "fmt={{{{{"]
+    if signal == "path_traversal_candidate":
+        return ["path=../etc/passwd", "path=..\\\\windows\\\\win.ini", "path=/tmp/../../secret"]
+    if signal == "command_injection_candidate":
+        return ["arg=;id", "arg=$(id)", "arg=`id`", "arg=&&touch /tmp/pwned"]
+    if signal == "authz_bypass_candidate":
+        return ["role=admin", "token=''", "user_id=-1", "permission=wildcard"]
+    if signal == "null_deref_candidate":
+        return ["ptr=null", "count=0", "header_only=true", "optional_field_missing"]
+    if signal == "uaf_candidate":
+        return ["free_then_use", "double_close", "lifetime=end_before_use", "refcount=0"]
+
+    if target_type_l in {"parser", "decoder", "archive", "document"}:
+        return ["size=0", "size=1", "size=4096", "declared_len=0xFFFFFFFF"]
+    if "parse" in api_l or "decode" in api_l:
+        return ["input=''", "input='\\x00'", "input='A'*4096", "declared_len=actual_len+1"]
+    return ["size=0", "size=1", "size=4096", "count=0xFFFFFFFF"]
+
+
+def _candidate_attack_hint(
+    *,
+    api: str,
+    target_type: str,
+    signal_id: str,
+    source_path: str,
+    security_reason: str,
+) -> dict[str, Any]:
+    signal = str(signal_id or "").strip().lower()
+    api_text = str(api or "").strip() or "target_api"
+    source_text = str(source_path or "").strip()
+    vuln_category = _signal_vuln_category(signal)
+    key_code_path = [api_text]
+    if source_text:
+        source_stem = Path(source_text).stem.strip()
+        if source_stem and source_stem not in {api_text, api_text.split("::")[-1]}:
+            key_code_path.append(source_stem)
+    trigger_condition = {
+        "mem_oob_candidate": f"{api_text} uses attacker-influenced length or offset beyond allocated bounds",
+        "integer_overflow_candidate": f"{api_text} derives buffer or loop sizes from arithmetic that can overflow",
+        "format_string_candidate": f"{api_text} forwards attacker-controlled format content into formatter sinks",
+        "path_traversal_candidate": f"{api_text} consumes file paths without constraining traversal sequences",
+        "command_injection_candidate": f"{api_text} reaches shell or process execution with partially controlled input",
+        "authz_bypass_candidate": f"{api_text} evaluates authorization decisions with bypass-prone state combinations",
+        "null_deref_candidate": f"{api_text} dereferences optional or stateful pointers on malformed input",
+        "uaf_candidate": f"{api_text} may access released state after cleanup or ownership transfer",
+    }.get(signal, f"{api_text} exposes a high-risk path that warrants adversarial input exploration")
+    if security_reason:
+        trigger_condition = f"{trigger_condition}; evidence={security_reason}"
+    return {
+        "trigger_condition": trigger_condition,
+        "key_code_path": key_code_path,
+        "boundary_values": _attack_boundary_values(signal, target_type=target_type, api=api_text),
+        "vuln_category": vuln_category,
+        "sanitizer_hint": _signal_sanitizer_hint(signal),
+    }
+
+
+def _normalize_attack_hint(
+    value: Any,
+    *,
+    api: str,
+    target_type: str,
+    signal_id: str,
+    source_path: str,
+    security_reason: str,
+) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_id,
+            source_path=source_path,
+            security_reason=security_reason,
+        )
+        hint["trigger_condition"] = value.strip()
+        return hint
+    return {}
+
+
+def _candidate_priority(
+    *,
+    vuln_likelihood: float,
+    exploitability: float,
+    reachability_confidence: float,
+    evidence_count: int,
+    signal_score: float,
+) -> float:
+    raw = (
+        0.50 * max(0.0, min(float(vuln_likelihood), 1.0))
+        + 0.24 * max(0.0, min(float(exploitability), 1.0))
+        + 0.18 * max(0.0, min(float(reachability_confidence), 1.0))
+        + 0.05 * max(0.0, min(float(signal_score), 1.0))
+        + 0.03 * min(max(int(evidence_count), 0), 5) / 5.0
+    )
+    return round(max(0.0, min(raw, 1.0)), 4)
+
+
 def _is_internal_api_symbol(api: str) -> bool:
     low = str(api or "").strip().lower()
     if not low:
@@ -1689,89 +2091,34 @@ def _is_internal_api_symbol(api: str) -> bool:
 
 
 def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
-    return max(lo, min(hi, float(value)))
+    return _wf_target_scoring.clamp_score(value, lo=lo, hi=hi)
 
 
 def _target_component_coverage_gap(item: dict[str, Any]) -> float:
-    explicit = item.get("coverage_gap")
-    if explicit is not None:
-        try:
-            return _clamp_score(float(explicit))
-        except Exception:
-            pass
-    depth_score = max(0, int(item.get("depth_score") or 0))
-    depth_class = str(item.get("depth_class") or "").strip().lower()
-    target_type = str(item.get("target_type") or "").strip().lower()
-    base = min(7.0, float(depth_score) / 2.0)
-    if depth_class == "deep":
-        base += 2.0
-    elif depth_class == "medium":
-        base += 1.0
-    if target_type in {"parser", "decoder", "archive"}:
-        base += 1.0
-    return _clamp_score(base)
+    return _wf_target_scoring.target_component_coverage_gap(item)
 
 
 def _target_component_complexity(item: dict[str, Any]) -> float:
-    depth_score = max(0, int(item.get("depth_score") or 0))
-    risk_signals = list(item.get("risk_signals") or [])
-    base = min(8.0, float(depth_score) / 3.0)
-    base += min(2.0, 0.4 * float(len(risk_signals)))
-    return _clamp_score(base)
+    return _wf_target_scoring.target_component_complexity(item)
 
 
 def _target_component_api_relevance(item: dict[str, Any]) -> float:
-    runtime_rank = _runtime_viability_rank(str(item.get("runtime_viability") or ""))
-    target_type = str(item.get("target_type") or "").strip().lower()
-    api = str(item.get("api") or "")
-    score = 2.0 + float(runtime_rank) * 2.5
-    if target_type in {"parser", "decoder", "archive"}:
-        score += 1.5
-    if "::" in api or re.search(r"[A-Za-z_][A-Za-z0-9_]*", api):
-        score += 1.0
-    return _clamp_score(score)
+    return _wf_target_scoring.target_component_api_relevance(
+        item,
+        runtime_viability_rank_fn=_runtime_viability_rank,
+    )
 
 
 def _target_component_consumer_order_support(item: dict[str, Any]) -> float:
-    target_type = str(item.get("target_type") or "").strip().lower()
-    rationale = str(item.get("selection_rationale") or "").lower()
-    bias = str(item.get("selection_bias_reason") or "").lower()
-    signals = " ".join(str(x).lower() for x in (item.get("risk_signals") or []))
-    score = 2.0
-    if target_type in {"parser", "archive", "decoder"}:
-        score += 2.0
-    if any(tok in rationale for tok in ("runtime", "entrypoint", "stream", "state")):
-        score += 2.0
-    if any(tok in bias for tok in ("state", "parse", "decode", "deep")):
-        score += 1.5
-    if "state-machine" in signals or "parser-like" in signals:
-        score += 1.5
-    return _clamp_score(score)
+    return _wf_target_scoring.target_component_consumer_order_support(item)
 
 
 def _target_score_breakdown(item: dict[str, Any]) -> dict[str, Any]:
-    weights = _target_scoring_weights()
-    coverage_gap = _target_component_coverage_gap(item)
-    complexity = _target_component_complexity(item)
-    api_relevance = _target_component_api_relevance(item)
-    complexity_depth = complexity
-    consumer_order_support = _target_component_consumer_order_support(item)
-    weighted_total = (
-        coverage_gap * float(weights["coverage_gap"])
-        + complexity * float(weights["complexity"])
-        + api_relevance * float(weights["api_relevance"])
-        + consumer_order_support * float(weights["consumer_order_support"])
+    return _wf_target_scoring.target_score_breakdown(
+        item,
+        weights=_target_scoring_weights(),
+        runtime_viability_rank_fn=_runtime_viability_rank,
     )
-    return {
-        "coverage_gap": round(coverage_gap, 4),
-        "complexity": round(complexity, 4),
-        "complexity_depth": round(complexity_depth, 4),
-        "api_relevance": round(api_relevance, 4),
-        "consumer_order_support": round(consumer_order_support, 4),
-        "recent_yield_penalty": 0.0,
-        "weights": {k: round(float(v), 4) for k, v in weights.items()},
-        "weighted_total": round(weighted_total, 6),
-    }
 
 
 def _load_seed_feedback_by_fuzzer(repo_root: Path) -> dict[str, dict[str, Any]]:
@@ -1793,24 +2140,215 @@ def _load_seed_feedback_by_fuzzer(repo_root: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _target_runtime_penalty(repo_root: Path, wrapper_fuzzer_name: str) -> dict[str, Any]:
-    if not wrapper_fuzzer_name:
-        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
+def _load_target_runtime_cooldown_index(repo_root: Path) -> dict[str, Any]:
+    context_dir = context_dir_for_repo_root(repo_root)
+    control_doc, workflow_doc = read_context_docs(context_dir, job_id="")
+    control = strip_meta(control_doc)
+    workflow = strip_meta(workflow_doc)
+    exhausted_targets: set[str] = set()
+    raw_exhausted = list(workflow.get("coverage_exhausted_targets") or [])
+    for item in raw_exhausted:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name:
+            exhausted_targets.update(_target_analysis_lookup_keys(name, name))
+
+    low_yield_targets: set[str] = set()
+    plateau_counts: dict[str, int] = {}
+    for entry in list(workflow.get("coverage_history") or [])[-8:]:
+        if not isinstance(entry, dict):
+            continue
+        target_api = str(entry.get("target_api") or entry.get("target_name") or "").strip()
+        if not target_api:
+            continue
+        plateau_no_gain = bool(
+            entry.get("plateau_detected")
+            and int(entry.get("max_cov") or 0) <= int(entry.get("prev_cov") or 0)
+            and int(entry.get("max_ft") or 0) <= int(entry.get("prev_ft") or 0)
+        )
+        if plateau_no_gain:
+            plateau_counts[target_api] = plateau_counts.get(target_api, 0) + 1
+    for target_api, count in plateau_counts.items():
+        if count >= 2:
+            low_yield_targets.update(_target_analysis_lookup_keys(target_api, target_api))
+
+    oom_fuzzers: set[str] = set()
+    timeout_fuzzers: set[str] = set()
+    last_fuzzer = str(workflow.get("last_fuzzer") or control.get("last_fuzzer") or "").strip()
+    run_error_kind = str(
+        workflow.get("coverage_run_error_kind_effective")
+        or workflow.get("run_error_kind")
+        or workflow.get("error_code")
+        or ""
+    ).strip().lower()
+    if last_fuzzer:
+        if run_error_kind == "oom_killed":
+            oom_fuzzers.add(last_fuzzer)
+        elif run_error_kind in {"k8s_job_timeout", "timeout", "run_timeout", "run_idle_timeout"}:
+            timeout_fuzzers.add(last_fuzzer)
+
+    return {
+        "exhausted_targets": exhausted_targets,
+        "low_yield_targets": low_yield_targets,
+        "oom_fuzzers": oom_fuzzers,
+        "timeout_fuzzers": timeout_fuzzers,
+    }
+
+
+def _target_runtime_penalty(
+    repo_root: Path,
+    wrapper_fuzzer_name: str,
+    *,
+    target_name: str = "",
+    api: str = "",
+) -> dict[str, Any]:
     feedback = _load_seed_feedback_by_fuzzer(repo_root).get(wrapper_fuzzer_name) or {}
-    if not feedback:
-        return {"score_penalty": 0.0, "reason": "", "seed_feedback": {}}
-    cold_start = bool(feedback.get("cold_start_failure") or False)
-    seed_score = float(feedback.get("seed_score") or 0.0)
-    early_units_30s = int(feedback.get("early_new_units_30s") or 0)
+    base = _wf_target_scoring.runtime_penalty_from_feedback(feedback)
+    penalty = float(base.get("score_penalty") or 0.0)
+    reasons: list[str] = []
+    if str(base.get("reason") or "").strip():
+        reasons.append(str(base.get("reason") or "").strip())
+
+    cooldown = _load_target_runtime_cooldown_index(repo_root)
+    lookup_keys = _target_analysis_lookup_keys(target_name or wrapper_fuzzer_name, api or target_name or wrapper_fuzzer_name)
+    if lookup_keys & set(cooldown.get("exhausted_targets") or set()):
+        penalty += 1.2
+        reasons.append("coverage_exhausted_target")
+    if lookup_keys & set(cooldown.get("low_yield_targets") or set()):
+        penalty += 0.9
+        reasons.append("persistent_low_yield_target")
+    if wrapper_fuzzer_name and wrapper_fuzzer_name in set(cooldown.get("oom_fuzzers") or set()):
+        penalty += 2.5
+        reasons.append("recent_oom_killed")
+    elif wrapper_fuzzer_name and wrapper_fuzzer_name in set(cooldown.get("timeout_fuzzers") or set()):
+        penalty += 1.4
+        reasons.append("recent_timeout")
+
+    return {
+        "score_penalty": round(min(max(penalty, 0.0), 4.5), 4),
+        "reason": ";".join(dict.fromkeys(x for x in reasons if x)),
+        "seed_feedback": dict(feedback),
+    }
+
+
+def _selection_target_key(name: str) -> str:
+    return str(name or "").strip().lower()
+
+
+def _execution_depth_bias(
+    *,
+    target_name: str,
+    api: str,
+    target_type: str,
+    depth_class: str,
+    depth_score: int,
+    selection_rationale: str,
+) -> dict[str, Any]:
+    text = " ".join(
+        [
+            str(target_name or ""),
+            str(api or ""),
+            str(selection_rationale or ""),
+        ]
+    ).lower()
+    callback_penalty = 0.0
+    wrapper_penalty = 0.0
+    if any(token in text for token in ("callback", "init", "cleanup", "helper", "check_sig", "sig")):
+        callback_penalty = 0.12
+    if any(token in text for token in ("helper", "wrapper", "adapter")):
+        wrapper_penalty = max(wrapper_penalty, 0.08)
+    deep_bonus = 0.0
+    if any(
+        token in text
+        for token in ("decode", "parse", "read", "load", "stream", "row", "image", "chunk", "process", "transform")
+    ):
+        deep_bonus += 0.08
+    if str(target_type or "").strip().lower() in {"parser", "decoder", "archive"}:
+        deep_bonus += 0.04
+    depth_class_l = str(depth_class or "").strip().lower()
+    if depth_class_l == "deep":
+        deep_bonus += 0.05
+    elif depth_class_l == "medium":
+        deep_bonus += 0.02
+    if int(depth_score or 0) >= 18:
+        deep_bonus += 0.03
+    execution_bias = round(deep_bonus - callback_penalty - wrapper_penalty, 4)
+    return {
+        "execution_depth_bias": execution_bias,
+        "callback_penalty": round(callback_penalty, 4),
+        "wrapper_penalty": round(wrapper_penalty, 4),
+    }
+
+
+def _target_surface_penalty(
+    *,
+    target_name: str,
+    api: str,
+    source_path: str,
+    runtime_replacement_reason: str = "",
+) -> dict[str, Any]:
+    if str(runtime_replacement_reason or "").strip() == "test_demo_helper_public_surrogate":
+        return {"target_surface_penalty": 0.0, "target_surface_penalty_reason": ""}
+    normalized_path = str(source_path or "").replace("\\", "/").strip().lower()
+    basename = Path(normalized_path).name.lower()
+    symbol_text = f"{target_name} {api}".strip().lower()
     penalty = 0.0
-    reason = ""
-    if cold_start and seed_score < 0.55 and early_units_30s <= 0:
-        penalty = 1.5
-        reason = "cold_start_low_yield"
-    elif seed_score < 0.30:
-        penalty = 0.8
-        reason = "very_low_seed_score"
-    return {"score_penalty": float(penalty), "reason": reason, "seed_feedback": feedback}
+    reasons: list[str] = []
+    non_core_tokens = (
+        "contrib/arm",
+        "contrib/intel",
+        "contrib/mips",
+        "contrib/powerpc",
+        "contrib/riscv",
+        "contrib/loongarch",
+        "/arm-neon/",
+        "arm-neon/",
+        "linux-auxv",
+        "/auxv",
+    )
+    if any(token in normalized_path for token in non_core_tokens):
+        penalty += 0.45
+        reasons.append("non_core_auxiliary_source")
+    elif normalized_path.startswith("contrib/") and not any(
+        token in normalized_path
+        for token in ("contrib/oss-fuzz/", "contrib/libtests/", "contrib/examples/", "contrib/gregbook/")
+    ):
+        penalty += 0.25
+        reasons.append("contrib_auxiliary_source")
+    helper_tokens = ("safe_read", "auxv", "helper", "wrapper", "callback", "platform", "cpuinfo")
+    if any(token in symbol_text for token in helper_tokens) or any(token in basename for token in helper_tokens):
+        penalty += 0.12
+        reasons.append("helper_surface")
+    return {
+        "target_surface_penalty": round(min(max(penalty, 0.0), 0.75), 4),
+        "target_surface_penalty_reason": ";".join(dict.fromkeys(reasons)),
+    }
+
+
+def _apply_selected_target_filters(
+    ranked_items: list[dict[str, Any]],
+    *,
+    exclude_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = list(ranked_items)
+    excluded = {
+        _selection_target_key(name)
+        for name in list(exclude_names or [])
+        if _selection_target_key(name)
+    }
+    if not excluded:
+        return rows
+    filtered = [
+        row
+        for row in rows
+        if _selection_target_key(
+            str(row.get("target_name") or row.get("target") or row.get("name") or "")
+        )
+        not in excluded
+    ]
+    return filtered or rows
 
 
 def _target_analysis_lookup_keys(target_name: str, api: str) -> set[str]:
@@ -1885,6 +2423,26 @@ def _load_target_analysis_security_index(repo_root: Path) -> dict[str, dict[str,
             merged = dict(out.get(key) or {})
             merged.update(item)
             out[key] = merged
+    vuln_doc = _load_vuln_candidates_doc(repo_root)
+    for item in list(vuln_doc.get("candidates") or []):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("validation_status") or "").strip().lower()
+        if status in {"exhausted", "cooling"}:
+            continue
+        api = str(item.get("target_api") or item.get("api") or "").strip()
+        name = str(item.get("target_name") or item.get("name") or api).strip()
+        if not (api or name):
+            continue
+        normalized = dict(item)
+        normalized.setdefault("api", api)
+        normalized.setdefault("name", name)
+        normalized.setdefault("file", str(item.get("target_file") or item.get("file") or ""))
+        normalized.setdefault("candidate_origin", str(item.get("candidate_origin") or item.get("source_stage") or "vuln_candidates"))
+        for key in _target_analysis_lookup_keys(name, api):
+            merged = dict(out.get(key) or {})
+            merged.update(normalized)
+            out[key] = merged
     return out
 
 
@@ -1930,6 +2488,593 @@ def _load_security_evidence_list(
     return normalized, ""
 
 
+def _load_vuln_candidate_inventory(
+    repo_root: Path,
+    analysis_context_path: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Load vulnerability candidates from analysis_context using a strict list-only contract.
+
+    Contract:
+      analysis_context.json.analysis_evidence.vuln_candidate_inventory must be list[object].
+    """
+    path_text = str(analysis_context_path or "").strip()
+    if not path_text:
+        return [], ""
+    ctx_path = Path(path_text)
+    if not ctx_path.is_absolute():
+        ctx_path = repo_root / ctx_path
+    if not ctx_path.is_file():
+        return [], ""
+    try:
+        raw_doc = json.loads(ctx_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return [], f"vuln_candidate_inventory_load_error:{exc}"
+    if not isinstance(raw_doc, dict):
+        return [], "vuln_candidate_inventory_schema_invalid:analysis_context_not_object"
+    analysis_evidence = raw_doc.get("analysis_evidence")
+    if analysis_evidence is None:
+        return [], ""
+    if not isinstance(analysis_evidence, dict):
+        return [], "vuln_candidate_inventory_schema_invalid:analysis_evidence_not_object"
+    inventory = analysis_evidence.get("vuln_candidate_inventory")
+    if inventory is None:
+        return [], ""
+    if not isinstance(inventory, list):
+        return [], "vuln_candidate_inventory_schema_invalid:vuln_candidate_inventory_not_list"
+    normalized: list[dict[str, Any]] = []
+    for item in inventory:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+    return normalized, ""
+
+
+def _vuln_candidates_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "vuln_candidates.json"
+
+
+def _load_vuln_candidates_doc(repo_root: Path) -> dict[str, Any]:
+    path = _vuln_candidates_path(repo_root)
+    if not path.is_file():
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    if not isinstance(raw, dict):
+        return {"schema_version": 1, "updated_at": 0, "candidate_count": 0, "candidates": []}
+    candidates = [dict(x) for x in list(raw.get("candidates") or []) if isinstance(x, dict)]
+    return {
+        "schema_version": int(raw.get("schema_version") or 1),
+        "updated_at": int(raw.get("updated_at") or 0),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+
+
+def _active_vuln_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocked = {"exhausted", "cooling"}
+    return [
+        dict(item)
+        for item in candidates
+        if str(item.get("validation_status") or "pending").strip().lower() not in blocked
+    ]
+
+
+def _write_vuln_candidates_doc(repo_root: Path, candidates: list[dict[str, Any]], *, degraded_reason: str = "") -> str:
+    path = _vuln_candidates_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "candidate_count": len(candidates),
+        "degraded_reason": degraded_reason,
+        "candidates": candidates,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _vuln_candidate_matches_feedback(candidate: dict[str, Any], event: dict[str, Any], active_candidate_id: str) -> bool:
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if active_candidate_id and candidate_id == active_candidate_id:
+        return True
+    event_api = str(event.get("target_api") or "").strip()
+    event_name = str(event.get("target_name") or "").strip()
+    values = {
+        str(candidate.get("target_api") or "").strip(),
+        str(candidate.get("api") or "").strip(),
+        str(candidate.get("target_name") or "").strip(),
+        str(candidate.get("name") or "").strip(),
+    }
+    return bool((event_api and event_api in values) or (event_name and event_name in values))
+
+
+def _feedback_status_for_vuln_candidate(event: dict[str, Any], *, plateau_streak: int) -> str:
+    event_type = str(event.get("event_type") or "").strip()
+    if event_type == "coverage_plateau":
+        return "exhausted" if plateau_streak >= _vuln_max_iterations_per_candidate() else "cooling"
+    if event_type in {"seed_generation_degraded", "harness_bug", "repair_feedback"}:
+        return "inconclusive"
+    return "pending"
+
+
+def _update_vuln_candidate_feedback(repo_root: Path, state: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    if not event:
+        return {}
+    doc = _load_vuln_candidates_doc(repo_root)
+    candidates = [dict(x) for x in list(doc.get("candidates") or []) if isinstance(x, dict)]
+    if not candidates:
+        return {}
+    active_candidate_id = str(state.get("vuln_hunt_active_candidate_id") or "").strip()
+    plateau_streak = int(state.get("coverage_plateau_streak") or event.get("coverage_plateau_streak") or 0)
+    changed = False
+    updated: list[dict[str, Any]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        if _vuln_candidate_matches_feedback(item, event, active_candidate_id):
+            attempts = int(item.get("attempt_count") or 0) + 1
+            status = _feedback_status_for_vuln_candidate(event, plateau_streak=plateau_streak)
+            item.update(
+                {
+                    "attempt_count": attempts,
+                    "validation_status": status,
+                    "last_result": {
+                        "ts": int(event.get("ts") or time.time()),
+                        "event_type": str(event.get("event_type") or ""),
+                        "target_name": str(event.get("target_name") or ""),
+                        "target_api": str(event.get("target_api") or ""),
+                        "coverage_plateau_streak": plateau_streak,
+                        "coverage_quality_flags": list(event.get("coverage_quality_flags") or []),
+                        "coverage_seed_generation_degraded": bool(
+                            event.get("coverage_seed_generation_degraded") or False
+                        ),
+                        "crash_triage_label": str(event.get("crash_triage_label") or ""),
+                    },
+                    "updated_at": int(time.time()),
+                }
+            )
+            changed = True
+        updated.append(item)
+    if not changed:
+        return {}
+    path = _write_vuln_candidates_doc(repo_root, updated)
+    active = _active_vuln_candidates(updated)
+    active_candidate = dict(active[0]) if active else {}
+    return {
+        "vuln_candidates_path": path,
+        "vuln_candidate_count": len(updated),
+        "vuln_hunt_candidate_count": len(updated),
+        "vuln_hunt_active_candidate_id": str(active_candidate.get("candidate_id") or ""),
+        "vuln_hunt_rerun_requested": True,
+    }
+
+
+def _vuln_candidate_id(value: str, idx: int) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return f"analysis_{slug or 'candidate'}_{idx + 1}"
+
+
+def _bounded_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except Exception:
+        return float(default)
+
+
+def _normalize_analysis_vuln_candidate(
+    item: dict[str, Any],
+    *,
+    idx: int,
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    api = str(item.get("api") or item.get("target_api") or item.get("name") or "").strip()
+    name = str(item.get("name") or item.get("target_name") or api).strip()
+    target_type = str(item.get("target_type") or "generic").strip().lower()
+    evidence_ids = [
+        str(x).strip()
+        for x in list(item.get("evidence_ids") or [])
+        if str(x).strip()
+    ]
+    evidence_refs = [dict(evidence_by_id[x]) for x in evidence_ids if x in evidence_by_id]
+    signal_type = str(item.get("signal_type") or item.get("signal_id") or "").strip()
+    if not signal_type and evidence_refs:
+        signal_type = str(evidence_refs[0].get("signal_id") or "").strip()
+    if not signal_type:
+        signal_type = "mem_oob_candidate"
+    vuln_likelihood = _bounded_float(item.get("vuln_likelihood"), 0.0)
+    exploitability = _bounded_float(item.get("exploitability"), 0.0)
+    reachability = _bounded_float(item.get("reachability_confidence"), 0.0)
+    signal_score = max(_bounded_float(item.get("signal_score"), 0.0), vuln_likelihood)
+    reason = str(item.get("security_priority_reason") or item.get("summary") or "").strip()
+    source_path = str(item.get("file") or item.get("target_file") or item.get("source_path") or "").strip()
+    try:
+        line = int(item.get("line") or 0)
+    except Exception:
+        line = 0
+    attack_hint = dict(item.get("attack_hint") or {})
+    if not attack_hint:
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_type,
+            source_path=source_path,
+            security_reason=reason,
+        )
+    candidate_id = str(item.get("candidate_id") or "").strip() or _vuln_candidate_id(api or name, idx)
+    risk_signal_source_breakdown = dict(item.get("risk_signal_source_breakdown") or {})
+    security_signal_scores = dict(item.get("security_signal_scores") or {})
+    return {
+        "candidate_id": candidate_id,
+        "source_stage": "analysis",
+        "candidate_origin": "analysis_context",
+        "validation_status": str(item.get("validation_status") or "pending"),
+        "target_api": api,
+        "api": api,
+        "target_name": name,
+        "name": name,
+        "target_file": source_path,
+        "file": source_path,
+        "source_path": source_path,
+        "line": line,
+        "target_type": target_type,
+        "signal_type": signal_type,
+        "risk_type": signal_type,
+        "signal_score": round(max(0.0, min(signal_score, 1.0)), 4),
+        "vuln_likelihood": round(vuln_likelihood, 4),
+        "exploitability": round(exploitability, 4),
+        "reachability_confidence": round(reachability, 4),
+        "detectability_confidence": round(
+            max(0.0, min(max(reachability, signal_score, vuln_likelihood * 0.8), 1.0)),
+            4,
+        ),
+        "priority": _candidate_priority(
+            vuln_likelihood=vuln_likelihood,
+            exploitability=exploitability,
+            reachability_confidence=reachability,
+            evidence_count=len(evidence_ids),
+            signal_score=signal_score,
+        ),
+        "security_priority_reason": reason,
+        "evidence_ids": evidence_ids,
+        "evidence": evidence_refs,
+        "attack_hint": attack_hint,
+        "security_signal_scores": {k: float(v) for k, v in security_signal_scores.items()},
+        "risk_signal_source_breakdown": risk_signal_source_breakdown,
+        "attempt_count": int(item.get("attempt_count") or 0),
+        "last_result": dict(item.get("last_result") or {}),
+        "created_at": int(item.get("created_at") or time.time()),
+        "updated_at": int(time.time()),
+    }
+
+
+def _write_analysis_vuln_candidates(repo_root: Path, analysis_context_path: str) -> dict[str, Any]:
+    evidence, evidence_issue = _load_security_evidence_list(repo_root, analysis_context_path)
+    inventory, inventory_issue = _load_vuln_candidate_inventory(repo_root, analysis_context_path)
+    path = _vuln_candidates_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_doc = _load_vuln_candidates_doc(repo_root)
+    evidence_by_id = {
+        str(item.get("evidence_id") or "").strip(): dict(item)
+        for item in evidence
+        if str(item.get("evidence_id") or "").strip()
+    }
+    existing_candidates = [
+        dict(x)
+        for x in list(existing_doc.get("candidates") or [])
+        if isinstance(x, dict) and str(x.get("source_stage") or "") != "analysis"
+    ]
+    topk = max(1, int(_vuln_topk()))
+    analysis_candidates = [
+        _normalize_analysis_vuln_candidate(item, idx=idx, evidence_by_id=evidence_by_id)
+        for idx, item in enumerate(inventory[:topk])
+        if isinstance(item, dict)
+    ]
+    by_id: dict[str, dict[str, Any]] = {}
+    for candidate in existing_candidates + analysis_candidates:
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if candidate_id:
+            by_id[candidate_id] = candidate
+    candidates = sorted(
+        by_id.values(),
+        key=lambda x: (
+            -float(x.get("priority") or 0.0),
+            -float(x.get("vuln_likelihood") or 0.0),
+            str(x.get("candidate_id") or ""),
+        ),
+    )
+    issue = ";".join(x for x in (evidence_issue, inventory_issue) if x)
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "candidate_count": len(candidates),
+        "analysis_candidate_count": len(analysis_candidates),
+        "degraded_reason": issue,
+        "candidates": candidates,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "candidate_count": len(candidates), "analysis_candidate_count": len(analysis_candidates), "issue": issue}
+
+
+def _vuln_hunt_summary_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "vuln_hunt_summary.md"
+
+
+def _vuln_hunt_events_path(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "vuln_hunt_events.jsonl"
+
+
+def _vuln_hunt_event_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    event_type = ""
+    if int(state.get("coverage_plateau_streak") or 0) > 0:
+        event_type = "coverage_plateau"
+    elif bool(state.get("coverage_seed_generation_degraded") or False):
+        event_type = "seed_generation_degraded"
+    elif str(state.get("crash_triage_label") or "").strip() == "harness_bug":
+        event_type = "harness_bug"
+    elif bool(state.get("repair_mode") or False):
+        event_type = "repair_feedback"
+    # Always emit at least a coverage_normal event so the vuln-hunt agent
+    # receives current run/coverage data for iterative refinement.
+    if not event_type:
+        event_type = "coverage_normal"
+    seed_quality = dict(state.get("coverage_seed_quality") or {}) if isinstance(state.get("coverage_seed_quality"), dict) else {}
+    return {
+        "ts": int(time.time()),
+        "event_type": event_type,
+        "target_name": str(state.get("coverage_target_name") or ""),
+        "target_api": str(state.get("coverage_target_api") or state.get("selected_target_api") or ""),
+        "coverage_plateau_streak": int(state.get("coverage_plateau_streak") or 0),
+        "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
+        "coverage_seed_generation_degraded": bool(state.get("coverage_seed_generation_degraded") or False),
+        "crash_triage_label": str(state.get("crash_triage_label") or ""),
+        "repair_origin_stage": str(state.get("repair_origin_stage") or ""),
+        "coverage_loop_round": int(state.get("coverage_loop_round") or 0),
+        "coverage_should_improve": bool(state.get("coverage_should_improve") or False),
+        "cov_delta": int(seed_quality.get("cov_delta") or 0),
+        "ft_delta": int(seed_quality.get("ft_delta") or 0),
+        "seed_score": float(seed_quality.get("seed_score") or 0.0),
+        "coverage_bottleneck_kind": str(state.get("coverage_bottleneck_kind") or ""),
+    }
+
+
+def _append_vuln_hunt_event(repo_root: Path, event: dict[str, Any]) -> str:
+    if not event:
+        return ""
+    path = _vuln_hunt_events_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    return str(path)
+
+
+def _write_vuln_hunt_summary(repo_root: Path, candidates: list[dict[str, Any]], event: dict[str, Any]) -> str:
+    path = _vuln_hunt_summary_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    active = _active_vuln_candidates(candidates)
+    lines = [
+        "# Vulnerability Hunt Summary",
+        "",
+        f"- generated_at: {int(time.time())}",
+        f"- candidate_count: {len(candidates)}",
+        f"- active_candidate_count: {len(active)}",
+        f"- event_type: {event.get('event_type') or 'initial_hunt'}",
+        "",
+        "## Top Candidates",
+        "",
+    ]
+    for idx, item in enumerate(active[:10], start=1):
+        lines.extend(
+            [
+                f"{idx}. `{item.get('candidate_id') or ''}`",
+                f"   - api: `{item.get('target_api') or item.get('api') or ''}`",
+                f"   - risk_type: `{item.get('risk_type') or item.get('signal_type') or ''}`",
+                f"   - priority: {float(item.get('priority') or 0.0):.4f}",
+                f"   - status: `{item.get('validation_status') or 'pending'}`",
+            ]
+        )
+        reason = str(item.get("security_priority_reason") or "").strip()
+        if reason:
+            lines.append(f"   - reason: {reason[:240]}")
+    if not active:
+        lines.append("- no active candidates")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _run_vuln_hunt_subphase(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    """Refresh vulnerability candidates without mutating control-plane truth."""
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    repo_root = gen.repo_root
+    enabled = bool(_vuln_hunting_enabled())
+    analysis_context_path = str(state.get("analysis_context_path") or repo_root / "fuzz" / "analysis_context.json")
+    analysis_ctx_obj = Path(analysis_context_path)
+    if not analysis_ctx_obj.is_absolute():
+        analysis_ctx_obj = repo_root / analysis_ctx_obj
+    has_hunt_input = bool(analysis_ctx_obj.is_file() or _vuln_candidates_path(repo_root).is_file())
+    issue = ""
+    result: dict[str, Any] = {"path": str(_vuln_candidates_path(repo_root)), "candidate_count": 0, "issue": ""}
+    if enabled:
+        try:
+            result = _write_analysis_vuln_candidates(repo_root, analysis_context_path)
+        except Exception as exc:
+            issue = f"vuln_hunt_candidate_materialize_error:{exc}"
+        if has_hunt_input and _has_codex_key() and getattr(gen, "patcher", None) is not None:
+            try:
+                # Snapshot vuln_candidates.json before the agent runs so we can
+                # roll back if it is killed mid-write and leaves a corrupt file.
+                # The done-file flush grace period only waits for the file named
+                # in ./done (vuln_hunt_summary.md), not vuln_candidates.json.
+                _vc_path = _vuln_candidates_path(repo_root)
+                _vc_snap_raw: bytes | None = None
+                _vc_snap_count = 0
+                try:
+                    if _vc_path.is_file():
+                        _vc_snap_raw = _vc_path.read_bytes()
+                        _vc_snap_count = len(
+                            (_load_vuln_candidates_doc(repo_root).get("candidates") or [])
+                        )
+                except Exception:
+                    _vc_snap_raw = None
+
+                _clear_opencode_done_sentinel(repo_root)
+                hunt_hint_lines = [
+                    f"- analysis_context_path: {analysis_context_path}",
+                    "- read `fuzz/analysis_context.json` and `fuzz/vuln_candidates.json` first",
+                    "- update only advisory vulnerability candidates and hunt summary",
+                    "- preserve validation_status/attempt_count/last_result for existing candidates",
+                ]
+                # Inject run/coverage feedback paths so the agent can refine
+                # vulnerability assessments with actual fuzz data.
+                run_feedback_path = str(state.get("fuzz_coverage_run_feedback_path") or "")
+                if run_feedback_path:
+                    hunt_hint_lines.append(f"- run_feedback_path: {run_feedback_path}")
+                coverage_frontier = str(state.get("fuzz_coverage_frontier_path") or "")
+                if coverage_frontier:
+                    hunt_hint_lines.append(f"- coverage_frontier_path: {coverage_frontier}")
+                replay_manifest = str(state.get("coverage_per_input_manifest_path") or "")
+                if replay_manifest:
+                    hunt_hint_lines.append(f"- per_input_manifest_path: {replay_manifest}")
+                # Attach run summary if available.
+                run_summary_path = str(state.get("fuzz_coverage_run_feedback_summary") or "")
+                if run_summary_path:
+                    hunt_hint_lines.append(f"- coverage_run_feedback_summary: {run_summary_path}")
+                hunt_hint = "\n".join(hunt_hint_lines)
+                event = _vuln_hunt_event_from_state(cast(dict[str, Any], state))
+                if event:
+                    hunt_hint += "\n- latest_feedback_event: " + json.dumps(event, ensure_ascii=False, sort_keys=True)
+                prompt, render_issue = _render_opencode_prompt_safe(
+                    "vuln_hunt_with_hint",
+                    fallback_name="analysis_with_hint",
+                    hint=hunt_hint,
+                    fallback_hint=hunt_hint,
+                )
+                if render_issue:
+                    issue = "; ".join(x for x in [issue, render_issue] if str(x).strip())
+                gen.patcher.run_codex_command(
+                    prompt,
+                    stage_skill="vuln_hunt",
+                    timeout=_remaining_time_budget_sec(state),
+                    max_attempts=1,
+                    max_cli_retries=_opencode_cli_retries(),
+                    idle_timeout_override=_vuln_hunt_idle_timeout_sec(),
+                )
+
+                # Validate vuln_candidates.json; restore snapshot if agent
+                # left a corrupt file (truncated write due to process kill).
+                if _vc_snap_raw is not None:
+                    _post_ok = False
+                    _post_count = 0
+                    try:
+                        _raw = json.loads(_vc_path.read_text(encoding="utf-8", errors="replace"))
+                        _post_ok = isinstance(_raw, dict)
+                        _post_count = len(_raw.get("candidates") or []) if _post_ok else 0
+                    except Exception:
+                        pass
+                    if not _post_ok:
+                        try:
+                            _vc_path.write_bytes(_vc_snap_raw)
+                            issue = "; ".join(
+                                x for x in [
+                                    issue,
+                                    f"vuln_candidates_corrupt_restored(pre={_vc_snap_count},post={_post_count})",
+                                ]
+                                if str(x).strip()
+                            )
+                        except Exception as _restore_exc:
+                            issue = "; ".join(
+                                x for x in [issue, f"vuln_candidates_restore_failed:{_restore_exc}"]
+                                if str(x).strip()
+                            )
+            except Exception as exc:
+                issue = "; ".join(
+                    x for x in [issue, f"vuln_hunt_opencode_error:{exc}"] if str(x).strip()
+                )
+    doc = _load_vuln_candidates_doc(repo_root)
+    candidates = list(doc.get("candidates") or [])
+    active = _active_vuln_candidates(candidates)
+    active_candidate = dict(active[0]) if active else {}
+    event = _vuln_hunt_event_from_state(cast(dict[str, Any], state))
+    events_path = _append_vuln_hunt_event(repo_root, event)
+    summary_path = _write_vuln_hunt_summary(repo_root, candidates, event)
+    degraded_reason = str(issue or result.get("issue") or "").strip()
+    out: dict[str, Any] = {
+        **state,
+        "vuln_hunt_enabled": enabled,
+        "vuln_hunt_iteration": int(state.get("vuln_hunt_iteration") or 0) + 1,
+        "vuln_hunt_active_candidate_id": str(active_candidate.get("candidate_id") or ""),
+        "vuln_hunt_highest_priority": float(active_candidate.get("priority") or 0.0) if active else 0.0,
+        "vuln_hunt_candidate_count": len(candidates),
+        "vuln_hunt_degraded": bool(degraded_reason),
+        "vuln_hunt_last_reason": degraded_reason,
+        "vuln_hunt_summary_path": summary_path,
+        "vuln_hunt_events_path": events_path,
+        "vuln_candidates_path": str(result.get("path") or _vuln_candidates_path(repo_root)),
+        "vuln_candidate_count": len(candidates),
+    }
+    snapshot = {
+        "kind": "choose_vuln_candidate",
+        "candidate_id": str(active_candidate.get("candidate_id") or ""),
+        "target_api": str(active_candidate.get("target_api") or active_candidate.get("api") or ""),
+        "priority": float(active_candidate.get("priority") or 0.0),
+        "validation_status": str(active_candidate.get("validation_status") or ""),
+        "candidate_count": len(candidates),
+        "active_candidate_count": len(active),
+        "event_type": str(event.get("event_type") or "initial_hunt"),
+        "degraded_reason": degraded_reason,
+    }
+    out = _record_decision_trace(
+        out,
+        stage="plan",
+        tool="system",
+        model="vuln-hunt",
+        latency_ms=0,
+        decision_snapshot=snapshot,
+    )
+    return _attach_prompt_render_status(out, issue=degraded_reason)
+
+
+def _node_vuln_hunt(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "vuln-hunt")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> vuln-hunt")
+    try:
+        out = dict(_run_vuln_hunt_subphase(state))
+        out.update(
+            {
+                "last_step": "vuln-hunt",
+                "last_error": "",
+                "failed": False,
+                "message": "vuln hunt done",
+            }
+        )
+        out = _clear_error_markers_on_success(out)
+        _wf_log(cast(dict[str, Any], out), f"<- vuln-hunt ok dt={_fmt_dt(time.perf_counter()-t0)}")
+        return cast(FuzzWorkflowRuntimeState, out)
+    except Exception as exc:
+        # Hunt is advisory. Keep the workflow fail-open but make degradation visible.
+        out = {
+            **state,
+            "last_step": "vuln-hunt",
+            "last_error": "",
+            "failed": False,
+            "message": "vuln hunt degraded",
+            "vuln_hunt_enabled": bool(_vuln_hunting_enabled()),
+            "vuln_hunt_degraded": True,
+            "vuln_hunt_last_reason": f"vuln_hunt_failed:{exc}",
+        }
+        out = _attach_prompt_render_status(out, issue=f"vuln_hunt_failed:{exc}")
+        _wf_log(cast(dict[str, Any], out), f"<- vuln-hunt degraded={exc} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return cast(FuzzWorkflowRuntimeState, out)
+
+
 def _lookup_target_security_candidate(
     *,
     target_name: str,
@@ -1942,8 +3087,377 @@ def _lookup_target_security_candidate(
     return {}
 
 
-def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
+def _build_selected_target_row(
+    *,
+    repo_root: Path,
+    item: dict[str, Any],
+    security_lookup: dict[str, dict[str, Any]],
+    security_priority_mode: bool,
+    degrade_reason: str,
+    score_weights: dict[str, float],
+    vuln_priority_by_api: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    item = _wf_norm.normalize_target_row(item)
+    explicit_security_breakdown = (
+        dict(item.get("security_score_breakdown") or {})
+        if isinstance(item.get("security_score_breakdown"), dict)
+        else {}
+    )
+    target_name = str(item.get("target_name") or item.get("name") or "").strip()
+    api = str(item.get("api") or target_name).strip()
+    target_type = str(item.get("target_type") or "generic").strip().lower()
+    seed_profile = _normalize_seed_profile(
+        str(item.get("seed_profile") or "generic"),
+        target_type=target_type,
+        name=target_name,
+        context=api,
+    )
+    required, optional = _seed_families_for_target(seed_profile, target_name, api)
+    runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
+    selection_rationale = str(item.get("selection_rationale") or "").strip()
+    runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
+    if not runtime_viability:
+        runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
+            target_name,
+            api,
+            file_hint=str(item.get("file") or ""),
+        )
+        selection_rationale = selection_rationale or auto_rationale
+        runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
+    security_candidate = _lookup_target_security_candidate(
+        target_name=target_name,
+        api=api,
+        index=security_lookup,
+    )
+    source_hint = str(item.get("file") or security_candidate.get("file") or "")
+    advisory_origin_target_name = ""
+    advisory_origin_api = ""
+    runtime_replacement_reason = ""
+    if _is_test_or_demo_helper_target(name=target_name, api=api, file_hint=source_hint):
+        if not runtime_replacement_candidates:
+            _, _, runtime_replacement_candidates = _runtime_viability_details(
+                target_name,
+                api,
+                file_hint=source_hint,
+            )
+        public_replacements = [
+            str(x).strip()
+            for x in runtime_replacement_candidates
+            if str(x).strip() and not _is_internal_api_symbol(str(x))
+        ]
+        if public_replacements:
+            advisory_origin_target_name = target_name
+            advisory_origin_api = api
+            target_name = public_replacements[0]
+            api = public_replacements[0]
+            runtime_viability = "high"
+            runtime_replacement_reason = "test_demo_helper_public_surrogate"
+            selection_rationale = (
+                f"{selection_rationale};public-validation-surrogate"
+                if selection_rationale
+                else "public-validation-surrogate"
+            )
+    security_scores = _extract_security_scores(item)
+    if not any(float(v) > 0.0 for v in security_scores.values()):
+        security_scores = _extract_security_scores(security_candidate)
+    if not any(float(v) > 0.0 for v in security_scores.values()):
+        security_scores = _compute_security_signal_scores(
+            name=target_name,
+            signature=f"{api} {selection_rationale}",
+            file_hint=source_hint,
+            risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(
+                item.get("risk_signal_source_breakdown")
+                or security_candidate.get("risk_signal_source_breakdown")
+                or {}
+            ),
+        )
+    # If plan emitted an aggregate public validation target with explicit
+    # security_score_breakdown, treat that as the advisory risk source for this
+    # row. Exact candidate matches are often internal/helper APIs and must not
+    # overwrite the agent's selected public entrypoint risk summary.
+    vuln_likelihood_raw = explicit_security_breakdown.get(
+        "vuln_likelihood",
+        security_candidate.get("vuln_likelihood", item.get("vuln_likelihood")),
+    )
+    exploitability_raw = explicit_security_breakdown.get(
+        "exploitability",
+        security_candidate.get("exploitability", item.get("exploitability")),
+    )
+    reachability_raw = explicit_security_breakdown.get(
+        "reachability_confidence",
+        security_candidate.get("reachability_confidence", item.get("reachability_confidence")),
+    )
+    security_reason = str(
+        security_candidate.get("security_priority_reason")
+        or item.get("security_priority_reason")
+        or ""
+    ).strip()
+    evidence_ids_source = (
+        list(item.get("evidence_ids") or [])
+        if explicit_security_breakdown
+        else (list(security_candidate.get("evidence_ids") or []) or list(item.get("evidence_ids") or []))
+    )
+    evidence_ids = list(dict.fromkeys(evidence_ids_source))
+    evidence_refs = (
+        list(item.get("evidence") or [])
+        if explicit_security_breakdown and item.get("evidence")
+        else list(security_candidate.get("evidence") or item.get("evidence") or [])
+    )
+    signal_type = str(security_candidate.get("signal_type") or item.get("signal_type") or "").strip()
+    try:
+        vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
+        exploitability = max(0.0, min(float(exploitability_raw), 1.0))
+        reachability_confidence = max(0.0, min(float(reachability_raw), 1.0))
+    except Exception:
+        vuln_likelihood, exploitability, reachability_confidence, derived_reason = _derive_security_priority(
+            target_type=target_type,
+            runtime_viability=runtime_viability,
+            security_scores=security_scores,
+        )
+        if not security_reason:
+            security_reason = derived_reason
+    # Override vuln_likelihood with vuln_candidate priority when a
+    # matching candidate exists.  This bridges vuln-hunt findings
+    # into plan target selection so the highest-priority vuln candidate
+    # becomes the selected target.
+    _vuln_override = vuln_priority_by_api or {}
+    _vc_prio = float(_vuln_override.get(api, _vuln_override.get(target_name, 0.0)) or 0.0)
+    if _vc_prio > 0:
+        vuln_likelihood = max(vuln_likelihood, _vc_prio)
+    if not security_reason:
+        _, _, _, security_reason = _derive_security_priority(
+            target_type=target_type,
+            runtime_viability=runtime_viability,
+            security_scores=security_scores,
+        )
+    if not signal_type:
+        top_signals = _top_security_signals(security_scores, threshold=0.0)
+        signal_type = top_signals[0] if top_signals else "mem_oob_candidate"
+    attack_hint = _normalize_attack_hint(
+        security_candidate.get("attack_hint") or item.get("attack_hint"),
+        api=api,
+        target_type=target_type,
+        signal_id=signal_type,
+        source_path=source_hint,
+        security_reason=security_reason,
+    )
+    if not attack_hint:
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type,
+            signal_id=signal_type,
+            source_path=str(item.get("file") or security_candidate.get("file") or ""),
+            security_reason=security_reason,
+        )
+    signal_score = max(0.0, min(float(security_scores.get(signal_type) or 0.0), 1.0))
+    scoring_source = {
+        "api": api,
+        "target_type": target_type,
+        "depth_score": int(item.get("depth_score") or 0),
+        "depth_class": str(item.get("depth_class") or ""),
+        "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+        "runtime_viability": runtime_viability,
+        "selection_rationale": selection_rationale,
+        "risk_signals": list(item.get("risk_signals") or []),
+        "coverage_gap": item.get("coverage_gap"),
+    }
+    score_breakdown = _target_score_breakdown(scoring_source)
+    wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
+    runtime_penalty = _target_runtime_penalty(
+        repo_root,
+        wrapper_fuzzer_name,
+        target_name=target_name,
+        api=api,
+    )
+    execution_bias = _execution_depth_bias(
+        target_name=target_name,
+        api=api,
+        target_type=target_type,
+        depth_class=str(item.get("depth_class") or ""),
+        depth_score=int(item.get("depth_score") or 0),
+        selection_rationale=selection_rationale,
+    )
+    surface_penalty = _target_surface_penalty(
+        target_name=target_name,
+        api=api,
+        source_path=source_hint,
+        runtime_replacement_reason=runtime_replacement_reason,
+    )
+    score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
+    target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
+    score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
+    score_total = (
+        float(score_weights.get("vuln_likelihood", 0.50)) * float(vuln_likelihood)
+        + float(score_weights.get("exploitability", 0.30)) * float(exploitability)
+        + float(score_weights.get("reachability_confidence", 0.20)) * float(reachability_confidence)
+        + float(execution_bias.get("execution_depth_bias") or 0.0)
+        - float(score_penalty)
+        - float(target_surface_penalty)
+    )
+    if explicit_security_breakdown and item.get("score_total") is not None:
+        try:
+            score_total = (
+                float(item.get("score_total") or 0.0)
+                - float(score_penalty)
+                - float(target_surface_penalty)
+            )
+        except Exception:
+            pass
+    adjusted_target_score = max(0.0, float(score_total))
+    internal_api = _is_internal_api_symbol(api)
+    internal_min = _vuln_internal_api_min_score()
+    api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
+    if internal_api:
+        if security_priority_mode and vuln_likelihood >= internal_min:
+            api_surface_exception = {
+                "used": True,
+                "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
+                "evidence_ids": list(security_candidate.get("evidence_ids") or []),
+            }
+        else:
+            adjusted_target_score = max(0.0, adjusted_target_score - 0.75)
+            if not runtime_penalty.get("reason"):
+                runtime_penalty["reason"] = "internal_api_below_vuln_threshold"
+            elif "internal_api_below_vuln_threshold" not in str(runtime_penalty.get("reason") or ""):
+                runtime_penalty["reason"] = (
+                    f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
+                )
+    priority_base = _candidate_priority(
+        vuln_likelihood=vuln_likelihood,
+        exploitability=exploitability,
+        reachability_confidence=reachability_confidence,
+        evidence_count=max(len(evidence_ids), len(evidence_refs)),
+        signal_score=signal_score,
+    )
+    priority_penalty = min(0.95, (max(0.0, score_penalty) * 0.55) + (target_surface_penalty * 0.9))
+    penalty_parts = [
+        str(runtime_penalty.get("reason") or "").strip(),
+        str(surface_penalty.get("target_surface_penalty_reason") or "").strip(),
+    ]
+    penalty_reason = ";".join(dict.fromkeys(x for x in penalty_parts if x))
+    if any(
+        token in penalty_reason
+        for token in (
+            "persistent_low_yield_target",
+            "coverage_exhausted_target",
+            "cold_start_low_yield",
+            "very_low_seed_score",
+        )
+    ):
+        priority_penalty = max(priority_penalty, 0.5)
+    effective_priority = round(
+        max(
+            0.0,
+            min(
+                1.0,
+                float(priority_base)
+                - float(priority_penalty)
+                + float(execution_bias.get("execution_depth_bias") or 0.0),
+            ),
+        ),
+        4,
+    )
+    score_breakdown_fixed = {
+        "vuln_likelihood": float(vuln_likelihood),
+        "exploitability": float(exploitability),
+        "reachability_confidence": float(reachability_confidence),
+        "recent_yield_penalty": float(score_breakdown.get("recent_yield_penalty") or 0.0),
+    }
+    return {
+        "target_name": target_name,
+        "name": target_name,
+        "target": target_name,
+        "api": api,
+        "lang": str(item.get("lang") or ""),
+        "target_type": target_type,
+        "seed_profile": seed_profile,
+        "depth_score": int(item.get("depth_score") or 0),
+        "depth_class": str(item.get("depth_class") or ""),
+        "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
+        "runtime_viability": runtime_viability,
+        "selection_rationale": selection_rationale,
+        "runtime_replacement_candidates": runtime_replacement_candidates,
+        "runtime_replacement_reason": runtime_replacement_reason,
+        "advisory_origin_target_name": advisory_origin_target_name,
+        "advisory_origin_api": advisory_origin_api,
+        "seed_families_suggested": required,
+        "seed_families_optional": optional,
+        "wrapper_fuzzer_name": wrapper_fuzzer_name,
+        "risk_signal_source_breakdown": dict(
+            item.get("risk_signal_source_breakdown")
+            or security_candidate.get("risk_signal_source_breakdown")
+            or {}
+        ),
+        "score_total": float(adjusted_target_score),
+        "score_breakdown": score_breakdown_fixed,
+        "penalty_reason": penalty_reason,
+        "security_score_breakdown": {
+            "vuln_likelihood": float(vuln_likelihood),
+            "exploitability": float(exploitability),
+            "reachability_confidence": float(reachability_confidence),
+            "recent_yield_penalty": float(score_penalty + target_surface_penalty),
+            "weights": {k: float(v) for k, v in score_weights.items()},
+        },
+        "security_priority_mode": bool(security_priority_mode),
+        "degraded_reason": str(degrade_reason),
+        "vuln_likelihood": float(vuln_likelihood),
+        "exploitability": float(exploitability),
+        "reachability_confidence": float(reachability_confidence),
+        "signal_type": signal_type,
+        "signal_score": float(signal_score),
+        "priority": float(priority_base),
+        "effective_priority": float(effective_priority),
+        "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
+        "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
+        "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
+        "target_surface_penalty": float(target_surface_penalty),
+        "target_surface_penalty_reason": str(surface_penalty.get("target_surface_penalty_reason") or ""),
+        "evidence": list(evidence_refs),
+        "evidence_ids": evidence_ids,
+        "vuln_candidate_id": str(security_candidate.get("candidate_id") or item.get("candidate_id") or ""),
+        "vuln_candidate_priority": float(security_candidate.get("priority") or item.get("priority") or 0.0),
+        "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
+        "validation_status": str(security_candidate.get("validation_status") or item.get("validation_status") or "pending"),
+        "attack_hint": attack_hint,
+        "security_priority_reason": security_reason,
+        "security_signals": _top_security_signals(security_scores),
+        "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+        "api_surface_exception": api_surface_exception,
+        "target_score_breakdown": score_breakdown,
+        "target_score": float(adjusted_target_score),
+        "target_score_penalty": float(score_penalty + target_surface_penalty),
+        "target_score_penalty_reason": penalty_reason,
+        "target_score_breakdown_available": True,
+        "target_scoring_enabled": True,
+        "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+        "vuln_focus_profile": "broad_high_risk",
+        "target_surface_policy": "risk_first",
+    }
+
+
+def _build_selected_targets_doc(
+    repo_root: Path,
+    *,
+    exclude_names: list[str] | None = None,
+    prefer_deeper: bool = False,
+) -> list[dict[str, Any]]:
     security_lookup = _load_target_analysis_security_index(repo_root)
+    # Build vuln_candidate priority override: map API→priority from
+    # vuln_candidates.json so vuln-hunt findings directly influence
+    # target scoring, not just target_analysis static signals.
+    _vuln_priority_by_api: dict[str, float] = {}
+    if _vuln_hunting_enabled():
+        try:
+            _vc_doc = _load_vuln_candidates_doc(repo_root)
+            for _vc in _vc_doc.get("candidates") or []:
+                _vc_api = str(_vc.get("api") or _vc.get("target_api") or "").strip()
+                _vc_prio = float(_vc.get("priority") or 0.0)
+                if _vc_api and _vc_prio > 0:
+                    _existing = _vuln_priority_by_api.get(_vc_api, 0.0)
+                    _vuln_priority_by_api[_vc_api] = max(_existing, _vc_prio)
+        except Exception:
+            pass
     security_priority_mode = bool(_vuln_hunting_enabled() and _vuln_score_mode() == "risk_first_v1")
     degrade_reason = ""
     if not _vuln_hunting_enabled():
@@ -1953,217 +3467,85 @@ def _build_selected_targets_doc(repo_root: Path) -> list[dict[str, Any]]:
     score_weights = _vuln_score_weights()
     ranked_items: list[dict[str, Any]] = []
     for item in _load_targets_doc(repo_root):
-        target_name = str(item.get("name") or "").strip()
-        api = str(item.get("api") or target_name).strip()
-        target_type = str(item.get("target_type") or "generic").strip().lower()
-        seed_profile = str(item.get("seed_profile") or "generic").strip().lower()
-        required, optional = _seed_families_for_target(seed_profile, target_name, api)
-        runtime_viability = str(item.get("runtime_viability") or "").strip().lower()
-        selection_rationale = str(item.get("selection_rationale") or "").strip()
-        runtime_replacement_candidates = list(item.get("runtime_replacement_candidates") or [])
-        if not runtime_viability:
-            runtime_viability, auto_rationale, auto_replacements = _runtime_viability_details(
-                target_name,
-                api,
-                file_hint=str(item.get("file") or ""),
-            )
-            selection_rationale = selection_rationale or auto_rationale
-            runtime_replacement_candidates = runtime_replacement_candidates or auto_replacements
-        security_candidate = _lookup_target_security_candidate(
-            target_name=target_name,
-            api=api,
-            index=security_lookup,
-        )
-        security_scores = _extract_security_scores(item)
-        if not any(float(v) > 0.0 for v in security_scores.values()):
-            security_scores = _extract_security_scores(security_candidate)
-        if not any(float(v) > 0.0 for v in security_scores.values()):
-            security_scores = _compute_security_signal_scores(
-                name=target_name,
-                signature=f"{api} {selection_rationale}",
-                file_hint=str(item.get("file") or security_candidate.get("file") or ""),
-                risk_signals=list(item.get("risk_signals") or security_candidate.get("risk_signals") or []),
-            )
-        vuln_likelihood_raw = security_candidate.get("vuln_likelihood", item.get("vuln_likelihood"))
-        exploitability_raw = security_candidate.get("exploitability", item.get("exploitability"))
-        reachability_raw = security_candidate.get("reachability_confidence", item.get("reachability_confidence"))
-        security_reason = str(
-            security_candidate.get("security_priority_reason")
-            or item.get("security_priority_reason")
-            or ""
-        ).strip()
-        try:
-            vuln_likelihood = max(0.0, min(float(vuln_likelihood_raw), 1.0))
-            exploitability = max(0.0, min(float(exploitability_raw), 1.0))
-            reachability_confidence = max(0.0, min(float(reachability_raw), 1.0))
-        except Exception:
-            vuln_likelihood, exploitability, reachability_confidence, derived_reason = _derive_security_priority(
-                target_type=target_type,
-                runtime_viability=runtime_viability,
-                security_scores=security_scores,
-            )
-            if not security_reason:
-                security_reason = derived_reason
-        if not security_reason:
-            _, _, _, security_reason = _derive_security_priority(
-                target_type=target_type,
-                runtime_viability=runtime_viability,
-                security_scores=security_scores,
-            )
-        scoring_source = {
-            "api": api,
-            "target_type": target_type,
-            "depth_score": int(item.get("depth_score") or 0),
-            "depth_class": str(item.get("depth_class") or ""),
-            "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
-            "runtime_viability": runtime_viability,
-            "selection_rationale": selection_rationale,
-            "risk_signals": list(item.get("risk_signals") or []),
-            "coverage_gap": item.get("coverage_gap"),
-        }
-        score_breakdown = _target_score_breakdown(scoring_source)
-        wrapper_fuzzer_name = str(item.get("wrapper_fuzzer_name") or "")
-        runtime_penalty = _target_runtime_penalty(repo_root, wrapper_fuzzer_name)
-        score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
-        score_breakdown["recent_yield_penalty"] = round(score_penalty, 4)
-        score_total = (
-            float(score_weights["vuln_likelihood"]) * float(vuln_likelihood)
-            + float(score_weights["exploitability"]) * float(exploitability)
-            + float(score_weights["reachability_confidence"]) * float(reachability_confidence)
-            + float(score_weights["coverage_gap"]) * float(score_breakdown.get("coverage_gap") or 0.0)
-            + float(score_weights["complexity_depth"]) * float(score_breakdown.get("complexity_depth") or 0.0)
-            + float(score_weights["api_relevance"]) * float(score_breakdown.get("api_relevance") or 0.0)
-            + float(score_weights["consumer_order_support"]) * float(score_breakdown.get("consumer_order_support") or 0.0)
-            - float(score_penalty)
-        )
-        adjusted_target_score = max(0.0, float(score_total))
-        internal_api = _is_internal_api_symbol(api)
-        internal_min = _vuln_internal_api_min_score()
-        api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
-        if internal_api:
-            if security_priority_mode and vuln_likelihood >= internal_min:
-                api_surface_exception = {
-                    "used": True,
-                    "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
-                    "evidence_ids": list(security_candidate.get("evidence_ids") or []),
-                }
-            else:
-                adjusted_target_score = max(0.0, adjusted_target_score - 0.75)
-                if not runtime_penalty.get("reason"):
-                    runtime_penalty["reason"] = "internal_api_below_vuln_threshold"
-                elif "internal_api_below_vuln_threshold" not in str(runtime_penalty.get("reason") or ""):
-                    runtime_penalty["reason"] = (
-                        f"{runtime_penalty.get('reason')};internal_api_below_vuln_threshold"
-                    )
-        score_breakdown_fixed = {
-            "coverage_gap": float(score_breakdown.get("coverage_gap") or 0.0),
-            "complexity_depth": float(score_breakdown.get("complexity_depth") or score_breakdown.get("complexity") or 0.0),
-            "api_relevance": float(score_breakdown.get("api_relevance") or 0.0),
-            "recent_yield_penalty": float(score_breakdown.get("recent_yield_penalty") or 0.0),
-        }
         ranked_items.append(
-            {
-                "target_name": target_name,
-                "name": target_name,
-                "target": target_name,
-                "api": api,
-                "lang": str(item.get("lang") or ""),
-                "target_type": target_type,
-                "seed_profile": seed_profile,
-                "depth_score": int(item.get("depth_score") or 0),
-                "depth_class": str(item.get("depth_class") or ""),
-                "selection_bias_reason": str(item.get("selection_bias_reason") or ""),
-                "runtime_viability": runtime_viability,
-                "selection_rationale": selection_rationale,
-                "runtime_replacement_candidates": runtime_replacement_candidates,
-                "seed_families_suggested": required,
-                "seed_families_optional": optional,
-                "wrapper_fuzzer_name": wrapper_fuzzer_name,
-                "score_total": float(adjusted_target_score),
-                "score_breakdown": score_breakdown_fixed,
-                "penalty_reason": str(runtime_penalty.get("reason") or ""),
-                "security_score_breakdown": {
-                    "vuln_likelihood": float(vuln_likelihood),
-                    "exploitability": float(exploitability),
-                    "reachability_confidence": float(reachability_confidence),
-                    "coverage_gap_ref": float(score_breakdown.get("coverage_gap") or 0.0),
-                    "complexity_depth_ref": float(score_breakdown.get("complexity_depth") or 0.0),
-                    "api_relevance_ref": float(score_breakdown.get("api_relevance") or 0.0),
-                    "consumer_order_support_ref": float(score_breakdown.get("consumer_order_support") or 0.0),
-                    "recent_yield_penalty": float(score_penalty),
-                    "weights": {k: float(v) for k, v in score_weights.items()},
-                },
-                "security_priority_mode": bool(security_priority_mode),
-                "degraded_reason": str(degrade_reason),
-                "vuln_likelihood": float(vuln_likelihood),
-                "exploitability": float(exploitability),
-                "reachability_confidence": float(reachability_confidence),
-                "security_priority_reason": security_reason,
-                "security_signals": _top_security_signals(security_scores),
-                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
-                "api_surface_exception": api_surface_exception,
-                "target_score_breakdown": score_breakdown,
-                "target_score": float(adjusted_target_score),
-                "target_score_penalty": float(score_penalty),
-                "target_score_penalty_reason": str(runtime_penalty.get("reason") or ""),
-                "target_score_breakdown_available": True,
-                "target_scoring_enabled": True,
-                "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
-                "vuln_focus_profile": "broad_high_risk",
-                "target_surface_policy": "risk_first",
+            _build_selected_target_row(
+                repo_root=repo_root,
+                item=item,
+                security_lookup=security_lookup,
+                security_priority_mode=security_priority_mode,
+                degrade_reason=degrade_reason,
+                score_weights=score_weights,
+                vuln_priority_by_api=_vuln_priority_by_api,
+            )
+        )
+    # Inject high-priority vuln candidates that are missing from targets.json.
+    # The plan stage's OpenCode may not include internal helper functions
+    # that vuln-hunt identified as attack surfaces.  Create target entries
+    # for them so they participate in ranking.
+    _seen_apis: set[str] = {str(r.get("api") or "").strip().lower() for r in ranked_items}
+    _seen_apis.update(str(r.get("target_name") or "").strip().lower() for r in ranked_items)
+    for _vc_api, _vc_prio in sorted(_vuln_priority_by_api.items(), key=lambda x: -x[1]):
+        if _vc_api.lower() not in _seen_apis and len(ranked_items) < _execution_targets_max() * 2:
+            _synthetic_item = {
+                "name": _vc_api,
+                "api": _vc_api,
+                "lang": "c",
+                "target_type": "generic",
+                "seed_profile": "generic",
+                "priority": _vc_prio,
+                "vuln_likelihood": _vc_prio,
+                "exploitability": 0.5,
+                "reachability_confidence": 0.5,
+                "_synthetic_from_vuln_candidate": True,
             }
-        )
-    if security_priority_mode:
-        # In risk-first mode, ranking is driven by security risk directly.
-        # `score_total` is still emitted for observability/reference, not as the
-        # primary ordering key.
-        ranked_items.sort(
-            key=lambda row: (
-                1
-                if (
-                    _is_internal_api_symbol(str(row.get("api") or ""))
-                    and not bool((row.get("api_surface_exception") or {}).get("used"))
+            ranked_items.append(
+                _build_selected_target_row(
+                    repo_root=repo_root,
+                    item=_synthetic_item,
+                    security_lookup=security_lookup,
+                    security_priority_mode=security_priority_mode,
+                    degrade_reason=degrade_reason,
+                    score_weights=score_weights,
+                    vuln_priority_by_api=_vuln_priority_by_api,
                 )
-                else 0,
-                -float(row.get("vuln_likelihood") or 0.0),
-                -float(row.get("exploitability") or 0.0),
-                -float(row.get("reachability_confidence") or 0.0),
-                -len(list(row.get("security_signals") or [])),
-                -float(row.get("target_score") or 0.0),
-                -int(row.get("depth_score") or 0),
-                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
-                str(row.get("target_name") or ""),
             )
-        )
-    else:
-        ranked_items.sort(
-            key=lambda row: (
-                -float(row.get("target_score") or 0.0),
-                -float(row.get("vuln_likelihood") or 0.0),
-                -float(row.get("exploitability") or 0.0),
-                -float(row.get("reachability_confidence") or 0.0),
-                -int(row.get("depth_score") or 0),
-                -_runtime_viability_rank(str(row.get("runtime_viability") or "")),
-                str(row.get("target_name") or ""),
-            )
-        )
-    out: list[dict[str, Any]] = []
+            _seen_apis.add(_vc_api.lower())
+    # In risk-first mode, ranking is driven by security risk directly.
+    # `score_total` is still emitted for observability/reference, not as the
+    # primary ordering key.
+    ranked_items = _wf_target_selection.sort_ranked_items(
+        ranked_items,
+        security_priority_mode=security_priority_mode,
+        is_internal_api_symbol_fn=_is_internal_api_symbol,
+        runtime_viability_rank_fn=_runtime_viability_rank,
+        prefer_deeper=prefer_deeper,
+    )
+    ranked_items = _apply_selected_target_filters(
+        ranked_items,
+        exclude_names=exclude_names,
+    )
     max_targets = _execution_targets_max()
-    for idx, row in enumerate(ranked_items):
-        row["rank"] = int(idx + 1)
-        row["execution_priority"] = int(idx + 1) if idx < max_targets else 0
-        target_type = str(row.get("target_type") or "").strip().lower()
-        row["must_run"] = bool(
-            idx < max_targets and (idx == 0 or target_type in {"archive", "parser", "decoder"})
-        )
-        out.append(row)
+    out = _wf_target_selection.assign_execution_priority(
+        ranked_items,
+        max_targets=max_targets,
+        security_priority_mode=security_priority_mode,
+    )
     return out
 
 
-def _write_selected_targets_doc(repo_root: Path) -> tuple[str, list[dict[str, Any]]]:
+def _write_selected_targets_doc(
+    repo_root: Path,
+    *,
+    exclude_names: list[str] | None = None,
+    prefer_deeper: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
     path = _selected_targets_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    doc = _build_selected_targets_doc(repo_root)
+    doc = _build_selected_targets_doc(
+        repo_root,
+        exclude_names=exclude_names,
+        prefer_deeper=prefer_deeper,
+    )
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(path), doc
 
@@ -2186,17 +3568,24 @@ def _build_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]
     max_targets = _execution_targets_max()
     min_required = _execution_targets_min_required()
     execution_targets: list[dict[str, Any]] = []
+    seen_identity_tokens: set[str] = set()
     for item in selected:
         prio = int(item.get("execution_priority") or 0)
         if prio <= 0 or prio > max_targets:
             continue
         target_name = str(item.get("target_name") or item.get("name") or "").strip()
+        api = str(item.get("api") or "").strip()
+        identity_token = _normalize_exec_target_token(api) or _normalize_exec_target_token(target_name)
+        if identity_token and identity_token in seen_identity_tokens:
+            continue
+        if identity_token:
+            seen_identity_tokens.add(identity_token)
         expected_bin = str(item.get("wrapper_fuzzer_name") or target_name).strip()
         execution_targets.append(
             {
                 "target_name": target_name,
                 "expected_fuzzer_name": expected_bin,
-                "api": str(item.get("api") or "").strip(),
+                "api": api,
                 "seed_profile": str(item.get("seed_profile") or "").strip(),
                 "target_type": str(item.get("target_type") or "").strip(),
                 "must_run": bool(item.get("must_run") or False),
@@ -2223,6 +3612,157 @@ def _write_execution_plan_doc(repo_root: Path, selected_doc: list[dict[str, Any]
     return str(path), doc
 
 
+def _sync_execution_plan_doc_from_selected_targets(repo_root: Path) -> tuple[str, dict[str, Any]]:
+    """Make execution_plan.json a derived artifact of selected_targets.json.
+
+    Agent-authored repair plans may edit execution_plan.json directly. The
+    control-plane contract treats selected_targets.json as the normalized ranked
+    target source, so stage boundaries must re-derive execution_plan.json from it
+    when it exists.
+    """
+    selected_doc = _load_selected_targets_doc(repo_root)
+    if not selected_doc:
+        return str(_execution_plan_path(repo_root)), _load_execution_plan_doc(repo_root)
+    return _write_execution_plan_doc(repo_root, selected_doc)
+
+
+def _selected_target_row_for_execution_target(
+    selected_doc: list[dict[str, Any]],
+    execution_target: dict[str, Any],
+) -> dict[str, Any]:
+    if not selected_doc:
+        return {}
+    target_tokens = [
+        str(execution_target.get("target_name") or ""),
+        str(execution_target.get("expected_fuzzer_name") or ""),
+        str(execution_target.get("api") or ""),
+    ]
+    for row in selected_doc:
+        row_tokens = [
+            str(row.get("target_name") or ""),
+            str(row.get("target") or ""),
+            str(row.get("name") or ""),
+            str(row.get("wrapper_fuzzer_name") or ""),
+            str(row.get("api") or ""),
+        ]
+        for target_token in target_tokens:
+            if target_token and _execution_target_matches_token(
+                {
+                    "target_name": target_token,
+                    "expected_fuzzer_name": target_token,
+                    "api": target_token,
+                },
+                " ".join(row_tokens),
+            ):
+                return dict(row)
+        normalized_target_tokens = {
+            _normalize_exec_target_token(token)
+            for token in target_tokens
+            if str(token or "").strip()
+        }
+        normalized_row_tokens = {
+            _normalize_exec_target_token(token)
+            for token in row_tokens
+            if str(token or "").strip()
+        }
+        if normalized_target_tokens.intersection(normalized_row_tokens):
+            return dict(row)
+    return dict(selected_doc[0])
+
+
+def _workflow_target_state_from_execution_plan(
+    repo_root: Path,
+    execution_plan_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    execution_doc = execution_plan_doc if isinstance(execution_plan_doc, dict) else _load_execution_plan_doc(repo_root)
+    execution_targets = [
+        item for item in list(execution_doc.get("execution_targets") or [])
+        if isinstance(item, dict)
+    ]
+    if not execution_targets:
+        return {}
+    selected_doc = _load_selected_targets_doc(repo_root)
+    primary = _primary_execution_target(execution_targets)
+    selected = _selected_target_row_for_execution_target(selected_doc, primary)
+    target_name = str(
+        primary.get("target_name")
+        or selected.get("target_name")
+        or selected.get("target")
+        or selected.get("name")
+        or ""
+    ).strip()
+    target_api = str(primary.get("api") or selected.get("api") or target_name).strip()
+    target_type = str(primary.get("target_type") or selected.get("target_type") or "").strip().lower()
+    seed_profile = _normalize_seed_profile(
+        str(primary.get("seed_profile") or selected.get("seed_profile") or ""),
+        target_type=target_type,
+        name=target_name,
+        context=target_api,
+    )
+    suggested_families = list(selected.get("seed_families_suggested") or [])
+    score_breakdown = dict(
+        selected.get("score_breakdown")
+        or selected.get("target_score_breakdown")
+        or {}
+    )
+    selected_targets_path = str(_selected_targets_path(repo_root))
+    decision_snapshot = {
+        "kind": "choose_target",
+        "selected_target": str(selected.get("target") or target_name or ""),
+        "selected_api": str(selected.get("api") or target_api or ""),
+        "score_total": float(selected.get("score_total") or selected.get("target_score") or 0.0),
+        "score_breakdown": score_breakdown,
+        "penalty_reason": str(
+            selected.get("penalty_reason")
+            or selected.get("target_score_penalty_reason")
+            or ""
+        ),
+        "selected_targets_path": selected_targets_path,
+        "degraded_reason": "" if selected_doc else "selected_targets_missing_or_empty",
+        "security_priority_mode": bool(selected.get("security_priority_mode") or False),
+        "top_vuln_candidate": str(selected.get("target") or target_name or ""),
+        "security_score_breakdown": dict(selected.get("security_score_breakdown") or {}),
+        "api_surface_exception_used": bool(
+            dict(selected.get("api_surface_exception") or {}).get("used") or False
+        ),
+        "tie_break_reason": str(selected.get("tie_break_reason") or ""),
+        "selection_delta_vs_runner_up": dict(selected.get("selection_delta_vs_runner_up") or {}),
+    }
+    out: dict[str, Any] = {
+        "coverage_target_name": target_name,
+        "coverage_target_api": target_api,
+        "coverage_target_type": target_type,
+        "selected_target_api": target_api,
+        "coverage_seed_profile": seed_profile,
+        "coverage_seed_families_suggested": suggested_families,
+        "coverage_seed_families_missing": suggested_families,
+        "coverage_target_score_breakdown": score_breakdown,
+        "target_scoring_enabled": bool(selected.get("target_scoring_enabled") or False),
+        "target_score_breakdown_available": bool(
+            selected.get("target_score_breakdown_available")
+            or selected.get("score_breakdown")
+            or selected.get("target_score_breakdown")
+        ),
+        "selected_targets_path": selected_targets_path if selected_doc else "",
+        "execution_plan_path": str(_execution_plan_path(repo_root)),
+        "latest_decision_snapshot": decision_snapshot,
+    }
+    if bool(selected.get("security_priority_mode") or False):
+        out["latest_vuln_decision_snapshot"] = {
+            "kind": "choose_target",
+            "selected_target": str(decision_snapshot.get("selected_target") or ""),
+            "selected_api": str(decision_snapshot.get("selected_api") or ""),
+            "security_priority_mode": True,
+            "top_vuln_candidate": str(decision_snapshot.get("top_vuln_candidate") or ""),
+            "security_score_breakdown": dict(decision_snapshot.get("security_score_breakdown") or {}),
+            "api_surface_exception_used": bool(decision_snapshot.get("api_surface_exception_used") or False),
+            "tie_break_reason": str(decision_snapshot.get("tie_break_reason") or ""),
+            "selection_delta_vs_runner_up": dict(decision_snapshot.get("selection_delta_vs_runner_up") or {}),
+        }
+        out["security_priority_mode"] = True
+    return out
+
+
 def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     path = _execution_plan_path(repo_root)
     if not path.is_file():
@@ -2232,6 +3772,256 @@ def _load_execution_plan_doc(repo_root: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _execution_plan_targets(repo_root: Path) -> list[dict[str, Any]]:
+    doc = _load_execution_plan_doc(repo_root)
+    return [item for item in list(doc.get("execution_targets") or []) if isinstance(item, dict)]
+
+
+def _execution_target_sort_key(item: dict[str, Any], index: int) -> tuple[int, int]:
+    try:
+        priority = int(item.get("execution_priority") or index + 1)
+    except Exception:
+        priority = index + 1
+    must_run_rank = 0 if bool(item.get("must_run", True)) else 1
+    return (must_run_rank, priority)
+
+
+def _primary_execution_target(execution_targets: list[dict[str, Any]]) -> dict[str, Any]:
+    if not execution_targets:
+        return {}
+    indexed = [(item, idx) for idx, item in enumerate(execution_targets)]
+    indexed.sort(key=lambda pair: _execution_target_sort_key(pair[0], pair[1]))
+    return dict(indexed[0][0])
+
+
+def _execution_target_fuzzer_name(item: dict[str, Any]) -> str:
+    return str(
+        item.get("expected_fuzzer_name")
+        or item.get("wrapper_fuzzer_name")
+        or item.get("target_name")
+        or item.get("name")
+        or ""
+    ).strip()
+
+
+def _execution_target_fuzzer_aliases(item: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    for value in (
+        _execution_target_fuzzer_name(item),
+        item.get("wrapper_fuzzer_name"),
+        item.get("target_name"),
+        item.get("name"),
+        item.get("api"),
+    ):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        base = Path(text).name
+        stem = Path(base).stem
+        for candidate in (text, base, stem):
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in aliases:
+                aliases.append(candidate)
+            if candidate and not re.search(r"_fuzz(?:er)?$", candidate):
+                fuzz_candidate = f"{candidate}_fuzz"
+                if fuzz_candidate not in aliases:
+                    aliases.append(fuzz_candidate)
+            stripped = re.sub(r"_fuzz(?:er)?$", "", candidate)
+            if stripped and stripped not in aliases:
+                aliases.append(stripped)
+    return aliases
+
+
+def _execution_target_identity(item: dict[str, Any]) -> dict[str, str]:
+    target_name = str(item.get("target_name") or item.get("name") or "").strip()
+    target_api = str(item.get("api") or target_name).strip()
+    target_type = str(item.get("target_type") or "").strip()
+    seed_profile = str(item.get("seed_profile") or "").strip()
+    expected_fuzzer_name = _execution_target_fuzzer_name(item)
+    identity = _wf_norm.normalize_target_identity(target_name=target_name, target_api=target_api)
+    return {
+        "target_name": identity["target_name"],
+        "target_api": identity["target_api"],
+        "target_type": target_type,
+        "seed_profile": seed_profile,
+        "expected_fuzzer_name": expected_fuzzer_name,
+    }
+
+
+def _execution_target_matches_token(item: dict[str, Any], token: str) -> bool:
+    normalized = _normalize_exec_target_token(token)
+    if not normalized:
+        return False
+    identity = _execution_target_identity(item)
+    candidates = [
+        identity.get("target_name", ""),
+        identity.get("target_api", ""),
+        identity.get("expected_fuzzer_name", ""),
+        str(item.get("wrapper_fuzzer_name") or ""),
+        str(item.get("source_path") or ""),
+    ]
+    return normalized in {_normalize_exec_target_token(value) for value in candidates if str(value or "").strip()}
+
+
+def _find_execution_target_for_tokens(
+    execution_targets: list[dict[str, Any]],
+    tokens: list[str],
+) -> dict[str, Any]:
+    for token in tokens:
+        for item in execution_targets:
+            if _execution_target_matches_token(item, token):
+                return dict(item)
+    return {}
+
+
+def _preferred_execution_target(
+    execution_targets: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    run_details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if not execution_targets:
+        return {}
+    tokens: list[str] = []
+    for snap_key in ("latest_vuln_decision_snapshot", "latest_decision_snapshot"):
+        snap = state.get(snap_key)
+        if isinstance(snap, dict):
+            tokens.extend(
+                [
+                    str(snap.get("selected_target") or ""),
+                    str(snap.get("selected_api") or ""),
+                    str(snap.get("top_vuln_candidate") or ""),
+                ]
+            )
+    tokens.extend(
+        [
+            str(state.get("coverage_target_name") or ""),
+            str(state.get("coverage_target_api") or ""),
+            str(state.get("selected_target_api") or ""),
+            str(state.get("synthesize_selected_target_name") or ""),
+            str(state.get("synthesize_selected_target_api") or ""),
+            str(state.get("last_fuzzer") or ""),
+        ]
+    )
+    for detail in run_details or []:
+        if isinstance(detail, dict):
+            tokens.append(str(detail.get("fuzzer") or ""))
+    matched = _find_execution_target_for_tokens(execution_targets, tokens)
+    return matched or _primary_execution_target(execution_targets)
+
+
+def _target_type_from_run_details(
+    run_details: list[dict[str, Any]] | None,
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> str:
+    details = [detail for detail in list(run_details or []) if isinstance(detail, dict)]
+    if not details:
+        return ""
+    wanted = {
+        _normalize_exec_target_token(target_name),
+        _normalize_exec_target_token(target_api),
+        _normalize_exec_target_token(fuzzer_name),
+    }
+    wanted.discard("")
+    for detail in details:
+        candidates = {
+            _normalize_exec_target_token(str(detail.get("target_name") or "")),
+            _normalize_exec_target_token(str(detail.get("target_api") or "")),
+            _normalize_exec_target_token(str(detail.get("fuzzer") or "")),
+        }
+        if wanted and not (wanted & candidates):
+            continue
+        target_type = str(detail.get("target_type") or "").strip()
+        if target_type:
+            return target_type
+    for detail in details:
+        target_type = str(detail.get("target_type") or "").strip()
+        if target_type:
+            return target_type
+    return ""
+
+
+def _matching_run_details_for_target(
+    run_details: list[dict[str, Any]] | None,
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> list[dict[str, Any]]:
+    details = [detail for detail in list(run_details or []) if isinstance(detail, dict)]
+    wanted = {
+        _normalize_exec_target_token(target_name),
+        _normalize_exec_target_token(target_api),
+        _normalize_exec_target_token(fuzzer_name),
+    }
+    wanted.discard("")
+    if not details or not wanted:
+        return []
+    matched: list[dict[str, Any]] = []
+    for detail in details:
+        candidates = {
+            _normalize_exec_target_token(str(detail.get("target_name") or "")),
+            _normalize_exec_target_token(str(detail.get("target_api") or "")),
+            _normalize_exec_target_token(str(detail.get("fuzzer") or "")),
+        }
+        candidates.discard("")
+        if wanted & candidates:
+            matched.append(detail)
+    return matched
+
+
+def _order_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
+    if not bins or not execution_targets:
+        return list(bins)
+    by_name = {p.name: p for p in bins}
+    by_stem = {p.stem: p for p in bins}
+    ordered: list[Path] = []
+    for item in sorted(
+        enumerate(execution_targets),
+        key=lambda pair: _execution_target_sort_key(pair[1], pair[0]),
+    ):
+        candidate = None
+        for alias in _execution_target_fuzzer_aliases(item[1]):
+            candidate = by_name.get(alias) or by_stem.get(Path(alias).stem)
+            if candidate is not None:
+                break
+        if candidate is not None and candidate not in ordered:
+            ordered.append(candidate)
+    for p in bins:
+        if p not in ordered:
+            ordered.append(p)
+    return ordered
+
+
+def _filter_fuzzer_bins_by_execution_plan(bins: list[Path], execution_targets: list[dict[str, Any]]) -> list[Path]:
+    """Return only fuzzer binaries that are current execution-plan targets.
+
+    `fuzz/out` can contain binaries from earlier plan/replan rounds. Running those
+    stale binaries pollutes run_details and can make coverage-analysis optimize a
+    target that is no longer in the active plan.
+    """
+    if not bins or not execution_targets:
+        return list(bins)
+    by_name = {p.name: p for p in bins}
+    by_stem = {p.stem: p for p in bins}
+    filtered: list[Path] = []
+    for item in sorted(
+        enumerate(execution_targets),
+        key=lambda pair: _execution_target_sort_key(pair[1], pair[0]),
+    ):
+        candidate = None
+        for alias in _execution_target_fuzzer_aliases(item[1]):
+            candidate = by_name.get(alias) or by_stem.get(Path(alias).stem)
+            if candidate is not None:
+                break
+        if candidate is not None and candidate not in filtered:
+            filtered.append(candidate)
+    return filtered
 
 
 def _discover_harness_sources(repo_root: Path) -> list[Path]:
@@ -2362,14 +4152,27 @@ def _build_harness_index_doc(repo_root: Path, execution_plan_doc: dict[str, Any]
         if source_path:
             used_sources.add(source_path)
         else:
-            label = target_name or expected or api
-            if label:
-                missing_targets.append(label)
+            api_norm = _normalize_exec_target_token(api)
+            for prior in mappings:
+                if (
+                    api_norm
+                    and api_norm == _normalize_exec_target_token(str(prior.get("api") or ""))
+                    and str(prior.get("source_path") or "").strip()
+                ):
+                    source_path = str(prior.get("source_path") or "").strip()
+                    matched_by = "api_equivalent"
+                    break
+            if not source_path:
+                label = target_name or expected or api
+                if label:
+                    missing_targets.append(label)
         mappings.append(
             {
                 "target_name": target_name,
                 "expected_fuzzer_name": expected,
                 "api": api,
+                "target_type": str(item.get("target_type") or "").strip(),
+                "seed_profile": str(item.get("seed_profile") or "").strip(),
                 "must_run": bool(item.get("must_run") or False),
                 "source_path": source_path,
                 "matched_by": matched_by,
@@ -2695,7 +4498,12 @@ def _build_fallback_targets_doc(
                 "api": name,
                 "lang": lang,
                 "target_type": target_type,
-                "seed_profile": _raw_sp if _raw_sp and _raw_sp != "pending" else _infer_seed_profile(name, file_hint, target_type=target_type),
+                "seed_profile": _normalize_seed_profile(
+                    _raw_sp,
+                    target_type=target_type,
+                    name=name,
+                    context=file_hint,
+                ),
                 "depth_score": depth_score,
                 "depth_class": depth_class,
                 "selection_bias_reason": selection_bias_reason,
@@ -2936,12 +4744,23 @@ def _validate_execution_plan_harness_consistency(
     execution_plan_doc: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     doc = _build_harness_index_doc(repo_root, execution_plan_doc=execution_plan_doc)
-    missing_targets = [str(x).strip() for x in list(doc.get("missing_targets") or []) if str(x).strip()]
-    if missing_targets:
+    missing_all = [str(x).strip() for x in list(doc.get("missing_targets") or []) if str(x).strip()]
+    if not missing_all:
+        return True, "", doc
+    # Only fail if must_run targets are missing; extra harnesses are harmless.
+    ep = dict(execution_plan_doc or _load_execution_plan_doc(repo_root))
+    must_run_names: set[str] = set()
+    for t in ep.get("execution_targets") or []:
+        if isinstance(t, dict) and t.get("must_run"):
+            name = str(t.get("target_name") or t.get("expected_fuzzer_name") or "").strip()
+            if name:
+                must_run_names.add(name)
+    must_run_missing = [n for n in missing_all if n in must_run_names]
+    if must_run_missing:
         extras = [str(x).strip() for x in list(doc.get("extra_harnesses") or []) if str(x).strip()]
         msg = (
-            "execution_plan_harness_mismatch: missing harness source for targets="
-            + ",".join(missing_targets)
+            "execution_plan_harness_mismatch: missing harness source for must_run targets="
+            + ",".join(must_run_missing)
             + (f"; extra_harnesses={','.join(extras[:8])}" if extras else "")
         )
         return False, msg, doc
@@ -3082,6 +4901,10 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "suggested_families": list(state.get("coverage_seed_families_suggested") or []),
         "covered_families": list(state.get("coverage_seed_families_covered") or []),
         "missing_suggested_families": list(state.get("coverage_seed_families_missing") or []),
+        "attack_hint_total_count": int(quality.get("attack_hint_total_count") or 0),
+        "attack_hint_covered_count": int(quality.get("attack_hint_covered_count") or 0),
+        "attack_hint_missing_values": list(quality.get("attack_hint_missing_values") or []),
+        "attack_hint_coverage_ratio": float(quality.get("attack_hint_coverage_ratio") or 1.0),
         "quality_flags": list(state.get("coverage_quality_flags") or quality.get("quality_flags") or []),
         "seed_score": float(quality.get("seed_score") or 0.0),
         "seed_score_components": dict(quality.get("seed_score_components") or {}),
@@ -3093,6 +4916,387 @@ def _build_seed_feedback(state: dict[str, Any]) -> dict[str, Any]:
         "seed_generation_degraded": bool(state.get("coverage_seed_generation_degraded") or False),
         "corpus_sources": list(state.get("coverage_corpus_sources") or []),
     }
+
+
+def _coverage_attack_hint_feedback_lines(seed_feedback: dict[str, Any]) -> list[str]:
+    missing_values = [
+        str(x).strip()
+        for x in list(seed_feedback.get("attack_hint_missing_values") or [])
+        if str(x).strip()
+    ]
+    if not missing_values:
+        return []
+    ratio = float(seed_feedback.get("attack_hint_coverage_ratio") or 0.0)
+    return [
+        (
+            "- attack_hint_gap: missing boundary-oriented seeds for "
+            + ", ".join(missing_values[:6])
+            + (" ..." if len(missing_values) > 6 else "")
+        ),
+        (
+            "- attack_hint_repair_directive: add or preserve format-valid seeds that encode those boundary values "
+            f"(coverage_ratio={ratio:.2f}) before broadening generic mutations."
+        ),
+    ]
+
+
+def _coverage_frontier_feedback_lines(frontier_summary: dict[str, Any]) -> list[str]:
+    top_inputs = [
+        dict(item)
+        for item in list(frontier_summary.get("top_inputs") or [])
+        if isinstance(item, dict)
+    ]
+    if not top_inputs:
+        return []
+    lines = ["- per_input_frontier: strongest replayed inputs so far:"]
+    for item in top_inputs[:3]:
+        rel = str(item.get("input_relpath") or "").strip() or "(unknown)"
+        fn_count = int(item.get("covered_function_count") or 0)
+        region_count = int(item.get("covered_region_count") or 0)
+        frontier_score = float(item.get("frontier_score") or 0.0)
+        unique_frontier_functions = int(item.get("unique_frontier_functions") or 0)
+        nearby_uncovered_regions = int(item.get("nearby_uncovered_regions") or 0)
+        target_relevance_count = int(item.get("target_relevance_count") or 0)
+        closest_target_distance = int(item.get("closest_target_distance") or 0)
+        funcs = [
+            str(x).strip()
+            for x in list(item.get("covered_functions_sample") or [])
+            if str(x).strip()
+        ]
+        line = (
+            f"  * {rel}: functions={fn_count}, regions={region_count}, "
+            f"frontier_score={frontier_score:.3f}, frontier_functions={unique_frontier_functions}, "
+            f"uncovered_regions_nearby={nearby_uncovered_regions}, "
+            f"target_relevance={target_relevance_count}, target_distance={closest_target_distance}"
+        )
+        if funcs:
+            line += f", sample={', '.join(funcs[:4])}"
+        lines.append(line)
+        frontier_functions = [
+            dict(fn)
+            for fn in list(item.get("frontier_functions") or [])
+            if isinstance(fn, dict)
+        ]
+        for fn in frontier_functions[:3]:
+            fn_name = str(fn.get("name") or "").strip()
+            if not fn_name:
+                continue
+            fn_file = str(fn.get("file") or "").strip()
+            fn_line = int(fn.get("line") or 0)
+            fn_uncovered = int(fn.get("uncovered_regions_nearby") or 0)
+            fn_ratio = float(fn.get("region_coverage_ratio") or 0.0)
+            lines.append(
+                "    - "
+                f"{fn_name} ({fn_file}:{fn_line}) uncovered_regions={fn_uncovered}, "
+                f"coverage_ratio={fn_ratio:.2f}"
+            )
+    top_frontier_functions = [
+        dict(item)
+        for item in list(frontier_summary.get("top_frontier_functions") or [])
+        if isinstance(item, dict)
+    ]
+    if top_frontier_functions:
+        lines.append("- per_input_frontier_inverse_index:")
+        for item in top_frontier_functions[:5]:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            refs = [
+                str(x).strip()
+                for x in list(item.get("input_relpaths") or [])
+                if str(x).strip()
+            ]
+            best_distance = int(item.get("best_distance_to_target") or 0)
+            lines.append(f"    - {name}: inputs={len(refs)} [{', '.join(refs[:3])}], best_target_distance={best_distance}")
+    pending = int(frontier_summary.get("pending_input_count") or 0)
+    failed = int(frontier_summary.get("failed_input_count") or 0)
+    if pending > 0 or failed > 0:
+        lines.append(f"- per_input_frontier_status: pending={pending}, failed={failed}")
+    return lines
+
+
+def _build_run_feedback_summary(
+    *,
+    repo_root: Path,
+    source_report: dict[str, Any],
+    frontier_summary: dict[str, Any],
+) -> dict[str, Any]:
+    function_gaps: list[dict[str, Any]] = []
+    for item in list(source_report.get("uncovered_function_details") or []):
+        if not isinstance(item, dict):
+            continue
+        function_gaps.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "kind": "uncovered",
+                "execution_count": int(item.get("execution_count") or 0),
+                "region_coverage_ratio": float(item.get("region_coverage_ratio") or 0.0),
+            }
+        )
+    for item in list(source_report.get("partial_function_details") or []):
+        if not isinstance(item, dict):
+            continue
+        function_gaps.append(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "kind": "partial",
+                "execution_count": int(item.get("execution_count") or 0),
+                "region_coverage_ratio": float(item.get("region_coverage_ratio") or 0.0),
+            }
+        )
+    function_gaps = [x for x in function_gaps if x["name"]]
+    function_gaps.sort(
+        key=lambda x: (
+            0 if str(x.get("kind") or "") == "uncovered" else 1,
+            float(x.get("region_coverage_ratio") or 0.0),
+            str(x.get("name") or ""),
+        )
+    )
+
+    path_frontiers: list[dict[str, Any]] = []
+    for item in list(frontier_summary.get("top_inputs") or []):
+        if not isinstance(item, dict):
+            continue
+        path_frontiers.append(
+            {
+                "input_relpath": str(item.get("input_relpath") or "").strip(),
+                "frontier_score": float(item.get("frontier_score") or 0.0),
+                "covered_function_count": int(item.get("covered_function_count") or 0),
+                "covered_region_count": int(item.get("covered_region_count") or 0),
+                "covered_functions_sample": [
+                    str(x).strip()
+                    for x in list(item.get("covered_functions_sample") or [])
+                    if str(x).strip()
+                ][:5],
+                "frontier_functions": [
+                    {
+                        "name": str(fn.get("name") or "").strip(),
+                        "file": str(fn.get("file") or "").strip(),
+                        "line": int(fn.get("line") or 0),
+                        "uncovered_regions_nearby": int(fn.get("uncovered_regions_nearby") or 0),
+                        "region_coverage_ratio": float(fn.get("region_coverage_ratio") or 0.0),
+                    }
+                    for fn in list(item.get("frontier_functions") or [])
+                    if isinstance(fn, dict) and str(fn.get("name") or "").strip()
+                ][:5],
+            }
+        )
+    path_frontiers = [x for x in path_frontiers if x["input_relpath"]]
+
+    top_frontier_functions = []
+    for item in list(frontier_summary.get("top_frontier_functions") or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        top_frontier_functions.append(
+            {
+                "name": name,
+                "file": str(item.get("file") or "").strip(),
+                "line": int(item.get("line") or 0),
+                "input_count": int(item.get("input_count") or len(list(item.get("input_relpaths") or []))),
+                "best_distance_to_target": int(item.get("best_distance_to_target") or 0),
+                "input_relpaths": [
+                    str(x).strip()
+                    for x in list(item.get("input_relpaths") or [])
+                    if str(x).strip()
+                ][:5],
+            }
+        )
+
+    files_index: dict[str, dict[str, Any]] = {}
+    for item in function_gaps[:20]:
+        file_path = str(item.get("file") or "").strip()
+        if not file_path:
+            continue
+        bucket = files_index.setdefault(file_path, {"path": file_path, "issue_count": 0, "functions": []})
+        bucket["issue_count"] = int(bucket.get("issue_count") or 0) + 1
+        bucket["functions"].append({"name": item["name"], "line": item["line"], "kind": item["kind"]})
+    for item in top_frontier_functions[:20]:
+        file_path = str(item.get("file") or "").strip()
+        if not file_path:
+            continue
+        bucket = files_index.setdefault(file_path, {"path": file_path, "issue_count": 0, "functions": []})
+        bucket["issue_count"] = int(bucket.get("issue_count") or 0) + 1
+        bucket["functions"].append({"name": item["name"], "line": item["line"], "kind": "frontier"})
+    top_files = sorted(
+        files_index.values(),
+        key=lambda x: (-int(x.get("issue_count") or 0), str(x.get("path") or "")),
+    )[:10]
+
+    return {
+        "repo_root": str(repo_root),
+        "generated_at": int(time.time()),
+        "function_gap_count": len(function_gaps),
+        "path_frontier_count": len(path_frontiers),
+        "frontier_function_count": len(top_frontier_functions),
+        "top_function_gaps": function_gaps[:12],
+        "top_path_frontiers": path_frontiers[:8],
+        "top_frontier_functions": top_frontier_functions[:12],
+        "top_files": top_files,
+        "coverage_pct": float(source_report.get("coverage_pct") or 0.0),
+        "covered_functions": int(source_report.get("covered_functions") or 0),
+        "total_functions": int(source_report.get("total_functions") or 0),
+    }
+
+
+def _write_run_feedback_artifact(
+    *,
+    repo_root: Path,
+    source_report: dict[str, Any],
+    frontier_summary: dict[str, Any],
+) -> dict[str, Any]:
+    summary = _build_run_feedback_summary(
+        repo_root=repo_root,
+        source_report=source_report,
+        frontier_summary=frontier_summary,
+    )
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    path = fuzz_dir / "run_feedback.json"
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "summary": summary,
+        "source_report": dict(source_report or {}),
+        "frontier_summary": dict(frontier_summary or {}),
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"path": str(path), "summary": summary}
+
+
+def _resolve_current_coverage_binary(repo_root: Path, state: FuzzWorkflowRuntimeState) -> Path | None:
+    fuzz_out = repo_root / "fuzz" / "out"
+    if not fuzz_out.is_dir():
+        return None
+
+    candidate_names: list[str] = []
+    for detail in list(state.get("run_details") or []):
+        name = str(detail.get("fuzzer") or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+    for raw in (
+        state.get("last_fuzzer"),
+        state.get("coverage_target_name"),
+        state.get("selected_target_name"),
+    ):
+        name = str(raw or "").strip()
+        if name:
+            candidate_names.append(Path(name).name)
+
+    seen: set[str] = set()
+    for name in candidate_names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        candidate = fuzz_out / name
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return candidate
+
+    bins = sorted(
+        p for p in fuzz_out.glob("*")
+        if p.is_file() and os.access(str(p), os.X_OK)
+    )
+    return bins[0] if bins else None
+
+
+def _replay_out_dir(repo_root: Path) -> Path:
+    return repo_root / "fuzz" / "out" / "replay"
+
+
+def _binary_looks_profile_instrumented(path: Path) -> bool:
+    try:
+        if not path.is_file() or not os.access(str(path), os.X_OK):
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return any(
+        marker in data
+        for marker in (
+            b"__llvm_prf",
+            b"LLVM_PROFILE_FILE",
+            b"__llvm_profile",
+        )
+    )
+
+
+def _materialize_replay_binaries(repo_root: Path, bin_paths: list[Path]) -> list[Path]:
+    replay_dir = _replay_out_dir(repo_root)
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    fuzz_out = repo_root / "fuzz" / "out"
+    primary_names = {
+        p.name
+        for p in bin_paths
+        if p.is_file() and p.parent == fuzz_out
+    }
+    for stale in replay_dir.iterdir():
+        if stale.is_file() and stale.name not in primary_names:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    created: list[Path] = []
+    for name in sorted(primary_names):
+        dest = replay_dir / name
+        candidates = [
+            dest,
+            replay_dir / f"{name}.exe",
+            fuzz_out / f"{name}_replay",
+            fuzz_out / f"{name}-replay",
+            fuzz_out / f"{name}.replay",
+        ]
+        src = next((p for p in candidates if _binary_looks_profile_instrumented(p)), None)
+        if src is None:
+            try:
+                if dest.exists() or dest.is_symlink():
+                    dest.unlink()
+            except OSError:
+                pass
+            continue
+        if src == dest:
+            created.append(dest)
+            continue
+        try:
+            if dest.exists() or dest.is_symlink():
+                dest.unlink()
+        except OSError:
+            pass
+        try:
+            rel_src = os.path.relpath(src, replay_dir)
+            os.symlink(rel_src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+            try:
+                mode = src.stat().st_mode
+                os.chmod(dest, mode)
+            except OSError:
+                pass
+        if _binary_looks_profile_instrumented(dest):
+            created.append(dest)
+    return created
+
+
+def _resolve_per_input_replay_binary(repo_root: Path, fuzzer_name: str) -> Path | None:
+    replay_dir = _replay_out_dir(repo_root)
+    fuzz_out = repo_root / "fuzz" / "out"
+    candidates = [
+        replay_dir / fuzzer_name,
+        replay_dir / f"{fuzzer_name}.exe",
+        fuzz_out / f"{fuzzer_name}_replay",
+        fuzz_out / f"{fuzzer_name}-replay",
+        fuzz_out / f"{fuzzer_name}.replay",
+    ]
+    for candidate in candidates:
+        if _binary_looks_profile_instrumented(candidate):
+            return candidate
+    return None
 
 
 def _aggregate_seed_quality_from_run_details(
@@ -3176,12 +5380,43 @@ def _aggregate_seed_quality_from_run_details(
     return merged
 
 
+def _seed_quality_from_run_details_for_target(
+    run_details: list[dict[str, Any]],
+    fallback: dict[str, Any],
+    *,
+    target_name: str = "",
+    target_api: str = "",
+    fuzzer_name: str = "",
+) -> dict[str, Any]:
+    matched = _matching_run_details_for_target(
+        run_details,
+        target_name=target_name,
+        target_api=target_api,
+        fuzzer_name=fuzzer_name,
+    )
+    if matched:
+        return _aggregate_seed_quality_from_run_details(matched, fallback)
+    return _aggregate_seed_quality_from_run_details(run_details, fallback)
+
+
+def _quality_flags_from_seed_quality(seed_quality: dict[str, Any]) -> list[str]:
+    flags: set[str] = set()
+    for flag in list(seed_quality.get("quality_flags") or []):
+        sval = str(flag or "").strip()
+        if sval:
+            flags.add(sval)
+    return sorted(flags)
+
+
 def _build_harness_feedback(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "execution_plan_path": str(state.get("execution_plan_path") or ""),
         "harness_index_path": str(state.get("harness_index_path") or ""),
         "selected_target_api": str(state.get("selected_target_api") or ""),
         "coverage_target_api": str(state.get("coverage_target_api") or ""),
+        "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+        "coverage_replay_error": str(state.get("coverage_replay_error") or ""),
         "missing_execution_targets": list(state.get("coverage_missing_execution_targets") or []),
         "built_targets": list(state.get("built_targets") or []),
         "missing_targets": list(state.get("missing_targets") or []),
@@ -3288,6 +5523,45 @@ def _opencode_cli_retries() -> int:
         return 2
 
 
+def _analysis_opencode_advisory_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_ADVISORY_ENABLED") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _analysis_opencode_timeout_sec(state: FuzzWorkflowRuntimeState) -> int:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_TIMEOUT_SEC") or "120").strip()
+    try:
+        configured = max(15, min(int(raw), 900))
+    except Exception:
+        configured = 120
+    remaining = _remaining_time_budget_sec(state)
+    return max(15, min(configured, remaining))
+
+
+def _analysis_opencode_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC") or "75").strip()
+    try:
+        return max(10, min(int(raw), 600))
+    except Exception:
+        return 75
+
+
+def _vuln_hunt_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_VULN_HUNT_SEC") or "1800").strip()
+    try:
+        return max(60, min(int(raw), 7200))
+    except Exception:
+        return 1800
+
+
+def _plan_idle_timeout_sec() -> int:
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC") or "1200").strip()
+    try:
+        return max(60, min(int(raw), 7200))
+    except Exception:
+        return 1200
+
+
 def _fix_build_max_noop_streak() -> int:
     raw = (os.environ.get("SHERPA_FIX_BUILD_MAX_NOOP_STREAK") or "3").strip()
     try:
@@ -3380,7 +5654,7 @@ def _run_idle_timeout_sec() -> int:
 
 
 def _synthesize_opencode_idle_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "300").strip()
+    raw = (os.environ.get("SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC") or "600").strip()
     try:
         return max(0, min(int(raw), 86_400))
     except Exception:
@@ -4242,6 +6516,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
         return ""
 
     def _safe_get_parser(language: str, timeout_sec: float = 5.0) -> Any:
+        executor = None
         try:
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
             result = {}
@@ -4252,12 +6527,20 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 if callable(get_parser):
                     result["parser"] = get_parser(language)
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_get_parser_worker)
-                future.result(timeout=timeout_sec)
-                return result.get("parser")
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_get_parser_worker)
+            future.result(timeout=timeout_sec)
+            return result.get("parser")
         except (FuturesTimeoutError, Exception):
             return None
+        finally:
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
 
     def _extract_tree_sitter_functions(path: Path, rel: str) -> list[dict[str, Any]]:
         try:
@@ -4404,7 +6687,11 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             except Exception:
                 pass
 
-    tree_sitter_enabled = importlib.util.find_spec("tree_sitter_language_pack") is not None
+    tree_sitter_opt_in = str(os.environ.get("SHERPA_TARGET_ANALYSIS_TREE_SITTER") or "").strip().lower()
+    tree_sitter_enabled = (
+        tree_sitter_opt_in in {"1", "true", "yes", "on"}
+        and importlib.util.find_spec("tree_sitter_language_pack") is not None
+    )
     semgrep_enabled, semgrep_hits = _run_semgrep_rules(repo_root)
 
     source_exts = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".java"}
@@ -4466,10 +6753,13 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 continue
             signature = f"{name}({' '.join(str(m.group(2) or '').split())})"[:240]
             line_no = text[: m.start()].count("\n") + 1
-            risk_signals = [rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)]
-            for rule_id in semgrep_hits.get(rel, []):
-                if rule_id not in risk_signals:
-                    risk_signals.append(rule_id)
+            regex_signals = [
+                rule["id"] for rule in semgrep_rules if re.search(rule["pattern"], f"{name}\n{signature}", re.IGNORECASE)
+            ]
+            weak_file_signals = [
+                rule_id for rule_id in semgrep_hits.get(rel, []) if rule_id not in regex_signals
+            ]
+            risk_signals = list(regex_signals)
             candidate_functions.append(
                 {
                     "name": name,
@@ -4479,6 +6769,10 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                     "target_type": "pending",
                     "seed_profile": "pending",
                     "risk_signals": risk_signals,
+                    "risk_signal_source_breakdown": {
+                        "regex": list(regex_signals),
+                        "weak_file": list(weak_file_signals),
+                    },
                     "security_signals": [],
                     "security_signal_scores": _empty_security_scores(),
                     "vuln_likelihood": 0.0,
@@ -4516,6 +6810,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
             signature=str(item.get("signature") or ""),
             file_hint=str(item.get("file") or ""),
             risk_signals=list(item.get("risk_signals") or []),
+            risk_signal_source_breakdown=dict(item.get("risk_signal_source_breakdown") or {}),
         )
         vuln_likelihood, exploitability, reachability_confidence, security_reason = _derive_security_priority(
             target_type=str(item.get("target_type") or "generic"),
@@ -4574,6 +6869,7 @@ def _collect_target_analysis_context(repo_root: Path) -> dict[str, Any]:
                 "target_type": str(item.get("target_type") or "generic"),
                 "seed_profile": str(item.get("seed_profile") or "generic"),
                 "risk_signals": risk,
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
                 "file": str(item.get("file") or ""),
                 "depth_score": int(item.get("depth_score") or 0),
                 "depth_class": str(item.get("depth_class") or "shallow"),
@@ -4721,6 +7017,60 @@ def _read_json_doc(path_text: str) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _materialize_analysis_context_from_companion(
+    *,
+    repo_root: Path,
+    antlr_context_path: str,
+    antlr_context_summary: str,
+    target_analysis_path: str,
+    target_analysis_summary: str,
+) -> tuple[str, int, int, int, str]:
+    companion_doc, companion_summary = _collect_analysis_companion_context()
+    artifacts = dict(companion_doc.get("artifacts") or {})
+    found_artifacts = sum(
+        1
+        for name in ("status.json", "preprocess.json", "coverage_hints.json")
+        if isinstance(artifacts.get(name), dict) and bool((artifacts.get(name) or {}).get("exists"))
+    )
+    if found_artifacts <= 0:
+        return "", 0, 0, 0, companion_summary
+
+    antlr_doc = _read_json_doc(antlr_context_path)
+    target_doc = _read_json_doc(target_analysis_path)
+    evidence_doc = _build_analysis_evidence_index(
+        repo_root=repo_root,
+        antlr_doc=antlr_doc,
+        target_doc=target_doc,
+        companion_doc=companion_doc,
+    )
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    analysis_doc = {
+        "mode": "companion-fallback-analysis",
+        "generated_at": int(time.time()),
+        "repo_root": str(repo_root),
+        "antlr_context_path": antlr_context_path,
+        "antlr_context_summary": antlr_context_summary,
+        "target_analysis_path": target_analysis_path,
+        "target_analysis_summary": target_analysis_summary,
+        "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
+        "vuln_focus_profile": "broad_high_risk",
+        "target_surface_policy": "risk_first",
+        "companion": companion_doc,
+        "analysis_evidence": evidence_doc,
+    }
+    analysis_path = fuzz_dir / "analysis_context.json"
+    analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    summary = dict(evidence_doc.get("summary") or {})
+    return (
+        str(analysis_path),
+        int(summary.get("evidence_count") or 0),
+        int(summary.get("security_evidence_count") or 0),
+        int(summary.get("vuln_candidate_count") or 0),
+        companion_summary,
+    )
+
+
 def _build_analysis_evidence_index(
     *,
     repo_root: Path,
@@ -4729,6 +7079,7 @@ def _build_analysis_evidence_index(
     companion_doc: dict[str, Any],
 ) -> dict[str, Any]:
     evidence_counter = 0
+    candidate_counter = 0
     evidence_index: dict[str, dict[str, Any]] = {}
     security_evidence: list[dict[str, Any]] = []
     vuln_candidate_inventory: list[dict[str, Any]] = []
@@ -4738,6 +7089,11 @@ def _build_analysis_evidence_index(
         nonlocal evidence_counter
         evidence_counter += 1
         return f"EV{evidence_counter:04d}"
+
+    def _new_candidate_id(signal_id: str) -> str:
+        nonlocal candidate_counter
+        candidate_counter += 1
+        return f"{_signal_slug(signal_id)}_{candidate_counter:03d}"
 
     def _add_evidence(
         *,
@@ -4827,6 +7183,7 @@ def _build_analysis_evidence_index(
             security_evidence.append(
                 {
                     "evidence_id": sec_ev_id,
+                    "target_api": api,
                     "signal_id": signal_id,
                     "severity": "high" if signal_score >= 0.75 else ("medium" if signal_score >= 0.55 else "low"),
                     "confidence": round(signal_score, 4),
@@ -4835,17 +7192,47 @@ def _build_analysis_evidence_index(
                     "summary": f"`{api}` matched {signal_id} (score={signal_score:.2f})",
                 }
             )
+        primary_signal = security_signals[0] if security_signals else "mem_oob_candidate"
+        evidence_refs = [{"evidence_id": ref} for ref in list(dict.fromkeys(candidate_evidence_ids))]
+        attack_hint = _candidate_attack_hint(
+            api=api,
+            target_type=target_type or "generic",
+            signal_id=primary_signal,
+            source_path=file_hint,
+            security_reason=str(item.get("security_priority_reason") or ""),
+        )
+        vuln_likelihood = float(item.get("vuln_likelihood") or 0.0)
+        exploitability = float(item.get("exploitability") or 0.0)
+        reachability_confidence = float(item.get("reachability_confidence") or 0.0)
+        primary_signal_score = float(security_scores.get(primary_signal) or 0.0)
         vuln_candidate_inventory.append(
             {
-                "candidate_id": f"VC-{len(vuln_candidate_inventory) + 1:04d}",
+                "candidate_id": _new_candidate_id(primary_signal),
                 "api": api,
                 "name": str(item.get("name") or api),
                 "file": file_hint,
                 "target_type": target_type or "generic",
-                "vuln_likelihood": float(item.get("vuln_likelihood") or 0.0),
-                "exploitability": float(item.get("exploitability") or 0.0),
-                "reachability_confidence": float(item.get("reachability_confidence") or 0.0),
+                "target_api": api,
+                "target_file": file_hint,
+                "signal_type": primary_signal,
+                "signal_score": round(primary_signal_score, 4),
+                "evidence": evidence_refs,
+                "attack_hint": attack_hint,
+                "candidate_origin": "analysis_context",
+                "validation_status": "pending",
+                "vuln_likelihood": vuln_likelihood,
+                "exploitability": exploitability,
+                "reachability_confidence": reachability_confidence,
+                "priority": _candidate_priority(
+                    vuln_likelihood=vuln_likelihood,
+                    exploitability=exploitability,
+                    reachability_confidence=reachability_confidence,
+                    evidence_count=len(evidence_refs),
+                    signal_score=primary_signal_score,
+                ),
                 "evidence_ids": list(dict.fromkeys(candidate_evidence_ids)),
+                "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
+                "risk_signal_source_breakdown": dict(item.get("risk_signal_source_breakdown") or {}),
             }
         )
 
@@ -5210,6 +7597,23 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
             "coverage_corpus_sources": list(state.get("coverage_corpus_sources") or []),
             "coverage_seed_counts": dict(state.get("coverage_seed_counts") or {}),
             "coverage_target_score_breakdown": dict(state.get("coverage_target_score_breakdown") or {}),
+            "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+            "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+            "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+            "coverage_replay_runtime_sec": float(state.get("coverage_replay_runtime_sec") or 0.0),
+            "coverage_replay_binary_hash": str(state.get("coverage_replay_binary_hash") or ""),
+            "coverage_replay_binary_dir": str(state.get("coverage_replay_binary_dir") or ""),
+            "coverage_replay_binary_count": int(state.get("coverage_replay_binary_count") or 0),
+            "coverage_replay_stage_success": bool(state.get("coverage_replay_stage_success") or False),
+            "coverage_replay_error": str(state.get("coverage_replay_error") or ""),
+            "coverage_replay_manifest_fresh_for_current_binary": bool(
+                state.get("coverage_replay_manifest_fresh_for_current_binary") or False
+            ),
+            "coverage_replay_queue_drained": bool(state.get("coverage_replay_queue_drained") or False),
+            "coverage_replay_pending_inputs": int(state.get("coverage_replay_pending_inputs") or 0),
+            "coverage_replay_failed_inputs": int(state.get("coverage_replay_failed_inputs") or 0),
+            "coverage_replay_processed_inputs": int(state.get("coverage_replay_processed_inputs") or 0),
+            "coverage_replay_total_inputs": int(state.get("coverage_replay_total_inputs") or 0),
             "analysis_done": bool(state.get("analysis_done") or False),
             "analysis_degraded": bool(state.get("analysis_degraded") or False),
             "analysis_error": str(state.get("analysis_error") or ""),
@@ -5251,6 +7655,7 @@ def _node_init(state: FuzzWorkflowState) -> FuzzWorkflowRuntimeState:
         "synthesize",
         "build",
         "run",
+        "per-input-replay",
         "crash-triage",
         "fix-harness",
         "coverage-analysis",
@@ -5410,6 +7815,8 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     companion_summary = ""
     analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
     prompt_render_issue = ""
+    analysis_advisory_degraded = False
+    analysis_advisory_error = ""
 
     for attempt in range(1, attempts + 1):
         try:
@@ -5445,11 +7852,18 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             analysis_context_path = str(analysis_path)
             analysis_report_path = str(analysis_path)
+            vuln_candidates_doc = _write_analysis_vuln_candidates(gen.repo_root, analysis_context_path)
 
-            if _has_codex_key():
+            if _has_codex_key() and _analysis_opencode_advisory_enabled():
                 analysis_lines: list[str] = [
                     "Generate analysis artifacts for downstream planning.",
-                    "Write/update `fuzz/analysis_context.json` with concise actionable signals.",
+                    "Do not rewrite the full `fuzz/analysis_context.json`; it is already system-generated.",
+                    "Do not rewrite `fuzz/vuln_candidates.json`; it is already system-generated.",
+                    "Write concise AI advisory findings to `fuzz/vuln_hypotheses.md` and keep them evidence-linked.",
+                    "Bounded analysis mode: after required files, use at most 6 additional MCP/tool reads in the first pass.",
+                    "Prefer existing `analysis_evidence.security_evidence[]` and `fuzz/vuln_candidates.json`; treat them as sufficient unless empty or corrupt.",
+                    "Do not call semantic/comprehension MCP tools unless this coordinator hint explicitly asks for semantic enrichment.",
+                    "After one bounded evidence pass, write `fuzz/vuln_hypotheses.md` and `./done`; do not continue open-ended exploration.",
                 ]
                 if antlr_context_summary:
                     analysis_lines.append(f"ANTLR context: {antlr_context_summary}")
@@ -5470,13 +7884,24 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if render_issue:
                     prompt_render_issue = str(render_issue)
                     _wf_log(cast(dict[str, Any], state), f"analysis: prompt render degraded -> {render_issue}")
-                gen.patcher.run_codex_command(
-                    prompt,
-                    stage_skill="analysis",
-                    timeout=_remaining_time_budget_sec(state),
-                    max_attempts=1,
-                    max_cli_retries=_opencode_cli_retries(),
-                )
+                try:
+                    gen.patcher.run_codex_command(
+                        prompt,
+                        stage_skill="analysis",
+                        timeout=_analysis_opencode_timeout_sec(state),
+                        max_attempts=1,
+                        max_cli_retries=1,
+                        idle_timeout_override=_analysis_opencode_idle_timeout_sec(),
+                        activity_watch_paths=("fuzz/vuln_hypotheses.md", "done"),
+                    )
+                except Exception as e:
+                    analysis_advisory_degraded = True
+                    analysis_advisory_error = str(e)[:4096]
+                    prompt_render_issue = prompt_render_issue or f"analysis_advisory_failed: {analysis_advisory_error}"
+                    _wf_log(
+                        cast(dict[str, Any], state),
+                        f"analysis: OpenCode advisory degraded; continuing with system evidence: {analysis_advisory_error}",
+                    )
                 if not analysis_path.is_file():
                     analysis_path.write_text(json.dumps(analysis_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -5507,11 +7932,17 @@ def _node_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "analysis_done": True,
                 "analysis_degraded": False,
                 "analysis_error": "",
+                "analysis_advisory_degraded": analysis_advisory_degraded,
+                "analysis_advisory_error": analysis_advisory_error,
                 "analysis_report_path": analysis_report_path,
                 "analysis_context_path": analysis_context_path,
                 "analysis_evidence_count": analysis_evidence_count,
                 "security_evidence_count": int((evidence_doc.get("summary") or {}).get("security_evidence_count") or 0),
-                "vuln_candidate_count": int((evidence_doc.get("summary") or {}).get("vuln_candidate_count") or 0),
+                "vuln_candidate_count": max(
+                    int((evidence_doc.get("summary") or {}).get("vuln_candidate_count") or 0),
+                    int(vuln_candidates_doc.get("candidate_count") or 0),
+                ),
+                "vuln_candidates_path": str(vuln_candidates_doc.get("path") or ""),
                 "vuln_hunting_enabled": bool(_vuln_hunting_enabled()),
                 "vuln_focus_profile": "broad_high_risk",
                 "target_surface_policy": "risk_first",
@@ -5599,10 +8030,64 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     target_analysis_summary = str(state.get("target_analysis_summary") or "").strip()
     analysis_context_path = str(state.get("analysis_context_path") or "").strip()
     analysis_evidence_count = int(state.get("analysis_evidence_count") or 0)
+    security_evidence_count = int(state.get("security_evidence_count") or 0)
+    vuln_candidate_count = int(state.get("vuln_candidate_count") or 0)
     if not antlr_context_path and not antlr_context_summary:
         antlr_context_path, antlr_context_summary = _prepare_antlr_assist_context(gen.repo_root)
     if not target_analysis_path and not target_analysis_summary:
         target_analysis_path, target_analysis_summary = _prepare_target_analysis_context(gen.repo_root)
+    if not analysis_context_path:
+        try:
+            (
+                analysis_context_path,
+                analysis_evidence_count,
+                security_evidence_count,
+                vuln_candidate_count,
+                companion_summary,
+            ) = _materialize_analysis_context_from_companion(
+                repo_root=gen.repo_root,
+                antlr_context_path=antlr_context_path,
+                antlr_context_summary=antlr_context_summary,
+                target_analysis_path=target_analysis_path,
+                target_analysis_summary=target_analysis_summary,
+            )
+            if analysis_context_path:
+                _wf_log(
+                    cast(dict[str, Any], state),
+                    "plan: hydrated analysis_context.json from companion artifacts"
+                    + (f" ({companion_summary})" if companion_summary else ""),
+                )
+        except Exception as exc:
+            _wf_log(cast(dict[str, Any], state), f"plan: companion analysis hydration skipped: {exc}")
+    if _vuln_hunting_enabled() and (
+        int(state.get("vuln_hunt_iteration") or 0) <= 0
+        or bool(state.get("vuln_hunt_rerun_requested") or False)
+    ):
+        try:
+            hunt_state = _run_vuln_hunt_subphase({**state, "analysis_context_path": analysis_context_path})
+            state = cast(FuzzWorkflowRuntimeState, hunt_state)
+            state["vuln_hunt_rerun_requested"] = False
+            vuln_candidate_count = int(state.get("vuln_candidate_count") or vuln_candidate_count)
+            hunt_note = (
+                "Vulnerability hunt candidate worklist is available at `fuzz/vuln_candidates.json`; "
+                f"candidate_count={vuln_candidate_count}, "
+                f"active_candidate={state.get('vuln_hunt_active_candidate_id') or 'none'}."
+            )
+            hint = (hint + "\n\n" + hunt_note).strip() if hint else hunt_note
+            if state.get("vuln_hunt_degraded"):
+                prompt_render_issue = "; ".join(
+                    x
+                    for x in [
+                        prompt_render_issue,
+                        str(state.get("vuln_hunt_last_reason") or ""),
+                    ]
+                    if str(x).strip()
+                )
+        except Exception as exc:
+            degraded = f"vuln_hunt_failed:{exc}"
+            prompt_render_issue = "; ".join(x for x in [prompt_render_issue, degraded] if str(x).strip())
+            state = cast(FuzzWorkflowRuntimeState, _attach_prompt_render_status(dict(state), issue=degraded))
+            _wf_log(cast(dict[str, Any], state), f"plan: vuln hunt degraded -> {exc}")
     if antlr_context_summary:
         antlr_note = (
             "ANTLR-assisted static context is available. Prefer this structure-grounded context when selecting targets.\n"
@@ -5710,6 +8195,17 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     indent=2,
                 )
             )
+        if repair_origin_stage == "fix-harness":
+            crash_ctx, crash_known_issues = _build_fix_harness_crash_context(
+                gen.repo_root,
+                include_contents=True,
+            )
+            if crash_ctx:
+                repair_blocks.append(crash_ctx)
+            if crash_known_issues:
+                prompt_render_issue = "; ".join(
+                    x for x in [prompt_render_issue, *crash_known_issues] if str(x).strip()
+                )
         repair_hint = "\n\n".join(part for part in repair_blocks if part.strip())
         hint = (hint + "\n\n" + repair_hint).strip() if hint else repair_hint
     seed_feedback = dict(state.get("coverage_seed_feedback") or {})
@@ -5719,6 +8215,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         feedback_lines: list[str] = ["Coverage feedback signals for planning:"]
         if quality_oracle:
             feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        feedback_lines.extend(_coverage_attack_hint_feedback_lines(seed_feedback))
         if seed_feedback:
             feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
         if harness_feedback:
@@ -5764,6 +8261,12 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 render_known_issues.append("missing repair_error_digest.signature")
             if not str(digest.get("error_kind") or "").strip():
                 render_known_issues.append("missing repair_error_digest.error_kind")
+            if repair_origin_stage == "fix-harness":
+                _, crash_known_issues = _build_fix_harness_crash_context(
+                    gen.repo_root,
+                    include_contents=False,
+                )
+                render_known_issues.extend(crash_known_issues)
         if hint:
             prompt, render_issue = _render_opencode_prompt_safe(
                 plan_template_name,
@@ -5782,6 +8285,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=_plan_idle_timeout_sec(),
             )
         else:
             gen._pass_plan_targets(timeout=_remaining_time_budget_sec(state))
@@ -5814,6 +8318,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 timeout=_remaining_time_budget_sec(state),
                 max_attempts=1,
                 max_cli_retries=_opencode_cli_retries(),
+                idle_timeout_override=_plan_idle_timeout_sec(),
             )
             ok_targets, targets_err = _validate_targets_json(gen.repo_root)
             plan_targets_schema_valid_after_retry = bool(ok_targets)
@@ -5872,17 +8377,58 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         selected_targets_path = ""
         execution_plan_path = ""
         try:
-            selected_targets_path, selected_targets_doc = _write_selected_targets_doc(gen.repo_root)
+            selected_targets_path, selected_targets_doc = _write_selected_targets_doc(
+                gen.repo_root,
+                exclude_names=_attempted if _attempted else None,
+                prefer_deeper=_is_replan,
+            )
             execution_plan_path, _ = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
         except Exception:
             selected_targets_doc = []
-        new_target_name = str(primary_target.get("name") or "")
-        new_target_api = str(primary_target.get("api") or new_target_name)
-        new_seed_profile = str(primary_target.get("seed_profile") or "")
-        new_depth_score = int(primary_target.get("depth_score") or 0)
-        new_depth_class = str(primary_target.get("depth_class") or "")
-        new_selection_bias_reason = str(primary_target.get("selection_bias_reason") or "")
-        selected_primary = selected_targets_doc[0] if selected_targets_doc else {}
+        selected_primary = selected_targets_doc[0] if selected_targets_doc else dict(primary_target)
+        new_target_name = str(
+            selected_primary.get("target_name")
+            or selected_primary.get("target")
+            or selected_primary.get("name")
+            or primary_target.get("name")
+            or ""
+        )
+        new_target_api = str(
+            selected_primary.get("api")
+            or primary_target.get("api")
+            or new_target_name
+        )
+        new_target_type = str(
+            selected_primary.get("target_type")
+            or primary_target.get("target_type")
+            or "generic"
+        ).strip().lower()
+        new_seed_profile = _normalize_seed_profile(
+            str(
+                selected_primary.get("seed_profile")
+                or primary_target.get("seed_profile")
+                or ""
+            ),
+            target_type=new_target_type,
+            name=new_target_name,
+            context=new_target_api,
+        )
+        new_depth_score = int(
+            selected_primary.get("depth_score")
+            or primary_target.get("depth_score")
+            or 0
+        )
+        new_depth_class = str(
+            selected_primary.get("depth_class")
+            or primary_target.get("depth_class")
+            or ""
+        )
+        new_selection_bias_reason = str(
+            selected_primary.get("selection_bias_reason")
+            or primary_target.get("selection_bias_reason")
+            or ""
+        )
+        runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
         seed_families_suggested = list(selected_primary.get("seed_families_suggested") or [])
         seed_families_optional = list(selected_primary.get("seed_families_optional") or [])
         selected_runtime_viability = str(selected_primary.get("runtime_viability") or "").strip().lower()
@@ -6010,8 +8556,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "target_analysis_summary": target_analysis_summary,
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
-            "security_evidence_count": int(state.get("security_evidence_count") or 0),
-            "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
+            "security_evidence_count": security_evidence_count,
+            "vuln_candidate_count": vuln_candidate_count,
             "vuln_hunting_enabled": bool(state.get("vuln_hunting_enabled") or _vuln_hunting_enabled()),
             "vuln_focus_profile": str(state.get("vuln_focus_profile") or "broad_high_risk"),
             "target_surface_policy": str(state.get("target_surface_policy") or "risk_first"),
@@ -6027,13 +8573,14 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             # gets a fresh set of attempts.
             "continuous_loop_count": 0,
             "coverage_target_name": new_target_name or prev_target_name,
-            "coverage_target_api": new_target_api or str(state.get("coverage_target_api") or ""),
+            "coverage_target_api": new_target_api,
+            "coverage_target_type": new_target_type,
             "selected_target_api": new_target_api or str(state.get("selected_target_api") or ""),
             "selected_target_runtime_viability": selected_runtime_viability or str(state.get("selected_target_runtime_viability") or ""),
-            "coverage_seed_profile": new_seed_profile or str(state.get("coverage_seed_profile") or ""),
-            "coverage_seed_families_suggested": seed_families_suggested or list(state.get("coverage_seed_families_suggested") or []),
-            "coverage_seed_families_covered": list(state.get("coverage_seed_families_covered") or []),
-            "coverage_seed_families_missing": list(state.get("coverage_seed_families_missing") or seed_families_suggested),
+            "coverage_seed_profile": new_seed_profile,
+            "coverage_seed_families_suggested": list(seed_families_suggested),
+            "coverage_seed_families_covered": [],
+            "coverage_seed_families_missing": list(seed_families_suggested),
             "coverage_seed_quality": dict(state.get("coverage_seed_quality") or {}),
             "coverage_quality_flags": list(state.get("coverage_quality_flags") or []),
             "coverage_target_depth_score": new_depth_score,
@@ -6091,6 +8638,65 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         out = _clear_error_markers_on_success(out)
         security_breakdown = dict(selected_primary.get("security_score_breakdown") or {})
         api_surface_exception = dict(selected_primary.get("api_surface_exception") or {})
+        runner_up = selected_targets_doc[1] if len(selected_targets_doc) > 1 else {}
+        selection_delta_vs_runner_up = (
+            {
+                "score_total": round(
+                    float(selected_primary.get("score_total") or selected_primary.get("target_score") or 0.0)
+                    - float(runner_up.get("score_total") or runner_up.get("target_score") or 0.0),
+                    4,
+                ),
+                "execution_depth_bias": round(
+                    float(selected_primary.get("execution_depth_bias") or 0.0)
+                    - float(runner_up.get("execution_depth_bias") or 0.0),
+                    4,
+                ),
+                "callback_penalty": round(
+                    float(selected_primary.get("callback_penalty") or 0.0)
+                    - float(runner_up.get("callback_penalty") or 0.0),
+                    4,
+                ),
+                "priority": round(
+                    float(selected_primary.get("effective_priority") or selected_primary.get("priority") or 0.0)
+                    - float(runner_up.get("effective_priority") or runner_up.get("priority") or 0.0),
+                    4,
+                ),
+            }
+            if runner_up
+            else {}
+        )
+        tie_break_reason_parts: list[str] = []
+        if str(selected_primary.get("penalty_reason") or ""):
+            tie_break_reason_parts.append(
+                f"penalty={selected_primary.get('penalty_reason')}"
+            )
+        if float(selected_primary.get("effective_priority") or 0.0) != float(
+            selected_primary.get("priority") or 0.0
+        ):
+            tie_break_reason_parts.append("effective_priority_adjusted")
+        if float(selected_primary.get("execution_depth_bias") or 0.0) > 0.0:
+            tie_break_reason_parts.append("deeper_path_bias")
+        if float(selected_primary.get("callback_penalty") or 0.0) > 0.0:
+            tie_break_reason_parts.append("shallow_callback_penalty")
+        if runner_up:
+            if float(selected_primary.get("execution_depth_bias") or 0.0) > float(
+                runner_up.get("execution_depth_bias") or 0.0
+            ):
+                tie_break_reason = "higher_execution_depth_bias"
+            elif float(selected_primary.get("callback_penalty") or 0.0) < float(
+                runner_up.get("callback_penalty") or 0.0
+            ):
+                tie_break_reason = "lower_callback_penalty"
+            elif tie_break_reason_parts:
+                tie_break_reason = ",".join(tie_break_reason_parts)
+            else:
+                tie_break_reason = "higher_security_priority"
+        else:
+            tie_break_reason = (
+                ",".join(tie_break_reason_parts)
+                if tie_break_reason_parts
+                else "risk_first_default"
+            )
         choose_target_snapshot = {
             "kind": "choose_target",
             "selected_target": str(selected_primary.get("target") or new_target_name or ""),
@@ -6112,6 +8718,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "top_vuln_candidate": str(selected_primary.get("target") or new_target_name or ""),
             "security_score_breakdown": security_breakdown,
             "api_surface_exception_used": bool(api_surface_exception.get("used") or False),
+            "tie_break_reason": tie_break_reason,
+            "selection_delta_vs_runner_up": selection_delta_vs_runner_up,
         }
         out["latest_vuln_decision_snapshot"] = {
             "kind": "choose_target",
@@ -6121,6 +8729,8 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "top_vuln_candidate": str(choose_target_snapshot.get("top_vuln_candidate") or ""),
             "security_score_breakdown": security_breakdown,
             "api_surface_exception_used": bool(choose_target_snapshot.get("api_surface_exception_used") or False),
+            "tie_break_reason": str(choose_target_snapshot.get("tie_break_reason") or ""),
+            "selection_delta_vs_runner_up": dict(choose_target_snapshot.get("selection_delta_vs_runner_up") or {}),
         }
         out = _record_decision_trace(
             out,
@@ -6142,7 +8752,7 @@ def _node_plan(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             error_text=str(e),
             state=cast(dict[str, Any], state),
         )
-        out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed"}
+        out = {**state, "last_step": "plan", "last_error": str(e), "message": "plan failed", "failed": True}
         out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- plan err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -6159,6 +8769,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     _wf_log(cast(dict[str, Any], state), "-> synthesize")
     hint = (state.get("codex_hint") or "").strip()
     prompt_render_issue = ""
+
+    def _synthesize_allowed_edit_paths() -> tuple[str, ...]:
+        return ("fuzz/**", "done")
+
     repair_mode = bool(state.get("repair_mode") or False)
     repair_origin_stage = str(state.get("repair_origin_stage") or "").strip().lower()
     if repair_origin_stage not in {"build", "crash", "coverage", "fix-harness"}:
@@ -6173,6 +8787,31 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
     selected_target_api = str(state.get("selected_target_api") or "").strip()
     selected_target_runtime_viability = str(state.get("selected_target_runtime_viability") or "").strip().lower()
     selected_target_doc = _load_selected_targets_doc(gen.repo_root)
+    # Overwrite targets.json with only selected targets so the synthesize
+    # agent generates harnesses for the correct execution targets.
+    if selected_target_doc:
+        if _vuln_hunting_enabled():
+            _must_run = [t for t in selected_target_doc if bool(t.get("must_run") or False)]
+            _filtered = _must_run if _must_run else selected_target_doc
+        else:
+            _filtered = selected_target_doc
+        _filtered_targets_path = gen.repo_root / "fuzz" / "targets.json"
+        _filtered_targets_path.parent.mkdir(parents=True, exist_ok=True)
+        _filtered_targets_path.write_text(
+            json.dumps(_filtered, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    # Sync execution_plan.json from selected_targets.json before AI runs
+    # so the agent sees a consistent contract. Also rebuild selected_targets
+    # from targets.json if the file is missing.
+    if selected_target_doc:
+        _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+    else:
+        _targets_doc = _load_targets_doc(gen.repo_root)
+        if _targets_doc:
+            selected_target_doc = _targets_doc
+            _write_selected_targets_doc(gen.repo_root)
+            _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
     selected_target_name = ""
     if selected_target_doc:
         selected_primary = selected_target_doc[0]
@@ -6204,6 +8843,10 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             gen.repo_root,
             analysis_context_path,
         )
+        vuln_candidates, vuln_candidates_issue = _load_vuln_candidate_inventory(
+            gen.repo_root,
+            analysis_context_path,
+        )
         if security_issue:
             issue_text = str(security_issue or "").strip()
             if issue_text:
@@ -6212,6 +8855,14 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 elif issue_text not in prompt_render_issue:
                     prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
             _wf_log(cast(dict[str, Any], state), f"synthesize: security evidence degraded -> {security_issue}")
+        if vuln_candidates_issue:
+            issue_text = str(vuln_candidates_issue or "").strip()
+            if issue_text:
+                if not prompt_render_issue:
+                    prompt_render_issue = issue_text
+                elif issue_text not in prompt_render_issue:
+                    prompt_render_issue = f"{prompt_render_issue}; {issue_text}"
+            _wf_log(cast(dict[str, Any], state), f"synthesize: vuln candidates degraded -> {vuln_candidates_issue}")
         high_conf: list[dict[str, Any]] = []
         for entry in security_evidence:
             try:
@@ -6220,11 +8871,53 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 confidence = 0.0
             if confidence >= 0.5:
                 high_conf.append(entry)
-        if high_conf:
+        high_priority_candidates: list[dict[str, Any]] = []
+        for candidate in vuln_candidates:
+            try:
+                priority = float(candidate.get("priority") or 0.0)
+            except Exception:
+                priority = 0.0
+            if priority <= 0.0:
+                continue
+            high_priority_candidates.append(dict(candidate))
+        high_priority_candidates.sort(
+            key=lambda item: (
+                -float(item.get("priority") or 0.0),
+                -float(item.get("vuln_likelihood") or 0.0),
+                str(item.get("candidate_id") or ""),
+            )
+        )
+        if high_conf or high_priority_candidates:
             vuln_hint_lines = [
                 "\n## Vulnerability-Directed Harness Guidance",
-                "Prioritize exercising these high-risk code paths:",
+                "Prioritize exercising these high-risk code paths and candidate triggers:",
             ]
+            for candidate in high_priority_candidates[:5]:
+                attack_hint = dict(candidate.get("attack_hint") or {})
+                candidate_id = str(candidate.get("candidate_id") or "candidate").strip() or "candidate"
+                target_api = str(candidate.get("target_api") or candidate.get("api") or "unknown_api").strip() or "unknown_api"
+                signal_type = str(candidate.get("signal_type") or "unknown_signal").strip() or "unknown_signal"
+                priority = float(candidate.get("priority") or 0.0)
+                key_code_path = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+                boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+                trigger_condition = str(attack_hint.get("trigger_condition") or "").strip()
+                vuln_category = str(attack_hint.get("vuln_category") or signal_type).strip() or signal_type
+                sanitizer_hint = str(attack_hint.get("sanitizer_hint") or "address").strip() or "address"
+                evidence_refs = [str(item.get("evidence_id") or "").strip() for item in list(candidate.get("evidence") or []) if str(item.get("evidence_id") or "").strip()]
+                location = str(candidate.get("target_file") or candidate.get("file") or "").strip()
+                vuln_hint_lines.append(
+                    f"- {candidate_id}: api={target_api}, signal={signal_type}, category={vuln_category}, priority={priority:.2f}"
+                    + (f" [{location}]" if location else "")
+                )
+                if trigger_condition:
+                    vuln_hint_lines.append(f"  trigger_condition: {trigger_condition}")
+                if key_code_path:
+                    vuln_hint_lines.append(f"  key_code_path: {' -> '.join(key_code_path[:6])}")
+                if boundary_values:
+                    vuln_hint_lines.append(f"  boundary_values: {', '.join(boundary_values[:6])}")
+                vuln_hint_lines.append(f"  sanitizer_hint: {sanitizer_hint}")
+                if evidence_refs:
+                    vuln_hint_lines.append(f"  evidence_refs: {', '.join(evidence_refs[:6])}")
             for entry in high_conf[:8]:
                 signal_id = str(entry.get("signal_id") or "unknown_signal").strip() or "unknown_signal"
                 summary = str(entry.get("summary") or "n/a").strip() or "n/a"
@@ -6238,8 +8931,9 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             vuln_hint_lines.extend(
                 [
                     "Design the harness to:",
-                    "- Feed attacker-controlled data through these paths",
-                    "- Exercise boundary conditions (max lengths, zero sizes, negative values)",
+                    "- Feed attacker-controlled data through the listed key_code_path sequences",
+                    "- Materialize the listed boundary_values in seed inputs and parser state",
+                    "- Prefer target-specific sanitizer guidance when choosing crash-oriented execution assumptions",
                     "- Test error handling paths (corrupt headers, truncated input, invalid checksums)",
                 ]
             )
@@ -6341,6 +9035,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         ]
         if quality_oracle:
             feedback_lines.append(f"- quality_oracle: {quality_oracle}")
+        feedback_lines.extend(_coverage_attack_hint_feedback_lines(seed_feedback))
         if seed_feedback:
             feedback_lines.append("=== SeedFeedback ===\n" + json.dumps(seed_feedback, ensure_ascii=False, indent=2))
         if harness_feedback:
@@ -6568,7 +9263,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             5. Keep non-root compatibility (no install-to-system-dir flow).
 
             Do not run commands. Only edit `fuzz/build.py` and `fuzz/build_strategy.json` if needed.
-            Write `fuzz/build.py` into `./done`.
+            Write the path string `fuzz/build.py` as the sole text of `./done` (run `echo 'fuzz/build.py' > ./done`; do **not** copy the file's contents).
             """
         ).strip()
         context = (
@@ -6588,6 +9283,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             timeout=min(remaining, 300),
             max_attempts=_synthesize_opencode_attempts(),
             max_cli_retries=_opencode_cli_retries(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
         _wf_log(cast(dict[str, Any], state), "synthesize: applied post-validation build.py repair for path/link issue")
 
@@ -6613,6 +9309,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     def _run_required_scaffold_repair(timeout: int) -> None:
@@ -6633,7 +9330,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
               Selected target, Final target, Technical reason, Relation, Harness file.
             - If strategy is missing, create a valid `fuzz/build_strategy.json` matching the current harness/build path.
             - Do NOT run commands.
-            - Write `fuzz/out/` into `./done` before exit.
+            - Write the path string `fuzz/out/` as the sole text of `./done` before exit (run `echo 'fuzz/out/' > ./done`; do **not** copy file contents).
             """
         ).strip()
         gen.patcher.run_codex_command(
@@ -6645,6 +9342,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     def _ensure_min_readme_fallback() -> bool:
@@ -6693,7 +9391,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             - The README must describe the actual observed target, not the original one.
             - Keep the README concise.
             - Do not edit any source/build files.
-            - Write `fuzz/README.md` into `./done` before finishing.
+            - Write the path string `fuzz/README.md` as the sole text of `./done` before finishing (run `echo 'fuzz/README.md' > ./done`; do **not** copy the file's contents).
             """
         ).strip()
         gen.patcher.run_codex_command(
@@ -6705,6 +9403,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             max_cli_retries=_opencode_cli_retries(),
             idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
             activity_watch_paths=_synthesize_activity_watch_paths(),
+            allowed_edit_paths=_synthesize_allowed_edit_paths(),
         )
 
     if not _has_codex_key():
@@ -6752,6 +9451,15 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             targets = (gen.repo_root / "fuzz" / "targets.json")
             ctx = ""
             try:
+                if repair_mode and repair_origin_stage == "fix-harness":
+                    crash_ctx, crash_known_issues = _build_fix_harness_crash_context(
+                        gen.repo_root,
+                        include_contents=True,
+                    )
+                    if crash_ctx:
+                        ctx += crash_ctx + "\n\n"
+                    for issue in crash_known_issues:
+                        _remember_prompt_render_issue(issue)
                 if plan.is_file():
                     ctx += "=== fuzz/PLAN.md ===\n" + plan.read_text(encoding="utf-8", errors="replace") + "\n\n"
                 if targets.is_file():
@@ -6799,6 +9507,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 max_cli_retries=_opencode_cli_retries(),
                 idle_timeout_override=_synthesize_opencode_idle_timeout_sec(),
                 activity_watch_paths=_synthesize_activity_watch_paths(),
+                allowed_edit_paths=_synthesize_allowed_edit_paths(),
             )
             grace_raw = os.environ.get("SHERPA_SYNTHESIZE_GRACE_SEC", "15").strip()
             try:
@@ -6890,7 +9599,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
                 diag_tail = f" [diagnostics: {', '.join(diag_bits)}]" if diag_bits else ""
                 raise HarnessGeneratorError(f"synthesize incomplete: missing required scaffold items: {missing}{diag_tail}")
         _run_post_synthesize_build_validation()
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        _, execution_plan_doc = _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
         harness_index_path = ""
         harness_index_doc: dict[str, Any] = {}
         try:
@@ -6996,7 +9709,8 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             "synthesize_target_relation": str(readme_alignment.get("relation") or ""),
             "synthesize_target_runtime_viability": selected_target_runtime_viability,
             "coverage_target_api": str(target_alignment.get("observed_api") or selected_target_api or ""),
-            "coverage_target_name": str(target_alignment.get("observed_api") or state.get("coverage_target_name") or ""),
+            "coverage_target_name": str(target_alignment.get("expected_target_name") or selected_target_name or state.get("coverage_target_name") or ""),
+            **boundary_target_state,
             "analysis_context_path": analysis_context_path or str(state.get("analysis_context_path") or ""),
             "analysis_evidence_count": analysis_evidence_count,
             "target_scoring_enabled": bool(state.get("target_scoring_enabled") or False),
@@ -7016,7 +9730,7 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
             error_text=str(e),
             state=cast(dict[str, Any], state),
         )
-        out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed"}
+        out = {**state, "last_step": "synthesize", "last_error": str(e), "message": "synthesize failed", "failed": True}
         out = _attach_prompt_render_status(out, issue=prompt_render_issue or str(e))
         _wf_log(cast(dict[str, Any], out), f"<- synthesize err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
         return out
@@ -7045,7 +9759,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             try:
                 build_full_log_path.parent.mkdir(parents=True, exist_ok=True)
                 header = (
-                    "Sherpa build full log\n"
+                    "TianHeng build full log\n"
                     f"repo_root={gen.repo_root}\n"
                     f"generated_at={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n"
                     + "=" * 88
@@ -7188,12 +9902,19 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("Missing fuzz/build.py (agent must create fuzz/build.py)")
 
         build_env = os.environ.copy()
+        # Install a compiler wrapper that automatically appends coverage
+        # instrumentation flags to every clang/clang++ invocation.  This
+        # approach is format-agnostic — it works regardless of how build.py
+        # structures its compile/link commands — and does not conflict with
+        # replay builds that already carry -fprofile-instr-generate.
+        _cc_wrapper_dir = _install_coverage_cc_wrapper(gen.repo_root)
+        build_env["PATH"] = f"{_cc_wrapper_dir}:{build_env.get('PATH', '')}"
+        build_env["CC"] = "clang"
+        build_env["CXX"] = "clang++"
+        build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
+        build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
         if getattr(gen, "docker_image", None):
             include_root = "/work"
-            build_env.setdefault("CC", "clang")
-            build_env.setdefault("CXX", "clang++")
-            build_env.setdefault("CFLAGS", "-D_GNU_SOURCE")
-            build_env.setdefault("CXXFLAGS", "-D_GNU_SOURCE")
             for stale_dir in (gen.repo_root / "fuzz" / "build", gen.repo_root / "build"):
                 if stale_dir.exists():
                     try:
@@ -7264,6 +9985,20 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             rc, out, err = gen._run_cmd(list(build_cmd), cwd=build_cwd, env=build_env, timeout=build_cmd_timeout)
             _append_build_full_log(stage=f"attempt-{attempt}/primary", cmd=list(build_cmd), cwd=build_cwd, rc=rc, out=out, err=err)
             attempts_used += 1
+
+            # Fast-path hotfix for implicit-decl / undeclared-identifier errors.
+            # Header-only libraries often need extern declarations that the
+            # synthesize agent omits.  Patch harness sources in-place so the
+            # next retry (or the fallback retries below) can succeed without
+            # going through a full plan→synthesize cycle.
+            if rc != 0:
+                _hotfix_state: dict[str, Any] = dict(cast(dict[str, Any], state))
+                _hotfix_state["last_error"] = (out or "") + "\n" + (err or "")
+                _hotfix_state["build_stdout_tail"] = out or ""
+                _hotfix_state["build_stderr_tail"] = err or ""
+                if _try_hotfix_missing_decl(_hotfix_state, ""):
+                    # Hotfix applied — retry the build immediately
+                    _wf_log(cast(dict[str, Any], state), "build: harness hotfix applied; retrying")
 
             # Backward-compatibility shim: older generated scripts may hardcode "fuzz/..."
             # and therefore need repo-root cwd.
@@ -7429,6 +10164,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 next_state["restart_to_plan_reason"] = "build_same_error_repeated" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
+                _mark_build_repair_state(
+                    kind=str(next_state.get("build_error_kind") or build_error_kind or "build_failure_generic"),
+                    code=str(next_state.get("build_error_code") or build_error_code or ""),
+                    sig=sig,
+                )
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-error "
@@ -7485,6 +10225,11 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 next_state["restart_to_plan_reason"] = "build_no_fuzzer_repeated" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_stage"] = "build" if build_error_kind == "infra" else ""
                 next_state["restart_to_plan_error_text"] = repeated_err if build_error_kind == "infra" else ""
+                _mark_build_repair_state(
+                    kind=build_error_kind or "build_failure_generic",
+                    code=build_error_code,
+                    sig=sig,
+                )
                 _wf_log(
                     cast(dict[str, Any], next_state),
                     "<- build stop same-no-fuzzer "
@@ -7521,20 +10266,38 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             )
             return next_state
 
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
+        selected_targets_doc = _load_selected_targets_doc(gen.repo_root)
+        if selected_targets_doc:
+            _, execution_plan_doc = _write_execution_plan_doc(gen.repo_root, selected_targets_doc)
+        else:
+            execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
         execution_targets = [
             item for item in list(execution_plan_doc.get("execution_targets") or [])
             if isinstance(item, dict)
         ]
-        harness_index_doc = _load_harness_index_doc(gen.repo_root)
-        if not harness_index_doc:
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
+        next_state.update(boundary_target_state)
+        if selected_targets_doc:
             try:
                 _, harness_index_doc = _write_harness_index_doc(
                     gen.repo_root,
                     execution_plan_doc=execution_plan_doc,
                 )
             except Exception:
-                harness_index_doc = {}
+                harness_index_doc = _load_harness_index_doc(gen.repo_root)
+        else:
+            harness_index_doc = _load_harness_index_doc(gen.repo_root)
+            if not harness_index_doc:
+                try:
+                    _, harness_index_doc = _write_harness_index_doc(
+                        gen.repo_root,
+                        execution_plan_doc=execution_plan_doc,
+                    )
+                except Exception:
+                    harness_index_doc = {}
         mapping_by_target: dict[str, dict[str, Any]] = {}
         for row in list(harness_index_doc.get("mappings") or []):
             if not isinstance(row, dict):
@@ -7691,6 +10454,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             binaries=final_bins,
             target_build_matrix=target_build_matrix,
         )
+        replay_bins = _materialize_replay_binaries(gen.repo_root, final_bins)
         if cache_path:
             next_state["build_template_cache_path"] = cache_path
         next_state["built_targets"] = sorted(built_names)
@@ -7701,6 +10465,8 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         ]
         next_state["target_build_matrix"] = target_build_matrix
         next_state["build_gate_reason"] = "ok"
+        next_state["coverage_replay_binary_dir"] = str(_replay_out_dir(gen.repo_root))
+        next_state["coverage_replay_binary_count"] = int(len(replay_bins))
         next_state["message"] = f"built ({len(final_bins)} fuzzers)"
         next_state = _clear_error_markers_on_success(next_state)
         _wf_log(cast(dict[str, Any], next_state), f"<- build ok fuzzers={len(final_bins)} dt={_fmt_dt(time.perf_counter()-t0)}")
@@ -7711,6 +10477,7 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_step": "build",
             "last_error": str(e),
             "message": "build failed",
+            "failed": True,
             "build_error_kind": "unknown",
             "build_error_code": "build_node_exception",
             "restart_to_plan": True,
@@ -8660,6 +11427,11 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
     def _try_hotfix_missing_system_packages() -> bool:
         alias_map = {
             "z": "zlib",
+            "libz": "zlib",
+            "libz-dev": "zlib",
+            "zlib-dev": "zlib",
+            "zlib1g": "zlib",
+            "zlib1g-dev": "zlib",
             "bz2": "bzip2",
             "lzma": "liblzma",
             "xz": "liblzma",
@@ -8900,6 +11672,86 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
         return changed
 
+    def _try_hotfix_missing_decl() -> bool:
+        """Detect implicit-function-declaration and undeclared-identifier errors
+        in harness source files and add extern declarations or missing includes.
+
+        Header-only / single-file libraries often expose internal symbols that
+        the synthesize agent fails to declare.  This hotfix scans the build
+        diagnostics for ``implicit declaration`` or ``undeclared identifier``
+        messages, extracts the symbol name, and inserts the appropriate
+        ``extern`` declaration into the offending harness source.
+        """
+        diag_raw = last_error + "\n" + stdout_tail + "\n" + stderr_tail
+        diag_lower = diag_raw.lower()
+        if "implicit declaration of function" not in diag_lower and "undeclared identifier" not in diag_lower:
+            return False
+
+        # Parse symbol and source file from clang diagnostic lines like:
+        #   harness.c:42:5: error: call to undeclared function 'foo'
+        #   harness.c:42:14: error: use of undeclared identifier 'BAR'
+        import re as _re_local
+        _changes = 0
+        _diag_lines = diag_raw.splitlines()
+        for _dl in _diag_lines:
+            # Clang: "<file>:<line>:<col>: error: ... 'symbol'"
+            _m = _re_local.search(
+                r"(?P<file>[^\s:]+\.(?:c|cc|cpp|cxx)):\d+:\d+:\s+(?:error|fatal error):\s+.*?(?:undeclared identifier|implicit declaration of function).*?(?:'|\")(?P<sym>[A-Za-z_][A-Za-z0-9_]*)(?:'|\")",
+                _dl,
+            )
+            if not _m:
+                continue
+            _src_name = _m.group("file")
+            _symbol = _m.group("sym")
+            _src_path = Path(_src_name)
+            if not _src_path.is_absolute():
+                _src_path = gen.repo_root / _src_path
+            if not _src_path.is_file() or _src_path.parent.name != "fuzz":
+                continue  # only patch harness sources in fuzz/
+
+            try:
+                _src_text = _src_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            if f"extern " in _src_text and _symbol in _src_text:
+                continue  # already has extern
+
+            # Also check for well-known header hints
+            _stb_header = 'stb' in _src_name.lower() or 'stb' in _symbol.lower()
+            _include_line = ""
+            if _stb_header:
+                # stb single-file libs often need CGLTF_IMPLEMENTATION or STB_* before include
+                pass  # fall through to extern declaration
+
+            # Insert extern declaration after the last #include line
+            _lines = _src_text.splitlines()
+            _insert_at = 0
+            for _j, _line in enumerate(_lines):
+                if _line.lstrip().startswith("#include") or _line.lstrip().startswith("#define"):
+                    _insert_at = _j + 1
+            # Also after any #ifdef / #ifndef guards
+            if _insert_at == 0:
+                for _j, _line in enumerate(_lines):
+                    if _line.lstrip().startswith("#if"):
+                        _insert_at = _j + 1
+
+            _decl = f"extern void {_symbol}(void);  /* sherpa-hotfix: forward declaration for header-only lib */"
+            _lines.insert(_insert_at, _decl)
+            _new_text = "\n".join(_lines) + ("\n" if _src_text.endswith("\n") else "")
+            if _new_text == _src_text:
+                continue
+
+            try:
+                _src_path.write_text(_new_text, encoding="utf-8", errors="replace")
+                _changes += 1
+                rel = str(_src_path.relative_to(gen.repo_root))
+                _wf_log(cast(dict[str, Any], state), f"fix_build: added extern {_symbol}() to {rel}")
+            except Exception:
+                continue
+
+        return _changes > 0
+
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():
             out = _success_out(
@@ -8989,6 +11841,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 outcome="rule_fixed",
                 rule_hit="missing_system_packages_declared",
                 last_diff_paths=["fuzz/system_packages.txt"],
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_missing_decl():
+            out = _success_out(
+                "local hotfix for missing declarations in harness source applied",
+                outcome="rule_fixed",
+                rule_hit="missing_harness_decl",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -9386,7 +12247,22 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 pass
 
         bins = gen._discover_fuzz_binaries()
+        _, execution_plan_doc = _sync_execution_plan_doc_from_selected_targets(gen.repo_root)
+        execution_targets = [
+            item for item in list(execution_plan_doc.get("execution_targets") or [])
+            if isinstance(item, dict)
+        ]
+        boundary_target_state = _workflow_target_state_from_execution_plan(
+            gen.repo_root,
+            execution_plan_doc,
+        )
+        if boundary_target_state:
+            state = cast(FuzzWorkflowRuntimeState, {**state, **boundary_target_state})
+        if execution_targets:
+            bins = _filter_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
         if not bins:
+            if execution_targets:
+                raise HarnessGeneratorError("No fuzzer binaries found under fuzz/out/ matching execution_plan.json")
             raise HarnessGeneratorError("No fuzzer binaries found under fuzz/out/")
 
         crash_found = False
@@ -9531,20 +12407,18 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 )
             return _sha256_text("\n".join(parts))
 
-        _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
-        # Seed generation uses OpenCode and shared repo context; keep it serial.
-        prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
         last_seed_profile = str(state.get("coverage_seed_profile") or "")
-        seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
-        seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
-        seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": 0}
+        seed_count_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 0, "total": 0}
+        seed_count_raw_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 0, "total": 0}
+        seed_count_filtered_total: dict[str, int] = {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 0, "total": 0}
         seed_generation_failed_fuzzers: list[str] = []
         seed_generation_error_by_fuzzer: dict[str, str] = {}
+        seed_generation_skipped_reason = ""
 
         def _accumulate_seed_counts(dst: dict[str, int], src: Any) -> None:
             if not isinstance(src, dict):
                 return
-            for key in ("repo_examples", "ai", "radamsa", "total"):
+            for key in ("repo_examples", "ai", "radamsa", "deterministic", "total"):
                 try:
                     dst[key] = int(dst.get(key, 0)) + int(src.get(key) or 0)
                 except Exception:
@@ -9557,44 +12431,46 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         seed_noise_rejected_count = 0
         missing_execution_targets: list[str] = []
         seed_family_coverage_state: dict[str, Any] = {}
-        execution_plan_doc = _load_execution_plan_doc(gen.repo_root)
-        execution_targets = [
-            item for item in list(execution_plan_doc.get("execution_targets") or [])
-            if isinstance(item, dict)
-        ]
+        bins = _order_fuzzer_bins_by_execution_plan(list(bins), execution_targets)
+        preferred_target = _preferred_execution_target(execution_targets, cast(dict[str, Any], state))
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        execution_target_by_fuzzer: dict[str, dict[str, Any]] = {}
+        for item in execution_targets:
+            for alias in _execution_target_fuzzer_aliases(item):
+                execution_target_by_fuzzer.setdefault(alias, dict(item))
         bins_by_name = {p.name: p for p in bins}
         bins_by_stem = {p.stem: p for p in bins}
         seed_fuzzers: list[Path] = []
         if execution_targets:
             for item in execution_targets:
-                expected = str(item.get("expected_fuzzer_name") or item.get("target_name") or "").strip()
-                candidate = bins_by_name.get(expected) or bins_by_stem.get(Path(expected).stem)
+                candidate = None
+                for alias in _execution_target_fuzzer_aliases(item):
+                    candidate = bins_by_name.get(alias) or bins_by_stem.get(Path(alias).stem)
+                    if candidate is not None:
+                        break
                 if candidate is not None:
                     if candidate not in seed_fuzzers:
                         seed_fuzzers.append(candidate)
                 else:
-                    missing_name = str(item.get("target_name") or expected)
+                    missing_name = str(item.get("target_name") or _execution_target_fuzzer_name(item))
                     if missing_name and missing_name not in missing_execution_targets:
                         missing_execution_targets.append(missing_name)
         if not seed_fuzzers:
             seed_fuzzers = list(bins)
-        try:
-            for idx, bin_path in enumerate(seed_fuzzers):
-                remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
-                if remaining_for_seed <= 0:
-                    return _time_budget_exceeded_state(state, step_name="run")
-                fuzzers_left = len(seed_fuzzers) - idx
-                per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
-                setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
-                fuzzer_name = bin_path.name
-                try:
-                    gen._pass_generate_seeds(fuzzer_name)
-                    profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
-                    if not last_seed_profile:
-                        last_seed_profile = str(profile_map.get(fuzzer_name) or "")
-                    bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
-                    meta = bootstrap_map.get(fuzzer_name) or {}
-                    if isinstance(meta, dict):
+        if _verify_stage_no_ai():
+            seed_generation_skipped_reason = "verify_stage_no_ai"
+            _wf_log(cast(dict[str, Any], state), "run: AI seed generation skipped by SHERPA_VERIFY_STAGE_NO_AI=1")
+            bootstrap_fn = getattr(gen, "_bootstrap_deterministic_seed_corpus", None)
+            if callable(bootstrap_fn):
+                for bin_path in seed_fuzzers:
+                    fuzzer_name = bin_path.name
+                    try:
+                        meta = bootstrap_fn(fuzzer_name)
+                        if not isinstance(meta, dict):
+                            continue
+                        profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
+                        if not last_seed_profile:
+                            last_seed_profile = str(profile_map.get(fuzzer_name) or meta.get("seed_profile") or "")
                         _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
                         _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
                         _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
@@ -9610,13 +12486,53 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                         seed_noise_rejected_count += int(meta.get("seed_noise_rejected_count") or 0)
                         if not seed_family_coverage_state and isinstance(meta.get("seed_family_coverage"), dict):
                             seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
-                except Exception as e:
-                    # Seed generation is best-effort; do not block fuzzing.
-                    seed_generation_failed_fuzzers.append(fuzzer_name)
-                    seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
-                    logger.info(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
-        finally:
-            setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
+                    except Exception as e:
+                        seed_generation_failed_fuzzers.append(fuzzer_name)
+                        seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
+                        logger.info(f"[warn] deterministic seed bootstrap skipped ({fuzzer_name}): {e}")
+        else:
+            _wf_log(cast(dict[str, Any], state), "run: generating AI seeds before fuzzing")
+            # Seed generation uses OpenCode and shared repo context; keep it serial.
+            prev_seed_timeout = getattr(gen, "seed_generation_timeout_sec", None)
+            try:
+                for idx, bin_path in enumerate(seed_fuzzers):
+                    remaining_for_seed = _remaining_time_budget_sec(state, min_timeout=0)
+                    if remaining_for_seed <= 0:
+                        return _time_budget_exceeded_state(state, step_name="run")
+                    fuzzers_left = len(seed_fuzzers) - idx
+                    per_fuzzer_budget = max(1, remaining_for_seed // max(1, fuzzers_left))
+                    setattr(gen, "seed_generation_timeout_sec", per_fuzzer_budget)
+                    fuzzer_name = bin_path.name
+                    try:
+                        gen._pass_generate_seeds(fuzzer_name)
+                        profile_map = getattr(gen, "last_seed_profile_by_fuzzer", {}) or {}
+                        if not last_seed_profile:
+                            last_seed_profile = str(profile_map.get(fuzzer_name) or "")
+                        bootstrap_map = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
+                        meta = bootstrap_map.get(fuzzer_name) or {}
+                        if isinstance(meta, dict):
+                            _accumulate_seed_counts(seed_count_total, meta.get("counts") or {})
+                            _accumulate_seed_counts(seed_count_raw_total, meta.get("seed_counts_raw") or {})
+                            _accumulate_seed_counts(seed_count_filtered_total, meta.get("seed_counts_filtered") or {})
+                            sources = meta.get("sources") or []
+                            if isinstance(sources, list):
+                                for src in sources:
+                                    src_text = str(src or "").strip()
+                                    if src_text:
+                                        seed_sources.add(src_text)
+                            repo_examples_filtered = bool(meta.get("repo_examples_filtered") or repo_examples_filtered)
+                            repo_examples_rejected_count += int(meta.get("repo_examples_rejected_count") or 0)
+                            repo_examples_accepted_count += int(meta.get("repo_examples_accepted_count") or 0)
+                            seed_noise_rejected_count += int(meta.get("seed_noise_rejected_count") or 0)
+                            if not seed_family_coverage_state and isinstance(meta.get("seed_family_coverage"), dict):
+                                seed_family_coverage_state = dict(meta.get("seed_family_coverage") or {})
+                    except Exception as e:
+                        # Seed generation is best-effort; do not block fuzzing.
+                        seed_generation_failed_fuzzers.append(fuzzer_name)
+                        seed_generation_error_by_fuzzer[fuzzer_name] = str(e)[:400]
+                        logger.info(f"[warn] seed generation skipped ({fuzzer_name}): {e}")
+            finally:
+                setattr(gen, "seed_generation_timeout_sec", prev_seed_timeout)
 
         run_results: dict[str, FuzzerRunResult] = {}
         run_exec_errors: dict[str, str] = {}
@@ -9919,6 +12835,18 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             run_details.append(
                 {
                     "fuzzer": fuzzer_name,
+                    "target_name": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_name")
+                        or ""
+                    ),
+                    "target_api": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_api")
+                        or ""
+                    ),
+                    "target_type": str(
+                        _execution_target_identity(execution_target_by_fuzzer.get(fuzzer_name) or {}).get("target_type")
+                        or ""
+                    ),
                     "rc": rc,
                     "effective_rc": rc,
                     "crash_found": bool(run.crash_found),
@@ -9962,6 +12890,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if not crash_candidates and not run_last_error:
             no_progress_fuzzers: list[str] = []
             seed_rejected_fuzzers: list[str] = []
+            stalled_after_cov_fuzzers: list[str] = []
             for detail in run_details:
                 if bool(detail.get("crash_found")):
                     continue
@@ -9984,6 +12913,8 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     seed_rejected_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
                 if final_execs <= 0 and warned_no_progress:
                     no_progress_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
+                if warned_no_progress and final_execs > 0 and (final_cov > 0 or final_ft > 0):
+                    stalled_after_cov_fuzzers.append(str(detail.get("fuzzer") or "unknown"))
             if seed_rejected_fuzzers:
                 run_error_kind = "run_seed_rejected"
                 joined = ", ".join(seed_rejected_fuzzers[:5])
@@ -9998,6 +12929,14 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     run_last_error = (
                         "fuzzer run made no measurable progress "
                         f"(exec/s=0 with no-interesting-input warnings): {joined}"
+                    )
+            if stalled_after_cov_fuzzers:
+                if not run_error_kind:
+                    run_error_kind = "run_stalled_after_coverage"
+                    joined = ", ".join(stalled_after_cov_fuzzers[:5])
+                    run_last_error = (
+                        "fuzzer stalled after finding initial coverage "
+                        f"(exec/s=0 with cov>0 but no further progress): {joined}"
                     )
 
         # Auto-repair corrupted dict files on dict_parse_error so next build
@@ -10037,7 +12976,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
 
         seed_bootstrap_all = getattr(gen, "last_seed_bootstrap_by_fuzzer", {}) or {}
 
-        def _first_seed_meta_list(*path: str) -> list[str]:
+        def _first_seed_meta_list(*path: str) -> tuple[bool, list[str]]:
             for meta in seed_bootstrap_all.values():
                 if not isinstance(meta, dict):
                     continue
@@ -10051,10 +12990,12 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 if not ok:
                     continue
                 if isinstance(cur, (list, tuple, set)):
-                    out_vals = [str(v).strip() for v in cur if str(v).strip()]
-                    if out_vals:
-                        return out_vals
-            return []
+                    return True, [str(v).strip() for v in cur if str(v).strip()]
+            return False, []
+
+        families_suggested_found, families_suggested_values = _first_seed_meta_list("seed_families_suggested")
+        families_covered_found, families_covered_values = _first_seed_meta_list("seed_family_coverage", "covered")
+        families_missing_found, families_missing_values = _first_seed_meta_list("seed_family_coverage", "missing")
 
         crash_signature = ""
         same_crash_repeats = 0
@@ -10073,22 +13014,26 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 else 0
             )
 
-        aggregated_seed_quality = _aggregate_seed_quality_from_run_details(
+        coverage_target_name = str(preferred_identity.get("target_name") or "").strip()
+        coverage_target_api = str(preferred_identity.get("target_api") or "").strip()
+        coverage_target_type = str(preferred_identity.get("target_type") or "").strip()
+        if not coverage_target_type:
+            coverage_target_type = _target_type_from_run_details(
+                run_details,
+                target_name=coverage_target_name,
+                target_api=coverage_target_api,
+                fuzzer_name=str(preferred_identity.get("expected_fuzzer_name") or ""),
+            )
+        coverage_seed_profile = str(preferred_identity.get("seed_profile") or last_seed_profile or "").strip()
+        coverage_fuzzer_name = str(preferred_identity.get("expected_fuzzer_name") or coverage_target_name).strip()
+        current_seed_quality = _seed_quality_from_run_details_for_target(
             run_details,
             dict(state.get("coverage_seed_quality") or {}),
+            target_name=coverage_target_name,
+            target_api=coverage_target_api,
+            fuzzer_name=coverage_fuzzer_name,
         )
-        aggregated_quality_flags: set[str] = set()
-        cold_start_failure_any = False
-        for detail in run_details:
-            sq = detail.get("seed_quality") or {}
-            if not isinstance(sq, dict):
-                continue
-            for flag in list(sq.get("quality_flags") or []):
-                sval = str(flag or "").strip()
-                if sval:
-                    aggregated_quality_flags.add(sval)
-            if bool(sq.get("cold_start_failure")):
-                cold_start_failure_any = True
+        current_quality_flags = _quality_flags_from_seed_quality(current_seed_quality)
 
         out = {
             **state,
@@ -10115,38 +13060,39 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "last_crash_artifact": last_artifact,
             "last_fuzzer": last_fuzzer,
             "coverage_target_name": (
-                str(state.get("synthesize_observed_target_api") or "").strip()
-                or last_fuzzer
-                or next(
-                    (
-                        str(detail.get("fuzzer") or "").strip()
-                        for detail in run_details
-                        if str(detail.get("fuzzer") or "").strip()
-                    ),
-                    str(state.get("coverage_target_name") or ""),
-                )
+                coverage_target_name
+                or str(state.get("synthesize_selected_target_name") or "").strip()
+                or str(state.get("coverage_target_name") or "").strip()
             ),
             "coverage_target_api": (
-                str(state.get("synthesize_observed_target_api") or "").strip()
+                coverage_target_api
+                or str(state.get("synthesize_observed_target_api") or "").strip()
+                or str(state.get("synthesize_selected_target_api") or "").strip()
+                or str(state.get("coverage_target_api") or "").strip()
                 or str(state.get("selected_target_api") or "").strip()
             ),
-            "coverage_seed_profile": last_seed_profile,
-            "coverage_seed_quality": aggregated_seed_quality,
+            "coverage_target_type": coverage_target_type or str(state.get("coverage_target_type") or ""),
+            "coverage_seed_profile": coverage_seed_profile,
+            "coverage_seed_quality": current_seed_quality,
             "coverage_seed_families_suggested": list(
-                _first_seed_meta_list("seed_families_suggested")
-                or list(state.get("coverage_seed_families_suggested") or [])
+                families_suggested_values
+                if families_suggested_found
+                else list(state.get("coverage_seed_families_suggested") or [])
             ),
             "coverage_seed_families_covered": list(
-                _first_seed_meta_list("seed_family_coverage", "covered")
-                or list(state.get("coverage_seed_families_covered") or [])
+                families_covered_values
+                if families_covered_found
+                else list(state.get("coverage_seed_families_covered") or [])
             ),
             "coverage_seed_families_missing": list(
-                _first_seed_meta_list("seed_family_coverage", "missing")
-                or list(state.get("coverage_seed_families_missing") or [])
+                families_missing_values
+                if families_missing_found
+                else list(state.get("coverage_seed_families_missing") or [])
             ),
             "coverage_quality_flags": list(
-                sorted(aggregated_quality_flags)
-                or list(state.get("coverage_quality_flags") or [])
+                current_quality_flags
+                if current_seed_quality
+                else list(state.get("coverage_quality_flags") or [])
             ),
             "coverage_target_depth_score": int(state.get("coverage_target_depth_score") or 0),
             "coverage_target_depth_class": str(state.get("coverage_target_depth_class") or ""),
@@ -10159,10 +13105,11 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "coverage_seed_generation_failed_fuzzers": list(seed_generation_failed_fuzzers),
             "coverage_seed_generation_error_by_fuzzer": dict(seed_generation_error_by_fuzzer),
             "coverage_seed_generation_failed_count": int(len(seed_generation_failed_fuzzers)),
+            "coverage_seed_generation_skipped_reason": seed_generation_skipped_reason,
             "coverage_seed_generation_degraded": bool(
                 seed_generation_failed_fuzzers
-                or int(seed_count_filtered_total.get("total") or 0) <= 1
-                or cold_start_failure_any
+                or (not seed_generation_skipped_reason and int(seed_count_filtered_total.get("total") or 0) <= 1)
+                or bool(current_seed_quality.get("cold_start_failure") or False)
             ),
             "coverage_missing_execution_targets": missing_execution_targets,
             "coverage_seed_family_coverage": seed_family_coverage_state,
@@ -10265,6 +13212,10 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                     "final_corpus_files": int(seed_quality.get("final_corpus_files") or 0),
                     "quality_flags": list(seed_quality.get("quality_flags") or []),
                     "missing_suggested_families": list(out.get("coverage_seed_families_missing") or []),
+                    "attack_hint_total_count": int(seed_quality.get("attack_hint_total_count") or 0),
+                    "attack_hint_covered_count": int(seed_quality.get("attack_hint_covered_count") or 0),
+                    "attack_hint_missing_values": list(seed_quality.get("attack_hint_missing_values") or []),
+                    "attack_hint_coverage_ratio": float(seed_quality.get("attack_hint_coverage_ratio") or 1.0),
                     "merge_retained_ratio_files": float(seed_quality.get("merge_retained_ratio_files") or 1.0),
                     "merge_retained_ratio_bytes": float(seed_quality.get("merge_retained_ratio_bytes") or 1.0),
                     "cold_start_failure": bool(seed_quality.get("cold_start_failure") or False),
@@ -10288,6 +13239,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 "seed_generation_degraded": bool(out.get("coverage_seed_generation_degraded") or False),
                 "seed_generation_failed_count": int(out.get("coverage_seed_generation_failed_count") or 0),
                 "seed_generation_failed_fuzzers": list(out.get("coverage_seed_generation_failed_fuzzers") or []),
+                "seed_generation_skipped_reason": str(out.get("coverage_seed_generation_skipped_reason") or ""),
                 "by_fuzzer": by_fuzzer,
             }
             seed_feedback_path.write_text(
@@ -10355,6 +13307,7 @@ def _node_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             "seed_counts_filtered": dict(seed_count_filtered_total),
             "seed_sources": sorted(seed_sources),
             "seed_generation_failed_fuzzers": list(seed_generation_failed_fuzzers),
+            "seed_generation_skipped_reason": seed_generation_skipped_reason,
             "seed_generation_degraded": bool(out.get("coverage_seed_generation_degraded") or False),
             "quality_flags": list(out.get("coverage_quality_flags") or []),
             "degraded_reason": (
@@ -10413,13 +13366,140 @@ def _max_cov_from_run_details(run_details: list[dict[str, Any]]) -> int:
     return max(covs) if covs else 0
 
 
+def _node_per_input_replay(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
+    if gen is None:
+        raise RuntimeError("workflow not initialized: missing generator")
+    state, stop_now = _enter_step(state, "per-input-replay")
+    if stop_now:
+        return state
+    t0 = time.perf_counter()
+    _wf_log(cast(dict[str, Any], state), "-> per-input-replay")
+    try:
+        run_details = list(state.get("run_details") or [])
+        execution_targets = _execution_plan_targets(gen.repo_root)
+        preferred_target = _preferred_execution_target(
+            execution_targets,
+            cast(dict[str, Any], state),
+            run_details=run_details,
+        )
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        fuzzer_name = str(preferred_identity.get("expected_fuzzer_name") or "").strip()
+        if not fuzzer_name and run_details:
+            fuzzer_name = str(run_details[0].get("fuzzer") or "").strip()
+        if not fuzzer_name:
+            fuzzer_name = str(state.get("last_fuzzer") or state.get("coverage_target_name") or "").strip()
+
+        replay_binary = _resolve_per_input_replay_binary(gen.repo_root, fuzzer_name) if fuzzer_name else None
+        if not fuzzer_name or replay_binary is None:
+            out = {
+                **state,
+                "last_step": "per-input-replay",
+                "last_error": "",
+                "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+                "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+                "coverage_frontier_summary": dict(state.get("coverage_frontier_summary") or {}),
+                "coverage_replay_runtime_sec": 0.0,
+                "coverage_replay_binary_hash": "",
+                "coverage_replay_stage_success": False,
+                "coverage_replay_error": "replay_binary_missing" if fuzzer_name else "replay_target_missing",
+                "coverage_replay_manifest_fresh_for_current_binary": False,
+                "coverage_replay_queue_drained": False,
+                "coverage_replay_pending_inputs": 0,
+                "coverage_replay_failed_inputs": 0,
+                "coverage_replay_processed_inputs": 0,
+                "coverage_replay_total_inputs": 0,
+                "message": "per-input replay skipped",
+            }
+            _wf_log(
+                cast(dict[str, Any], out),
+                f"<- per-input-replay skip reason={out['coverage_replay_error']} dt={_fmt_dt(time.perf_counter()-t0)}",
+            )
+            return out
+
+        replay = collect_per_input_frontier(
+            repo_root=gen.repo_root,
+            fuzzer_name=fuzzer_name,
+            replay_binary=replay_binary,
+            target_api=str(
+                preferred_identity.get("target_api")
+                or state.get("coverage_target_api")
+                or state.get("selected_target_api")
+                or state.get("synthesize_selected_target_api")
+                or ""
+            ).strip(),
+        )
+        out = {
+            **state,
+            "last_step": "per-input-replay",
+            "last_error": "",
+            "coverage_per_input_manifest_path": replay.manifest_path,
+            "coverage_frontier_path": replay.frontier_path,
+            "coverage_frontier_summary": dict(replay.frontier_summary or {}),
+            "coverage_target_name": str(preferred_identity.get("target_name") or state.get("coverage_target_name") or ""),
+            "coverage_target_api": str(preferred_identity.get("target_api") or state.get("coverage_target_api") or ""),
+            "coverage_target_type": str(
+                preferred_identity.get("target_type")
+                or state.get("coverage_target_type")
+                or _target_type_from_run_details(
+                    run_details,
+                    target_name=str(preferred_identity.get("target_name") or state.get("coverage_target_name") or ""),
+                    target_api=str(preferred_identity.get("target_api") or state.get("coverage_target_api") or ""),
+                    fuzzer_name=fuzzer_name,
+                )
+                or ""
+            ),
+            "coverage_replay_runtime_sec": float(replay.runtime_sec),
+            "coverage_replay_binary_hash": str(replay.binary_hash or ""),
+            "coverage_replay_stage_success": bool(replay.stage_success),
+            "coverage_replay_error": str(replay.stage_error or ""),
+            "coverage_replay_manifest_fresh_for_current_binary": bool(
+                replay.manifest_fresh_for_current_binary
+            ),
+            "coverage_replay_queue_drained": bool(replay.replay_queue_drained),
+            "coverage_replay_pending_inputs": int(replay.pending_inputs),
+            "coverage_replay_failed_inputs": int(replay.failed_inputs),
+            "coverage_replay_processed_inputs": int(replay.processed_inputs),
+            "coverage_replay_total_inputs": int(replay.total_inputs),
+            "message": "per-input replay completed",
+        }
+        _wf_log(
+            cast(dict[str, Any], out),
+            (
+                "<- per-input-replay ok"
+                f" stage_success={int(replay.stage_success)}"
+                f" pending={int(replay.pending_inputs)}"
+                f" failed={int(replay.failed_inputs)}"
+                f" dt={_fmt_dt(time.perf_counter()-t0)}"
+            ),
+        )
+        return out
+    except Exception as e:
+        out = {
+            **state,
+            "last_step": "per-input-replay",
+            "last_error": "",
+            "coverage_replay_stage_success": False,
+            "coverage_replay_error": f"replay_stage_error:{type(e).__name__}",
+            "message": "per-input replay failed",
+        }
+        _wf_log(cast(dict[str, Any], out), f"<- per-input-replay err={e} dt={_fmt_dt(time.perf_counter()-t0)}")
+        return out
+
+
 def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
+    gen = state.get("generator")
     state, stop_now = _enter_step(state, "coverage-analysis")
     if stop_now:
         return state
     t0 = time.perf_counter()
     _wf_log(cast(dict[str, Any], state), "-> coverage-analysis")
     try:
+        analysis_repo_root = (
+            Path(str(state.get("repo_root") or "").strip())
+            if str(state.get("repo_root") or "").strip()
+            else getattr(gen, "repo_root", Path.cwd())
+        )
         max_rounds = max(
             0,
             int(
@@ -10434,11 +13514,29 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         history = list(state.get("coverage_history") or [])
         current_cov = _max_cov_from_run_details(run_details)
         current_ft = 0
-        current_target_name = ""
+        current_target_name = str(state.get("coverage_target_name") or "")
         current_target_api = str(state.get("coverage_target_api") or "")
+        current_target_type = str(state.get("coverage_target_type") or "")
+        execution_targets = _execution_plan_targets(analysis_repo_root)
+        preferred_target = _preferred_execution_target(
+            execution_targets,
+            cast(dict[str, Any], state),
+            run_details=run_details,
+        )
+        preferred_identity = _execution_target_identity(preferred_target) if preferred_target else {}
+        if preferred_identity:
+            current_target_name = str(preferred_identity.get("target_name") or current_target_name)
+            current_target_api = str(preferred_identity.get("target_api") or current_target_api)
+            current_target_type = str(preferred_identity.get("target_type") or current_target_type)
+        if not current_target_type:
+            current_target_type = _target_type_from_run_details(
+                run_details,
+                target_name=current_target_name,
+                target_api=current_target_api,
+            )
         selected_target_score_breakdown: dict[str, Any] = {}
         try:
-            for item in _load_selected_targets_doc(gen.repo_root):
+            for item in _load_selected_targets_doc(analysis_repo_root):
                 item_api = str(item.get("api") or "").strip()
                 item_name = str(item.get("target_name") or item.get("name") or "").strip()
                 if current_target_api and item_api and item_api == current_target_api:
@@ -10462,19 +13560,43 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 current_ft = max(int(detail.get("final_ft") or 0) for detail in run_details)
             except Exception:
                 current_ft = 0
-            current_target_name = current_target_api or str(run_details[0].get("fuzzer") or "")
+            if not current_target_name:
+                current_target_name = str(run_details[0].get("fuzzer") or "")
         plateau_detected = any(bool(detail.get("plateau_detected")) for detail in run_details)
         plateau_idle_seconds = max(int(detail.get("plateau_idle_seconds") or 0) for detail in run_details) if run_details else 0
         prev_cov = max(0, int(state.get("coverage_last_max_cov") or 0))
         prev_ft = max(0, int(state.get("coverage_last_ft") or 0))
+        best_cov = max(prev_cov, current_cov)
+        best_ft = max(prev_ft, current_ft)
         prev_plateau_streak = max(0, int(state.get("coverage_plateau_streak") or 0))
         current_seed_profile = str(state.get("coverage_seed_profile") or "")
         current_depth_score = int(state.get("coverage_target_depth_score") or 0)
         current_depth_class = str(state.get("coverage_target_depth_class") or "")
         current_selection_bias_reason = str(state.get("coverage_selection_bias_reason") or "")
-        seed_quality = dict(state.get("coverage_seed_quality") or {})
-        seed_feedback = dict(state.get("coverage_seed_feedback") or _build_seed_feedback(cast(dict[str, Any], state)))
-        quality_flags = list(state.get("coverage_quality_flags") or seed_quality.get("quality_flags") or [])
+        seed_quality = _seed_quality_from_run_details_for_target(
+            run_details,
+            dict(state.get("coverage_seed_quality") or {}),
+            target_name=current_target_name,
+            target_api=current_target_api,
+            fuzzer_name=str(preferred_identity.get("expected_fuzzer_name") or current_target_name),
+        )
+        seed_feedback_state = dict(state)
+        seed_feedback_state["coverage_seed_quality"] = seed_quality
+        seed_feedback_state["coverage_quality_flags"] = _quality_flags_from_seed_quality(seed_quality)
+        seed_feedback = _build_seed_feedback(cast(dict[str, Any], seed_feedback_state))
+        frontier_summary = dict(state.get("coverage_frontier_summary") or {})
+        coverage_frontier_input_count = int(frontier_summary.get("top_input_count") or 0)
+        coverage_replay_stage_success = bool(state.get("coverage_replay_stage_success") or False)
+        coverage_replay_manifest_fresh = bool(
+            state.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        )
+        coverage_replay_queue_drained = bool(state.get("coverage_replay_queue_drained") or False)
+        coverage_replay_pending_inputs = int(state.get("coverage_replay_pending_inputs") or 0)
+        coverage_replay_failed_inputs = int(state.get("coverage_replay_failed_inputs") or 0)
+        coverage_replay_error = str(state.get("coverage_replay_error") or "")
+        quality_flags = _quality_flags_from_seed_quality(seed_quality)
+        if not quality_flags and not seed_quality:
+            quality_flags = list(state.get("coverage_quality_flags") or [])
         seed_families_suggested = list(state.get("coverage_seed_families_suggested") or [])
         seed_families_covered = list(state.get("coverage_seed_families_covered") or [])
         seed_families_missing = list(state.get("coverage_seed_families_missing") or [])
@@ -10502,17 +13624,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         underutilized_execs_threshold = _coverage_underutilized_execs_threshold()
         cold_start_quality_threshold = _cold_start_seed_replan_quality_threshold()
         cold_start_early_units_threshold = _cold_start_seed_replan_early_units_30s_threshold()
-        plateau_no_gain = plateau_detected and current_cov <= prev_cov and current_ft <= prev_ft
-        plateau_streak = (prev_plateau_streak + 1) if plateau_no_gain else (1 if plateau_detected else 0)
-        requested_replan = bool(
-            plateau_no_gain
-            and plateau_streak >= 2
-            and bool(current_seed_profile)
-        )
         replan_reason = ""
         improve_mode = ""
-        can_in_place = unlimited_rounds or (current_round < max_rounds)
-        can_replan = unlimited_rounds or ((current_round + 1) < max_rounds)
         round_budget_exhausted = False
         stop_reason = ""
         run_error_kind_raw = str(state.get("run_error_kind") or "").strip().lower()
@@ -10520,6 +13633,18 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
         cold_start_failure = bool(seed_feedback.get("cold_start_failure") or False)
         seed_generation_degraded = bool(state.get("coverage_seed_generation_degraded") or False)
         quality_score = float(seed_feedback.get("seed_score") or seed_quality.get("seed_score") or 0.0)
+        attack_hint_missing_values = list(
+            seed_feedback.get("attack_hint_missing_values")
+            if seed_feedback.get("attack_hint_missing_values") is not None
+            else seed_quality.get("attack_hint_missing_values")
+            or []
+        )
+        attack_hint_coverage_ratio = float(
+            seed_feedback.get("attack_hint_coverage_ratio")
+            if seed_feedback.get("attack_hint_coverage_ratio") is not None
+            else seed_quality.get("attack_hint_coverage_ratio")
+            or 1.0
+        )
         early_new_units_30s = int(
             seed_feedback.get("early_new_units_30s")
             if seed_feedback.get("early_new_units_30s") is not None
@@ -10549,149 +13674,68 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 )
             )
         )
-        seed_quality_issue = bool(
-            any(
-                flag in quality_flags
-                for flag in {
-                    "low_retention",
-                    "low_early_yield",
-                    "high_homogeneity",
-                    "seed_noise_high",
-                    "missing_execution_targets",
-                    # Advisory flags (missing_suggested_families, repo_examples_missing,
-                    # seed_family_undercovered) intentionally excluded — they are
-                    # informational and should not block or trigger replan.
-                }
-            )
-            or cold_start_failure
-            or merge_retained_low
+        decision = _wf_coverage_decision.evaluate_coverage_decision(
+            run_error_kind=run_error_kind,
+            crash_found=bool(state.get("crash_found")),
+            failed=bool(state.get("failed")),
+            recoverable_run_error_kinds=set(_RECOVERABLE_RUN_ERROR_KINDS),
+            plateau_detected=plateau_detected,
+            current_cov=current_cov,
+            prev_cov=prev_cov,
+            current_ft=current_ft,
+            prev_ft=prev_ft,
+            prev_plateau_streak=prev_plateau_streak,
+            current_seed_profile=current_seed_profile,
+            quality_flags=quality_flags,
+            seed_families_missing=seed_families_missing,
+            cold_start_failure=cold_start_failure,
+            seed_generation_degraded=seed_generation_degraded,
+            quality_score=quality_score,
+            cold_start_quality_threshold=cold_start_quality_threshold,
+            early_new_units_30s=early_new_units_30s,
+            cold_start_early_units_threshold=cold_start_early_units_threshold,
+            merge_retained_low=merge_retained_low,
+            configured_parallel_units=configured_parallel_units,
+            parallel_cpu_budget=parallel_cpu_budget,
+            total_execs_per_sec=total_execs_per_sec,
+            underutilized_execs_threshold=underutilized_execs_threshold,
+            current_depth_class=current_depth_class,
+            coverage_replay_stage_success=coverage_replay_stage_success,
+            coverage_replay_manifest_fresh=coverage_replay_manifest_fresh,
+            coverage_replay_queue_drained=coverage_replay_queue_drained,
+            coverage_frontier_input_count=coverage_frontier_input_count,
+            current_round=current_round,
+            max_rounds=max_rounds,
+            unlimited_rounds=unlimited_rounds,
         )
-        resource_underutilized = bool(
-            not seed_quality_issue
-            and configured_parallel_units < int(parallel_cpu_budget * 0.7)
-            and total_execs_per_sec < underutilized_execs_threshold
+        plateau_no_gain = bool(decision.get("plateau_no_gain") or False)
+        plateau_streak = int(decision.get("plateau_streak") or 0)
+        requested_replan = bool(decision.get("requested_replan") or False)
+        cold_start_seed_replan_triggered = bool(
+            decision.get("cold_start_seed_replan_triggered") or False
         )
-        strategy_mismatch = bool(
-            (not seed_quality_issue)
-            and plateau_detected
-            and total_execs_per_sec > 0
-            and current_cov <= prev_cov
-            and current_ft <= prev_ft
+        degraded_seed_replan_triggered = bool(
+            decision.get("degraded_seed_replan_triggered") or False
         )
-        if seed_quality_issue:
-            parallel_diagnosis_code = "seed_limited_priority"
-            parallel_diagnosis = (
-                "seed quality is the primary bottleneck; prioritize seed replan before parallelism changes"
-            )
-        elif resource_underutilized:
-            parallel_diagnosis_code = "resource_underutilized"
-            parallel_diagnosis = (
-                "exec/s is low while configured parallel units are below cpu budget; "
-                "increase outer or inner workers"
-            )
-        elif strategy_mismatch:
-            parallel_diagnosis_code = "strategy_mismatch"
-            parallel_diagnosis = (
-                "exec/s is healthy but coverage/features are stalled; "
-                "reduce parallelism and prioritize target/seed strategy changes"
-            )
-        else:
-            parallel_diagnosis_code = "balanced"
-            parallel_diagnosis = "parallelism looks balanced for current coverage signal"
+        seed_quality_issue = bool(decision.get("seed_quality_issue") or False)
+        parallel_diagnosis_code = str(decision.get("parallel_diagnosis_code") or "balanced")
+        parallel_diagnosis = str(
+            decision.get("parallel_diagnosis") or "parallelism looks balanced for current coverage signal"
+        )
         quality_degraded = bool(
-            seed_quality_issue
+            decision.get("quality_degraded")
             or list(state.get("coverage_missing_execution_targets") or [])
-            or (requested_replan and plateau_no_gain)
         )
         quality_oracle = "quality_degraded" if quality_degraded else "ok"
-        if seed_quality_issue:
-            coverage_bottleneck_kind = "seed_limited"
-            if cold_start_failure:
-                coverage_bottleneck_reason = "cold_start_failure"
-            elif seed_generation_degraded:
-                coverage_bottleneck_reason = "seed_generation_degraded"
-            elif merge_retained_low:
-                coverage_bottleneck_reason = "merge_retained_low"
-            elif seed_families_missing:
-                coverage_bottleneck_reason = "missing_seed_families"
-            else:
-                coverage_bottleneck_reason = "seed_quality_flags"
-        elif requested_replan or (plateau_no_gain and str(current_depth_class or "").lower() == "shallow"):
-            coverage_bottleneck_kind = "target_limited"
-            coverage_bottleneck_reason = "target_plateau_or_shallow_depth"
-        elif plateau_no_gain:
-            coverage_bottleneck_kind = "harness_limited"
-            coverage_bottleneck_reason = "plateau_without_seed_or_target_signal"
-        else:
-            coverage_bottleneck_kind = "none"
-            coverage_bottleneck_reason = ""
+        coverage_bottleneck_kind = str(decision.get("coverage_bottleneck_kind") or "none")
+        coverage_bottleneck_reason = str(decision.get("coverage_bottleneck_reason") or "")
         auto_stop_policy = _auto_stop_policy()
-        base_should_improve = (
-            (not bool(state.get("crash_found")))
-            and (not bool(state.get("failed")))
-            and (
-                (not run_error_kind)
-                or (run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS)
-            )
-        )
-        should_improve = False
-        replan_required = False
-        if base_should_improve:
-            # Zero-coverage after at least one round indicates a fundamental
-            # problem (broken dict, bad harness, invalid seeds).  Force a
-            # full replan instead of incremental in-place tweaks.
-            if current_cov <= 0 and current_round > 0:
-                # Always force replan on zero coverage — the system must not
-                # stop; it should switch strategy (target, seeds, harness).
-                should_improve = True
-                replan_required = True
-                improve_mode = "replan"
-                replan_reason = "zero_coverage_force_replan"
-            elif cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
-                if can_replan:
-                    should_improve = True
-                    replan_required = True
-                    improve_mode = "seed_replan"
-                    replan_reason = (
-                        "seed_cold_start_failure"
-                        if cold_start_seed_replan_triggered
-                        else "seed_generation_degraded"
-                    )
-                elif can_in_place:
-                    should_improve = True
-                    improve_mode = "in_place"
-                    replan_reason = (
-                        "seed_cold_start_failure_fallback_in_place"
-                        if cold_start_seed_replan_triggered
-                        else "seed_generation_degraded_fallback_in_place"
-                    )
-                else:
-                    round_budget_exhausted = True
-                    stop_reason = "coverage_loop_budget_exhausted"
-            elif seed_quality_issue and can_in_place:
-                should_improve = True
-                improve_mode = "in_place"
-                if cold_start_failure:
-                    replan_reason = "seed_cold_start_failure"
-                elif merge_retained_low:
-                    replan_reason = "seed_merge_retained_low"
-                else:
-                    replan_reason = "seed_quality_issue"
-            elif requested_replan:
-                if can_replan:
-                    should_improve = True
-                    replan_required = True
-                    improve_mode = "replan"
-                    replan_reason = "prefer_deeper_target" if current_depth_class == "shallow" else "stalled_current_target"
-                else:
-                    round_budget_exhausted = True
-                    stop_reason = "coverage_loop_budget_exhausted"
-            elif can_in_place:
-                should_improve = True
-                improve_mode = "in_place"
-            else:
-                round_budget_exhausted = True
-                stop_reason = "coverage_loop_budget_exhausted"
+        should_improve = bool(decision.get("should_improve") or False)
+        replan_required = bool(decision.get("replan_required") or False)
+        improve_mode = str(decision.get("improve_mode") or "")
+        replan_reason = str(decision.get("replan_reason") or "")
+        round_budget_exhausted = bool(decision.get("round_budget_exhausted") or False)
+        stop_reason = str(decision.get("stop_reason") or "")
 
         next_round = current_round + (1 if should_improve else 0)
         reason = "skip coverage loop"
@@ -10715,10 +13759,16 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 reason += "; cold_start_failure=1"
             if seed_generation_degraded:
                 reason += "; seed_generation_degraded=1"
-            if merge_retained_low:
-                reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
-            if parallel_diagnosis_code != "balanced":
-                reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
+        if merge_retained_low:
+            reason += f"; merge_retained_ratio_files={merge_retained_ratio:.2f}"
+        if attack_hint_missing_values:
+            reason += f"; attack_hint_missing_values={','.join(attack_hint_missing_values[:4])}"
+        if coverage_replay_error:
+            reason += f"; per_input_replay={coverage_replay_error}"
+        elif coverage_replay_pending_inputs > 0:
+            reason += f"; per_input_replay_pending={coverage_replay_pending_inputs}"
+        if parallel_diagnosis_code != "balanced":
+            reason += f"; parallel_diagnosis={parallel_diagnosis_code}"
             if coverage_bottleneck_kind != "none":
                 reason += f"; bottleneck={coverage_bottleneck_kind}:{coverage_bottleneck_reason}"
         elif round_budget_exhausted:
@@ -10763,8 +13813,17 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                 "seed_families_suggested": seed_families_suggested,
                 "seed_families_covered": seed_families_covered,
                 "seed_families_missing": seed_families_missing,
+                "attack_hint_coverage_ratio": attack_hint_coverage_ratio,
+                "attack_hint_missing_values": attack_hint_missing_values,
                 "quality_flags": quality_flags,
                 "quality_oracle": quality_oracle,
+                "coverage_frontier_summary": frontier_summary,
+                "coverage_replay_stage_success": coverage_replay_stage_success,
+                "coverage_replay_manifest_fresh_for_current_binary": coverage_replay_manifest_fresh,
+                "coverage_replay_queue_drained": coverage_replay_queue_drained,
+                "coverage_replay_pending_inputs": coverage_replay_pending_inputs,
+                "coverage_replay_failed_inputs": coverage_replay_failed_inputs,
+                "coverage_replay_error": coverage_replay_error,
                 "coverage_bottleneck_kind": coverage_bottleneck_kind,
                 "coverage_bottleneck_reason": coverage_bottleneck_reason,
                 "parallel_diagnosis_code": parallel_diagnosis_code,
@@ -10806,7 +13865,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_improve_reason": reason,
             "coverage_history": history,
             "coverage_target_name": current_target_name or str(state.get("coverage_target_name") or ""),
-            "coverage_target_api": current_target_api or current_target_name or str(state.get("coverage_target_api") or ""),
+            "coverage_target_api": current_target_api or str(state.get("coverage_target_api") or ""),
+            "coverage_target_type": current_target_type,
             "coverage_seed_profile": current_seed_profile,
             "coverage_seed_quality": seed_quality,
             "coverage_seed_families_suggested": seed_families_suggested,
@@ -10830,8 +13890,8 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_selection_bias_reason": current_selection_bias_reason,
             "coverage_target_score_breakdown": selected_target_score_breakdown,
             "coverage_plateau_streak": plateau_streak,
-            "coverage_last_max_cov": current_cov,
-            "coverage_last_ft": current_ft,
+            "coverage_last_max_cov": best_cov,
+            "coverage_last_ft": best_ft,
             "coverage_replan_required": replan_required,
             "coverage_replan_reason": replan_reason or str(state.get("coverage_replan_reason") or ""),
             "coverage_improve_mode": improve_mode,
@@ -10840,6 +13900,19 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             "coverage_repo_examples_filtered": bool(state.get("coverage_repo_examples_filtered") or False),
             "coverage_repo_examples_rejected_count": int(state.get("coverage_repo_examples_rejected_count") or 0),
             "coverage_repo_examples_accepted_count": int(state.get("coverage_repo_examples_accepted_count") or 0),
+            "coverage_per_input_manifest_path": str(state.get("coverage_per_input_manifest_path") or ""),
+            "coverage_frontier_path": str(state.get("coverage_frontier_path") or ""),
+            "coverage_frontier_summary": frontier_summary,
+            "coverage_replay_runtime_sec": float(state.get("coverage_replay_runtime_sec") or 0.0),
+            "coverage_replay_binary_hash": str(state.get("coverage_replay_binary_hash") or ""),
+            "coverage_replay_stage_success": coverage_replay_stage_success,
+            "coverage_replay_error": coverage_replay_error,
+            "coverage_replay_manifest_fresh_for_current_binary": coverage_replay_manifest_fresh,
+            "coverage_replay_queue_drained": coverage_replay_queue_drained,
+            "coverage_replay_pending_inputs": coverage_replay_pending_inputs,
+            "coverage_replay_failed_inputs": coverage_replay_failed_inputs,
+            "coverage_replay_processed_inputs": int(state.get("coverage_replay_processed_inputs") or 0),
+            "coverage_replay_total_inputs": int(state.get("coverage_replay_total_inputs") or 0),
             "coverage_run_error_kind_effective": run_error_kind,
             "cold_start_seed_replan_triggered": cold_start_seed_replan_triggered,
             "degraded_seed_replan_triggered": degraded_seed_replan_triggered,
@@ -10869,23 +13942,30 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
             out["continuous_loop_count"] = int(out.get("continuous_loop_count") or 0) + 1
         out["coverage_seed_feedback"] = _build_seed_feedback(cast(dict[str, Any], out))
         out["coverage_harness_feedback"] = _build_harness_feedback(cast(dict[str, Any], out))
+        hunt_event = _vuln_hunt_event_from_state(cast(dict[str, Any], out))
+        if hunt_event:
+            out["vuln_hunt_events_path"] = _append_vuln_hunt_event(analysis_repo_root, hunt_event)
+            out.update(_update_vuln_candidate_feedback(analysis_repo_root, cast(dict[str, Any], out), hunt_event))
 
         # Collect source coverage report (llvm-cov) for improve feedback
         source_report: dict[str, Any] | None = None
         try:
-            fuzz_out = gen.repo_root / "fuzz" / "out"
-            if fuzz_out.is_dir():
-                bins = sorted(fuzz_out.glob("*"))
-                for b in bins:
-                    if b.is_file() and os.access(str(b), os.X_OK):
-                        source_report = gen.collect_source_coverage(b)
-                        if source_report:
-                            break
+            if gen is not None:
+                current_bin = _resolve_current_coverage_binary(analysis_repo_root, cast(FuzzWorkflowRuntimeState, state))
+                if current_bin is not None:
+                    source_report = gen.collect_source_coverage(current_bin)
         except Exception:
             pass
         if source_report:
             out["coverage_source_report"] = source_report
             out["coverage_uncovered_functions"] = list(source_report.get("uncovered_functions") or [])
+        run_feedback_artifact = _write_run_feedback_artifact(
+            repo_root=analysis_repo_root,
+            source_report=dict(source_report or {}),
+            frontier_summary=frontier_summary,
+        )
+        out["coverage_run_feedback_path"] = str(run_feedback_artifact.get("path") or "")
+        out["coverage_run_feedback_summary"] = dict(run_feedback_artifact.get("summary") or {})
 
         # Track exhausted targets for coverage-guided replan.
         # Each entry is either a plain target name (legacy) or a dict
@@ -10930,6 +14010,22 @@ def _node_coverage_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRunt
                     f"cov={h_entry.get('max_cov')}, ft={h_entry.get('max_ft')}, "
                     f"plateau={h_entry.get('plateau_detected')}"
                 )
+            feedback_lines.extend(_coverage_frontier_feedback_lines(frontier_summary))
+            feedback_summary = dict(out.get("coverage_run_feedback_summary") or {})
+            top_function_gaps = [
+                dict(item)
+                for item in list(feedback_summary.get("top_function_gaps") or [])
+                if isinstance(item, dict)
+            ]
+            if top_function_gaps:
+                feedback_lines.append("- top_function_gaps:")
+                for item in top_function_gaps[:5]:
+                    feedback_lines.append(
+                        "  - "
+                        f"{str(item.get('name') or '').strip()} "
+                        f"({str(item.get('file') or '').strip()}:{int(item.get('line') or 0)}) "
+                        f"kind={str(item.get('kind') or 'unknown')}"
+                    )
             out["coverage_feedback_for_plan"] = "\n".join(feedback_lines)
 
         _wf_log(
@@ -10955,6 +14051,18 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
     _wf_log(cast(dict[str, Any], state), "-> improve-harness")
     prompt_render_issue = ""
     try:
+        def _target_names(values: Any) -> list[str]:
+            names: list[str] = []
+            for item in list(values or []):
+                if isinstance(item, dict):
+                    value = item.get("name") or item.get("target_name") or item.get("api") or item.get("target")
+                else:
+                    value = item
+                name = str(value or "").strip()
+                if name:
+                    names.append(name)
+            return names
+
         if not bool(state.get("coverage_should_improve")):
             out = {
                 **state,
@@ -11018,7 +14126,7 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             )
             # Append coverage-guided target selection context
             coverage_feedback_for_plan = str(state.get("coverage_feedback_for_plan") or "")
-            exhausted_targets = list(state.get("coverage_exhausted_targets") or [])
+            exhausted_targets = _target_names(state.get("coverage_exhausted_targets"))
             if exhausted_targets:
                 hint += f"- AVOID re-selecting these exhausted targets: {', '.join(exhausted_targets)}\n"
             if coverage_feedback_for_plan:
@@ -11052,6 +14160,15 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             )
 
         # Append fine-grained source coverage feedback if available
+        frontier_summary = dict(state.get("coverage_frontier_summary") or {})
+        frontier_lines = _coverage_frontier_feedback_lines(frontier_summary)
+        if frontier_lines:
+            hint += "\n--- Per-Input Frontier ---\n"
+            hint += "\n".join(frontier_lines) + "\n"
+            frontier_path = str(state.get("coverage_frontier_path") or "").strip()
+            if frontier_path:
+                hint += f"- Full frontier summary: {frontier_path}\n"
+
         source_report = dict(state.get("coverage_source_report") or {})
         uncovered_fns = list(state.get("coverage_uncovered_functions") or [])
         if source_report or uncovered_fns:
@@ -11071,6 +14188,30 @@ def _node_improve_harness(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntim
             report_path = source_report.get("report_path")
             if report_path:
                 hint += f"- Full coverage report: {report_path}\n"
+        run_feedback_summary = dict(state.get("coverage_run_feedback_summary") or {})
+        if run_feedback_summary:
+            hint += "\n--- Run Feedback Summary ---\n"
+            for item in list(run_feedback_summary.get("top_function_gaps") or [])[:5]:
+                if not isinstance(item, dict):
+                    continue
+                hint += (
+                    f"- function_gap: {str(item.get('name') or '').strip()} "
+                    f"({str(item.get('file') or '').strip()}:{int(item.get('line') or 0)}) "
+                    f"kind={str(item.get('kind') or 'unknown')}, "
+                    f"ratio={float(item.get('region_coverage_ratio') or 0.0):.2f}\n"
+                )
+            for item in list(run_feedback_summary.get("top_path_frontiers") or [])[:3]:
+                if not isinstance(item, dict):
+                    continue
+                hint += (
+                    f"- path_frontier: {str(item.get('input_relpath') or '').strip()} "
+                    f"score={float(item.get('frontier_score') or 0.0):.2f}, "
+                    f"functions={int(item.get('covered_function_count') or 0)}, "
+                    f"regions={int(item.get('covered_region_count') or 0)}\n"
+                )
+            run_feedback_path = str(state.get("coverage_run_feedback_path") or "").strip()
+            if run_feedback_path:
+                hint += f"- Full run feedback: {run_feedback_path}\n"
 
         opencode_applied = False
         if improve_mode == "in_place":
@@ -11244,8 +14385,10 @@ def _node_fix_crash(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("fix.patch", "fix_summary.md", "done"),
         )
         patch_path = repo_root / "fix.patch"
+        _grace_wait_for_file(patch_path, max_sec=5, min_size=0)
         fix_summary_path = repo_root / "fix_summary.md"
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
         patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
@@ -11337,6 +14480,186 @@ def _normalize_crash_analysis_verdict(raw: str) -> str:
         return "real_bug"
     return "unknown"
 
+
+def _crash_vuln_status(*, stage: str, classification: str) -> str:
+    stage_l = str(stage or "").strip().lower()
+    cls = str(classification or "").strip().lower()
+    if stage_l == "crash-analysis":
+        if cls == "real_bug":
+            return "real_bug"
+        if cls == "false_positive":
+            return "false_positive"
+        return "inconclusive"
+    if cls == "upstream_bug":
+        return "likely_bug"
+    if cls == "harness_bug":
+        return "false_positive"
+    return "inconclusive"
+
+
+def _crash_vuln_confidence(*, status: str, raw_confidence: float) -> float:
+    status_l = str(status or "").strip().lower()
+    base = max(0.0, min(float(raw_confidence or 0.0), 1.0))
+    floor_by_status = {
+        "real_bug": 0.80,
+        "likely_bug": 0.65,
+        "false_positive": 0.70,
+        "inconclusive": 0.35,
+    }
+    return max(base, float(floor_by_status.get(status_l, 0.35)))
+
+
+def _crash_vuln_sanitizer_signal(*texts: str) -> tuple[str, str]:
+    joined = "\n".join(str(t or "") for t in texts if str(t or "").strip())
+    m = re.search(
+        r"ERROR:\s*(Address|Undefined|Memory|Thread|Leak)Sanitizer:\s*([^\s]+)",
+        joined,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        sanitizer = f"{m.group(1)}Sanitizer"
+        crash_type = str(m.group(2) or "unknown").strip()
+        return sanitizer, crash_type
+    m = re.search(
+        r"SUMMARY:\s*(Address|Undefined|Memory|Thread|Leak)Sanitizer:\s*([^\s]+)",
+        joined,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        sanitizer = f"{m.group(1)}Sanitizer"
+        crash_type = str(m.group(2) or "unknown").strip()
+        return sanitizer, crash_type
+    return "", str("unknown")
+
+
+def _crash_vuln_selected_target(repo_root: Path, state: dict[str, Any]) -> dict[str, Any]:
+    fuzzer = str(state.get("last_fuzzer") or "").strip()
+    selected = _load_selected_targets_doc(repo_root)
+    if fuzzer:
+        for item in selected:
+            if str(item.get("wrapper_fuzzer_name") or "").strip() == fuzzer:
+                return dict(item)
+            if str(item.get("target_name") or item.get("name") or "").strip() == fuzzer:
+                return dict(item)
+    return dict(selected[0]) if selected else {}
+
+
+def _write_crash_vuln_candidate(
+    repo_root: Path,
+    state: dict[str, Any],
+    *,
+    stage: str,
+    classification: str,
+    reason: str,
+    evidence: list[str],
+    confidence: float,
+    triage_label: str = "",
+    analysis_verdict: str = "",
+    info_text: str = "",
+    runtime_text: str = "",
+) -> dict[str, Any]:
+    fuzz_dir = repo_root / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    path = fuzz_dir / "vuln_candidates.json"
+    report_path = repo_root / "crash_vuln_report.md"
+
+    selected_target = _crash_vuln_selected_target(repo_root, state)
+    attack_hint = dict(selected_target.get("attack_hint") or {})
+    sanitizer, crash_type = _crash_vuln_sanitizer_signal(
+        info_text,
+        runtime_text,
+        "\n".join(evidence),
+        str(state.get("crash_stack_type") or ""),
+    )
+    if not sanitizer and str(state.get("crash_stack_type") or "").strip():
+        crash_type = str(state.get("crash_stack_type") or "").strip()
+
+    signature = str(state.get("crash_signature") or state.get("crash_stack_signature") or "").strip()
+    signature_short = re.sub(r"[^A-Za-z0-9]+", "", signature)[:12] or "unknown"
+    status = _crash_vuln_status(stage=stage, classification=classification)
+    candidate = {
+        "candidate_id": f"crash_{signature_short}",
+        "source_stage": stage,
+        "validation_status": status,
+        "classification": classification,
+        "confidence": _crash_vuln_confidence(status=status, raw_confidence=confidence),
+        "reason": str(reason or "").strip(),
+        "evidence": [str(x).strip() for x in list(evidence or []) if str(x).strip()],
+        "target_api": str(
+            selected_target.get("target_api")
+            or selected_target.get("api")
+            or state.get("selected_target_api")
+            or state.get("coverage_target_api")
+            or ""
+        ).strip(),
+        "target_name": str(
+            selected_target.get("target_name")
+            or selected_target.get("name")
+            or state.get("coverage_target_name")
+            or ""
+        ).strip(),
+        "target_file": str(selected_target.get("target_file") or selected_target.get("file") or ""),
+        "fuzzer": str(state.get("last_fuzzer") or ""),
+        "artifact": str(state.get("last_crash_artifact") or ""),
+        "crash_signature": signature,
+        "sanitizer": sanitizer,
+        "crash_type": crash_type,
+        "triage_label": triage_label,
+        "analysis_verdict": analysis_verdict,
+        "reproduction_status": "reproduced" if bool(state.get("re_run_ok") or state.get("crash_repro_ok")) else "observed",
+        "attack_hint": attack_hint,
+        "created_at": int(time.time()),
+    }
+
+    doc: dict[str, Any] = {"schema_version": 1, "candidates": []}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(loaded, dict):
+                doc = loaded
+        except Exception:
+            doc = {"schema_version": 1, "candidates": []}
+    candidates = [dict(x) for x in list(doc.get("candidates") or []) if isinstance(x, dict)]
+    candidates = [x for x in candidates if str(x.get("candidate_id") or "") != candidate["candidate_id"]]
+    candidates.append(candidate)
+    doc = {
+        "schema_version": 1,
+        "updated_at": int(time.time()),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    report_lines = [
+        "# Crash Vulnerability Candidate Report",
+        "",
+        f"- candidate_id: {candidate['candidate_id']}",
+        f"- validation_status: {candidate['validation_status']}",
+        f"- classification: {candidate['classification']}",
+        f"- confidence: {float(candidate['confidence']):.2f}",
+        f"- target_api: {candidate['target_api'] or '(unknown)'}",
+        f"- fuzzer: {candidate['fuzzer'] or '(unknown)'}",
+        f"- sanitizer: {candidate['sanitizer'] or '(unknown)'}",
+        f"- crash_type: {candidate['crash_type'] or '(unknown)'}",
+        f"- crash_signature: {candidate['crash_signature'] or '(unknown)'}",
+        "",
+        "## Reason",
+        "",
+        candidate["reason"] or "(none)",
+        "",
+        "## Evidence",
+        "",
+    ]
+    report_lines.extend([f"- {line}" for line in candidate["evidence"]] or ["- (none)"])
+    report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    return {
+        "candidate": candidate,
+        "path": str(path),
+        "report_path": str(report_path),
+        "candidate_count": len(candidates),
+    }
+
+
 def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
     gen = state.get("generator")
     if gen is None:
@@ -11403,11 +14726,17 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("crash_triage.json", "done"),
         )
+        # Grace period for filesystem flush — OpenCode (Node.js) uses async I/O,
+        # so the output file may not be flushed to disk when the done sentinel fires.
+        _grace_wait_for_file(triage_json_path, max_sec=5)
         parsed: dict[str, Any] = {}
         if triage_json_path.is_file():
             try:
-                parsed = json.loads(triage_json_path.read_text(encoding="utf-8", errors="replace"))
+                raw = triage_json_path.read_text(encoding="utf-8", errors="replace").strip()
+                if raw:
+                    parsed = json.loads(raw)
             except Exception:
                 parsed = {}
         if isinstance(parsed, dict) and parsed:
@@ -11476,6 +14805,19 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         except Exception as exc:
             _wf_log(cast(dict[str, Any], state), f"crash-triage: constraint memory update skipped: {exc}")
 
+    crash_vuln = _write_crash_vuln_candidate(
+        repo_root,
+        cast(dict[str, Any], state),
+        stage="crash-triage",
+        classification=label,
+        confidence=float(confidence),
+        reason=reason,
+        evidence=signal_lines,
+        triage_label=label,
+        info_text=info_text,
+        runtime_text=re_run_text,
+    )
+
     out = {
         **state,
         "last_step": "crash-triage",
@@ -11534,6 +14876,10 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "constraint_memory_count": constraint_count,
         "constraint_memory_path": constraint_path,
         "crash_signature_dedup_hit": bool(int(state.get("same_crash_repeats") or 0) > 0),
+        "vuln_candidates_path": str(crash_vuln.get("path") or ""),
+        "crash_vuln_report_path": str(crash_vuln.get("report_path") or ""),
+        "latest_crash_vuln_candidate": dict(crash_vuln.get("candidate") or {}),
+        "crash_vuln_candidate_count": int(crash_vuln.get("candidate_count") or 0),
         "message": f"crash triage classified as {label}",
     }
     choose_repair_snapshot = {
@@ -11545,6 +14891,7 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         "repair_origin_stage": str(out.get("repair_origin_stage") or ""),
         "repair_signature": str(out.get("repair_signature") or ""),
         "constraint_memory_count": int(constraint_count),
+        "vuln_candidate_status": str(dict(crash_vuln.get("candidate") or {}).get("validation_status") or ""),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
     out = _attach_prompt_render_status(out, issue=prompt_render_issue)
@@ -11629,13 +14976,17 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("crash_analysis.json", "done"),
         )
+        _grace_wait_for_file(analysis_json_path, max_sec=5)
         parsed_doc: dict[str, Any] = {}
         if analysis_json_path.is_file():
             try:
-                loaded = json.loads(analysis_json_path.read_text(encoding="utf-8", errors="replace"))
-                if isinstance(loaded, dict):
-                    parsed_doc = loaded
+                raw = analysis_json_path.read_text(encoding="utf-8", errors="replace").strip()
+                if raw:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict):
+                        parsed_doc = loaded
             except Exception:
                 parsed_doc = {}
         if parsed_doc:
@@ -11713,6 +15064,19 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
     restart_reason = "crash_false_positive" if false_positive else ""
     restart_error = reason[:4096] if false_positive else ""
     now_ts = int(time.time())
+    crash_vuln = _write_crash_vuln_candidate(
+        repo_root,
+        cast(dict[str, Any], state),
+        stage="crash-analysis",
+        classification=verdict,
+        confidence=(0.8 if verdict in {"false_positive", "real_bug"} else 0.45),
+        reason=reason,
+        evidence=evidence,
+        triage_label=str(triage_doc.get("label") or state.get("crash_triage_label") or ""),
+        analysis_verdict=verdict,
+        info_text=info_text,
+        runtime_text=re_run_text,
+    )
     out = {
         **state,
         "last_step": "crash-analysis",
@@ -11766,6 +15130,10 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         "constraint_memory_count": constraint_count,
         "constraint_memory_path": constraint_path,
         "crash_signature_dedup_hit": bool(int(state.get("same_crash_repeats") or 0) > 0),
+        "vuln_candidates_path": str(crash_vuln.get("path") or ""),
+        "crash_vuln_report_path": str(crash_vuln.get("report_path") or ""),
+        "latest_crash_vuln_candidate": dict(crash_vuln.get("candidate") or {}),
+        "crash_vuln_candidate_count": int(crash_vuln.get("candidate_count") or 0),
         "message": "crash-analysis false_positive" if false_positive else "crash-analysis stop",
     }
     choose_repair_snapshot = {
@@ -11776,6 +15144,7 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         "repair_origin_stage": str(out.get("repair_origin_stage") or ""),
         "repair_signature": str(out.get("repair_signature") or ""),
         "constraint_memory_count": int(constraint_count),
+        "vuln_candidate_status": str(dict(crash_vuln.get("candidate") or {}).get("validation_status") or ""),
         "degraded_reason": "" if model_output_valid else "model_output_invalid_or_incomplete",
     }
     out = _attach_prompt_render_status(out, issue=prompt_render_issue)
@@ -11848,8 +15217,10 @@ def _node_fix_harness_after_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflow
             timeout=_remaining_time_budget_sec(state),
             max_attempts=1,
             max_cli_retries=_opencode_cli_retries(),
+            activity_watch_paths=("fix.patch", "done"),
         )
         patch_path = repo_root / "fix.patch"
+        _grace_wait_for_file(patch_path, max_sec=5, min_size=0)
         changed_files = write_patch_from_snapshot(snapshot, repo_root, patch_path)
         patch_bytes = patch_path.stat().st_size if patch_path.exists() else 0
         if not changed_files:
@@ -12601,22 +15972,35 @@ def _route_after_run_state(state: FuzzWorkflowRuntimeState) -> str:
     err = dict(state.get("error") or {})
     terminal_reason = str(state.get("run_terminal_reason") or err.get("code") or "").strip().lower()
     # Coverage plateau is a coverage signal, not a hard run failure.
-    # Let coverage-analysis decide in_place vs replan.
+    # Replay the corpus first so coverage-analysis can classify it.
     if terminal_reason == "coverage_plateau":
-        return "coverage-analysis"
+        return "per-input-replay"
     run_error_kind = _effective_run_error_kind(cast(dict[str, Any], state)) or str(
         state.get("run_error_kind") or err.get("code") or ""
     ).strip().lower()
     if run_error_kind in _RECOVERABLE_RUN_ERROR_KINDS:
-        return "coverage-analysis"
+        return "per-input-replay"
     if run_error_kind in _FATAL_RUN_ERROR_KINDS:
         return "plan"
     if run_error_kind:
         return "plan"
+    return "per-input-replay"
+
+
+def _route_after_per_input_replay_state(state: FuzzWorkflowRuntimeState) -> str:
+    state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
+    err = dict(state.get("error") or {})
+    if bool(state.get("failed")) or bool(err.get("terminal")):
+        return "stop"
+    if str(state.get("last_error") or err.get("message") or "").strip():
+        return "stop"
     return "coverage-analysis"
 
 
 def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if bool(state.get("coverage_should_improve")) and _vuln_hunting_enabled():
+        state["_vuln_hunt_entry_source"] = "coverage-analysis"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
@@ -12624,12 +16008,16 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
     if str(state.get("last_error") or err.get("message") or "").strip():
         return "stop"
     if bool(state.get("coverage_should_improve")):
+        if _vuln_hunting_enabled():
+            return "vuln-hunt"
         return "improve-harness"
     # Circuit breaker: force a full replan after repeated no-improvement
     # loops instead of blindly re-running the same failing configuration.
     max_continuous = int(os.environ.get("SHERPA_MAX_CONTINUOUS_LOOP", "3"))
     loop_count = int(state.get("continuous_loop_count") or 0)
     if loop_count >= max_continuous:
+        if _vuln_hunting_enabled():
+            return "vuln-hunt"
         return "plan"
     if _auto_stop_policy() == "hard_fail_only":
         return "run"
@@ -12637,6 +16025,13 @@ def _route_after_coverage_analysis_state(state: FuzzWorkflowRuntimeState) -> str
 
 
 def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if (
+        bool(state.get("coverage_should_improve"))
+        and _vuln_hunting_enabled()
+        and str(state.get("coverage_improve_mode") or "").strip() == "in_place"
+    ):
+        state["_vuln_hunt_entry_source"] = "improve-harness"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
@@ -12659,19 +16054,27 @@ def _route_after_improve_harness_state(state: FuzzWorkflowRuntimeState) -> str:
             return "plan"
         return "stop"
     if bool(state.get("coverage_should_improve")):
-        if str(state.get("coverage_improve_mode") or "").strip() == "in_place":
+        mode = str(state.get("coverage_improve_mode") or "").strip()
+        if _vuln_hunting_enabled() and mode == "in_place":
+            return "vuln-hunt"
+        if mode == "in_place":
             return "build"
         return "plan"
     return "stop"
 
 
 def _route_after_analysis_state(state: FuzzWorkflowRuntimeState) -> str:
+    # Set source on original dict before _normalize_error_state makes a copy.
+    if _vuln_hunting_enabled():
+        state["_vuln_hunt_entry_source"] = "analysis"
     state = cast(FuzzWorkflowRuntimeState, _normalize_error_state(cast(dict[str, Any], state)))
     err = dict(state.get("error") or {})
     if bool(state.get("failed")) or bool(err.get("terminal")):
         return "stop"
     if str(state.get("last_error") or err.get("message") or "").strip() and not bool(state.get("analysis_degraded")):
         return "stop"
+    if _vuln_hunting_enabled():
+        return "vuln-hunt"
     return "plan"
 
 
@@ -12797,6 +16200,8 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_init_state(state)
     if last_step == "analysis":
         return _route_after_analysis_state(state)
+    if last_step == "vuln-hunt":
+        return _route_after_vuln_hunt_state(state)
     if last_step == "plan":
         return _route_after_plan_state(state)
     if last_step == "synthesize":
@@ -12807,6 +16212,8 @@ def _recommended_next_step(state: FuzzWorkflowRuntimeState) -> str:
         return _route_after_fix_build_state(state)
     if last_step == "run":
         return _route_after_run_state(state)
+    if last_step == "per-input-replay":
+        return _route_after_per_input_replay_state(state)
     if last_step == "fix_crash":
         return _route_after_fix_crash_state(state)
     if last_step == "crash-triage":
@@ -12834,12 +16241,16 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
         raw = "plan"
     if raw in {"fix_build", "fix_crash"}:
         raw = "build"
+    if raw == "vuln_hunt":
+        raw = "vuln-hunt"
     allowed = {
         "analysis",
+        "vuln-hunt",
         "plan",
         "synthesize",
         "build",
         "run",
+        "per-input-replay",
         "crash-triage",
         "coverage-analysis",
         "improve-harness",
@@ -12852,6 +16263,27 @@ def _route_after_init_state(state: FuzzWorkflowRuntimeState) -> str:
     if raw in allowed:
         return raw
     return "analysis"
+
+
+def _route_after_vuln_hunt_state(state: FuzzWorkflowRuntimeState) -> str:
+    if bool(state.get("failed")):
+        return "stop"
+    if str(state.get("last_error") or "").strip():
+        return "stop"
+
+    source = str(state.get("_vuln_hunt_entry_source") or "").strip()
+
+    if source == "improve-harness":
+        return "build"
+
+    if source == "coverage-analysis":
+        active_priority = float(state.get("vuln_hunt_highest_priority") or 0.0)
+        if active_priority >= _vuln_replan_priority_threshold():
+            return "plan"
+        return "improve-harness"
+
+    # "analysis" or unknown sources — initial flow, unchanged
+    return "plan"
 
 
 def _should_stage_stop(state: FuzzWorkflowRuntimeState, step_name: str) -> bool:
@@ -12870,9 +16302,11 @@ def build_fuzz_workflow() -> StateGraph:
 
     graph.add_node("init", _node_init)
     graph.add_node("analysis", _node_analysis)
+    graph.add_node("vuln-hunt", _node_vuln_hunt)
     graph.add_node("plan", _node_plan)
     graph.add_node("synthesize", _node_synthesize)
     graph.add_node("build", _node_build)
+    graph.add_node("per-input-replay", _node_per_input_replay)
     graph.add_node("coverage-analysis", _node_coverage_analysis)
     graph.add_node("improve-harness", _node_improve_harness)
     graph.add_node("re-build", _node_re_build)
@@ -12911,6 +16345,10 @@ def build_fuzz_workflow() -> StateGraph:
         nxt = _route_after_run_state(state)
         return _apply_stage_stop_guard(state, "run", nxt)
 
+    def _route_after_per_input_replay(state: FuzzWorkflowRuntimeState) -> str:
+        nxt = _route_after_per_input_replay_state(state)
+        return _apply_stage_stop_guard(state, "per-input-replay", nxt)
+
     def _route_after_crash_triage(state: FuzzWorkflowRuntimeState) -> str:
         nxt = _route_after_crash_triage_state(state)
         return _apply_stage_stop_guard(state, "crash-triage", nxt)
@@ -12940,10 +16378,12 @@ def build_fuzz_workflow() -> StateGraph:
         _route_after_init_state,
         {
             "analysis": "analysis",
+            "vuln-hunt": "vuln-hunt",
             "plan": "plan",
             "synthesize": "synthesize",
             "build": "build",
             "run": "run",
+            "per-input-replay": "per-input-replay",
             "crash-triage": "crash-triage",
             "coverage-analysis": "coverage-analysis",
             "improve-harness": "improve-harness",
@@ -12953,7 +16393,12 @@ def build_fuzz_workflow() -> StateGraph:
             "stop": END,
         },
     )
-    graph.add_conditional_edges("analysis", _route_after_analysis, {"plan": "plan", "stop": END})
+    graph.add_conditional_edges("analysis", _route_after_analysis, {"vuln-hunt": "vuln-hunt", "plan": "plan", "stop": END})
+    graph.add_conditional_edges(
+        "vuln-hunt",
+        lambda state: _apply_stage_stop_guard(state, "vuln-hunt", _route_after_vuln_hunt_state(state)),
+        {"plan": "plan", "improve-harness": "improve-harness", "build": "build", "stop": END},
+    )
     graph.add_conditional_edges("plan", _route_after_plan, {"synthesize": "synthesize", "stop": END})
     graph.add_conditional_edges("synthesize", _route_after_synthesize, {"build": "build", "stop": END})
     graph.add_conditional_edges(
@@ -12965,11 +16410,16 @@ def build_fuzz_workflow() -> StateGraph:
         "run",
         _route_after_run,
         {
-            "coverage-analysis": "coverage-analysis",
+            "per-input-replay": "per-input-replay",
             "crash-triage": "crash-triage",
             "plan": "plan",
             "stop": END,
         },
+    )
+    graph.add_conditional_edges(
+        "per-input-replay",
+        _route_after_per_input_replay,
+        {"coverage-analysis": "coverage-analysis", "stop": END},
     )
     graph.add_conditional_edges(
         "crash-triage",
@@ -12979,12 +16429,12 @@ def build_fuzz_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "coverage-analysis",
         _route_after_coverage_analysis,
-        {"improve-harness": "improve-harness", "stop": END},
+        {"vuln-hunt": "vuln-hunt", "improve-harness": "improve-harness", "stop": END},
     )
     graph.add_conditional_edges(
         "improve-harness",
         _route_after_improve_harness,
-        {"plan": "plan", "stop": END},
+        {"build": "build", "plan": "plan", "vuln-hunt": "vuln-hunt", "stop": END},
     )
     graph.add_conditional_edges(
         "re-build",
@@ -13133,8 +16583,13 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             msg = f"{terminal_reason}: {msg}"
         raise RuntimeError(msg or "workflow failed")
     # If we stopped due to an error but didn't mark failed, still surface it.
+    # crash_found alone is not enough to suppress — if we're still in an
+    # unrecovered repair (e.g. crash_triage→harness_bug→plan_repair failed),
+    # the error must surface as a workflow failure.
     last_error = str(out.get("last_error") or err.get("message") or "").strip()
-    if last_error and not bool(out.get("crash_found")):
+    repair_unrecovered = bool(out.get("repair_mode")) and bool(last_error)
+    should_surface = bool(last_error) and (not bool(out.get("crash_found")) or repair_unrecovered)
+    if should_surface:
         if stop_after_step and recommended_next != "stop":
             _wf_log(
                 out,
@@ -13147,7 +16602,7 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
             _wf_log(out, f"workflow end status=error dt={_fmt_dt(time.perf_counter()-t0)}")
             raise RuntimeError(last_error)
 
-    if not (last_error and not bool(out.get("crash_found")) and stop_after_step and recommended_next != "stop"):
+    if not (should_surface and stop_after_step and recommended_next != "stop"):
         _wf_log(out, f"workflow end status=ok dt={_fmt_dt(time.perf_counter()-t0)}")
     return {
         "message": msg,
@@ -13175,6 +16630,50 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "coverage_improve_reason": str(out.get("coverage_improve_reason") or ""),
         "coverage_bottleneck_kind": str(out.get("coverage_bottleneck_kind") or ""),
         "coverage_bottleneck_reason": str(out.get("coverage_bottleneck_reason") or ""),
+        "coverage_target_name": str(out.get("coverage_target_name") or ""),
+        "coverage_target_api": str(out.get("coverage_target_api") or ""),
+        "coverage_target_type": str(out.get("coverage_target_type") or ""),
+        "coverage_seed_profile": str(out.get("coverage_seed_profile") or ""),
+        "coverage_seed_quality": dict(out.get("coverage_seed_quality") or {}),
+        "coverage_seed_families_suggested": list(out.get("coverage_seed_families_suggested") or []),
+        "coverage_seed_families_covered": list(out.get("coverage_seed_families_covered") or []),
+        "coverage_seed_families_missing": list(out.get("coverage_seed_families_missing") or []),
+        "coverage_quality_flags": list(out.get("coverage_quality_flags") or []),
+        "coverage_quality_oracle": str(out.get("coverage_quality_oracle") or ""),
+        "coverage_target_depth_score": int(out.get("coverage_target_depth_score") or 0),
+        "coverage_target_depth_class": str(out.get("coverage_target_depth_class") or ""),
+        "coverage_selection_bias_reason": str(out.get("coverage_selection_bias_reason") or ""),
+        "coverage_target_score_breakdown": dict(out.get("coverage_target_score_breakdown") or {}),
+        "coverage_plateau_streak": int(out.get("coverage_plateau_streak") or 0),
+        "coverage_last_max_cov": int(out.get("coverage_last_max_cov") or 0),
+        "coverage_last_ft": int(out.get("coverage_last_ft") or 0),
+        "coverage_replan_required": bool(out.get("coverage_replan_required") or False),
+        "coverage_replan_reason": str(out.get("coverage_replan_reason") or ""),
+        "coverage_replan_effective": bool(out.get("coverage_replan_effective") or False),
+        "coverage_improve_mode": str(out.get("coverage_improve_mode") or ""),
+        "coverage_round_budget_exhausted": bool(out.get("coverage_round_budget_exhausted") or False),
+        "coverage_stop_reason": str(out.get("coverage_stop_reason") or ""),
+        "coverage_corpus_sources": list(out.get("coverage_corpus_sources") or []),
+        "coverage_seed_counts": dict(out.get("coverage_seed_counts") or {}),
+        "coverage_parallel_diagnosis_code": str(out.get("coverage_parallel_diagnosis_code") or ""),
+        "coverage_parallel_diagnosis": str(out.get("coverage_parallel_diagnosis") or ""),
+        "coverage_per_input_manifest_path": str(out.get("coverage_per_input_manifest_path") or ""),
+        "coverage_frontier_path": str(out.get("coverage_frontier_path") or ""),
+        "coverage_frontier_summary": dict(out.get("coverage_frontier_summary") or {}),
+        "coverage_replay_runtime_sec": float(out.get("coverage_replay_runtime_sec") or 0.0),
+        "coverage_replay_binary_hash": str(out.get("coverage_replay_binary_hash") or ""),
+        "coverage_replay_binary_dir": str(out.get("coverage_replay_binary_dir") or ""),
+        "coverage_replay_binary_count": int(out.get("coverage_replay_binary_count") or 0),
+        "coverage_replay_stage_success": bool(out.get("coverage_replay_stage_success") or False),
+        "coverage_replay_error": str(out.get("coverage_replay_error") or ""),
+        "coverage_replay_manifest_fresh_for_current_binary": bool(
+            out.get("coverage_replay_manifest_fresh_for_current_binary") or False
+        ),
+        "coverage_replay_queue_drained": bool(out.get("coverage_replay_queue_drained") or False),
+        "coverage_replay_pending_inputs": int(out.get("coverage_replay_pending_inputs") or 0),
+        "coverage_replay_failed_inputs": int(out.get("coverage_replay_failed_inputs") or 0),
+        "coverage_replay_processed_inputs": int(out.get("coverage_replay_processed_inputs") or 0),
+        "coverage_replay_total_inputs": int(out.get("coverage_replay_total_inputs") or 0),
         "cold_start_seed_replan_triggered": bool(out.get("cold_start_seed_replan_triggered") or False),
         "degraded_seed_replan_triggered": bool(out.get("degraded_seed_replan_triggered") or False),
         "cold_start_trigger_snapshot": dict(out.get("cold_start_trigger_snapshot") or {}),
@@ -13183,10 +16682,24 @@ def run_fuzz_workflow(inp: FuzzWorkflowInput) -> dict[str, Any]:
         "security_evidence_count": int(out.get("security_evidence_count") or 0),
         "vuln_candidate_count": int(out.get("vuln_candidate_count") or 0),
         "vuln_hunting_enabled": bool(out.get("vuln_hunting_enabled") or False),
+        "vuln_hunt_enabled": bool(out.get("vuln_hunt_enabled") or False),
+        "vuln_hunt_iteration": int(out.get("vuln_hunt_iteration") or 0),
+        "vuln_hunt_active_candidate_id": str(out.get("vuln_hunt_active_candidate_id") or ""),
+        "vuln_hunt_highest_priority": float(out.get("vuln_hunt_highest_priority") or 0.0),
+        "vuln_hunt_candidate_count": int(out.get("vuln_hunt_candidate_count") or 0),
+        "vuln_hunt_degraded": bool(out.get("vuln_hunt_degraded") or False),
+        "vuln_hunt_last_reason": str(out.get("vuln_hunt_last_reason") or ""),
+        "vuln_hunt_summary_path": str(out.get("vuln_hunt_summary_path") or ""),
+        "vuln_hunt_events_path": str(out.get("vuln_hunt_events_path") or ""),
+        "vuln_hunt_rerun_requested": bool(out.get("vuln_hunt_rerun_requested") or False),
         "vuln_focus_profile": str(out.get("vuln_focus_profile") or ""),
         "target_surface_policy": str(out.get("target_surface_policy") or ""),
         "security_priority_mode": bool(out.get("security_priority_mode") or False),
         "latest_vuln_decision_snapshot": dict(out.get("latest_vuln_decision_snapshot") or {}),
+        "vuln_candidates_path": str(out.get("vuln_candidates_path") or ""),
+        "crash_vuln_report_path": str(out.get("crash_vuln_report_path") or ""),
+        "latest_crash_vuln_candidate": dict(out.get("latest_crash_vuln_candidate") or {}),
+        "crash_vuln_candidate_count": int(out.get("crash_vuln_candidate_count") or 0),
         "target_scoring_enabled": bool(out.get("target_scoring_enabled") or False),
         "target_score_breakdown_available": bool(out.get("target_score_breakdown_available") or False),
         "constraint_memory_count": int(out.get("constraint_memory_count") or 0),

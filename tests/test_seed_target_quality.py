@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -28,6 +29,10 @@ def _make_generator(repo_root: Path) -> NonOssFuzzHarnessGenerator:
     gen.repo_root = repo_root
     gen.fuzz_dir = repo_root / "fuzz"
     gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_out_dir = gen.fuzz_dir / "out"
+    gen.last_seed_profile_by_fuzzer = {}
+    gen.last_seed_bootstrap_by_fuzzer = {}
+    gen.last_selected_target_by_fuzzer = {}
     return gen
 
 
@@ -104,6 +109,43 @@ def test_collect_repo_seed_examples_bootstraps_archive_samples_when_repo_has_non
     assert ".zip" in suffixes or ".tar" in suffixes
     assert any(ext in suffixes for ext in {".gz", ".bz2", ".xz"})
     assert meta["accepted_count"] == len(selected)
+
+
+def test_deterministic_bootstrap_adds_png_decoder_seeds_without_ai(tmp_path: Path):
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "selected_targets.json").write_text(
+        json.dumps(
+            [
+                {
+                    "target_name": "png_process_data",
+                    "api": "png_process_data",
+                    "target_type": "decoder",
+                    "seed_profile": "decoder-binary",
+                    "seed_families_suggested": [],
+                    "seed_families_optional": ["png_signature", "chunk_layout", "truncated_sections"],
+                    "attack_hint": {"trigger_condition": "crafted PNG chunks"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fuzz_dir / "png_process_data_fuzz.c").write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) { png_process_data(0,0,data,size); return 0; }\n",
+        encoding="utf-8",
+    )
+    gen = _make_generator(tmp_path)
+
+    meta = gen._bootstrap_deterministic_seed_corpus("png_process_data")
+
+    corpus_dir = fuzz_dir / "corpus" / "png_process_data"
+    files = sorted(p for p in corpus_dir.iterdir() if p.is_file())
+    assert int(meta["counts"]["deterministic"]) >= 4
+    assert any(p.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for p in files)
+    assert "deterministic" in meta["sources"]
+    coverage = dict(meta["seed_family_coverage"])
+    assert "png_signature" in set(coverage.get("covered") or [])
+    assert gen.last_seed_bootstrap_by_fuzzer["png_process_data"]["generation_mode"] == "deterministic_no_ai"
 
 
 def test_resolve_seed_target_metadata_prefers_observed_target(tmp_path: Path):
@@ -198,6 +240,33 @@ def test_seed_quality_score_rewards_early_yield_signal():
     assert float(high.get("seed_score") or 0.0) > float(low.get("seed_score") or 0.0)
 
 
+def test_seed_quality_flags_attack_hint_boundary_values_missing():
+    log = "\n".join(
+        [
+            "#32 INITED cov: 2 ft: 4 corp: 2/32b exec/s: 0 rss: 12Mb",
+            "#64 pulse cov: 2 ft: 4 corp: 2/32b lim: 1000 exec/s: 100 rss: 12Mb",
+        ]
+    )
+    quality = _seed_quality_from_run(
+        log=log,
+        initial_corpus_files=2,
+        initial_corpus_bytes=32,
+        final_stats={"cov": 2, "ft": 4, "corpus_files": 2, "corpus_size_bytes": 32},
+        required_families=["flow_structures"],
+        covered_families=["flow_structures"],
+        repo_examples_count=1,
+        plateau_idle_seconds=60,
+        attack_hint_total_count=3,
+        attack_hint_covered_count=1,
+        attack_hint_missing_values=["len=4096", "len=0xFFFFFFFF"],
+    )
+    flags = set(quality["quality_flags"])
+    assert "attack_hint_boundary_values_missing" in flags
+    assert quality["attack_hint_total_count"] == 3
+    assert quality["attack_hint_covered_count"] == 1
+    assert quality["attack_hint_missing_values"] == ["len=4096", "len=0xFFFFFFFF"]
+
+
 def test_host_git_proxy_env_prefers_runtime_proxy_env(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:6789")
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,.svc")
@@ -259,6 +328,21 @@ def test_fmt_seed_families_replace_generic_parser_format():
     assert "width_precision" in required
     assert "malformed_replacement_fields" in required
     assert optional == []
+
+
+def test_decoder_binary_seed_families_are_format_bounded_and_advisory():
+    required, optional = _seed_families_for_target(
+        "decoder-binary",
+        "png_read_image",
+        "libpng IHDR IDAT chunk decoder",
+    )
+    assert required == []
+    assert "magic_headers" in optional
+    assert "chunk_layout" in optional
+    assert "png_signature" in optional
+    assert "png_chunk_order" in optional
+    assert "document_markers" not in optional
+    assert "block_scalars" not in optional
 
 
 def test_infer_target_type_keeps_inflate_on_archive_side():

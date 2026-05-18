@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -85,11 +86,76 @@ def test_run_cmd_keeps_stream_loop_open_while_process_is_silent(tmp_path: Path):
     assert "late-err" in err
 
 
+def test_run_cmd_caps_noisy_stderr_but_keeps_tail(tmp_path: Path, monkeypatch, capsys):
+    gen = _fake_generator(tmp_path)
+    monkeypatch.setenv("SHERPA_CMD_CAPTURE_MAX_BYTES", "512")
+    monkeypatch.setenv("SHERPA_CMD_LIVE_MAX_BYTES", "256")
+    script = (
+        "import sys;"
+        "[print(f'noise-{i:04d}-' + 'x'*80, file=sys.stderr, flush=True) for i in range(80)]"
+    )
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert out == ""
+    assert "[sherpa-output-truncated]" in err
+    assert "noise-0079" in err
+    assert "noise-0000" not in err
+    assert "[sherpa-live-output-suppressed]" in captured.out
+    assert captured.out.count("noise-") < 20
+
+
+def test_run_cmd_drops_reader_backlog_but_keeps_tail(tmp_path: Path, monkeypatch, capsys):
+    gen = _fake_generator(tmp_path)
+    monkeypatch.setenv("SHERPA_CMD_CAPTURE_MAX_BYTES", "1024")
+    monkeypatch.setenv("SHERPA_CMD_LIVE_MAX_BYTES", "128")
+    monkeypatch.setenv("SHERPA_CMD_QUEUE_MAX_BYTES", "2048")
+    script = (
+        "import sys;"
+        "[sys.stderr.write(f'burst-{i:05d}-' + 'x'*180 + '\\n') for i in range(2500)];"
+        "sys.stderr.flush()"
+    )
+
+    rc, out, err = gen._run_cmd(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert out == ""
+    assert "[sherpa-output-reader-dropped]" in err
+    assert "[sherpa-output-reader-tail]" in err
+    assert "burst-02499" in err
+    assert "burst-00000" not in err
+    assert captured.out.count("burst-") < 20
+
+
+def test_normalize_dict_token_emits_hex_only_bytes():
+    assert fur._normalize_dict_token('"PNG"') == '"\\x50\\x4e\\x47"'
+    assert fur._normalize_dict_token('"\\x89PNG\\r\\n\\x1a\\n"') == (
+        '"\\x89\\x50\\x4e\\x47\\x0d\\x0a\\x1a\\x0a"'
+    )
+    assert fur._normalize_dict_token('"\\0\\377\\\""') == '"\\x00\\xff\\x22"'
+    assert fur._normalize_dict_token('""') == ""
+
+
 def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     log_path = tmp_path / "vcpkg.log"
     bin_dir = tmp_path / "bin"
@@ -129,27 +195,68 @@ def test_run_cmd_native_autoinstalls_declared_system_packages_for_build_entry(tm
     assert rc == 0
     assert "native-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "list zlib:" in log_text
+    assert "list bzip2:" in log_text
     assert "install --triplet" in log_text
-    assert "zlib" in log_text
+    assert "bzip2" in log_text
+
+
+def test_run_cmd_skips_builtin_zlib_vcpkg_by_default(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+
+    log_path = tmp_path / "vcpkg.log"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(f"#!/bin/sh\necho \"$@\" >> {log_path}\nexit 1\n", encoding="utf-8")
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho zlib-native-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0, err
+    assert "zlib-native-ok" in out
+    assert not log_path.exists()
+    assert gen._declared_vcpkg_ports(repo_root=tmp_path) == []
 
 
 def test_declared_vcpkg_ports_normalizes_common_aliases(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text(
+        "z\nzlib-dev\nzlib1g-dev\nlibz-dev\nbz2\nlzma\nlz4\n",
+        encoding="utf-8",
+    )
 
     ports = gen._declared_vcpkg_ports(repo_root=tmp_path)
 
-    assert ports == ["zlib", "bzip2", "liblzma", "lz4"]
+    assert ports == ["bzip2", "liblzma", "lz4"]
 
 
 def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("z\nbz2\nlzma\nlz4\n", encoding="utf-8")
+    dep_file = fuzz_dir / "system_packages.txt"
+    dep_file.write_text("z\nzlib-dev\nzlib1g-dev\nlibz-dev\nbz2\nlzma\nlz4\n", encoding="utf-8")
 
     log_path = tmp_path / "vcpkg.log"
     vcpkg_dir = tmp_path / "vcpkg"
@@ -185,18 +292,27 @@ def test_run_cmd_normalizes_system_package_aliases_before_install(tmp_path: Path
     assert rc == 0
     assert "alias-build-ok" in out
     log_text = log_path.read_text(encoding="utf-8")
-    assert "list zlib:" in log_text
+    assert "list zlib:" not in log_text
     assert "list bzip2:" in log_text
     assert "list liblzma:" in log_text
     assert "list lz4:" in log_text
     assert "list z:" not in log_text
+    assert "list zlib-dev:" not in log_text
+    assert "list zlib1g-dev:" not in log_text
+    assert "list libz-dev:" not in log_text
     assert "list bz2:" not in log_text
     assert "list lzma:" not in log_text
+    assert dep_file.read_text(encoding="utf-8") == (
+        "# Auto-normalized to vcpkg port names.\n"
+        "bzip2\n"
+        "liblzma\n"
+        "lz4\n"
+    )
 def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     build_script = fuzz_dir / "build.sh"
     build_script.write_text("#!/bin/sh\necho should-not-run\n", encoding="utf-8")
@@ -228,11 +344,61 @@ def test_run_cmd_fails_when_declared_ports_require_missing_vcpkg(tmp_path: Path)
     assert "vcpkg install failed" in merged
 
 
+def test_run_cmd_retries_transient_vcpkg_lock_before_install_failure(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    fuzz_dir = tmp_path / "fuzz"
+    fuzz_dir.mkdir(parents=True, exist_ok=True)
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
+
+    state_file = tmp_path / "vcpkg-install-attempts"
+    vcpkg_dir = tmp_path / "vcpkg"
+    vcpkg_dir.mkdir(parents=True, exist_ok=True)
+    toolchain = vcpkg_dir / "scripts" / "buildsystems" / "vcpkg.cmake"
+    toolchain.parent.mkdir(parents=True, exist_ok=True)
+    toolchain.write_text("# fake toolchain\n", encoding="utf-8")
+    vcpkg_script = vcpkg_dir / "vcpkg"
+    vcpkg_script.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"list\" ]; then exit 1; fi\n"
+        f"attempts=$(cat {state_file} 2>/dev/null || echo 0)\n"
+        "attempts=$((attempts + 1))\n"
+        f"echo \"$attempts\" > {state_file}\n"
+        "if [ \"$attempts\" = \"1\" ]; then\n"
+        "  echo 'vcpkg-running.lock: error: failed to take lock, another vcpkg may be running' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    vcpkg_script.chmod(0o755)
+
+    build_script = fuzz_dir / "build.sh"
+    build_script.write_text("#!/bin/sh\necho lock-retry-build-ok\n", encoding="utf-8")
+    build_script.chmod(0o755)
+
+    env = os.environ.copy()
+    env["SHERPA_AUTO_INSTALL_SYSTEM_DEPS"] = "1"
+    env["SHERPA_VCPKG_INSTALL_RETRY_DELAY_SEC"] = "0"
+
+    rc, out, err = gen._run_cmd(
+        ["./build.sh"],
+        cwd=fuzz_dir,
+        env=env,
+        timeout=10,
+        idle_timeout=0,
+    )
+
+    assert rc == 0
+    assert "lock-retry-build-ok" in out
+    assert state_file.read_text(encoding="utf-8").strip() == "2"
+    assert "retrying vcpkg install after transient lock failure" in (out + err)
+
+
 def test_run_cmd_retries_hardcoded_vcpkg_mirrors_after_primary_clone_failure(tmp_path: Path):
     gen = _fake_generator(tmp_path)
     fuzz_dir = tmp_path / "fuzz"
     fuzz_dir.mkdir(parents=True, exist_ok=True)
-    (fuzz_dir / "system_packages.txt").write_text("zlib\n", encoding="utf-8")
+    (fuzz_dir / "system_packages.txt").write_text("bzip2\n", encoding="utf-8")
 
     clone_log = tmp_path / "clone.log"
     git_bin_dir = tmp_path / "bin"
@@ -472,6 +638,106 @@ def test_pass_generate_seeds_uses_declared_target_type_guidance(tmp_path: Path):
     assert "Aim for at least" in captured["instructions"]
     assert "total seed files" in captured["instructions"]
     assert "Do not stop after creating only one tiny seed per family" in captured["instructions"]
+
+
+def test_pass_generate_seeds_injects_attack_hint_boundary_guidance(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"parse_zip","api":"parse_zip","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"signal_type":"mem_oob_candidate","evidence_ids":["EV-1","EV-2"],'
+            '"attack_hint":{"trigger_condition":"declared length exceeds allocated output buffer",'
+            '"key_code_path":["parse_zip","copy_entry_data","memcpy"],'
+            '"boundary_values":["len=0","len=4096","len=0xFFFFFFFF"],'
+            '"vuln_category":"heap-buffer-overflow","sanitizer_hint":"address"}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_zip_fuzz.cc"
+    harness.write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return parse_zip(0, 0); }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_zip_fuzz")
+
+    assert "Attack-hint guidance for seed design:" in captured["instructions"]
+    assert "trigger_condition: declared length exceeds allocated output buffer" in captured["instructions"]
+    assert "key_code_path: parse_zip -> copy_entry_data -> memcpy" in captured["instructions"]
+    assert "boundary_values: len=0, len=4096, len=0xFFFFFFFF" in captured["instructions"]
+    assert "sanitizer_hint: address" in captured["instructions"]
+    assert "evidence_ids: EV-1, EV-2" in captured["instructions"]
+    assert "ensure the corpus contains explicit seeds for those values" in captured["instructions"]
+
+
+def test_pass_generate_seeds_prioritizes_previous_attack_hint_gaps(tmp_path: Path):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"parse_zip","api":"parse_zip","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"attack_hint":{"key_code_path":["parse_zip","copy_entry_data","memcpy"],'
+            '"boundary_values":["len=0","len=0xFFFFFFFF"]}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    (gen.fuzz_dir / "seed_feedback.json").write_text(
+        json.dumps(
+            {
+                "by_fuzzer": {
+                    "parse_zip_fuzz": {
+                        "attack_hint_missing_values": ["len=0xFFFFFFFF"],
+                        "attack_hint_coverage_ratio": 0.25,
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "parse_zip_fuzz.cc"
+    harness.write_text(
+        "int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return parse_zip(0, 0); }\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, str] = {}
+
+    class _Patcher:
+        def run_codex_command(self, instructions: str, additional_context: str = "", **_kwargs):
+            captured["instructions"] = instructions
+            captured["context"] = additional_context
+            return "seed-ok"
+
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("parse_zip_fuzz")
+
+    assert "Current attack-hint boundary coverage:" in captured["instructions"]
+    assert "missing=len=0, len=0xFFFFFFFF" in captured["instructions"]
+    assert "Attack-hint recovery directive (must follow):" in captured["instructions"]
+    assert "Previous run still missed these boundary-oriented values: len=0xFFFFFFFF." in captured["instructions"]
+    assert "Previous attack-hint coverage ratio was 0.25." in captured["instructions"]
+    assert "Keep the seed structure aligned with the selected target's `key_code_path`" in captured["instructions"]
 
 
 def test_pass_generate_seeds_passes_idle_timeout_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -906,6 +1172,54 @@ def test_pass_generate_seeds_bootstraps_repo_examples_and_records_counts(tmp_pat
     assert meta["seed_exploration_path"] == "fuzz/seed_exploration_yaml_parser_parse_fuzz.json"
     assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
     assert meta["seed_check_path"] == "fuzz/seed_check_yaml_parser_parse_fuzz.json"
+
+
+def test_pass_generate_seeds_records_attack_hint_in_bootstrap_meta(tmp_path: Path, monkeypatch):
+    gen = _fake_generator(tmp_path)
+    gen.fuzz_dir = tmp_path / "fuzz"
+    gen.fuzz_corpus_dir = gen.fuzz_dir / "corpus"
+    gen.fuzz_dir.mkdir(parents=True, exist_ok=True)
+    gen.fuzz_corpus_dir.mkdir(parents=True, exist_ok=True)
+    (gen.fuzz_dir / "selected_targets.json").write_text(
+        (
+            '[{"target_name":"yaml_parser_parse","api":"yaml_parser_parse","lang":"c-cpp","target_type":"parser",'
+            '"seed_profile":"parser-structure","seed_families_suggested":["document_markers"],"seed_families_optional":[],'
+            '"attack_hint":{"trigger_condition":"deep alias nesting expands parser state",'
+            '"key_code_path":["yaml_parser_parse","yaml_parse_node"],'
+            '"boundary_values":["anchors=32","aliases=64"],'
+            '"vuln_category":"stack-exhaustion","sanitizer_hint":"address"}}]\n'
+        ),
+        encoding="utf-8",
+    )
+    harness = gen.fuzz_dir / "yaml_parser_parse_fuzz.cc"
+    harness.write_text("int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }\n", encoding="utf-8")
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "sample.yaml").write_text("---\na: 1\n", encoding="utf-8")
+
+    class _Patcher:
+        def run_codex_command(self, _instructions: str, **_kwargs):
+            corpus_dir = gen.fuzz_corpus_dir / "yaml_parser_parse_fuzz"
+            (corpus_dir / "ai_extra.yaml").write_text("...\n", encoding="utf-8")
+            (gen.fuzz_dir / "seed_exploration_yaml_parser_parse_fuzz.json").write_text(
+                '{"chosen_target_api":"yaml_parser_parse","observed_target_api":"","seed_profile":"parser-structure","suggested_families":["document_markers"],"missing_suggested_families":[],"repo_paths_reviewed":["tests/sample.yaml"],"sample_inputs_found":["tests/sample.yaml"],"summary":"reviewed yaml sample and existing corpus"}\n',
+                encoding="utf-8",
+            )
+            (gen.fuzz_dir / "seed_check_yaml_parser_parse_fuzz.json").write_text(
+                '{"seed_profile":"parser-structure","suggested_families":["document_markers"],"covered_families":["document_markers"],"missing_suggested_families":[],"family_counts":{"document_markers":2},"corpus_files":2,"target_corpus_files":8,"per_family_target":2,"planned_additions":["more valid/minimal docs"],"summary":"suggested families covered but corpus still thin"}\n',
+                encoding="utf-8",
+            )
+            return "seed-ok"
+
+    orig_which = fur.which
+    monkeypatch.setattr(fur, "which", lambda cmd: None if cmd == "radamsa" else orig_which(cmd))
+    gen.patcher = _Patcher()
+
+    gen._pass_generate_seeds("yaml_parser_parse_fuzz")
+
+    meta = gen.last_seed_bootstrap_by_fuzzer["yaml_parser_parse_fuzz"]
+    assert meta["attack_hint"]["trigger_condition"] == "deep alias nesting expands parser state"
+    assert meta["attack_hint"]["boundary_values"] == ["anchors=32", "aliases=64"]
 
 
 def test_collect_repo_seed_examples_filters_source_files_for_generic_targets(tmp_path: Path):

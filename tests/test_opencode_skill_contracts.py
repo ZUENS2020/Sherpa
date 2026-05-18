@@ -39,13 +39,26 @@ def test_synthesize_contract_keeps_harness_and_build_requirements() -> None:
     assert "build_system" in synth
     assert "fuzzer_entry_strategy" in synth
     assert "DEFAULT_CMAKE_ARGS" in synth
+    assert "python -m cmake" in synth
+    assert "system `cmake` binary" in synth
     assert "def find_static_lib(repo_root):" in synth
     assert "use `clang` for `.c` sources" in synth
     assert "use `clang++` for `.cc`, `.cpp`, `.cxx` sources" in synth
     assert "api_surface_exception" in synth
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth
+    assert "If upstream source appears syntactically broken" in synth
     assert "do not define custom `main()` in harness source" in synth
     assert "LLVMFuzzerTestOneInput" in synth
     assert "fopen(argv[1], ...)" in synth
+    assert "-fsanitize=fuzzer,address,undefined" in synth
+    assert "fuzzer-no-link" in synth
+    assert "including `fuzz/out/replay/<name>`" in synth
+    assert "separate replay `main()` wrapper" in synth
+    assert "coverage-instrumented repository/library objects" in synth
+    assert "non-instrumented static libraries" in synth
+    assert "-DCMAKE_C_COMPILER=clang" in synth
+    assert "do not pass LLVM coverage flags to `/usr/bin/cc`/GCC" in synth
+    assert "never as `cmd[0]`" in synth
 
 
 def test_synthesize_complete_scaffold_requires_missing_item_repair() -> None:
@@ -66,6 +79,9 @@ def test_plan_and_schema_fix_contracts_keep_target_semantics() -> None:
     assert "fuzz/analysis_context.json" in analysis
     assert "MCP tools from task-scoped PromeFuzz companion" in analysis
     assert "/shared/output/_k8s_jobs/<job-id>/promefuzz/" in analysis
+    assert "Bounded analysis mode" in analysis
+    assert "use at most 6 additional MCP/tool reads" in analysis
+    assert "Do not call semantic/comprehension MCP tools" in analysis
     assert "LLVMFuzzerTestOneInput" in plan
     assert "`api` must describe an API identifier" in plan
     assert "fuzz/execution_plan.json" in plan
@@ -139,22 +155,37 @@ def test_seed_and_repair_skills_keep_feedback_and_api_surface_constraints() -> N
     assert "api_surface_exception" in synth_repair_crash
     assert "MCP tools from task-scoped PromeFuzz companion" in plan_repair_build
     assert "MCP tools from task-scoped PromeFuzz companion" in synth_repair_build
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in plan_repair_build
+    assert "Do not modify repository source files outside `fuzz/` and `./done`" in synth_repair_build
     assert "Strategy Delta" in synth_repair_build
     assert "Output Path Contract" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_build
     assert "non_public_api_usage" in synth_repair_crash
     assert "crash_triage.json" in plan_repair_fix_harness
+    assert "repo-root" in plan_repair_fix_harness
+    assert "crash_analysis_not_available_yet" in plan_repair_fix_harness
     assert "repair_error_digest" in plan_repair_fix_harness
     assert "strategy change" in plan_repair_fix_harness.lower()
     assert "crash_info.md" in synth_repair_fix_harness
     assert "crash_analysis.md" in synth_repair_fix_harness
     assert "crash_triage.json" in synth_repair_fix_harness
+    assert "repo-root" in synth_repair_fix_harness
+    assert "crash_analysis_not_available_yet" in synth_repair_fix_harness
     assert "LLVMFuzzerTestOneInput" in synth_repair_fix_harness
     assert "fopen(argv[1], ...)" in synth_repair_fix_harness
     assert "doc-only/no-op patches are invalid" in synth_repair_fix_harness
     assert "do not define custom `main()` in harness source" in synth_repair_build
     assert "LLVMFuzzerTestOneInput" in synth_repair_build
     assert "fopen(argv[1], ...)" in synth_repair_build
+    assert "-fsanitize=fuzzer,address,undefined" in synth_repair_build
+    assert "fuzzer-no-link" in synth_repair_build
+    assert "including `fuzz/out/replay/<name>`" in synth_repair_build
+    assert "fuzzer-no-link` objects without `main()`" in synth_repair_build
+    assert "coverage-instrumented repository/library objects" in synth_repair_build
+    assert "non-instrumented static libraries" in synth_repair_build
+    assert "-DCMAKE_C_COMPILER=clang" in synth_repair_build
+    assert "do not pass LLVM coverage flags to `/usr/bin/cc`/GCC" in synth_repair_build
+    assert "never as `cmd[0]`" in synth_repair_build
     assert "do not define custom `main()` in harness source" in synth_repair_crash
     assert "LLVMFuzzerTestOneInput" in synth_repair_crash
     assert "fopen(argv[1], ...)" in synth_repair_crash

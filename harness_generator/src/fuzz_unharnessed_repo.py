@@ -65,11 +65,16 @@ import time
 import hashlib
 import uuid
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from seed_families import (
+    is_fmt_format_target as _shared_is_fmt_format_target,
+    seed_families_for_target as _shared_seed_families_for_target,
+)
 
 try:
     from git import Repo, exc as git_exc  # type: ignore
@@ -169,7 +174,7 @@ DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
 # Supported sanitizer configurations for multi-sanitizer fuzzing
 SANITIZER_CONFIGS: Dict[str, Dict[str, str]] = {
     "address": {
-        "compile_flags": "-fsanitize=address,undefined,fuzzer",
+        "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
         "asan_options": "exitcode=76:detect_leaks=0",
         "ubsan_options": "print_stacktrace=1",
     },
@@ -201,6 +206,11 @@ VCPKG_INSTALLED_DIR = (os.environ.get("SHERPA_VCPKG_INSTALLED_DIR") or "vcpkg_in
 VCPKG_PORT_ALIASES: Dict[str, str] = {
     # Common generic/library shorthands -> vcpkg ports
     "z": "zlib",
+    "libz": "zlib",
+    "libz-dev": "zlib",
+    "zlib-dev": "zlib",
+    "zlib1g": "zlib",
+    "zlib1g-dev": "zlib",
     "bz2": "bzip2",
     "lzma": "liblzma",
     "xz": "liblzma",
@@ -211,6 +221,22 @@ VCPKG_PORT_ALIASES: Dict[str, str] = {
     "xml2": "libxml2",
     "libxml": "libxml2",
 }
+DEFAULT_VCPKG_SKIP_PORTS = {
+    # These are base toolchain/runtime libraries in the native image. Let the
+    # generated build script discover/link them instead of bootstrapping vcpkg.
+    "zlib",
+}
+
+
+def _vcpkg_skip_ports() -> set[str]:
+    raw = os.environ.get("SHERPA_VCPKG_SKIP_PORTS")
+    if raw is None:
+        return set(DEFAULT_VCPKG_SKIP_PORTS)
+    return {
+        VCPKG_PORT_ALIASES.get(token.strip().lower(), token.strip().lower())
+        for token in re.split(r"[,:\s]+", raw)
+        if token.strip()
+    }
 ALLOWED_TARGET_TYPES = {
     "parser",
     "decoder",
@@ -318,10 +344,80 @@ _C_ESCAPE_TO_HEX: Dict[str, str] = {
 
 
 def _normalize_dict_token(tok: str) -> str:
-    """Convert C-style escape sequences to ``\\xNN`` for libFuzzer compatibility."""
-    for c_esc, hex_esc in _C_ESCAPE_TO_HEX.items():
-        tok = tok.replace(c_esc, hex_esc)
-    return tok
+    r"""Normalize a quoted token to libFuzzer's conservative ``\xNN`` form.
+
+    Agent-generated and harness-extracted literals may contain C escapes that
+    libFuzzer's dictionary parser does not accept (for example ``\0`` or
+    partial/non-hex escapes).  Emitting every byte as ``\xNN`` avoids parse
+    errors while preserving the mutation hint bytes.
+    """
+
+    tok = str(tok or "").strip()
+    if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':
+        tok = tok[1:-1]
+    if not tok:
+        return ""
+
+    out = bytearray()
+    i = 0
+    while i < len(tok):
+        ch = tok[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8", errors="replace"))
+            i += 1
+            continue
+
+        if i + 1 >= len(tok):
+            out.append(ord("\\"))
+            i += 1
+            continue
+
+        nxt = tok[i + 1]
+        mapped = _C_ESCAPE_TO_HEX.get("\\" + nxt)
+        if mapped:
+            try:
+                out.append(int(mapped[2:], 16))
+            except Exception:
+                pass
+            i += 2
+            continue
+
+        if nxt == "x":
+            hex_part = tok[i + 2 : i + 4]
+            if len(hex_part) == 2 and re.fullmatch(r"[0-9A-Fa-f]{2}", hex_part):
+                out.append(int(hex_part, 16))
+                i += 4
+                continue
+            # Invalid \x escape: keep the escaped byte literally.
+            out.append(ord("x"))
+            i += 2
+            continue
+
+        if nxt in {"'", '"', "\\"}:
+            out.append(ord(nxt))
+            i += 2
+            continue
+
+        if nxt in "01234567":
+            j = i + 1
+            oct_digits = []
+            while j < len(tok) and len(oct_digits) < 3 and tok[j] in "01234567":
+                oct_digits.append(tok[j])
+                j += 1
+            try:
+                out.append(int("".join(oct_digits), 8) & 0xFF)
+            except Exception:
+                pass
+            i = j
+            continue
+
+        # Unknown escape: keep the escaped character as a literal byte.
+        out.extend(nxt.encode("utf-8", errors="replace"))
+        i += 2
+
+    if not out:
+        return ""
+    return '"' + "".join(f"\\x{b:02x}" for b in out) + '"'
 
 
 # ── Per-profile adaptive max_len (bytes) ─────────────────────────────────
@@ -712,6 +808,50 @@ def write_patch_from_snapshot(
         out_path.unlink(missing_ok=True)
 
     return changed_files
+
+
+def _snapshot_crash_evidence(
+    *,
+    bin_path: Path,
+    artifact_path: Path,
+    repro_output: str,
+    repo_root: Path,
+    fuzzer_name: str,
+) -> None:
+    """Preserve crash evidence before subsequent synthesize stages rebuild the binary.
+
+    Copies the crashing binary, ASAN output, and build-source hash into
+    ``fuzz/out/artifacts/`` alongside the crash input file so that the crash
+    remains reproducible even after the harness/build.py are regenerated.
+    """
+    artifacts_dir = repo_root / "fuzz" / "out" / "artifacts"
+    artifact_stem = artifact_path.name
+    try:
+        # 1) Crash binary
+        if bin_path.is_file():
+            dest = artifacts_dir / f"{artifact_stem}.binary"
+            shutil.copy2(bin_path, dest)
+            print(f"[*] crash binary preserved: {dest}")
+
+        # 2) ASAN / reproducer output
+        dest_asan = artifacts_dir / f"{artifact_stem}.asan.txt"
+        dest_asan.write_text(repro_output, encoding="utf-8", errors="replace")
+        print(f"[*] ASAN output preserved: {dest_asan}")
+
+        # 3) Build-source hash (build.py + harness sources)
+        _build_files: list[str] = []
+        build_py = repo_root / "fuzz" / "build.py"
+        if build_py.is_file():
+            _build_files.append(build_py.read_text(encoding="utf-8", errors="replace"))
+        for src in sorted((repo_root / "fuzz").glob(f"{fuzzer_name}*fuzz*.c")):
+            _build_files.append(src.read_text(encoding="utf-8", errors="replace"))
+        _combined = "\n---\n".join(_build_files)
+        _hash = hashlib.sha256(_combined.encode("utf-8", errors="replace")).hexdigest()[:16]
+        dest_hash = artifacts_dir / f"{artifact_stem}.build_hash"
+        dest_hash.write_text(f"sha256:{_hash}\n", encoding="utf-8", errors="replace")
+        print(f"[*] build hash preserved: {dest_hash} (hash={_hash})")
+    except Exception as exc:
+        print(f"[warn] crash snapshot partial: {exc}")
 
 
 def hexdump(path: Path, limit_bytes: int = 512) -> str:
@@ -1126,6 +1266,9 @@ def _seed_quality_from_run(
     archive_min_valid_ratio: float = 0.60,
     archive_malformed_ratio: float = 0.0,
     archive_max_malformed_ratio: float = 0.30,
+    attack_hint_total_count: int = 0,
+    attack_hint_covered_count: int = 0,
+    attack_hint_missing_values: list[str] | None = None,
 ) -> Dict[str, object]:
     events = parse_libfuzzer_progress_events(log)
     inited_cov = 0
@@ -1214,6 +1357,14 @@ def _seed_quality_from_run(
             quality_flags.append("archive_seed_validity_low")
         if archive_malformed_ratio > archive_max_malformed_ratio:
             quality_flags.append("archive_seed_malformed_ratio_high")
+    attack_hint_missing = [str(x).strip() for x in list(attack_hint_missing_values or []) if str(x).strip()]
+    attack_hint_ratio = (
+        float(max(0, attack_hint_covered_count)) / float(max(1, attack_hint_total_count))
+        if attack_hint_total_count > 0
+        else 1.0
+    )
+    if attack_hint_total_count > 0 and attack_hint_missing:
+        quality_flags.append("attack_hint_boundary_values_missing")
 
     required_total = len([x for x in required_families if x])
     covered_required = len([x for x in required_families if x and x in set(covered_families)])
@@ -1306,6 +1457,10 @@ def _seed_quality_from_run(
         "archive_min_valid_ratio": archive_min_valid_ratio,
         "archive_malformed_ratio": archive_malformed_ratio,
         "archive_max_malformed_ratio": archive_max_malformed_ratio,
+        "attack_hint_total_count": int(max(0, attack_hint_total_count)),
+        "attack_hint_covered_count": int(max(0, attack_hint_covered_count)),
+        "attack_hint_missing_values": attack_hint_missing,
+        "attack_hint_coverage_ratio": float(max(0.0, min(1.0, attack_hint_ratio))),
         "seed_score": float(seed_score),
         "seed_score_components": {
             "alpha": alpha,
@@ -1317,6 +1472,7 @@ def _seed_quality_from_run(
             "novelty": float(novelty),
             "redundancy_penalty": float(redundancy_penalty),
             "family_coverage_ratio": float(family_coverage_ratio),
+            "attack_hint_coverage_ratio": float(max(0.0, min(1.0, attack_hint_ratio))),
         },
         "quality_flags": quality_flags,
     }
@@ -1354,11 +1510,7 @@ def _infer_target_type(*parts: str) -> str:
 
 
 def _is_fmt_format_target(*parts: str) -> bool:
-    text = " ".join(p for p in parts if p).lower()
-    return bool(
-        "fmt" in text
-        and any(tok in text for tok in ("format", "format_to", "vformat", "println", "print", "replacement field", "specifier"))
-    )
+    return _shared_is_fmt_format_target(*parts)
 
 
 def _looks_textual_seed(path: Path) -> bool:
@@ -1436,57 +1588,7 @@ def _seed_filter_mode() -> str:
 
 
 def _seed_families_for_target(seed_profile: str, *parts: str) -> tuple[list[str], list[str]]:
-    """Return (suggested, optional) seed families as *hints* for AI seed
-    generation.  These are advisory — the AI may choose different families
-    based on project context.  Non-parser profiles intentionally return
-    empty suggested lists so the AI decides what's appropriate."""
-    profile = str(seed_profile or "").strip().lower()
-    text = " ".join(p for p in parts if p).lower()
-    suggested: list[str] = []
-    optional: list[str] = []
-    if profile == "parser-format" and _is_fmt_format_target(text):
-        suggested.extend(
-            [
-                "replacement_fields",
-                "escaped_braces",
-                "positional_arguments",
-                "format_specifiers",
-                "width_precision",
-                "fill_align",
-                "type_conversions",
-                "malformed_replacement_fields",
-            ]
-        )
-        return suggested, optional
-    if profile == "parser-structure":
-        suggested.extend(["document_markers", "block_scalars", "anchors_aliases", "tags_directives"])
-        optional.extend(["flow_structures", "unterminated_fragments", "malformed_separators"])
-    elif profile == "parser-token":
-        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
-        optional.extend(["document_markers", "tags_directives", "flow_structures"])
-    elif profile == "parser-format":
-        suggested.extend(["delimiter_fragments", "unterminated_fragments", "malformed_separators"])
-    elif profile == "parser-numeric":
-        suggested.extend(["delimiter_fragments", "malformed_separators"])
-    # decoder-binary, archive-container, serializer-structured,
-    # document-text, network-message, generic: no mandatory families —
-    # AI decides based on project context.
-
-    # YAML-specific enrichment — only for parser-* profiles
-    if profile.startswith("parser-") and any(tok in text for tok in ("yaml", "yml")):
-        for family in [
-            "flow_structures",
-            "block_scalars",
-            "anchors_aliases",
-            "tags_directives",
-            "document_markers",
-            "delimiter_fragments",
-            "unterminated_fragments",
-            "malformed_separators",
-        ]:
-            if family not in suggested:
-                suggested.append(family)
-    return suggested, [x for x in optional if x not in suggested]
+    return _shared_seed_families_for_target(seed_profile, *parts)
 
 
 def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
@@ -1511,6 +1613,29 @@ def _classify_seed_family(path: Path, seed_profile: str = "") -> set[str]:
             families.add("archive_xz")
         if any(f in families for f in {"archive_zip", "archive_tar", "archive_gzip", "archive_bzip2", "archive_xz"}):
             families.add("valid_archive_sample")
+    if (profile == "decoder-binary" or data.startswith(b"\x89PNG\r\n\x1a\n")) and data:
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            families.add("magic_headers")
+            families.add("png_signature")
+            if b"IHDR" in data:
+                families.add("metadata_chunks")
+                families.add("png_ihdr_dimensions")
+            if b"IDAT" in data:
+                families.add("compressed_payload_variants")
+                families.add("png_idat_payloads")
+            if b"IEND" in data:
+                families.add("chunk_layout")
+                families.add("png_chunk_order")
+            if len(data) < 32:
+                families.add("truncated_sections")
+            if b"tEXt" in data or b"iTXt" in data or b"zTXt" in data:
+                families.add("metadata_chunks")
+                families.add("png_ancillary_chunks")
+        if len(data) >= 8 and re.search(rb"[\x7f\x80\xff]{2,}", data):
+            families.add("length_boundary_values")
+        if path.name.lower().startswith("deterministic_png_bad_crc"):
+            families.add("checksum_crc_variants")
+            families.add("png_crc_variants")
     if "{}" in text or re.search(r"\{[^{}]*\}", text):
         families.add("replacement_fields")
     if "{{" in text or "}}" in text:
@@ -2265,11 +2390,14 @@ class NonOssFuzzHarnessGenerator:
             return []
         ports: list[str] = []
         seen: set[str] = set()
+        skip_ports = _vcpkg_skip_ports()
         try:
             for raw_line in dep_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = raw_line.split("#", 1)[0].strip().lower()
                 norm = _normalize_port(line)
                 if not norm:
+                    continue
+                if norm in skip_ports:
                     continue
                 if norm in seen:
                     continue
@@ -2337,6 +2465,7 @@ class NonOssFuzzHarnessGenerator:
             repo_root="$(cd "$(dirname "$dep_file")/.." && pwd -P)"
             vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
             vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
+            skip_ports="${{SHERPA_VCPKG_SKIP_PORTS:-zlib}}"
 
             pkgs=""
             if [ -f "$dep_file" ]; then
@@ -2351,6 +2480,7 @@ class NonOssFuzzHarnessGenerator:
                     pkg="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
                     case "$pkg" in
                         z) mapped="zlib" ;;
+                        libz|libz-dev|zlib-dev|zlib1g|zlib1g-dev) mapped="zlib" ;;
                         bz2) mapped="bzip2" ;;
                         lzma|xz) mapped="liblzma" ;;
                         ssl|crypto|libssl|libcrypto) mapped="openssl" ;;
@@ -2360,6 +2490,19 @@ class NonOssFuzzHarnessGenerator:
                     if [ "$mapped" != "$pkg" ]; then
                         echo "[warn] ({log_prefix}) normalized package token '$pkg' -> '$mapped' (vcpkg port)"
                     fi
+                    skip_this=0
+                    for skip_port in $(printf '%s' "$skip_ports" | tr ',:' '  '); do
+                        skip_port="$(printf '%s' "$skip_port" | tr '[:upper:]' '[:lower:]')"
+                        case "$skip_port" in
+                            z|libz|libz-dev|zlib-dev|zlib1g|zlib1g-dev) skip_port="zlib" ;;
+                        esac
+                        if [ "$mapped" = "$skip_port" ]; then
+                            echo "[*] ({log_prefix}) using native/system '$mapped'; skip vcpkg install"
+                            skip_this=1
+                            break
+                        fi
+                    done
+                    [ "$skip_this" -eq 0 ] || continue
                     case " $pkgs " in
                         *" $mapped "*) ;;
                         *) pkgs="$pkgs $mapped" ;;
@@ -2524,10 +2667,28 @@ EOF
                     echo "[*] ({log_prefix}) all requested vcpkg ports already installed; skipping"
                 else
                     echo "[*] ({log_prefix}) installing vcpkg ports from $dep_file:$missing_pkgs"
-                    if ! "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs; then
+                    install_attempt=1
+                    install_max="${{SHERPA_VCPKG_INSTALL_RETRIES:-3}}"
+                    install_delay="${{SHERPA_VCPKG_INSTALL_RETRY_DELAY_SEC:-5}}"
+                    while :; do
+                        install_log="$(mktemp)"
+                        if "$vcpkg_root/vcpkg" install --triplet "$triplet" $missing_pkgs >"$install_log" 2>&1; then
+                            cat "$install_log"
+                            rm -f "$install_log"
+                            break
+                        fi
+                        cat "$install_log"
+                        if grep -Eiq 'vcpkg-running[.]lock|failed to take lock|filesystem lock|device or resource busy' "$install_log" && [ "$install_attempt" -lt "$install_max" ]; then
+                            echo "[warn] ({log_prefix}) retrying vcpkg install after transient lock failure ($install_attempt/$install_max)"
+                            rm -f "$install_log"
+                            install_attempt=$((install_attempt + 1))
+                            sleep "$install_delay"
+                            continue
+                        fi
+                        rm -f "$install_log"
                         echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
                         exit 87
-                    fi
+                    done
                 fi
             fi
 
@@ -2718,6 +2879,9 @@ EOF
             f"""
             Follow global policy from `./.git/sherpa-opencode/opencode_policy.md` when present.
             Goal: synthesize a complete fuzz scaffold under `{FUZZ_DIR}`.
+            TARGET PRIORITY: `fuzz/selected_targets.json` contains the execution targets
+            with `must_run=true`. Generate harnesses ONLY for must_run targets, NOT for
+            every candidate in `fuzz/targets.json`. Ignore targets that are not must_run.
             Required outputs:
             - harness source file(s)
             - `fuzz/build.py` or `fuzz/build.sh`
@@ -2735,9 +2899,15 @@ EOF
             """
         ).strip()
 
+        selected_targets_path = self.fuzz_dir / "selected_targets.json"
+        execution_plan_path = self.fuzz_dir / "execution_plan.json"
+        selected_text = read_text_safely(selected_targets_path)
+        execution_text = read_text_safely(execution_plan_path)
         context = (
             "=== fuzz/PLAN.md ===\n" + plan_text +
-            "\n\n=== fuzz/targets.json ===\n" + targets_text
+            "\n\n=== fuzz/targets.json ===\n" + targets_text +
+            "\n\n=== fuzz/selected_targets.json (EXECUTION TARGETS) ===\n" + selected_text +
+            "\n\n=== fuzz/execution_plan.json ===\n" + execution_text
         )
         overload_retry_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES") or "3").strip()
         overload_backoff_raw = (os.environ.get("SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC") or "10").strip()
@@ -2799,9 +2969,95 @@ EOF
             if partial_outputs:
                 print("[warn] Codex exited without done sentinel, but partial synth outputs exist; deferring completeness check")
                 return
+            self._dump_synthesize_failure_diagnostic(
+                error_kind=last_kind,
+                error_message=last_msg,
+            )
+            stdout_tail = str(getattr(self.patcher, "last_cli_stdout", "") or "")
+            print(
+                "[error] synthesize agent produced no scaffold. "
+                f"cli_error_kind={last_kind or '<empty>'}, "
+                f"cli_error_message={(last_msg or '<empty>')[:300]}",
+                file=sys.stderr,
+            )
+            if stdout_tail:
+                print(
+                    "[error] OpenCode stdout tail (last 2000 chars):\n"
+                    + stdout_tail[-2000:],
+                    file=sys.stderr,
+                )
             raise HarnessGeneratorError("Codex did not create harness/build scaffold under fuzz/.")
 
         print(f"[*] Codex synthesis done (truncated):\n{stdout[:900]}")
+
+    def _dump_synthesize_failure_diagnostic(
+        self,
+        *,
+        error_kind: str,
+        error_message: str,
+    ) -> None:
+        """Write a diagnostic snapshot when synthesize returns stdout=None.
+
+        The k8s job error log only captures the Python traceback, which makes
+        100%-failure regressions hard to triage. This dump records:
+        - timestamp, OpenCode CLI error kind/message
+        - tail of the OpenCode subprocess stdout (captured in CodexHelper)
+        - fuzz/ directory listing (so we can see what the agent *did* write)
+        - synthesize-relevant env vars (idle timeout, retry knobs)
+
+        Output: ``fuzz/.synth_failure.log`` (gitignored via fuzz/** scope).
+        Best-effort: any exception is swallowed so the original
+        HarnessGeneratorError remains the surfaced failure.
+        """
+        try:
+            log_path = self.fuzz_dir / ".synth_failure.log"
+            self.fuzz_dir.mkdir(parents=True, exist_ok=True)
+            stdout_tail = str(getattr(self.patcher, "last_cli_stdout", "") or "")
+            fuzz_entries: list[str] = []
+            try:
+                for p in sorted(self.fuzz_dir.rglob("*")):
+                    if not p.exists():
+                        continue
+                    try:
+                        rel = p.relative_to(self.fuzz_dir).as_posix()
+                    except Exception:
+                        continue
+                    if rel.startswith(".sherpa-cc"):
+                        continue
+                    kind = "dir" if p.is_dir() else "file"
+                    size = p.stat().st_size if p.is_file() else 0
+                    fuzz_entries.append(f"{kind:4s} {size:>10d} {rel}")
+                    if len(fuzz_entries) >= 200:
+                        fuzz_entries.append("... (truncated)")
+                        break
+            except Exception as exc:
+                fuzz_entries.append(f"<listing failed: {exc}>")
+            env_keys = (
+                "SHERPA_OPENCODE_IDLE_TIMEOUT_SEC",
+                "SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC",
+                "SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_RETRIES",
+                "SHERPA_SYNTHESIZE_PROVIDER_OVERLOAD_BACKOFF_SEC",
+                "SHERPA_OPENCODE_PARTIAL_SUCCESS_STAGE_SKILLS",
+            )
+            env_snapshot = "\n".join(
+                f"{k}={os.environ.get(k, '<unset>')}" for k in env_keys
+            )
+            body = (
+                f"=== synth_failure @ {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ===\n"
+                f"error_kind={error_kind or '<empty>'}\n"
+                f"error_message={error_message or '<empty>'}\n"
+                f"\n=== env ===\n{env_snapshot}\n"
+                f"\n=== fuzz/ listing ({len(fuzz_entries)} entries) ===\n"
+                + "\n".join(fuzz_entries) + "\n"
+                f"\n=== OpenCode stdout tail (last {len(stdout_tail)} chars) ===\n"
+                + (stdout_tail or "<empty>")
+                + "\n=== end ===\n\n"
+            )
+            with log_path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write(body)
+            print(f"[*] synthesize failure diagnostic appended: {log_path}")
+        except Exception as exc:
+            print(f"[warn] could not write synth failure diagnostic: {exc}")
 
     # ────────────────────────────────────────────────────────────────────
     # Step C – Build with retries (feedback to Codex)
@@ -3408,6 +3664,105 @@ EOF
             + vuln_hint
         )
 
+    def _seed_attack_hint_guidance(self, selected_target: dict[str, object] | None) -> str:
+        target = dict(selected_target or {})
+        attack_hint = dict(target.get("attack_hint") or {})
+        if not attack_hint:
+            return ""
+        target_api = str(target.get("target_api") or target.get("api") or target.get("target_name") or "").strip()
+        signal_type = str(target.get("signal_type") or "").strip()
+        trigger_condition = str(attack_hint.get("trigger_condition") or "").strip()
+        key_code_path = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+        boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+        vuln_category = str(attack_hint.get("vuln_category") or signal_type or "").strip()
+        sanitizer_hint = str(attack_hint.get("sanitizer_hint") or "").strip()
+        evidence_ids = [str(x).strip() for x in list(target.get("evidence_ids") or []) if str(x).strip()]
+
+        lines = [
+            "Attack-hint guidance for seed design:",
+            f"- target_api: {target_api or '(unknown)'}",
+        ]
+        if signal_type:
+            lines.append(f"- signal_type: {signal_type}")
+        if vuln_category:
+            lines.append(f"- vuln_category: {vuln_category}")
+        if trigger_condition:
+            lines.append(f"- trigger_condition: {trigger_condition}")
+        if key_code_path:
+            lines.append(f"- key_code_path: {' -> '.join(key_code_path[:8])}")
+        if boundary_values:
+            lines.append(f"- boundary_values: {', '.join(boundary_values[:8])}")
+        if sanitizer_hint:
+            lines.append(f"- sanitizer_hint: {sanitizer_hint}")
+        if evidence_ids:
+            lines.append(f"- evidence_ids: {', '.join(evidence_ids[:8])}")
+        lines.extend(
+            [
+                "- Turn the listed boundary_values into concrete seed cases, not just comments.",
+                "- Prefer seed content that reaches the listed key_code_path instead of generic parser wrappers.",
+                "- Keep at least one seed aimed directly at the trigger_condition.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _attack_hint_seed_coverage(
+        self,
+        corpus_dir: Path,
+        selected_target: dict[str, object] | None,
+    ) -> dict[str, object]:
+        target = dict(selected_target or {})
+        attack_hint = dict(target.get("attack_hint") or {})
+        boundary_values = [str(x).strip() for x in list(attack_hint.get("boundary_values") or []) if str(x).strip()]
+        if not boundary_values:
+            return {
+                "target_api": str(target.get("target_api") or target.get("api") or ""),
+                "covered": [],
+                "missing": [],
+                "coverage_ratio": 1.0,
+                "total": 0,
+                "covered_count": 0,
+            }
+
+        corpus_texts: list[str] = []
+        if corpus_dir.is_dir():
+            for path in sorted(corpus_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                text_parts = [path.name.lower()]
+                try:
+                    data = path.read_bytes()[:512]
+                    text_parts.append(data.decode("utf-8", errors="ignore").lower())
+                    text_parts.append(data.hex().lower())
+                except Exception:
+                    pass
+                corpus_texts.append("\n".join(text_parts))
+        joined = "\n".join(corpus_texts)
+        covered: list[str] = []
+        missing: list[str] = []
+        for raw in boundary_values:
+            token = raw.lower()
+            if "=" in token:
+                _, rhs = token.split("=", 1)
+                candidates = [token, rhs.strip()]
+            else:
+                candidates = [token]
+            hit = any(candidate and candidate in joined for candidate in candidates)
+            if hit:
+                covered.append(raw)
+            else:
+                missing.append(raw)
+        total = len(boundary_values)
+        covered_count = len(covered)
+        ratio = float(covered_count) / float(max(1, total))
+        return {
+            "target_api": str(target.get("target_api") or target.get("api") or ""),
+            "covered": covered,
+            "missing": missing,
+            "coverage_ratio": float(max(0.0, min(1.0, ratio))),
+            "total": int(total),
+            "covered_count": int(covered_count),
+        }
+
     def _collect_repo_seed_examples(
         self,
         seed_profile: str,
@@ -3992,12 +4347,14 @@ EOF
     ) -> dict[str, object]:
         filter_mode = _seed_filter_mode()
         files = sorted(p for p in corpus_dir.iterdir() if p.is_file()) if corpus_dir.is_dir() else []
-        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "total": len(files)}
+        raw_counts = {"repo_examples": 0, "ai": 0, "radamsa": 0, "deterministic": 0, "total": len(files)}
         for path in files:
             if path.name.startswith("repo_"):
                 raw_counts["repo_examples"] += 1
             elif path.name.startswith("radamsa_"):
                 raw_counts["radamsa"] += 1
+            elif path.name.startswith("deterministic_"):
+                raw_counts["deterministic"] = int(raw_counts.get("deterministic") or 0) + 1
             else:
                 raw_counts["ai"] += 1
         filtered_counts = dict(raw_counts)
@@ -4264,6 +4621,8 @@ EOF
                         filtered_counts["repo_examples"] = max(0, int(filtered_counts["repo_examples"]) - 1)
                     elif path.name.startswith("radamsa_"):
                         filtered_counts["radamsa"] = max(0, int(filtered_counts["radamsa"]) - 1)
+                    elif path.name.startswith("deterministic_"):
+                        filtered_counts["deterministic"] = max(0, int(filtered_counts.get("deterministic") or 0) - 1)
                     else:
                         filtered_counts["ai"] = max(0, int(filtered_counts["ai"]) - 1)
                     filtered_counts["total"] = max(0, int(filtered_counts["total"]) - 1)
@@ -4308,6 +4667,174 @@ EOF
             "seed_family_coverage": self._seed_family_coverage(corpus_dir, required_families),
         }
 
+    def _png_chunk(self, chunk_type: bytes, data: bytes, *, corrupt_crc: bool = False) -> bytes:
+        crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
+        if corrupt_crc:
+            crc ^= 0xFFFFFFFF
+        return len(data).to_bytes(4, "big") + chunk_type + data + crc.to_bytes(4, "big")
+
+    def _deterministic_decoder_seed_bytes(self, fuzzer_name: str, selected_target: dict[str, object]) -> dict[str, bytes]:
+        context = " ".join(
+            [
+                fuzzer_name,
+                str(selected_target.get("target_name") or ""),
+                str(selected_target.get("api") or ""),
+                json.dumps(selected_target.get("attack_hint") or {}, ensure_ascii=False),
+                " ".join(str(x) for x in selected_target.get("seed_families_optional") or []),
+                " ".join(str(x) for x in selected_target.get("seed_families_suggested") or []),
+            ]
+        ).lower()
+        if "png" not in context:
+            return {}
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr_1x1 = (1).to_bytes(4, "big") + (1).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+        ihdr_wide = (0x7FFFFFFF).to_bytes(4, "big") + (1).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+        raw_rgba_scanline = b"\x00\x00\x00\x00\x00"
+        idat = zlib.compress(raw_rgba_scanline)
+        return {
+            "deterministic_png_minimal.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1)
+                + self._png_chunk(b"IDAT", idat)
+                + self._png_chunk(b"IEND", b"")
+            ),
+            "deterministic_png_signature_only.bin": sig,
+            "deterministic_png_truncated_ihdr.bin": sig + (13).to_bytes(4, "big") + b"IHDR" + ihdr_1x1[:6],
+            "deterministic_png_bad_crc.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1, corrupt_crc=True)
+                + self._png_chunk(b"IEND", b"")
+            ),
+            "deterministic_png_large_dimension.png": sig + self._png_chunk(b"IHDR", ihdr_wide) + self._png_chunk(b"IEND", b""),
+            "deterministic_png_text_chunk.png": (
+                sig
+                + self._png_chunk(b"IHDR", ihdr_1x1)
+                + self._png_chunk(b"tEXt", b"Comment\x00" + b"A" * 64)
+                + self._png_chunk(b"IEND", b"")
+            ),
+        }
+
+    def _bootstrap_deterministic_seed_corpus(self, fuzzer_name: str) -> dict[str, object]:
+        harness_src = self._locate_harness_source_for(fuzzer_name)
+        harness_text = read_text_safely(harness_src) if harness_src else ""
+        readme_text = read_text_safely(self.fuzz_dir / "README.md")
+        corpus_dir = self.fuzz_corpus_dir / fuzzer_name
+        corpus_dir.mkdir(parents=True, exist_ok=True)
+        selected_target = self._resolve_selected_target(fuzzer_name, harness_text)
+        observed_target = self._resolve_observed_target(fuzzer_name, harness_text)
+        target_type = ""
+        seed_profile = ""
+        seed_profile_source = "fallback"
+        if selected_target:
+            selected_type = str(selected_target.get("target_type") or "").strip().lower()
+            selected_profile = str(selected_target.get("seed_profile") or "").strip().lower()
+            if selected_type in ALLOWED_TARGET_TYPES and selected_profile in ALLOWED_SEED_PROFILES:
+                target_type = selected_type
+                seed_profile = selected_profile
+                seed_profile_source = "selected_targets"
+        if not target_type or not seed_profile:
+            target_type, seed_profile = self._resolve_seed_target_metadata(fuzzer_name, harness_text)
+            if observed_target:
+                seed_profile_source = "observed_or_inferred"
+        execution_target = dict(observed_target or selected_target)
+        if selected_target:
+            self.last_selected_target_by_fuzzer[fuzzer_name] = dict(selected_target)
+        required_families, optional_families = _seed_families_for_target(
+            seed_profile,
+            fuzzer_name,
+            harness_text,
+            readme_text,
+            str(execution_target.get("observed_target_api") or ""),
+            str(execution_target.get("selected_target_api") or ""),
+            str(execution_target.get("target_name") or ""),
+            str(execution_target.get("api") or ""),
+        )
+        self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
+        repo_seed_files, repo_meta = self._collect_repo_seed_examples(
+            seed_profile,
+            fuzzer_name,
+            corpus_dir,
+            required_families=required_families,
+        )
+        deterministic_count = 0
+        if seed_profile == "decoder-binary":
+            for name, data in self._deterministic_decoder_seed_bytes(fuzzer_name, selected_target).items():
+                path = corpus_dir / name
+                if path.exists():
+                    continue
+                try:
+                    path.write_bytes(data)
+                    deterministic_count += 1
+                except Exception:
+                    continue
+        sources = list(repo_meta.get("sources") or [])
+        if deterministic_count > 0:
+            sources.append("deterministic")
+        filtered_meta = self._filter_seed_corpus(
+            corpus_dir,
+            seed_profile=seed_profile,
+            required_families=required_families,
+            target_markers=[
+                fuzzer_name,
+                harness_text,
+                readme_text,
+                str(execution_target.get("observed_target_api") or ""),
+                str(execution_target.get("selected_target_api") or ""),
+                str(execution_target.get("target_name") or ""),
+                str(execution_target.get("api") or ""),
+            ],
+        )
+        seed_quality_path = self.fuzz_dir / f"seed_quality_{re.sub(r'[^A-Za-z0-9_.-]+', '_', fuzzer_name)}.json"
+        seed_quality_doc = {
+            "fuzzer": fuzzer_name,
+            "seed_profile": seed_profile,
+            "target_type": target_type,
+            "seed_profile_source": seed_profile_source,
+            "generation_mode": "deterministic_no_ai",
+            "suggested_families": required_families,
+            "optional_families": optional_families,
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
+        }
+        try:
+            seed_quality_path.write_text(json.dumps(seed_quality_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        meta = {
+            "counts": {
+                "repo_examples": len(repo_seed_files),
+                "ai": 0,
+                "radamsa": 0,
+                "deterministic": int((filtered_meta.get("seed_counts_filtered") or {}).get("deterministic") or deterministic_count),
+                "total": len([p for p in corpus_dir.iterdir() if p.is_file()]),
+            },
+            "sources": sorted(set(str(x) for x in sources if str(x).strip())),
+            "seed_profile": seed_profile,
+            "seed_profile_source": seed_profile_source,
+            "target_type": target_type,
+            "selected_target": dict(selected_target),
+            "observed_target": dict(observed_target),
+            "attack_hint": dict((selected_target or {}).get("attack_hint") or {}),
+            "seed_families_suggested": required_families,
+            "seed_families_optional": optional_families,
+            "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
+            "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
+            "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
+            "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
+            "seed_filter_mode": str(filtered_meta.get("seed_filter_mode") or _seed_filter_mode()),
+            "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
+            "repo_examples_filtered": bool(repo_meta.get("filtered") or False),
+            "repo_examples_rejected_count": int(repo_meta.get("rejected_count") or 0),
+            "repo_examples_accepted_count": int(repo_meta.get("accepted_count") or 0),
+            "seed_quality_path": str(seed_quality_path.relative_to(self.repo_root)) if seed_quality_path.is_file() else "",
+            "generation_mode": "deterministic_no_ai",
+        }
+        self.last_seed_bootstrap_by_fuzzer[fuzzer_name] = meta
+        return meta
+
     def _pass_generate_seeds(self, fuzzer_name: str) -> None:
         harness_src = self._locate_harness_source_for(fuzzer_name)
         harness_text = read_text_safely(harness_src) if harness_src else ""
@@ -4346,6 +4873,7 @@ EOF
             str(execution_target.get("api") or ""),
         )
         seed_guidance = self._seed_generation_guidance(target_type, seed_profile, fuzzer_name, harness_text)
+        attack_hint_guidance = self._seed_attack_hint_guidance(selected_target)
         self.last_seed_profile_by_fuzzer[fuzzer_name] = seed_profile
         repo_seed_files, repo_meta = self._collect_repo_seed_examples(
             seed_profile,
@@ -4355,6 +4883,7 @@ EOF
         )
         sources = list(repo_meta.get("sources") or [])
         family_coverage = self._seed_family_coverage(corpus_dir, required_families)
+        attack_hint_coverage = self._attack_hint_seed_coverage(corpus_dir, selected_target)
         target_corpus_files = max(self._seed_corpus_min_per_target(), len(required_families) * 2)
         per_family_target = 2 if required_families else 1
         previous_seed_feedback = self._seed_feedback_for_fuzzer(fuzzer_name)
@@ -4366,6 +4895,14 @@ EOF
         previous_cold_start = bool(previous_seed_feedback.get("cold_start_failure") or False)
         previous_early_units_30 = int(previous_seed_feedback.get("early_new_units_30s") or 0)
         previous_missing_families = list(previous_seed_feedback.get("missing_suggested_families") or [])
+        previous_attack_hint_missing_values = [
+            str(x).strip()
+            for x in list(previous_seed_feedback.get("attack_hint_missing_values") or [])
+            if str(x).strip()
+        ]
+        previous_attack_hint_coverage_ratio = float(
+            previous_seed_feedback.get("attack_hint_coverage_ratio") or 1.0
+        )
         cold_start_recovery_directive = ""
         if previous_cold_start:
             cold_start_recovery_directive = textwrap.dedent(
@@ -4375,6 +4912,17 @@ EOF
                 - Prioritize semantically different, high-signal seeds over random variants.
                 - First fill missing suggested families: {", ".join(previous_missing_families) if previous_missing_families else "none"}.
                 - Do not finish until you add seeds that explicitly target those families and likely increase early coverage.
+                """
+            ).strip()
+        attack_hint_recovery_directive = ""
+        if previous_attack_hint_missing_values:
+            attack_hint_recovery_directive = textwrap.dedent(
+                f"""
+                Attack-hint recovery directive (must follow):
+                - Previous run still missed these boundary-oriented values: {", ".join(previous_attack_hint_missing_values)}.
+                - Previous attack-hint coverage ratio was {previous_attack_hint_coverage_ratio:.2f}.
+                - Add or refine format-valid seeds that explicitly encode those values before adding generic mutation variants.
+                - Keep the seed structure aligned with the selected target's `key_code_path` when representing those values.
                 """
             ).strip()
 
@@ -4400,9 +4948,15 @@ EOF
             - selected seed_profile from `fuzz/selected_targets.json`: {str(selected_target.get("seed_profile") or "(missing)") if selected_target else "(missing)"}
             - active seed_profile for this run: {seed_profile}
 
+            {attack_hint_guidance}
+
             Current seed family coverage:
             covered={", ".join(family_coverage.get("covered") or []) if family_coverage.get("covered") else "none"}
             missing={", ".join(family_coverage.get("missing") or []) if family_coverage.get("missing") else "none"}
+
+            Current attack-hint boundary coverage:
+            covered={", ".join(attack_hint_coverage.get("covered") or []) if attack_hint_coverage.get("covered") else "none"}
+            missing={", ".join(attack_hint_coverage.get("missing") or []) if attack_hint_coverage.get("missing") else "none"}
 
             Active seed filter mode:
             - `{_seed_filter_mode()}` (default soft; keep semantic diversity while still removing exact duplicates and oversized files)
@@ -4417,6 +4971,7 @@ EOF
             Previous run seed feedback (if available):
             {previous_seed_feedback_text}
             {cold_start_recovery_directive}
+            {attack_hint_recovery_directive}
 
             Rules:
             - Before writing new seeds, inspect repository files relevant to target inputs: tests, examples, fuzz directories, build files, `fuzz/PLAN.md`, and target metadata files.
@@ -4445,6 +5000,8 @@ EOF
             - Soft filtering keeps diverse seeds; do not assume near variants will always be removed.
             - If previous feedback shows cold-start failure, low merge retained ratio, or low early yield, prioritize semantically different high-signal seeds over random variants.
             - If previous feedback shows missing families, fill missing families first before adding more variants for already-covered families.
+            - If attack-hint guidance provides boundary_values, ensure the corpus contains explicit seeds for those values or their closest format-valid encodings.
+            - If attack-hint guidance provides key_code_path, bias seed structure toward that path even when other generic families are also available.
             - Each seed file must stay small (<= {self._seed_max_file_bytes()} bytes by default). Prefer concise high-signal seeds over large blobs.
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
             - Only create seed files plus `{seed_exploration_path.relative_to(self.repo_root)}` and `{seed_check_path.relative_to(self.repo_root)}` (no code changes).
@@ -4479,6 +5036,7 @@ EOF
             "=== harness source ===\n" + (harness_text or "(no harness found)"),
             "=== fuzz/README.md ===\n" + (readme_text or "(missing)"),
             "=== seed family coverage ===\n" + json.dumps(family_coverage, ensure_ascii=False, indent=2),
+            "=== attack hint coverage ===\n" + json.dumps(attack_hint_coverage, ensure_ascii=False, indent=2),
             "=== previous seed feedback ===\n" + previous_seed_feedback_text,
         ]
         stdout = self.patcher.run_codex_command(
@@ -4630,6 +5188,7 @@ EOF
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or {}),
+            "attack_hint_coverage": dict(attack_hint_coverage),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
             "seed_oversized_rejected_count": int(filtered_meta.get("seed_oversized_rejected_count") or 0),
             "filtered_by_rule_breakdown": dict(filtered_meta.get("filtered_by_rule_breakdown") or {}),
@@ -4682,9 +5241,11 @@ EOF
             "target_type": target_type,
             "selected_target": dict(selected_target),
             "observed_target": dict(observed_target),
+            "attack_hint": dict((selected_target or {}).get("attack_hint") or {}),
             "seed_families_suggested": required_families,
             "seed_families_optional": optional_families,
             "seed_family_coverage": dict(filtered_meta.get("seed_family_coverage") or self._seed_family_coverage(corpus_dir, required_families)),
+            "attack_hint_coverage": dict(attack_hint_coverage),
             "seed_counts_raw": dict(filtered_meta.get("seed_counts_raw") or {}),
             "seed_counts_filtered": dict(filtered_meta.get("seed_counts_filtered") or {}),
             "seed_noise_rejected_count": int(filtered_meta.get("seed_noise_rejected_count") or 0),
@@ -4799,6 +5360,9 @@ EOF
         seen: set[str] = set()
         unique_tokens: list[str] = []
         for t in tokens:
+            t = _normalize_dict_token(t)
+            if not t:
+                continue
             if t not in seen:
                 seen.add(t)
                 unique_tokens.append(t)
@@ -4976,11 +5540,13 @@ EOF
                 except (ValueError, IndexError):
                     pass
 
-        # Generate uncovered function list using llvm-cov export
+        # Generate uncovered / partially covered function details using llvm-cov export
+        uncovered_function_details: list[Dict[str, object]] = []
+        partial_function_details: list[Dict[str, object]] = []
         export_cmd = [
             llvm_cov, "export", str(bin_path),
             f"-instr-profile={profdata_path}",
-            "-format=text", "-summary-only",
+            "-format=text",
         ]
         try:
             rc, export_out, _ = self._run_cmd(export_cmd, cwd=self.repo_root, timeout=60)
@@ -4988,9 +5554,51 @@ EOF
                 try:
                     export_data = json.loads(export_out)
                     for file_data in export_data.get("data", []):
-                        for fn in file_data.get("functions", []):
-                            if fn.get("count", 0) == 0:
-                                uncovered_functions.append(fn.get("name", ""))
+                        if not isinstance(file_data, dict):
+                            continue
+                        function_sets = []
+                        root_functions = file_data.get("functions")
+                        if isinstance(root_functions, list):
+                            function_sets.append(("", root_functions))
+                        for file_item in file_data.get("files", []):
+                            if not isinstance(file_item, dict):
+                                continue
+                            file_name = str(file_item.get("filename") or "")
+                            functions = file_item.get("functions")
+                            if isinstance(functions, list):
+                                function_sets.append((file_name, functions))
+                        for file_name, functions in function_sets:
+                            for fn in functions:
+                                if not isinstance(fn, dict):
+                                    continue
+                                name = str(fn.get("name", "") or "")
+                                count = int(fn.get("count", 0) or 0)
+                                regions = fn.get("regions") if isinstance(fn.get("regions"), list) else []
+                                region_total = max(len(regions), 1)
+                                region_hit = 0
+                                line = 0
+                                for region in regions:
+                                    if isinstance(region, list) and len(region) >= 5:
+                                        try:
+                                            if int(region[4] or 0) > 0:
+                                                region_hit += 1
+                                            if not line:
+                                                line = int(region[0] or 0)
+                                        except Exception:
+                                            pass
+                                coverage_ratio = float(region_hit) / float(region_total)
+                                detail: Dict[str, object] = {
+                                    "name": name,
+                                    "file": file_name,
+                                    "line": int(line),
+                                    "execution_count": int(count),
+                                    "region_coverage_ratio": round(coverage_ratio, 4),
+                                }
+                                if count == 0:
+                                    uncovered_functions.append(name)
+                                    uncovered_function_details.append(detail)
+                                elif coverage_ratio < 1.0:
+                                    partial_function_details.append(detail)
                 except (json.JSONDecodeError, KeyError):
                     pass
         except Exception:
@@ -5007,6 +5615,8 @@ EOF
             "covered_functions": covered_functions,
             "coverage_pct": round(coverage_pct, 1),
             "uncovered_functions": uncovered_functions[:20],  # top 20
+            "uncovered_function_details": uncovered_function_details[:20],
+            "partial_function_details": partial_function_details[:20],
             "report_path": str(report_path),
         }
         print(f"[*] Source coverage: {covered_functions}/{total_functions} functions "
@@ -5053,6 +5663,7 @@ EOF
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
         bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         family_coverage = dict(bootstrap.get("seed_family_coverage") or {})
+        attack_hint_coverage = dict(bootstrap.get("attack_hint_coverage") or {})
         required_families = list(bootstrap.get("seed_families_suggested") or [])
         covered_families = list(family_coverage.get("covered") or [])
 
@@ -5074,6 +5685,9 @@ EOF
         missing_families = [f for f in required_families if f and f not in set(covered_families)]
         if missing_families:
             issues.append(f"missing_suggested_families: {', '.join(missing_families)}")
+        missing_attack_hint_values = [str(x).strip() for x in list(attack_hint_coverage.get("missing") or []) if str(x).strip()]
+        if missing_attack_hint_values:
+            issues.append(f"attack_hint_boundary_values_missing: {', '.join(missing_attack_hint_values)}")
 
         # Check archive validity
         if seed_profile == "archive-container" and file_count > 0:
@@ -5096,6 +5710,7 @@ EOF
             "suggested_families": required_families,
             "covered_families": covered_families,
             "missing_suggested_families": missing_families,
+            "attack_hint_coverage": attack_hint_coverage,
             "issues": issues,
             "passed": len(issues) == 0,
         }
@@ -5387,6 +6002,7 @@ EOF
         libfuzzer_stats = parse_libfuzzer_final_stats(log)
         seed_bootstrap = dict(self.last_seed_bootstrap_by_fuzzer.get(bin_path.name) or {})
         seed_family_coverage = dict(seed_bootstrap.get("seed_family_coverage") or {})
+        attack_hint_coverage = dict(seed_bootstrap.get("attack_hint_coverage") or {})
         required_families = list(seed_bootstrap.get("seed_families_suggested") or [])
         covered_families = list(seed_family_coverage.get("covered") or [])
 
@@ -5536,6 +6152,9 @@ EOF
             archive_max_malformed_ratio=float(
                 seed_bootstrap.get("archive_max_malformed_ratio") or self._seed_archive_max_malformed_ratio()
             ),
+            attack_hint_total_count=int(attack_hint_coverage.get("total") or 0),
+            attack_hint_covered_count=int(attack_hint_coverage.get("covered_count") or 0),
+            attack_hint_missing_values=list(attack_hint_coverage.get("missing") or []),
         )
         if isinstance(seed_quality_data, dict):
             seed_quality_data["merge_retained_ratio_files"] = float(seed_bootstrap.get("merge_retained_ratio_files") or 1.0)
@@ -5636,6 +6255,16 @@ EOF
         ]
         write_text_safely(self.repo_root / "crash_info.md", "\n".join(info_md))
         print("[*] crash_info.md written.")
+
+        # Snapshot crash evidence before subsequent synthesize stages can
+        # rebuild the binary and destroy the crash repro context.
+        _snapshot_crash_evidence(
+            bin_path=bin_path,
+            artifact_path=artifact_path,
+            repro_output=combined,
+            repo_root=self.repo_root,
+            fuzzer_name=fuzzer_name,
+        )
 
         # 3) Ask Codex for crash_analysis.md
         context_blob = (
@@ -6448,6 +7077,16 @@ EOF
             out = re.sub(r"(?i)\b(Authorization\s*:\s*Bearer\s+)([^\s]+)", r"\1***", out)
             return out
 
+        def _bounded_env_int(name: str, default: int, *, min_value: int = 0, max_value: int = 64 * 1024 * 1024) -> int:
+            raw = str(os.environ.get(name) or "").strip()
+            if not raw:
+                return default
+            try:
+                value = int(raw)
+            except Exception:
+                return default
+            return max(min_value, min(value, max_value))
+
         if extra_inputs:
             # Append corpus/extra inputs directly. libFuzzer treats a bare "--" as an ignored flag
             # and logs noisy warnings that can look like failures in UI streams.
@@ -6485,18 +7124,119 @@ EOF
         if track_for_early_stop:
             self._register_active_run_process(proc)
 
+        capture_max_bytes = _bounded_env_int("SHERPA_CMD_CAPTURE_MAX_BYTES", 4 * 1024 * 1024)
+        live_max_bytes = _bounded_env_int("SHERPA_CMD_LIVE_MAX_BYTES", 512 * 1024)
+        queue_max_bytes = _bounded_env_int(
+            "SHERPA_CMD_QUEUE_MAX_BYTES",
+            max(live_max_bytes, min(capture_max_bytes, 1024 * 1024)),
+        )
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
+        capture_bytes = {"stdout": 0, "stderr": 0}
+        capture_truncated = {"stdout": False, "stderr": False}
+        live_bytes = {"stdout": 0, "stderr": 0}
+        live_suppressed = {"stdout": False, "stderr": False}
+        enqueued_bytes = {"stdout": 0, "stderr": 0}
+        reader_dropped = {"stdout": False, "stderr": False}
         reader_eof = object()
         out_queue: queue.Queue[tuple[str, str] | object] = queue.Queue()
+        callback_lock = threading.Lock()
+
+        def _append_bounded(kind: str, text: str) -> None:
+            chunks = stdout_chunks if kind == "stdout" else stderr_chunks
+            if capture_max_bytes <= 0:
+                capture_truncated[kind] = True
+                return
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            if text_bytes > capture_max_bytes:
+                # Preserve the newest diagnostic tail even when a single queued
+                # chunk is larger than the capture budget.
+                text = text[-capture_max_bytes:]
+                text_bytes = len(text.encode("utf-8", errors="replace"))
+                capture_truncated[kind] = True
+            chunks.append(text)
+            capture_bytes[kind] += text_bytes
+            while capture_bytes[kind] > capture_max_bytes and chunks:
+                removed = chunks.pop(0)
+                capture_bytes[kind] -= len(removed.encode("utf-8", errors="replace"))
+                capture_truncated[kind] = True
+
+        def _maybe_print_live(kind: str, text: str) -> None:
+            if live_max_bytes <= 0:
+                if not live_suppressed[kind]:
+                    print(f"[sherpa-live-output-suppressed] {kind} live output disabled", flush=True)
+                    live_suppressed[kind] = True
+                return
+            text_bytes = len(text.encode("utf-8", errors="replace"))
+            if live_bytes[kind] + text_bytes <= live_max_bytes:
+                live_bytes[kind] += text_bytes
+                print(text, end="", flush=True)
+                return
+            if not live_suppressed[kind]:
+                print(
+                    f"[sherpa-live-output-suppressed] {kind} exceeded "
+                    f"{live_max_bytes} bytes; continuing with bounded captured tail",
+                    flush=True,
+                )
+                live_suppressed[kind] = True
+
+        def _record_callback(kind: str, text: str) -> None:
+            nonlocal callback_stop_reason
+            if line_callback is None or callback_stop_reason:
+                return
+            try:
+                reason = str(line_callback(kind, text) or "").strip()
+            except Exception:
+                reason = ""
+            if reason:
+                with callback_lock:
+                    if not callback_stop_reason:
+                        callback_stop_reason = reason
 
         def _reader(pipe: Optional[object], kind: str) -> None:
+            tail_chunks: List[str] = []
+            tail_bytes = 0
+
+            def _keep_tail(text: str) -> None:
+                nonlocal tail_bytes
+                if capture_max_bytes <= 0:
+                    return
+                tail_chunks.append(text)
+                tail_bytes += len(text.encode("utf-8", errors="replace"))
+                while tail_bytes > capture_max_bytes and tail_chunks:
+                    removed = tail_chunks.pop(0)
+                    tail_bytes -= len(removed.encode("utf-8", errors="replace"))
+
             try:
                 if pipe is None:
                     return
                 for line in pipe:
+                    _record_callback(kind, line)
+                    if queue_max_bytes <= 0 or enqueued_bytes[kind] >= queue_max_bytes:
+                        if not reader_dropped[kind]:
+                            reader_dropped[kind] = True
+                            out_queue.put(
+                                (
+                                    kind,
+                                    "\n"
+                                    f"[sherpa-output-reader-dropped] {kind} exceeded "
+                                    f"{queue_max_bytes} queued bytes; draining pipe and keeping tail only\n",
+                                )
+                            )
+                        _keep_tail(line)
+                        continue
                     out_queue.put((kind, line))
+                    enqueued_bytes[kind] += len(line.encode("utf-8", errors="replace"))
             finally:
+                if reader_dropped[kind] and tail_chunks:
+                    out_queue.put(
+                        (
+                            kind,
+                            "\n"
+                            f"[sherpa-output-reader-tail] {kind} tail after dropped backlog\n"
+                            + "".join(tail_chunks),
+                        )
+                    )
                 out_queue.put(reader_eof)
 
         t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
@@ -6526,6 +7266,9 @@ EOF
                     item = out_queue.get(timeout=0.2)
                 except queue.Empty:
                     # Queue timeout only means "no new output yet", not reader EOF.
+                    if callback_stop_reason:
+                        timed_out = True
+                        break
                     continue
 
                 if item is reader_eof:
@@ -6534,21 +7277,16 @@ EOF
                     kind, text = item
                     safe_text = _redact_text(text)
                     if kind == "stdout":
-                        stdout_chunks.append(safe_text)
-                        print(safe_text, end="", flush=True)
+                        _append_bounded("stdout", safe_text)
+                        _maybe_print_live("stdout", safe_text)
                     else:
-                        stderr_chunks.append(safe_text)
-                        # Keep stderr visible in real-time to avoid silent failures.
-                        print(safe_text, end="", flush=True)
+                        _append_bounded("stderr", safe_text)
+                        # Keep stderr visible in real-time, but cap noisy libraries.
+                        _maybe_print_live("stderr", safe_text)
                     last_activity = time.monotonic()
-                    if line_callback is not None:
-                        try:
-                            callback_stop_reason = str(line_callback(kind, safe_text) or "").strip()
-                        except Exception:
-                            callback_stop_reason = ""
-                        if callback_stop_reason:
-                            timed_out = True
-                            break
+                    if callback_stop_reason:
+                        timed_out = True
+                        break
 
                 if idle_timeout > 0 and (time.monotonic() - last_activity) > idle_timeout:
                     idle_timed_out = True
@@ -6594,14 +7332,36 @@ EOF
                 kind, text = item
                 safe_text = _redact_text(text)
                 if kind == "stdout":
-                    stdout_chunks.append(safe_text)
+                    _append_bounded("stdout", safe_text)
                 else:
-                    stderr_chunks.append(safe_text)
+                    _append_bounded("stderr", safe_text)
             if track_for_early_stop:
                 self._unregister_active_run_process(proc)
 
         out = "".join(stdout_chunks)
         err = "".join(stderr_chunks)
+        if capture_truncated["stdout"]:
+            out = (
+                f"[sherpa-output-truncated] stdout exceeded {capture_max_bytes} bytes; "
+                "kept captured tail only\n"
+            ) + out
+        if capture_truncated["stderr"]:
+            err = (
+                f"[sherpa-output-truncated] stderr exceeded {capture_max_bytes} bytes; "
+                "kept captured tail only\n"
+            ) + err
+        if reader_dropped["stdout"] and "[sherpa-output-reader-dropped]" not in out:
+            out = (
+                f"[sherpa-output-reader-dropped] stdout exceeded {queue_max_bytes} queued bytes; "
+                "dropped middle backlog\n"
+                "[sherpa-output-reader-tail] stdout tail kept after dropped backlog\n"
+            ) + out
+        if reader_dropped["stderr"] and "[sherpa-output-reader-dropped]" not in err:
+            err = (
+                f"[sherpa-output-reader-dropped] stderr exceeded {queue_max_bytes} queued bytes; "
+                "dropped middle backlog\n"
+                "[sherpa-output-reader-tail] stderr tail kept after dropped backlog\n"
+            ) + err
         if callback_stop_reason:
             err = (err or "") + f"\n[callback-stop] {callback_stop_reason}"
         elif idle_timed_out:

@@ -4,7 +4,7 @@ description: Produce runtime-viable fuzz targets and execution plan artifacts fo
 compatibility: opencode
 metadata:
   stage: plan
-  owner: sherpa
+  owner: tianheng
 ---
 
 ## What this skill does
@@ -14,6 +14,7 @@ Generate planning artifacts that choose practical targets and define execution p
 Use this skill in the `plan` stage for initial planning or re-planning.
 
 ## Required inputs
+- `fuzz/vuln_candidates.json` (if present; read before target scoring)
 - `fuzz/target_analysis.json` (if present)
 - `fuzz/antlr_plan_context.json` (if present)
 - MCP tools from task-scoped PromeFuzz companion (if available), including preprocessor and semantic tools
@@ -29,20 +30,31 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 
 ## Workflow
 1. Query MCP evidence first when MCP is available (code-navigation first, preprocessor second, semantic evidence third).
-2. Read target analysis and identify runtime-viable public entrypoints.
-3. Apply vulnerability-first scoring when selecting targets:
-   - `score_total = 0.40*vuln_likelihood + 0.20*exploitability + 0.15*reachability_confidence + 0.10*coverage_gap + 0.08*complexity_depth + 0.05*api_relevance + 0.02*consumer_order_support - recent_yield_penalty`.
-4. Produce `fuzz/targets.json` as a strict non-empty array.
-5. Produce `fuzz/execution_plan.json` with prioritized execution targets.
-6. Write concise implementation guidance into `fuzz/PLAN.md`.
+2. Read `fuzz/vuln_candidates.json` first when present. Treat pending high-priority candidates as the primary target source; coverage and complexity are only tie-breakers.
+3. Read target analysis and identify runtime-viable entrypoints that can validate the top vulnerability candidates.
+4. Apply pure vulnerability-driven scoring when selecting targets:
+   - `score_total = 0.50*vuln_likelihood + 0.30*exploitability + 0.20*reachability_confidence - recent_yield_penalty`.
+   - Coverage, complexity, API relevance, and consumer-order-support are NOT scored; they default to 0.
+   - `vuln_likelihood` and `exploitability` dominate the ranking; all other dimensions are tie-breakers only.
+5. Produce `fuzz/targets.json` as a strict non-empty array.
+6. Produce `fuzz/execution_plan.json` with prioritized execution targets.
+7. Write concise implementation guidance into `fuzz/PLAN.md`.
 
 ## Constraints
-- In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`.
+- In `fuzz/targets.json`, each item must include non-empty `name`, `api`, `lang`, `target_type`, `seed_profile`, `risk_type`.
+- `risk_type` must be carried forward from `fuzz/vuln_candidates.json` when a candidate is selected. Valid values: `mem_oob_candidate`, `integer_overflow_candidate`, `use_after_free_candidate`, `null_deref_candidate`, `type_confusion_candidate`. If no candidate maps, use `none`.
+- Treat `fuzz/targets.json` as advisory candidate input. The coordinator will normalize target identity, seed profile, and execution metadata before writing `fuzz/selected_targets.json`.
 - `api` must describe an API identifier, not a harness path.
 - Forbidden `api` examples: `fuzz/*.c`, `fuzz/*.cc`, `fuzz/*.cpp`, `fuzz/*.cxx`, `fuzz/*.java`.
 - Forbidden: `name = LLVMFuzzerTestOneInput`.
-- Rank runtime-executable/public targets first.
-- Keep vulnerability signals primary; coverage/complexity are secondary references.
+- Rank runtime-executable/public targets first. Prefer functions declared in public headers (`include/`, `lib/`, `src/*.h`). Internal/static functions (`static` keyword, file-local scope) require `api_surface_exception` with `vuln_likelihood >= 0.75`.
+- Deprioritize functions in `test/`, `tests/`, `demo/`, `demos/`, `examples/`, `example/`, `deprecated/`, `legacy/`, or `contrib/` directories.
+- Deprioritize format-gated entry points (e.g., image decoders with strict header checks like PNM/PNG) that reject nearly all fuzzer mutations at the format-validation gate. Prefer raw-buffer consumers. Only select a format-gated entry when coverage feedback from a prior run confirms the fuzzer passes the gate.
+- Deprioritize cleanup/lifecycle functions whose name matches `Delete`, `Dealloc`, `Deallocate`, `Free`, `Destroy`, `Cleanup`, `Release`, `Dispose`, `Close`, `Uninit`. These are resource management, not attack surface. Only select when `vuln_likelihood >= 0.75` with crash evidence from production builds.
+  Check the `file`/`source_hint` field.  Prefer public API equivalents from `lib/` or `src/` instead.
+  Only select a deprecated-path target when no public alternative exists; mark it with `api_surface_exception` and `vuln_likelihood` ≤ 0.3.
+- Keep vulnerability candidates primary; coverage/complexity are secondary references.
+- If `fuzz/vuln_candidates.json` has pending candidates, `fuzz/PLAN.md` must name the chosen `candidate_id`, target API, evidence IDs, and attack hint.
 - `fuzz/execution_plan.json` must include `execution_priority`, `must_run`, `target_name`, `expected_fuzzer_name`, `seed_profile`.
 - Naming contract to reduce target/binary mismatch:
   - `target_name` should be API-centric and suffix-free (for example: `decode`).
@@ -50,6 +62,8 @@ Use this skill in the `plan` stage for initial planning or re-planning.
   - Keep `expected_fuzzer_name` consistent with `fuzz/harness_index.json` and harness filename stem.
 - Include `min_required_built_targets` (default >=2 when multiple execution targets exist).
 - `fuzz/selected_targets.json` must include `security_score_breakdown`.
+- `fuzz/selected_targets.json` is the normalized execution truth source. Keep target identity stable and API-centric.
+- Empty `seed_families_suggested` is valid when no specific advisory family guidance is justified.
 - Internal/private API selection requires explicit `api_surface_exception`:
   - allow only when `vuln_likelihood >= 0.75`
   - include non-empty `reason` and `evidence_ids`.
@@ -66,4 +80,4 @@ Use this skill in the `plan` stage for initial planning or re-planning.
 - `fuzz/execution_plan.json` is consistent with selected runtime targets.
 
 ## Done contract
-- Write `fuzz/PLAN.md` into `./done`.
+- Write the path string `fuzz/PLAN.md` as the sole text of `./done` (run `echo 'fuzz/PLAN.md' > ./done`; do **not** copy the file's contents).
