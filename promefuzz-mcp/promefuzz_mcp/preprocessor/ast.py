@@ -211,7 +211,11 @@ class ASTPreprocessor:
                 logger.warning(f"Skipping invalid meta payload from {source_file}: {type(meta_payload).__name__}")
                 self.invalid_meta_files.append(str(source_file))
                 continue
-            all_meta.update(meta_payload)
+            for _k, _v in meta_payload.items():
+                if _k in all_meta and isinstance(all_meta[_k], dict) and isinstance(_v, dict):
+                    all_meta[_k].update(_v)
+                else:
+                    all_meta[_k] = _v
             if (idx + 1) % 100 == 0 or (idx + 1) == total:
                 logger.info(f"AST preprocessing progress: {idx + 1}/{total} files ({int((idx + 1) / total * 100)}%)")
 
