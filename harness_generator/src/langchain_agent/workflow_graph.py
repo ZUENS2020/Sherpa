@@ -4571,6 +4571,59 @@ def _summarize_build_error(last_error: str, stdout_tail: str, stderr_tail: str) 
     return _wf_common.summarize_build_error(last_error, stdout_tail, stderr_tail)
 
 
+def _splice_sources_list(text: str, new_paths: list[str]) -> tuple[str, bool]:
+    """Insert string-literal entries before the closing ']' of a SOURCES list.
+
+    Recognizes two template shapes used by fuzz/build.py:
+      - Python:  ``SOURCES = [ "a.c", "b.c" ]``
+      - JSON-ish: ``"sources": [ "a.c", "b.c" ]``
+    Skips entries already present (substring match). Returns ``(new_text, ok)``
+    where ``ok`` is False when no SOURCES list could be located.
+    """
+    if not new_paths:
+        return text, False
+
+    pat = re.compile(r"(?P<head>SOURCES\s*=\s*\[|[\"']sources[\"']\s*:\s*\[)", re.IGNORECASE)
+    m = pat.search(text)
+    if not m:
+        return text, False
+
+    open_idx = m.end() - 1  # position of '['
+    depth = 0
+    close_idx = -1
+    for i in range(open_idx, len(text)):
+        ch = text[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                close_idx = i
+                break
+    if close_idx < 0:
+        return text, False
+
+    inner = text[open_idx + 1 : close_idx]
+    additions = [p for p in new_paths if p not in inner]
+    if not additions:
+        return text, False
+
+    # Match indentation of last non-empty line inside the list (best-effort).
+    inner_rstripped = inner.rstrip()
+    last_nl = inner_rstripped.rfind("\n")
+    indent = "    "
+    if last_nl >= 0:
+        tail_line = inner_rstripped[last_nl + 1 :]
+        lead = len(tail_line) - len(tail_line.lstrip(" \t"))
+        if lead > 0:
+            indent = tail_line[:lead]
+
+    sep = "," if inner_rstripped and not inner_rstripped.endswith(",") else ""
+    insertion = sep + "\n" + "\n".join(f'{indent}"{p}",' for p in additions) + "\n"
+    new_text = text[: open_idx + 1] + inner_rstripped + insertion + text[close_idx:]
+    return new_text, True
+
+
 def _extract_actionable_build_locations(
     last_error: str,
     stdout_tail: str,
@@ -5539,11 +5592,11 @@ def _analysis_opencode_timeout_sec(state: FuzzWorkflowRuntimeState) -> int:
 
 
 def _analysis_opencode_idle_timeout_sec() -> int:
-    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC") or "75").strip()
+    raw = (os.environ.get("SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC") or "300").strip()
     try:
-        return max(10, min(int(raw), 600))
+        return max(10, min(int(raw), 1200))
     except Exception:
-        return 75
+        return 300
 
 
 def _vuln_hunt_idle_timeout_sec() -> int:
@@ -9219,11 +9272,11 @@ def _node_synthesize(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeStat
         remaining = _remaining_time_budget_sec(state, min_timeout=0)
         if remaining <= 0:
             return
-        raw_timeout = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE_TIMEOUT_SEC") or "90").strip()
+        raw_timeout = (os.environ.get("SHERPA_SYNTH_BUILD_VALIDATE_TIMEOUT_SEC") or "1800").strip()
         try:
-            cfg_timeout = max(10, min(int(raw_timeout), 600))
+            cfg_timeout = max(10, min(int(raw_timeout), 3600))
         except Exception:
-            cfg_timeout = 90
+            cfg_timeout = 1800
         timeout = min(remaining, cfg_timeout)
         cmd = [gen._python_runner(), "build.py"] if hasattr(gen, "_python_runner") else [shutil.which("python3") or "python", "build.py"]
         build_env = os.environ.copy()
@@ -11752,6 +11805,103 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
 
         return _changes > 0
 
+    def _try_hotfix_batch_internal_symbol_discovery() -> bool:
+        """Resolve multiple `undefined reference` errors in one pass.
+
+        When the linker reports >=2 distinct missing symbols, scan the repo's
+        likely internal-library source directories (apps/lib, src/lib, etc.)
+        for files that define those symbols, then append them all to the
+        SOURCES list in fuzz/build.py in a single edit. This shortcuts the
+        otherwise per-round whack-a-mole loop where the LLM adds one .c file
+        per build attempt.
+        """
+        if (os.environ.get("SHERPA_FIX_BUILD_BATCH_DISCOVERY") or "1").strip().lower() in {"0", "false", "no", "off"}:
+            return False
+
+        diag = (last_error or "") + "\n" + (stdout_tail or "") + "\n" + (stderr_tail or "")
+        import re as _re_local
+        syms = sorted(set(_re_local.findall(r"undefined reference to [`'\"]([A-Za-z_][A-Za-z0-9_]*)[`'\"]", diag)))
+        if len(syms) < 2:
+            return False
+
+        repo = gen.repo_root
+        candidate_rels = ("apps/lib", "apps", "src/lib", "lib", "src/internal", "core", "src")
+        cand_dirs: list[Path] = []
+        for rel in candidate_rels:
+            d = repo / rel
+            if not d.is_dir():
+                continue
+            try:
+                c_count = sum(1 for _ in d.rglob("*.c"))
+            except (OSError, PermissionError):
+                continue
+            if c_count >= 3:
+                cand_dirs.append(d)
+        if not cand_dirs:
+            return False
+
+        _SIMD_SUFFIX_SET = (
+            "_neon", "_sse", "_sse2", "_sse3", "_sse4", "_sse41", "_sse42",
+            "_ssse3", "_msa", "_avx", "_avx2", "_avx512", "_altivec", "_vsx",
+        )
+
+        def _is_skip(p: Path) -> bool:
+            parts_lower = [x.lower() for x in p.parts]
+            if any(seg in {"test", "tests", "demo", "demos", "examples", "example",
+                            "build", "_build", "cmakefiles", "_deps", "_install"} for seg in parts_lower):
+                return True
+            stem_lower = p.stem.lower()
+            if any(stem_lower.endswith(s) for s in _SIMD_SUFFIX_SET):
+                return True
+            return False
+
+        sym_to_src: dict[str, Path] = {}
+        for d in cand_dirs:
+            try:
+                c_files = list(d.rglob("*.c"))
+            except (OSError, PermissionError):
+                continue
+            for c in c_files:
+                if _is_skip(c):
+                    continue
+                missing = [s for s in syms if s not in sym_to_src]
+                if not missing:
+                    break
+                try:
+                    text = c.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                for sym in missing:
+                    if _re_local.search(rf"(?m)^[A-Za-z_][\w\s\*]*\b{_re_local.escape(sym)}\s*\(", text):
+                        sym_to_src[sym] = c
+        if not sym_to_src:
+            return False
+
+        build_py = repo / "fuzz" / "build.py"
+        if not build_py.is_file():
+            return False
+        try:
+            build_text = build_py.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        new_rel_paths = sorted({str(p.relative_to(repo)) for p in sym_to_src.values()})
+        new_text, ok = _splice_sources_list(build_text, new_rel_paths)
+        if not ok or new_text == build_text:
+            return False
+
+        try:
+            build_py.write_text(new_text, encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+
+        added_count = sum(1 for p in new_rel_paths if p not in build_text)
+        _wf_log(
+            cast(dict[str, Any], state),
+            f"fix_build: batch-discovered {added_count} sources for {len(sym_to_src)}/{len(syms)} undef symbols",
+        )
+        return True
+
     if _fix_build_ruleset() == "extended":
         if _try_hotfix_compiler_fuzzer_flag_mismatch():
             out = _success_out(
@@ -11841,6 +11991,15 @@ def _node_fix_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState
                 outcome="rule_fixed",
                 rule_hit="missing_system_packages_declared",
                 last_diff_paths=["fuzz/system_packages.txt"],
+            )
+            _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
+            return out
+
+        if _try_hotfix_batch_internal_symbol_discovery():
+            out = _success_out(
+                "local hotfix for batch internal symbol discovery applied",
+                outcome="rule_fixed",
+                rule_hit="batch_internal_symbol_discovery",
             )
             _wf_log(cast(dict[str, Any], out), f"<- fix_build hotfix ok dt={_fmt_dt(time.perf_counter()-t0)}")
             return out
@@ -15385,7 +15544,7 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in cloned repo")
 
         rem = _remaining_time_budget_sec(state, min_timeout=15)
-        build_timeout = max(30, min(rem, 600))
+        build_timeout = max(30, min(rem, 1800))
         build_env = os.environ.copy()
         if hasattr(gen, "_compose_vcpkg_runtime_env"):
             try:
@@ -15647,7 +15806,7 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         else:
             raise HarnessGeneratorError("no fuzz/build.py or fuzz/build.sh found in re-run workspace rebuild")
 
-        build_timeout = max(30, min(rem, 600))
+        build_timeout = max(30, min(rem, 1800))
         build_env = os.environ.copy()
         if hasattr(gen, "_compose_vcpkg_runtime_env"):
             try:

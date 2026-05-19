@@ -17,24 +17,82 @@ _SIMD_SUFFIXES = {
     "_ssse3", "_msa", "_avx", "_avx2", "_avx512", "_altivec", "_vsx",
 }
 
+_BUILD_BLACKLIST_PARTS = frozenset({
+    "build", "build64", "_build",
+    "CMakeFiles", "_deps", "_install", "out", "dist",
+    "node_modules", "vendor", "third_party", "thirdparty",
+    ".git", ".svn", ".hg", "__pycache__",
+})
+
+_HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".inc")
+
 
 def _is_simd_file(path: Path) -> bool:
     stem = path.stem.lower()
     return any(stem.endswith(s) for s in _SIMD_SUFFIXES)
 
 
+def _is_build_artifact(path: Path) -> bool:
+    for part in path.parts:
+        if part in _BUILD_BLACKLIST_PARTS:
+            return True
+        if part.startswith(("build-", "build_", "cmake-build-")):
+            return True
+    return False
+
+
+def _dir_has_headers(d: Path, *, max_depth: int = 2) -> bool:
+    """True iff `d` contains at least one header within max_depth levels."""
+    if not d.is_dir() or _is_build_artifact(d):
+        return False
+    try:
+        for entry in d.iterdir():
+            if _is_build_artifact(entry):
+                continue
+            if entry.is_file() and entry.suffix.lower() in _HEADER_SUFFIXES:
+                return True
+            if max_depth > 0 and entry.is_dir():
+                if _dir_has_headers(entry, max_depth=max_depth - 1):
+                    return True
+    except (OSError, PermissionError):
+        return False
+    return False
+
+
 def _scan_include_dirs(repo_root: Path) -> list[str]:
-    dirs: list[str] = []
-    for candidate in (
-        repo_root / "include",
-        repo_root / "src",
-        repo_root / "source",
-        repo_root / "lib",
-        repo_root,
-    ):
-        if candidate.is_dir():
-            dirs.append(str(candidate))
-    return dirs
+    """Return -I candidates ordered by priority.
+
+    Tier 1 — canonical names (include/src/source/lib); OpenSSL hits here.
+    Tier 2 — repo_root itself; covers cJSON-style flat layouts.
+    Tier 3 — first-level subdirs containing headers; covers wolfssl/wolfssl/.
+    Build-artifact dirs are excluded everywhere. Capped at 16 entries.
+    """
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _push(p: Path) -> None:
+        if not p.is_dir() or _is_build_artifact(p):
+            return
+        try:
+            rp = p.resolve()
+        except (OSError, RuntimeError):
+            return
+        if rp in seen:
+            return
+        seen.add(rp)
+        candidates.append(p)
+
+    for name in ("include", "src", "source", "lib"):
+        _push(repo_root / name)
+    _push(repo_root)
+    try:
+        for entry in sorted(repo_root.iterdir()):
+            if entry.is_dir() and _dir_has_headers(entry, max_depth=2):
+                _push(entry)
+    except (OSError, PermissionError):
+        pass
+
+    return [str(p) for p in candidates[:16]]
 
 
 class Meta:
@@ -114,6 +172,8 @@ class ASTPreprocessor:
                 for suffix in suffixes:
                     for f in source_path.rglob(f"*{suffix}"):
                         if _is_simd_file(f):
+                            continue
+                        if _is_build_artifact(f):
                             continue
                         if any(part in ("test", "tests", "demo", "demos", "examples", "example")
                                for part in f.parts):

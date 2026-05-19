@@ -121,9 +121,10 @@ run → crash-triage
 ## Session State
 
 <!-- SESSION-START -->
-last_session: 2026-05-16
-last_deploy: 6b3626b31 — self-evolving docs (journal, habits, auto sections)
-active_jobs: cJSON (d0b0cb5c), uriparser (3c3c2c8e), libwebp (3504b418) — all in analysis
+last_session: 2026-05-19
+last_deploy: edbe3296a — socket.setdefaulttimeout hardening, AST limit 2000, embedding retry+128 batch
+last_local_change: 2026-05-19 — P1-P4 fixes (extended include heuristic, build timeout 1800s, analysis idle 300s, batch symbol discovery hotfix); not yet pushed
+active_jobs: none — wolfssl (real_bug: memcpy32 heap-bof), libwebp (complete)
 <!-- SESSION-END -->
 
 ## Key Env Vars
@@ -134,7 +135,9 @@ active_jobs: cJSON (d0b0cb5c), uriparser (3c3c2c8e), libwebp (3504b418) — all 
 | `SHERPA_OPENCODE_IDLE_TIMEOUT_VULN_HUNT_SEC` | 1800 | Idle timeout for vuln_hunt stage |
 | `SHERPA_OPENCODE_IDLE_TIMEOUT_PLAN_SEC` | 1200 | Idle timeout for plan stage |
 | `SHERPA_OPENCODE_IDLE_TIMEOUT_SYNTH_SEC` | 300 | Idle timeout for synthesize stage |
-| `SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC` | 75 | Idle timeout for analysis stage |
+| `SHERPA_ANALYSIS_OPENCODE_IDLE_TIMEOUT_SEC` | 300 | Idle timeout for analysis stage |
+| `SHERPA_SYNTH_BUILD_VALIDATE_TIMEOUT_SEC` | 1800 | Synth-stage build validation subprocess timeout |
+| `SHERPA_FIX_BUILD_BATCH_DISCOVERY` | 1 | Enable batch symbol-discovery hotfix (set 0 to disable) |
 | `SHERPA_VULN_HUNTING_ENABLED` | 1 | Enable vuln-hunt sub-phase |
 | `SHERPA_VERIFY_STAGE_NO_AI` | 0 | Skip AI seed generation in run stage |
 
