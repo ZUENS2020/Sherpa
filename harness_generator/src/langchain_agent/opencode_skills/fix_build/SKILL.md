@@ -51,7 +51,7 @@ def find_static_lib(repo_root):
 
 ## Workflow
 1. Read diagnostics first; identify smallest root-cause edit.
-2. Apply minimal patch tied to concrete symbol/file/line errors.
+2. Apply minimal patch tied to concrete symbol/file/line errors. When multiple `undefined reference` errors point at internal library symbols, prefer adding the entire owning source directory (e.g. `apps/lib/*.c`) to the build SOURCES list in one edit, rather than chasing one symbol at a time.
 3. If dependencies are missing, update `fuzz/system_packages.txt` using canonical vcpkg names.
 4. Keep execution-plan coverage intent (do not silently collapse multi-target plans).
 

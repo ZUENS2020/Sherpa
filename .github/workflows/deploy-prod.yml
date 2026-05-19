@@ -360,6 +360,18 @@ jobs:
             fi
             sleep 2
           done
+          echo "[reset] cleaning up released PVs for ${NAMESPACE}"
+          for pv in $(kubectl get pv -o name); do
+            pv_name="${pv#persistentvolume/}"
+            if [[ "${pv_name}" != *"${NAMESPACE}"* ]]; then
+              continue
+            fi
+            pv_status="$(kubectl get pv "${pv_name}" -o jsonpath='{.status.phase}')"
+            if [[ "${pv_status}" == "Released" ]]; then
+              echo "[reset] deleting released PV ${pv_name}"
+              kubectl delete pv "${pv_name}" --ignore-not-found=true || true
+            fi
+          done
           echo "[reset] recreating namespace ${NAMESPACE}"
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
