@@ -174,6 +174,7 @@ Constraints:
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 - Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only in build-repair planning.
+- when build diagnostics indicate missing system libraries (cmake/pkg-config "Could NOT find", "missing:", "not found", missing headers), note the canonical vcpkg port name in `Known Issues` and recommend a `fuzz/system_packages.txt` update
 
 Required planning sections in `fuzz/PLAN.md`:
 - `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
@@ -395,6 +396,7 @@ Build-repair constraints:
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
+- if build diagnostics indicate missing system libraries (cmake/pkg-config "Could NOT find", "missing:", "not found", missing headers), write canonical vcpkg port names to `fuzz/system_packages.txt` (one per line, lowercase, use standard vcpkg port names like `protobuf`, `curl`, `sqlite3`, `pcre`, `gmp`, etc.)
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 Required notes in generated scaffold artifacts:
