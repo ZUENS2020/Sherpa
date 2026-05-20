@@ -8,7 +8,7 @@ AI-driven automated fuzzing harness generation and vulnerability discovery syste
 
 | Layer | Technology |
 |---|---|
-| Backend | Python FastAPI (port 8001) + LangGraph state machine |
+| Backend | Python FastAPI (port 8000, configurable via PORT env var) + LangGraph state machine |
 | Frontend | Next.js 14 App Router + React + MUI v7 + TanStack Query |
 | Code Analysis | PromeFuzz MCP Server (AST, callgraph, LLM comprehension) |
 | AI Agent | OpenCode CLI (opencode-ai) via `codex_helper.py` |
@@ -50,7 +50,7 @@ k8s/                             # Kustomize overlays (base, dev, prod, cloudfla
 
 ## Workflow Stages (LangGraph)
 
-14 nodes in `workflow_graph.py:build_fuzz_workflow()` (line 16271). Init can resume from any stage.
+14 nodes in `workflow_graph.py:build_fuzz_workflow()` (line 16459). Init can resume from any stage.
 
 ### Main Happy Path
 ```
@@ -97,7 +97,7 @@ run → crash-triage
 | improve-harness | in_place | build |
 | improve-harness | replan or loop_count ≥ max | plan |
 
-## API Routes (port 8001)
+## API Routes (port 8000)
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -172,9 +172,9 @@ kubectl get pods -n sherpa-dev | grep fuzz
 # Follow pod logs
 kubectl logs -n sherpa-dev <pod> --tail=50
 # Query API tasks
-kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8001/api/tasks
+kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8000/api/tasks
 # Check API task detail
-kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8001/api/task/<job_id>
+kubectl exec -n sherpa-dev deploy/sherpa-web -- curl -s http://localhost:8000/api/task/<job_id>
 ```
 
 ## Documentation Maintenance
