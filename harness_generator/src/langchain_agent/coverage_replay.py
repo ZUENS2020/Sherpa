@@ -286,6 +286,7 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path, *, focus:
     uncovered_functions: list[str] = []
     covered_region_count = 0
     total_region_count = 0
+    harness_fallback_files = 0
     repo_files_seen: set[str] = set()
     frontier_functions: list[dict[str, Any]] = []
     partial_threshold = _frontier_partial_threshold()
@@ -305,7 +306,8 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path, *, focus:
 
     for unit in list(export_doc.get("data") or []):
         file_map: dict[str, bool] = {}
-        for file_doc in list(unit.get("files") or []):
+        file_docs = list(unit.get("files") or [])
+        for file_doc in file_docs:
             file_name = str(file_doc.get("filename") or "").strip()
             if not file_name or not _repo_source_file(file_name, repo_root):
                 continue
@@ -321,6 +323,43 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path, *, focus:
                 total_region_count += int(regions.get("count") or 0)
             except Exception:
                 pass
+
+        # Fallback: when a harness embeds library source via `#include "<lib>/<lib>.c"`,
+        # llvm-cov only reports the `fuzz/<harness>.c` file (the library code is
+        # preprocessor-merged into the harness translation unit). `_repo_source_file()`
+        # filters fuzz/* out, so without this fallback file_map is empty and every
+        # function is skipped below — giving covered_function_count=0 for every input.
+        # When the normal path finds zero source files, accept fuzz/* files as the
+        # coverage carrier so region/function counts reflect actual execution.
+        if not file_map:
+            try:
+                repo_root_resolved = repo_root.resolve()
+            except Exception:
+                repo_root_resolved = repo_root
+            for file_doc in file_docs:
+                file_name = str(file_doc.get("filename") or "").strip()
+                if not file_name:
+                    continue
+                try:
+                    rel = Path(file_name).resolve().relative_to(repo_root_resolved)
+                except Exception:
+                    continue
+                if not (rel.parts and rel.parts[0].lower() == "fuzz"):
+                    continue
+                repo_files_seen.add(file_name)
+                file_map[file_name] = True
+                harness_fallback_files += 1
+                summary = dict(file_doc.get("summary") or {})
+                regions = dict(summary.get("regions") or {})
+                try:
+                    covered_region_count += int(regions.get("covered") or 0)
+                except Exception:
+                    pass
+                try:
+                    total_region_count += int(regions.get("count") or 0)
+                except Exception:
+                    pass
+
         for fn in list(unit.get("functions") or []):
             filenames = [str(x).strip() for x in list(fn.get("filenames") or []) if str(x).strip()]
             allowed_files = [name for name in filenames if file_map.get(name)]
@@ -392,6 +431,7 @@ def _summarize_export_doc(export_doc: dict[str, Any], repo_root: Path, *, focus:
         "covered_functions_sample": covered_functions[:12],
         "uncovered_functions_sample": uncovered_functions[:12],
         "repo_file_count": len(repo_files_seen),
+        "harness_files_fallback_count": int(harness_fallback_files),
         "frontier_functions": frontier_functions[:8],
         "unique_frontier_functions": len(frontier_functions),
         "nearby_uncovered_regions": int(nearby_uncovered_regions),
