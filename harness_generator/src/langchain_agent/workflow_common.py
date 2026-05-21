@@ -12,7 +12,7 @@ from typing import Any
 
 from persistent_config import load_config
 
-_DEFAULT_TIME_BUDGET_SEC = 900
+_DEFAULT_TIME_BUDGET_SEC = int(os.environ.get("SHERPA_STAGE_TIME_BUDGET_SEC", "1800"))
 _UNLIMITED_TIME_BUDGET_SENTINEL_SEC = 2_147_483_647
 ALLOWED_TARGET_TYPES = {
     "parser",
