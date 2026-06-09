@@ -1729,6 +1729,16 @@ def _vuln_internal_api_min_score() -> float:
         return 0.75
 
 
+def _vuln_non_public_reachability_cap() -> float:
+    """Reachability ceiling applied to non-public candidates so public targets
+    rank ahead. Overridable via SHERPA_VULN_NON_PUBLIC_REACHABILITY_CAP."""
+    raw = (os.environ.get("SHERPA_VULN_NON_PUBLIC_REACHABILITY_CAP") or "0.30").strip()
+    try:
+        return max(0.0, min(float(raw), 1.0))
+    except Exception:
+        return 0.30
+
+
 def _vuln_min_evidence_confidence() -> float:
     raw = (os.environ.get("SHERPA_VULN_MIN_EVIDENCE_CONFIDENCE") or "0.45").strip()
     try:
@@ -2088,6 +2098,229 @@ def _is_internal_api_symbol(api: str) -> bool:
         "__",
     )
     return any(p in low for p in patterns)
+
+
+# --- Public-API surface oracle ------------------------------------------------
+# Symbol-name patterns that mark a function as a non-public binding/shim even
+# when it isn't listed in (or precedes) the extracted public-API set.
+_NON_PUBLIC_API_NAME_PATTERNS = (
+    "_wasm",
+    "_emscripten",
+    "emscripten_",
+    "_napi",
+    "napi_",
+    "_jni",
+    "jni_",
+    "_pyx",
+    "_cffi",
+)
+
+# Cache: repo_root str -> frozenset of public/exported symbol names.
+_PUBLIC_API_SYMBOL_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _vuln_public_api_enforce() -> bool:
+    raw = (os.environ.get("SHERPA_VULN_PUBLIC_API_ENFORCE") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _companion_work_dir() -> Path | None:
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    if not job_id:
+        return None
+    base_output = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+    work = base_output / "_k8s_jobs" / job_id / "promefuzz" / "work"
+    return work if work.is_dir() else None
+
+
+def _load_public_api_symbols(repo_root: Path, *, refresh: bool = False) -> frozenset[str]:
+    """Build the public/linkable symbol set for a repo.
+
+    Sources, unioned:
+      1. companion `work/api_functions.json` entries with `is_public == true`
+      2. build-stage `fuzz/exported_symbols.json` (authoritative, post-build)
+
+    Cached per repo_root. Returns empty set when no source is available, in
+    which case callers must degrade to name-pattern heuristics (no false
+    rejections).
+    """
+    key = str(repo_root)
+    if not refresh and key in _PUBLIC_API_SYMBOL_CACHE:
+        return _PUBLIC_API_SYMBOL_CACHE[key]
+
+    names: set[str] = set()
+
+    # 1. header-derived public surface (pre-build heuristic)
+    work = _companion_work_dir()
+    api_path = (work / "api_functions.json") if work else None
+    if api_path and api_path.is_file():
+        try:
+            doc = json.loads(api_path.read_text(encoding="utf-8", errors="replace"))
+            funcs = doc.get("functions") if isinstance(doc, dict) else doc
+            for f in funcs or []:
+                if not isinstance(f, dict):
+                    continue
+                # Treat missing is_public as public for backward compatibility
+                # with old artifacts that predate the flag.
+                if f.get("is_public", True):
+                    nm = str(f.get("name") or "").strip()
+                    if nm:
+                        names.add(nm)
+        except Exception:
+            pass
+
+    # 2. exported symbol table (authoritative)
+    try:
+        from .exported_symbols import load_exported_symbols
+
+        exported_path = repo_root / "fuzz" / "exported_symbols.json"
+        if exported_path.is_file():
+            names |= load_exported_symbols(exported_path)
+    except Exception:
+        pass
+
+    result = frozenset(names)
+    _PUBLIC_API_SYMBOL_CACHE[key] = result
+    return result
+
+
+def _load_api_loc_index(repo_root: Path) -> dict[str, tuple[str, int]]:
+    """Map symbol name -> (source_path, line) from companion api_functions.json.
+
+    Prefers `decl_loc` (declaration in header) then `loc`. Used to backfill a
+    candidate's missing source location. Empty when unavailable.
+    """
+    work = _companion_work_dir()
+    api_path = (work / "api_functions.json") if work else None
+    if not api_path or not api_path.is_file():
+        return {}
+    index: dict[str, tuple[str, int]] = {}
+    try:
+        doc = json.loads(api_path.read_text(encoding="utf-8", errors="replace"))
+        funcs = doc.get("functions") if isinstance(doc, dict) else doc
+        for f in funcs or []:
+            if not isinstance(f, dict):
+                continue
+            nm = str(f.get("name") or "").strip()
+            if not nm or nm in index:
+                continue
+            raw = str(f.get("decl_loc") or f.get("loc") or "").strip()
+            if not raw:
+                continue
+            # Format: "path:line:col" (col optional). Split from the right so
+            # Windows-style paths with a drive colon survive.
+            parts = raw.rsplit(":", 2)
+            path_part = parts[0] if parts else raw
+            line_no = 0
+            if len(parts) >= 2:
+                try:
+                    line_no = int(parts[1])
+                except Exception:
+                    line_no = 0
+            if path_part:
+                index[nm] = (path_part, line_no)
+    except Exception:
+        return {}
+    return index
+
+
+def _api_surface_class(api: str, public_set: frozenset[str]) -> str:
+    """Classify an API symbol as 'public' | 'internal' | 'unknown'.
+
+    - 'internal' when name matches a binding/shim pattern, the legacy internal
+      heuristic, or (when a non-empty public_set exists) is absent from it.
+    - 'public' when present in a non-empty public_set.
+    - 'unknown' when no oracle is available and no pattern matches (degraded).
+    """
+    name = str(api or "").strip()
+    if not name:
+        return "unknown"
+    low = name.lower()
+    if any(p in low for p in _NON_PUBLIC_API_NAME_PATTERNS):
+        return "internal"
+    if _is_internal_api_symbol(name):
+        return "internal"
+    if public_set:
+        return "public" if name in public_set else "internal"
+    return "unknown"
+
+
+def _is_non_public_api(api: str, public_set: frozenset[str]) -> bool:
+    """True when the symbol is known to be non-public/non-linkable.
+
+    Degrades safely: with no oracle and no matching pattern, returns the legacy
+    `_is_internal_api_symbol` result so behaviour is unchanged when enforcement
+    has no data to act on.
+    """
+    if not _vuln_public_api_enforce():
+        return _is_internal_api_symbol(api)
+    return _api_surface_class(api, public_set) == "internal"
+
+
+# Cache: repo_root str -> reverse adjacency {callee_name -> set(caller_name)}.
+_CALLGRAPH_REVERSE_CACHE: dict[str, dict[str, set[str]]] = {}
+
+
+def _load_callgraph_reverse(repo_root: Path) -> dict[str, set[str]]:
+    """Build a callee -> {callers} index from companion coverage_hints.json.
+
+    Empty dict when no callgraph data is available.
+    """
+    key = str(repo_root)
+    if key in _CALLGRAPH_REVERSE_CACHE:
+        return _CALLGRAPH_REVERSE_CACHE[key]
+    rev: dict[str, set[str]] = {}
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    if job_id:
+        base_output = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+        hints_path = base_output / "_k8s_jobs" / job_id / "promefuzz" / "coverage_hints.json"
+        if hints_path.is_file():
+            try:
+                doc = json.loads(hints_path.read_text(encoding="utf-8", errors="replace"))
+                for edge in doc.get("callgraph_summary") or []:
+                    if not isinstance(edge, dict):
+                        continue
+                    caller = str(edge.get("caller") or "").strip()
+                    callee = str(edge.get("callee") or "").strip()
+                    if caller and callee:
+                        rev.setdefault(callee, set()).add(caller)
+            except Exception:
+                rev = {}
+    _CALLGRAPH_REVERSE_CACHE[key] = rev
+    return rev
+
+
+def _nearest_public_entry(
+    sink_api: str,
+    public_set: frozenset[str],
+    reverse_cg: dict[str, set[str]],
+    *,
+    max_depth: int = 6,
+) -> str:
+    """Reverse-BFS from an internal sink to the nearest public caller.
+
+    Returns the public entry symbol name, or "" when none is reachable / no
+    callgraph. The public_set must be non-empty for a positive result.
+    """
+    if not sink_api or not public_set or not reverse_cg:
+        return ""
+    from collections import deque
+
+    seen: set[str] = {sink_api}
+    queue: deque[tuple[str, int]] = deque((c, 1) for c in reverse_cg.get(sink_api, set()))
+    while queue:
+        node, depth = queue.popleft()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node in public_set and not _is_non_public_api(node, public_set):
+            return node
+        if depth >= max_depth:
+            continue
+        for caller in reverse_cg.get(node, set()):
+            if caller not in seen:
+                queue.append((caller, depth + 1))
+    return ""
 
 
 def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
@@ -2667,6 +2900,8 @@ def _normalize_analysis_vuln_candidate(
     *,
     idx: int,
     evidence_by_id: dict[str, dict[str, Any]],
+    public_set: frozenset[str] | None = None,
+    api_loc_index: dict[str, tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     api = str(item.get("api") or item.get("target_api") or item.get("name") or "").strip()
     name = str(item.get("name") or item.get("target_name") or api).strip()
@@ -2692,6 +2927,28 @@ def _normalize_analysis_vuln_candidate(
         line = int(item.get("line") or 0)
     except Exception:
         line = 0
+
+    # Classify the candidate against the public-API surface. Non-public
+    # symbols (WASM/binding shims, statics, internal-only) keep their evidence
+    # but are reachability-capped so public candidates rank ahead of them; the
+    # high-vuln-likelihood escape hatch still applies later at target selection.
+    public_set = public_set if public_set is not None else frozenset()
+    api_surface = _api_surface_class(api, public_set)
+    if api_surface == "internal":
+        cap = _vuln_non_public_reachability_cap()
+        if reachability > cap:
+            reachability = cap
+
+    # Backfill source location from the public-API index when the candidate
+    # arrived without a concrete line (line == 0) but names a known symbol.
+    if (line <= 0 or not source_path) and api_loc_index:
+        loc = api_loc_index.get(api)
+        if loc:
+            loc_path, loc_line = loc
+            if not source_path and loc_path:
+                source_path = loc_path
+            if line <= 0 and loc_line > 0:
+                line = loc_line
     attack_hint = dict(item.get("attack_hint") or {})
     if not attack_hint:
         attack_hint = _candidate_attack_hint(
@@ -2720,6 +2977,7 @@ def _normalize_analysis_vuln_candidate(
         "target_type": target_type,
         "signal_type": signal_type,
         "risk_type": signal_type,
+        "api_surface": api_surface,
         "signal_score": round(max(0.0, min(signal_score, 1.0)), 4),
         "vuln_likelihood": round(vuln_likelihood, 4),
         "exploitability": round(exploitability, 4),
@@ -2765,8 +3023,16 @@ def _write_analysis_vuln_candidates(repo_root: Path, analysis_context_path: str)
         if isinstance(x, dict) and str(x.get("source_stage") or "") != "analysis"
     ]
     topk = max(1, int(_vuln_topk()))
+    public_set = _load_public_api_symbols(repo_root)
+    api_loc_index = _load_api_loc_index(repo_root)
     analysis_candidates = [
-        _normalize_analysis_vuln_candidate(item, idx=idx, evidence_by_id=evidence_by_id)
+        _normalize_analysis_vuln_candidate(
+            item,
+            idx=idx,
+            evidence_by_id=evidence_by_id,
+            public_set=public_set,
+            api_loc_index=api_loc_index,
+        )
         for idx, item in enumerate(inventory[:topk])
         if isinstance(item, dict)
     ]
@@ -3106,6 +3372,23 @@ def _build_selected_target_row(
     target_name = str(item.get("target_name") or item.get("name") or "").strip()
     api = str(item.get("api") or target_name).strip()
     target_type = str(item.get("target_type") or "generic").strip().lower()
+
+    # Internal sink -> nearest public entry mapping. When the requested API is
+    # non-public but the call graph shows a public caller that reaches it, fuzz
+    # the public entry instead (it's linkable) and keep the sink as an attack
+    # hint so synthesize still steers toward the dangerous path. Falls back to
+    # the escape-hatch handling below when no public caller is found.
+    _sink_remap: dict[str, str] = {}
+    if _vuln_public_api_enforce() and api:
+        _ps = _load_public_api_symbols(repo_root)
+        if _is_non_public_api(api, _ps):
+            _mapped = _nearest_public_entry(api, _ps, _load_callgraph_reverse(repo_root))
+            if _mapped and _mapped != api:
+                _sink_remap = {"original_api": api, "mapped_api": _mapped}
+                if not target_name or target_name == api:
+                    target_name = _mapped
+                api = _mapped
+
     seed_profile = _normalize_seed_profile(
         str(item.get("seed_profile") or "generic"),
         target_type=target_type,
@@ -3250,6 +3533,18 @@ def _build_selected_target_row(
             source_path=str(item.get("file") or security_candidate.get("file") or ""),
             security_reason=security_reason,
         )
+    # When we remapped an internal sink to a public entry, keep the sink on the
+    # attack-hint key code path so synthesize steers the public harness toward
+    # the dangerous internal function.
+    if _sink_remap:
+        attack_hint = dict(attack_hint or {})
+        kcp = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+        sink = _sink_remap.get("original_api", "")
+        if sink and sink not in kcp:
+            kcp.insert(0, sink)
+        attack_hint["key_code_path"] = kcp
+        attack_hint["mapped_from_internal_sink"] = sink
+        attack_hint["public_entry"] = _sink_remap.get("mapped_api", "")
     signal_score = max(0.0, min(float(security_scores.get(signal_type) or 0.0), 1.0))
     scoring_source = {
         "api": api,
@@ -3305,7 +3600,12 @@ def _build_selected_target_row(
         except Exception:
             pass
     adjusted_target_score = max(0.0, float(score_total))
-    internal_api = _is_internal_api_symbol(api)
+    # Non-public/non-linkable symbols (WASM/binding shims, statics, internal)
+    # are gated here using the public-API surface oracle, not just the legacy
+    # name heuristic — so they get the internal-API penalty + escape-hatch
+    # treatment *before* a wasted build cycle exposes them as non_public_api_usage.
+    _public_set = _load_public_api_symbols(repo_root)
+    internal_api = _is_non_public_api(api, _public_set)
     internal_min = _vuln_internal_api_min_score()
     api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
     if internal_api:
@@ -3420,6 +3720,7 @@ def _build_selected_target_row(
         "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
         "validation_status": str(security_candidate.get("validation_status") or item.get("validation_status") or "pending"),
         "attack_hint": attack_hint,
+        "sink_remap": dict(_sink_remap),
         "security_priority_reason": security_reason,
         "security_signals": _top_security_signals(security_scores),
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
