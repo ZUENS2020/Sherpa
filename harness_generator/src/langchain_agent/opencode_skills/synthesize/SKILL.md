@@ -119,6 +119,41 @@ Compiler-by-suffix rule:
 - Avoid internal/private namespaces (`detail`, `_internal`, `impl`, `private`) by default.
 - If no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
 
+### Stateful context initialization contract (MANDATORY)
+Many target APIs operate on an object/handle that must be fully configured
+before the call does any real work. A harness that calls the target with an
+unconfigured/empty context compiles and runs but exercises almost nothing —
+the hallmark is **code coverage frozen at a trivial value (e.g. `cov`/`ft`
+stuck below ~15) across millions of executions** while the fuzzer never grows
+its corpus. Treat such a harness as broken.
+
+Before calling the target API, the harness MUST construct a *valid, populated*
+input object using the library's own setup sequence:
+- **Grammar/parser libraries** (tree-sitter, ANTLR runtimes, PEG/state-machine
+  parsers): set the grammar/language on the parser before parsing. For
+  tree-sitter, `ts_parser_set_language(parser, tree_sitter_<grammar>())` is
+  REQUIRED before `ts_parser_parse_string(...)`; without it the tree is empty,
+  `ts_node_child_count(root)` is 0, and every input short-circuits. Link a
+  concrete grammar (e.g. an available `tree-sitter-<lang>`/grammar object) so
+  the parse produces a non-trivial tree, then exercise the node/cursor target
+  on that tree.
+- **Decoders/codecs**: initialize the decoder context with the expected
+  format/options before decoding.
+- **Serializers/protocol libraries**: register/select the concrete message or
+  schema type before parsing.
+
+Rules:
+- Verify the constructed object is non-empty before reaching the target (e.g.
+  assert child/element count > 0, or bail only after a *successful* setup).
+- Do NOT fake progress by reaching the target API with a null/empty object.
+- If the required grammar/codec/schema is not linkable in this repo, record it
+  in `fuzz/repo_understanding.json` (`chosen_target_reason` / `evidence`) and
+  pick a target whose context *can* be constructed from the available sources,
+  rather than shipping a harness that cannot reach real code.
+- Do NOT route the data flow through internal binding/transfer shims (e.g.
+  `*_wasm`, marshal-buffer indirection) in place of the real public API; those
+  paths bypass the parse/decode the fuzzer needs to drive.
+
 ## Constraints
 - Do not modify repository source files outside `fuzz/` and `./done`.
 - If upstream source appears syntactically broken, do not edit it; adapt the external harness/build glue, avoid that example/demo source, or record the limitation in `fuzz/repo_understanding.json`.
