@@ -408,10 +408,18 @@ def _run_promefuzz_pipeline(repo_root: Path, companion_root: Path) -> dict[str, 
     if (repo_root / "include").is_dir():
         headers.append(repo_root / "include")
     headers.append(repo_root)
-    extractor = APIExtractor(header_paths=headers, meta=meta)
+    # Pass repo_root so the extractor can classify each header public/internal
+    # (top-level headers and include/ dirs are public; lib/src, binding_*,
+    # tests, etc. are tagged is_public=false). Downstream target selection
+    # builds its public-API surface from the is_public flag.
+    extractor = APIExtractor(header_paths=headers, meta=meta, repo_root=repo_root)
     api_collection, api_path = extractor.extract(output_path=work_root / "api_functions.json")
 
-    top_functions = [str(x.name) for x in api_collection.funcs[:40]]
+    # Prefer surfacing public API names to RAG/coverage hints; fall back to all
+    # when classification yields nothing (degraded heuristics).
+    public_funcs = [x for x in api_collection.funcs if getattr(x, "is_public", True)]
+    surface_funcs = public_funcs or api_collection.funcs
+    top_functions = [str(x.name) for x in surface_funcs[:40]]
     result.update(
         {
             "ok": True,
@@ -526,11 +534,109 @@ def _run_rag_pipeline(repo_root: Path, companion_root: Path, api_functions: list
     return out
 
 
+def _callgraph_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_VULN_CALLGRAPH_ENABLE") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _callgraph_max_files() -> int:
+    raw = (os.environ.get("SHERPA_VULN_CALLGRAPH_MAX_FILES") or "80").strip()
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 80
+
+
+def _enumerate_source_files(repo_root: Path, limit: int) -> list[Path]:
+    """Collect .c/.cc/.cpp/.cxx files, skipping build/test/vendor dirs."""
+    src_suffixes = {".c", ".cc", ".cpp", ".cxx"}
+    skip = _PROGRESS_SKIP_DIRS | {"test", "tests", "example", "examples", "fuzz"}
+    out: list[Path] = []
+    for base, dirs, files in os.walk(repo_root):
+        dirs[:] = [d for d in dirs if d.lower() not in skip]
+        for name in files:
+            if Path(name).suffix.lower() in src_suffixes:
+                out.append(Path(base) / name)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _build_callgraph_summary(
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], str]:
+    """Best-effort call-graph extraction → compact summary list.
+
+    Returns (summary, degraded_reason). Always degrades to ([], reason) on any
+    problem (no cgprocessor binary, no compile_commands, timeout, exception) so
+    the companion never fails because of call-graph extraction.
+    """
+    if not _callgraph_enabled():
+        return [], "callgraph_disabled"
+
+    compile_commands = _compile_commands_path(repo_root)
+    if not compile_commands:
+        # cgprocessor without compile_commands almost always fails on real repos;
+        # skip rather than spend clang invocations that yield nothing.
+        return [], "no_compile_commands"
+
+    try:
+        from promefuzz_mcp.preprocessor.callgraph import CallGraphBuilder
+    except Exception as exc:  # pragma: no cover - import/env guard
+        return [], f"callgraph_import_failed:{exc}"
+
+    source_files = _enumerate_source_files(repo_root, _callgraph_max_files())
+    if not source_files:
+        return [], "no_source_files"
+
+    try:
+        builder = CallGraphBuilder(
+            source_files=source_files,
+            compile_commands_path=compile_commands,
+        )
+        # get_cgprocessor_bin() raises if the binary isn't present; catch below.
+        result, _ = builder.build()
+    except Exception as exc:
+        return [], f"callgraph_build_failed:{exc}"
+
+    edges = list((result or {}).get("edges") or [])
+    summary: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for edge in edges:
+        # Edge tuple: (callerName, callerDeclLoc, calleeName, calleeDeclLoc)
+        try:
+            caller, caller_loc, callee, callee_loc = edge
+        except Exception:
+            continue
+        caller = str(caller or "").strip()
+        callee = str(callee or "").strip()
+        if not caller or not callee:
+            continue
+        key = (caller, callee)
+        if key in seen:
+            continue
+        seen.add(key)
+        summary.append(
+            {
+                "caller": caller,
+                "callee": callee,
+                "caller_loc": str(caller_loc or ""),
+                "callee_loc": str(callee_loc or ""),
+                "summary": f"{caller} -> {callee}",
+            }
+        )
+        if len(summary) >= 2000:
+            break
+    return summary, "" if summary else "no_edges"
+
+
 def _build_coverage_hints(
     repo_root: Path,
     inventory: RepoInventory,
     promefuzz_doc: dict[str, Any],
     fallback_candidates: list[dict[str, Any]],
+    callgraph_summary: list[dict[str, Any]] | None = None,
+    callgraph_degraded_reason: str = "",
 ) -> dict[str, Any]:
     recommended: list[dict[str, Any]] = []
 
@@ -568,12 +674,15 @@ def _build_coverage_hints(
         "generated_at": _now_iso(),
         "repo_root": str(repo_root),
         "recommended_targets": ranked,
+        "callgraph_summary": list(callgraph_summary or []),
+        "callgraph_degraded_reason": callgraph_degraded_reason,
         "signals": {
             "inventory_source_files": inventory.source_files,
             "inventory_header_files": inventory.header_files,
             "promefuzz_ok": bool(promefuzz_doc.get("ok")),
             "promefuzz_api_count": int(promefuzz_doc.get("api_count") or 0),
             "fallback_candidate_count": len(fallback_candidates),
+            "callgraph_edge_count": len(callgraph_summary or []),
         },
     }
 
@@ -620,7 +729,18 @@ def _run_once(job_id: str, output_root: Path, companion_root: Path) -> dict[str,
             "top_candidates": fallback_candidates[:40],
         },
     }
-    hints_doc = _build_coverage_hints(repo_root, inventory, promefuzz_doc, fallback_candidates)
+    try:
+        callgraph_summary, callgraph_degraded_reason = _build_callgraph_summary(repo_root)
+    except Exception as exc:
+        callgraph_summary, callgraph_degraded_reason = [], f"callgraph_unexpected:{exc}"
+    hints_doc = _build_coverage_hints(
+        repo_root,
+        inventory,
+        promefuzz_doc,
+        fallback_candidates,
+        callgraph_summary=callgraph_summary,
+        callgraph_degraded_reason=callgraph_degraded_reason,
+    )
 
     preprocess_path = companion_root / "preprocess.json"
     coverage_hints_path = companion_root / "coverage_hints.json"
