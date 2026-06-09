@@ -1,0 +1,540 @@
+name: Deploy Staging
+
+# Minimal isolated verification environment (namespace sherpa-staging).
+# - Manual only: pick any branch/sha to deploy via the `ref` input.
+# - No external URL: no cloudflared tunnel, no ingress (access via
+#   `kubectl exec` / `kubectl port-forward`, same as the vuln-hunt tooling).
+# - Reuses the *_DEV GitHub secrets (same cluster + LLM endpoint); the staging
+#   namespace/postgres/PVs are fully separate so it never touches sherpa-dev.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to deploy to staging"
+        type: string
+        required: true
+        default: dev
+      force_rebuild_all:
+        description: "Force rebuild web and frontend images"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  NAMESPACE: sherpa-staging
+  OVERLAY: k8s/overlays/staging
+  STAGING_NAMESPACE: sherpa-staging
+  STAGING_SHARED_ROOT: /shared/staging
+  STAGING_OUTPUT_DIR: /home/deploy/output/staging
+  RESET_STAGING_BEFORE_DEPLOY: "true"
+  INSTALL_METRICS_SERVER: "true"
+
+concurrency:
+  group: deploy-staging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-staging:
+    runs-on: [self-hosted, linux]
+    environment: dev
+    timeout-minutes: 90
+
+    steps:
+      - name: Resolve deploy target refs
+        id: target_ref
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          api_base="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # Resolve the dispatched ref (branch name or commit sha) to a sha.
+          target_sha="$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${api_base}/commits/${INPUT_REF}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')"
+          checked_out_sha="${target_sha}"
+          base_sha=""
+          echo "target_branch=${INPUT_REF}" >> "$GITHUB_OUTPUT"
+          echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "checked_out_sha=${checked_out_sha}" >> "$GITHUB_OUTPUT"
+          echo "::notice::staging deploy ref=${INPUT_REF} target_sha=${target_sha}"
+
+      - name: Materialize source tree
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target_ref.outputs.target_sha }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo_dir="${GITHUB_WORKSPACE}"
+          tmp_tar="$(mktemp /tmp/sherpa-src-XXXXXX.tar.gz)"
+          find "${repo_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${TARGET_SHA}" \
+            -o "${tmp_tar}"
+          tar -xzf "${tmp_tar}" --strip-components=1 -C "${repo_dir}"
+          rm -f "${tmp_tar}"
+          test -f "${repo_dir}/.github/workflows/deploy-staging.yml"
+
+      - name: Guard no GHCR push path
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=".github/workflows/deploy-staging.yml"
+          if rg -n '^\s*push:\s*true\s*$' "$file"; then
+            echo "::error::Forbidden remote image push configuration found in $file"
+            exit 1
+          fi
+
+      - name: Setup kubectl (self-hosted fast path)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if command -v kubectl >/dev/null 2>&1; then
+            kubectl version --client --output=yaml >/dev/null
+            exit 0
+          fi
+          KVER="${KUBECTL_VERSION:-v1.30.5}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64) KARCH="amd64" ;;
+            aarch64|arm64) KARCH="arm64" ;;
+            *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          for base in \
+            "https://mirrors.aliyun.com/kubernetes-new/core/stable" \
+            "https://dl.k8s.io/release"; do
+            if curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 180 -fsSL "${base}/${KVER}/bin/linux/${KARCH}/kubectl" -o /tmp/kubectl; then
+              sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+              rm -f /tmp/kubectl
+              kubectl version --client --output=yaml >/dev/null
+              exit 0
+            fi
+          done
+          echo "Failed to install kubectl" >&2
+          exit 1
+
+      - name: Configure kubeconfig
+        id: kubeconfig
+        shell: bash
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64_DEV }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          selected=""
+          selected_source=""
+          runner_is_self_hosted="false"
+          if [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]; then
+            runner_is_self_hosted="true"
+          fi
+          select_candidate() {
+            local source="$1"; local path="$2"
+            if [[ -z "$path" || ! -f "$path" ]]; then return 1; fi
+            if KUBECONFIG="$path" kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
+              selected="$path"; selected_source="$source"; return 0
+            fi
+            return 1
+          }
+          select_candidate_via_sudo_copy() {
+            local source="$1"; local path="$2"; local tmp_copy
+            if [[ -z "$path" ]]; then return 1; fi
+            tmp_copy="$(mktemp)"
+            if sudo cp "$path" "$tmp_copy" 2>/dev/null; then
+              chmod 600 "$tmp_copy"
+              if select_candidate "$source" "$tmp_copy"; then return 0; fi
+            fi
+            rm -f "$tmp_copy"; return 1
+          }
+          if [[ "$runner_is_self_hosted" == "true" ]]; then
+            if [[ -n "${KUBECONFIG:-}" ]]; then
+              IFS=':' read -r first_kubeconfig _ <<< "${KUBECONFIG}"
+              select_candidate "runner-kubeconfig-env" "$first_kubeconfig" || true
+            fi
+            if [[ -z "$selected" ]]; then select_candidate "runner-home" "$HOME/.kube/config" || true; fi
+            if [[ -z "$selected" ]]; then select_candidate_via_sudo_copy "runner-k3s" "/etc/rancher/k3s/k3s.yaml" || true; fi
+            if [[ -z "$selected" ]]; then select_candidate_via_sudo_copy "runner-kubeadm" "/etc/kubernetes/admin.conf" || true; fi
+          fi
+          if [[ -z "$selected" && -n "${KUBE_CONFIG_B64:-}" ]]; then
+            tmp_kubeconfig="$(mktemp)"; trap 'rm -f "$tmp_kubeconfig"' EXIT
+            if echo "${KUBE_CONFIG_B64}" | base64 --decode > "$tmp_kubeconfig" 2>/dev/null; then
+              select_candidate "github-secret" "$tmp_kubeconfig" || echo "::warning::GitHub kubeconfig secret decoded but is not reachable."
+            else
+              echo "::warning::Failed to decode GitHub kubeconfig secret."
+            fi
+          fi
+          if [[ -z "$selected" ]]; then
+            echo "::error::Unable to locate any reachable kubeconfig file."
+            exit 1
+          fi
+          if [[ "$selected" != "$HOME/.kube/config" ]]; then cp "$selected" ~/.kube/config; fi
+          chmod 600 ~/.kube/config
+          echo "source=${selected_source}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Using kubeconfig source=${selected_source}"
+
+      - name: Preflight Kubernetes connectivity
+        id: kube_preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
+          if [[ -z "${server}" ]]; then
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Kubernetes server is empty in kubeconfig."
+            exit 1
+          fi
+          if kubectl version --request-timeout=10s >/tmp/kubectl-version.log 2>&1; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Cannot reach Kubernetes API server (${server})."
+            exit 1
+          fi
+
+      - name: Reset staging environment
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RESET_STAGING_BEFORE_DEPLOY}" != "true" ]]; then
+            echo "::error::RESET_STAGING_BEFORE_DEPLOY must be true for staging fresh deployment"
+            exit 1
+          fi
+          if [[ "${NAMESPACE}" != "${STAGING_NAMESPACE}" || "${STAGING_NAMESPACE}" != "sherpa-staging" ]]; then
+            echo "::error::Unsafe namespace guard triggered: NAMESPACE=${NAMESPACE}, STAGING_NAMESPACE=${STAGING_NAMESPACE}"
+            exit 1
+          fi
+
+          echo "[reset] deleting namespace ${STAGING_NAMESPACE}"
+          kubectl delete namespace "${STAGING_NAMESPACE}" --ignore-not-found=true --wait=true --timeout=300s || true
+          if kubectl get namespace "${STAGING_NAMESPACE}" >/dev/null 2>&1; then
+            echo "[reset] namespace still terminating, removing finalizers"
+            kubectl patch namespace "${STAGING_NAMESPACE}" --type=merge -p '{"spec":{"finalizers":[]}}' || true
+            kubectl wait --for=delete namespace/"${STAGING_NAMESPACE}" --timeout=120s || true
+          fi
+
+          echo "[reset] deleting retained staging PVs"
+          kubectl delete pv \
+            pv-sherpa-staging-postgres \
+            pv-sherpa-staging-config \
+            pv-sherpa-staging-job-logs \
+            pv-sherpa-staging-shared-output \
+            pv-sherpa-staging-shared-tmp \
+            --ignore-not-found=true || true
+
+          echo "[reset] cleaning ${STAGING_SHARED_ROOT}"
+          sudo mkdir -p "${STAGING_SHARED_ROOT}" "${STAGING_OUTPUT_DIR}"
+          for d in \
+            "${STAGING_SHARED_ROOT}/postgres" \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"; do
+            sudo mkdir -p "$d"
+            sudo find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          done
+          sudo chown -R 999:999 "${STAGING_SHARED_ROOT}/postgres"
+          sudo chown -R 10001:10001 \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"
+          sudo chmod -R a+rwX \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"
+
+      - name: Create or update runtime secrets
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY_DEV }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL_DEV || vars.LLM_MODEL_DEV || 'GLM-5' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL_DEV || 'https://modelservice.jdcloud.com/coding/openai/v1' }}
+          OPENROUTER_EMBEDDING_API_KEY: ${{ secrets.OPENROUTER_EMBEDDING_API_KEY_DEV }}
+          OPENROUTER_EMBEDDING_MODEL: ${{ secrets.OPENROUTER_EMBEDDING_MODEL_DEV || vars.OPENROUTER_EMBEDDING_MODEL_DEV || 'text-embedding-3-small' }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD_DEV }}
+          POSTGRES_DB: ${{ vars.POSTGRES_DB_DEV || 'sherpa' }}
+          POSTGRES_USER: ${{ vars.POSTGRES_USER_DEV || 'sherpa' }}
+          RUNTIME_HTTP_PROXY: ${{ secrets.RUNTIME_HTTP_PROXY_DEV }}
+          RUNTIME_HTTPS_PROXY: ${{ secrets.RUNTIME_HTTPS_PROXY_DEV }}
+          RUNTIME_ALL_PROXY: ${{ secrets.RUNTIME_ALL_PROXY_DEV }}
+          RUNTIME_NO_PROXY: ${{ secrets.RUNTIME_NO_PROXY_DEV }}
+        run: |
+          set -euo pipefail
+          current_secret_value() {
+            local secret_name="$1"; local key_name="$2"; local encoded
+            encoded="$(kubectl -n "${NAMESPACE}" get secret "${secret_name}" -o "jsonpath={.data.${key_name}}" 2>/dev/null || true)"
+            if [ -z "$encoded" ]; then echo ""; return 0; fi
+            printf '%s' "$encoded" | base64 --decode 2>/dev/null || true
+          }
+          require_non_empty() {
+            local env_name="$1"; local secret_name="$2"; local key_name="$3"
+            local value="${!env_name:-}"
+            if [ -n "$value" ]; then return 0; fi
+            local current; current="$(current_secret_value "$secret_name" "$key_name")"
+            if [ -n "$current" ]; then
+              echo "[error] ${env_name} is empty; refusing to overwrite existing ${secret_name}/${key_name}." >&2
+            else
+              echo "[error] ${env_name} is empty and ${secret_name}/${key_name} is not present in cluster." >&2
+            fi
+            exit 1
+          }
+          apply_optional_runtime_proxy_secret() {
+            local secret_name="sherpa-runtime-proxy"; local args=()
+            [[ -n "${RUNTIME_HTTP_PROXY:-}" ]] && args+=(--from-literal=HTTP_PROXY="${RUNTIME_HTTP_PROXY}" --from-literal=http_proxy="${RUNTIME_HTTP_PROXY}")
+            [[ -n "${RUNTIME_HTTPS_PROXY:-}" ]] && args+=(--from-literal=HTTPS_PROXY="${RUNTIME_HTTPS_PROXY}" --from-literal=https_proxy="${RUNTIME_HTTPS_PROXY}")
+            [[ -n "${RUNTIME_ALL_PROXY:-}" ]] && args+=(--from-literal=ALL_PROXY="${RUNTIME_ALL_PROXY}" --from-literal=all_proxy="${RUNTIME_ALL_PROXY}")
+            [[ -n "${RUNTIME_NO_PROXY:-}" ]] && args+=(--from-literal=NO_PROXY="${RUNTIME_NO_PROXY}" --from-literal=no_proxy="${RUNTIME_NO_PROXY}")
+            if [[ ${#args[@]} -eq 0 ]]; then
+              kubectl -n "${NAMESPACE}" delete secret "${secret_name}" --ignore-not-found=true; return 0
+            fi
+            kubectl -n "${NAMESPACE}" create secret generic "${secret_name}" "${args[@]}" --dry-run=client -o yaml | kubectl apply -f -
+          }
+
+          require_non_empty LLM_API_KEY sherpa-llm LLM_key
+          require_non_empty OPENROUTER_EMBEDDING_API_KEY sherpa-openrouter-embedding OPENROUTER_EMBEDDING_API_KEY
+          require_non_empty OPENROUTER_EMBEDDING_MODEL sherpa-openrouter-embedding OPENROUTER_EMBEDDING_MODEL
+          require_non_empty POSTGRES_PASSWORD sherpa-postgres POSTGRES_PASSWORD
+
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-llm \
+            --from-literal=LLM_key="${LLM_API_KEY}" \
+            --from-literal=OPENAI_API_KEY="${LLM_API_KEY}" \
+            --from-literal=OPENAI_BASE_URL="${LLM_BASE_URL}" \
+            --from-literal=OPENAI_MODEL="${LLM_MODEL}" \
+            --from-literal=OPENCODE_MODEL="${LLM_MODEL}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-openrouter-embedding \
+            --from-literal=OPENROUTER_EMBEDDING_API_KEY="${OPENROUTER_EMBEDDING_API_KEY}" \
+            --from-literal=OPENROUTER_EMBEDDING_MODEL="${OPENROUTER_EMBEDDING_MODEL}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "${NAMESPACE}" create secret generic sherpa-postgres \
+            --from-literal=POSTGRES_DB="${POSTGRES_DB}" \
+            --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+            --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            --from-literal=DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          apply_optional_runtime_proxy_secret
+
+      - name: Prepare staging hostPath directories
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p \
+            "${STAGING_SHARED_ROOT}/postgres" \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"
+          sudo chown -R 999:999 "${STAGING_SHARED_ROOT}/postgres"
+          sudo chown -R 10001:10001 \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"
+          sudo chmod -R a+rwX \
+            "${STAGING_SHARED_ROOT}/config" \
+            "${STAGING_SHARED_ROOT}/job-logs" \
+            "${STAGING_SHARED_ROOT}/tmp" \
+            "${STAGING_OUTPUT_DIR}"
+
+      - name: Prepare local image refs
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        id: prep
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target_ref.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          sha="${TARGET_SHA:-${GITHUB_SHA}}"
+          echo "web_image=sherpa-web:${sha}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=sherpa-frontend:${sha}" >> "$GITHUB_OUTPUT"
+          echo "web_tar=/tmp/sherpa-web-${sha}.tar" >> "$GITHUB_OUTPUT"
+          echo "frontend_tar=/tmp/sherpa-frontend-${sha}.tar" >> "$GITHUB_OUTPUT"
+          echo "::notice::image_tag_sha=${sha}"
+
+      - name: Decide image rebuild scope
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        id: rebuild_scope
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+          web_changed=true
+          frontend_changed=true
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            ctr_cmd=(sudo ctr -n k8s.io)
+            if sudo test -S /run/k3s/containerd/containerd.sock; then
+              ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+            fi
+            image_present() { "${ctr_cmd[@]}" images ls | awk '{print $1}' | grep -Fx "$1" >/dev/null 2>&1; }
+            # Reuse already-built images when present to save a full rebuild.
+            if image_present "${WEB_IMAGE}"; then web_changed=false; echo "::notice::reusing existing ${WEB_IMAGE}"; fi
+            if image_present "${FRONTEND_IMAGE}"; then frontend_changed=false; echo "::notice::reusing existing ${FRONTEND_IMAGE}"; fi
+          fi
+          # Honor explicit force rebuild.
+          if [[ "${{ inputs.force_rebuild_all }}" == "true" ]]; then web_changed=true; frontend_changed=true; fi
+          echo "web_changed=${web_changed}" >> "$GITHUB_OUTPUT"
+          echo "frontend_changed=${frontend_changed}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve base images
+        id: base_images
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        env:
+          WEB_PYTHON_BASE_IMAGE_DEV: ${{ secrets.WEB_PYTHON_BASE_IMAGE_DEV }}
+          FRONTEND_NODE_IMAGE_DEV: ${{ secrets.FRONTEND_NODE_IMAGE_DEV }}
+        run: |
+          set -euo pipefail
+          web_python_image="${WEB_PYTHON_BASE_IMAGE_DEV:-python:3.10-slim}"
+          frontend_node_image="${FRONTEND_NODE_IMAGE_DEV:-node:20-alpine}"
+          echo "web_python_image=${web_python_image}" >> "$GITHUB_OUTPUT"
+          echo "frontend_node_image=${frontend_node_image}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and export web image
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.web_changed == 'true'
+        timeout-minutes: 75
+        shell: bash
+        env:
+          WEB_PYTHON_IMAGE: ${{ steps.base_images.outputs.web_python_image }}
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          WEB_TAR: ${{ steps.prep.outputs.web_tar }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=0 docker build \
+            --file docker/Dockerfile.web \
+            --build-arg "WEB_PYTHON_BASE_IMAGE=${WEB_PYTHON_IMAGE}" \
+            --tag "${WEB_IMAGE}" \
+            .
+          docker save -o "${WEB_TAR}" "${WEB_IMAGE}"
+
+      - name: Build and export frontend image
+        if: steps.kube_preflight.outputs.reachable == 'true' && steps.rebuild_scope.outputs.frontend_changed == 'true'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          FRONTEND_NODE_IMAGE_BASE: ${{ steps.base_images.outputs.frontend_node_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=0 docker build \
+            --file docker/Dockerfile.frontend \
+            --build-arg "FRONTEND_NODE_IMAGE=${FRONTEND_NODE_IMAGE_BASE}" \
+            --tag "${FRONTEND_IMAGE}" \
+            .
+          docker save -o "${FRONTEND_TAR}" "${FRONTEND_IMAGE}"
+
+      - name: Import web image into containerd
+        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted' && steps.rebuild_scope.outputs.web_changed == 'true'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          WEB_TAR: ${{ steps.prep.outputs.web_tar }}
+        run: |
+          set -euo pipefail
+          ctr_cmd=(sudo ctr -n k8s.io)
+          if sudo test -S /run/k3s/containerd/containerd.sock; then
+            ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+          fi
+          timeout 1800s "${ctr_cmd[@]}" images import "${WEB_TAR}"
+          "${ctr_cmd[@]}" images ls | grep -F "${WEB_IMAGE}" >/dev/null
+          rm -f "${WEB_TAR}"
+
+      - name: Import frontend image into containerd
+        if: steps.kube_preflight.outputs.reachable == 'true' && runner.environment == 'self-hosted' && steps.rebuild_scope.outputs.frontend_changed == 'true'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+          FRONTEND_TAR: ${{ steps.prep.outputs.frontend_tar }}
+        run: |
+          set -euo pipefail
+          ctr_cmd=(sudo ctr -n k8s.io)
+          if sudo test -S /run/k3s/containerd/containerd.sock; then
+            ctr_cmd=(sudo ctr --address /run/k3s/containerd/containerd.sock -n k8s.io)
+          fi
+          timeout 1800s "${ctr_cmd[@]}" images import "${FRONTEND_TAR}"
+          "${ctr_cmd[@]}" images ls | grep -F "${FRONTEND_IMAGE}" >/dev/null
+          rm -f "${FRONTEND_TAR}"
+
+      - name: Deploy overlay
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -k "${OVERLAY}"
+
+      - name: Pin images and worker image
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        env:
+          WEB_IMAGE: ${{ steps.prep.outputs.web_image }}
+          FRONTEND_IMAGE: ${{ steps.prep.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" patch configmap sherpa-config --type merge \
+            -p "{\"data\":{\"SHERPA_K8S_WORKER_IMAGE\":\"${WEB_IMAGE}\"}}"
+          patched_worker_image="$(kubectl -n "${NAMESPACE}" get configmap sherpa-config -o jsonpath='{.data.SHERPA_K8S_WORKER_IMAGE}')"
+          if [[ "${patched_worker_image}" != "${WEB_IMAGE}" ]]; then
+            echo "::error::worker image patch mismatch expected=${WEB_IMAGE} actual=${patched_worker_image}"
+            exit 1
+          fi
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-web web="${WEB_IMAGE}"
+          kubectl -n "${NAMESPACE}" set image deployment/sherpa-frontend frontend="${FRONTEND_IMAGE}"
+
+      - name: Wait for rollout
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" rollout status statefulset/postgres --timeout=300s
+          rollout_with_retry() {
+            local kind="$1"; local name="$2"; local timeout="$3"
+            if kubectl -n "${NAMESPACE}" rollout status "${kind}/${name}" --timeout="${timeout}"; then return 0; fi
+            echo "::warning::${kind}/${name} rollout exceeded ${timeout}; collecting diagnostics"
+            kubectl -n "${NAMESPACE}" describe "${kind}/${name}" || true
+            kubectl -n "${NAMESPACE}" get pods -o wide || true
+            kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -n 40 || true
+            kubectl -n "${NAMESPACE}" rollout status "${kind}/${name}" --timeout=300s
+          }
+          rollout_with_retry deployment sherpa-web 600s
+          kubectl -n "${NAMESPACE}" rollout status deployment/sherpa-frontend --timeout=300s
+
+      - name: Health check (internal)
+        if: steps.kube_preflight.outputs.reachable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" port-forward svc/sherpa-web 18001:8001 >/tmp/pf-web.log 2>&1 &
+          web_pf_pid=$!
+          trap 'kill "${web_pf_pid}" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if ! kill -0 "${web_pf_pid}" >/dev/null 2>&1; then
+              echo "::error::web port-forward exited early"; cat /tmp/pf-web.log || true; exit 1
+            fi
+            if curl -fsS --max-time 2 http://127.0.0.1:18001/api/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18001/api/health
+          echo
+          echo "::notice::staging is up. Submit jobs via: kubectl -n ${NAMESPACE} exec deploy/sherpa-web -- curl -s -X POST http://localhost:8001/api/task ..."
