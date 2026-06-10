@@ -3590,9 +3590,15 @@ def _execution_target_fuzzer_aliases(item: dict[str, Any]) -> list[str]:
             if candidate and candidate not in aliases:
                 aliases.append(candidate)
             if candidate and not re.search(r"_fuzz(?:er)?$", candidate):
-                fuzz_candidate = f"{candidate}_fuzz"
-                if fuzz_candidate not in aliases:
-                    aliases.append(fuzz_candidate)
+                # Match both common harness naming conventions: `<api>_fuzz`
+                # and `<api>_fuzzer`. Without the `_fuzzer` variant a binary
+                # named e.g. `png_read_image_fuzzer` fails to match the
+                # execution-plan target `png_read_image`, so the run stage finds
+                # "no binaries matching execution_plan" and records nothing.
+                for suffix in ("_fuzz", "_fuzzer"):
+                    fuzz_candidate = f"{candidate}{suffix}"
+                    if fuzz_candidate not in aliases:
+                        aliases.append(fuzz_candidate)
             stripped = re.sub(r"_fuzz(?:er)?$", "", candidate)
             if stripped and stripped not in aliases:
                 aliases.append(stripped)
