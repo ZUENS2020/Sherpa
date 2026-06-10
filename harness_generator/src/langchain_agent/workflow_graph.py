@@ -1025,7 +1025,7 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
 
     Returns the wrapper directory path (add it to ``PATH`` before the real
     compiler).  The wrapper delegates every call to the system clang/clang++
-    and silently appends ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    and silently appends ``-fsanitize-coverage=inline-8bit-counters,pc-table``
     unless the command already contains ``-fsanitize-coverage`` or
     ``-fprofile-instr-generate`` (replay builds).
 
@@ -1036,7 +1036,7 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
     wrapper_dir = repo_root / "fuzz" / ".sherpa-cc"
     wrapper_dir.mkdir(parents=True, exist_ok=True)
 
-    _COV_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    _COV_FLAGS = "-fsanitize-coverage=inline-8bit-counters,pc-table"
 
     wrapper_sh = wrapper_dir / "sherpa-cc-wrapper.sh"
     wrapper_sh.write_text(textwrap.dedent(f"""\
@@ -1049,7 +1049,15 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
         COV_FLAGS="{_COV_FLAGS}"
         HAS_COV=0
         HAS_REPLAY=0
+        # Rewrite any deprecated trace-pc-guard coverage flag to the modern set.
+        # clang>=14 libFuzzer refuses trace-pc-guard binaries at runtime, so a
+        # flag from build.py/CMake/anywhere must be normalized at compile time.
+        ARGS=()
         for arg in "$@"; do
+            case "$arg" in
+                *trace-pc-guard*) arg="{_COV_FLAGS}" ;;
+            esac
+            ARGS+=("$arg")
             [[ "$arg" == *fsanitize-coverage* ]] && HAS_COV=1
             [[ "$arg" == *fprofile-instr-generate* ]] && HAS_REPLAY=1
         done
@@ -1060,9 +1068,9 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
             REAL_PATH=$(PATH=${{PATH#*:}} command -v "$REAL_CC" 2>/dev/null || echo "/usr/bin/$REAL_CC")
         fi
         if [[ $HAS_COV -eq 0 && $HAS_REPLAY -eq 0 ]]; then
-            exec "$REAL_PATH" "$@" $COV_FLAGS
+            exec "$REAL_PATH" "${{ARGS[@]}}" $COV_FLAGS
         else
-            exec "$REAL_PATH" "$@"
+            exec "$REAL_PATH" "${{ARGS[@]}}"
         fi
     """))
     wrapper_sh.chmod(0o755)
@@ -1082,14 +1090,14 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
 
     LibFuzzer requires coverage feedback instrumentation to guide its mutation
-    engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    engine.  Without ``-fsanitize-coverage=inline-8bit-counters,pc-table``
     the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
     occasionally omits these flags even when the SKILL.md contract requires them.
     This function inserts a separate ``'-fsanitize-coverage=...'`` list element
     after the ``-fsanitize=fuzzer`` element so that clang receives them as
     distinct arguments.
     """
-    COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    COVERAGE_FLAGS = "-fsanitize-coverage=inline-8bit-counters,pc-table"
     bp = Path(build_py_path)
     if not bp.is_file():
         return
@@ -1097,6 +1105,26 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
         text = bp.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return
+
+    # Normalize any deprecated trace-pc-guard the synthesize agent may have
+    # written directly. Modern libFuzzer (clang >= ~14) removed trace-pc-guard
+    # and refuses to run such binaries at startup
+    # ("trace-pc-guard is no longer supported by libFuzzer"). Rewrite it to the
+    # supported inline-8bit-counters,pc-table set in place.
+    if "trace-pc-guard" in text:
+        normalized = re.sub(
+            r"-fsanitize-coverage=[\w,\-]*trace-pc-guard[\w,\-]*",
+            COVERAGE_FLAGS,
+            text,
+        )
+        if normalized != text:
+            text = normalized
+            try:
+                bp.write_text(text, encoding="utf-8", errors="replace")
+                _wf_log(state, "build: normalized deprecated trace-pc-guard -> inline-8bit-counters,pc-table")
+            except Exception:
+                pass
+
     if COVERAGE_FLAGS in text:
         return
 
@@ -1134,7 +1162,7 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
             if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower() and "-fprofile" not in line:
                 lines[i] = line.replace(
                     "-fsanitize=fuzzer,address,undefined",
-                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
+                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=inline-8bit-counters,pc-table",
                 )
                 if lines[i] != line:
                     changed = True
