@@ -174,7 +174,7 @@ DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
 # Supported sanitizer configurations for multi-sanitizer fuzzing
 SANITIZER_CONFIGS: Dict[str, Dict[str, str]] = {
     "address": {
-        "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
+        "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=inline-8bit-counters,pc-table",
         "asan_options": "exitcode=76:detect_leaks=0",
         "ubsan_options": "print_stacktrace=1",
     },
