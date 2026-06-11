@@ -2466,6 +2466,19 @@ class NonOssFuzzHarnessGenerator:
             vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
             vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
             skip_ports="${{SHERPA_VCPKG_SKIP_PORTS:-zlib}}"
+            # When vcpkg cannot be provisioned (e.g. native executor without a
+            # baked toolchain, or transient network), declaring ports must not
+            # hard-fail the whole stage: degrade to best-effort and let the
+            # project's own build run. A genuinely-required dependency then
+            # surfaces as an accurate build error instead of a misleading
+            # "vcpkg unavailable". Set SHERPA_VCPKG_STRICT=1 to restore the old
+            # hard-fail behavior.
+            vcpkg_strict="${{SHERPA_VCPKG_STRICT:-0}}"
+            _vcpkg_degrade() {{
+                echo "[warn] ({log_prefix}) $1 -- continuing without vcpkg (best-effort); the project build will surface a real error if these ports are genuinely required"
+                unset CMAKE_TOOLCHAIN_FILE VCPKG_ROOT VCPKG_DEFAULT_TRIPLET VCPKG_INSTALLED_DIR 2>/dev/null || true
+                pkgs=""
+            }}
 
             pkgs=""
             if [ -f "$dep_file" ]; then
@@ -2651,8 +2664,11 @@ EOF
                 fi
 
                 if [ ! -x "$vcpkg_root/vcpkg" ]; then
-                    echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
-                    exit 86
+                    if [ "$vcpkg_strict" = "1" ]; then
+                        echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
+                        exit 86
+                    fi
+                    _vcpkg_degrade "vcpkg unavailable for declared ports:$pkgs"
                 fi
 
                 missing_pkgs=""
@@ -2686,8 +2702,12 @@ EOF
                             continue
                         fi
                         rm -f "$install_log"
-                        echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
-                        exit 87
+                        if [ "$vcpkg_strict" = "1" ]; then
+                            echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
+                            exit 87
+                        fi
+                        _vcpkg_degrade "vcpkg install failed for:$missing_pkgs"
+                        break
                     done
                 fi
             fi
@@ -2707,8 +2727,11 @@ EOF
             fi
 
             if [ -n "$pkgs" ] && [ ! -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
-                echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
-                exit 88
+                if [ "$vcpkg_strict" = "1" ]; then
+                    echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                    exit 88
+                fi
+                _vcpkg_degrade "missing vcpkg toolchain file"
             fi
             """
         ).strip()
