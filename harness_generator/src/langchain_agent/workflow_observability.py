@@ -30,6 +30,22 @@ def decision_snapshot_from_state(state: dict[str, Any]) -> dict[str, Any]:
         "vuln_candidate_count": int(state.get("vuln_candidate_count") or 0),
         "security_evidence_count": int(state.get("security_evidence_count") or 0),
         "analysis_evidence_count": int(state.get("analysis_evidence_count") or 0),
+        # fuzzing signal (cross-stage)
+        "fuzz_max_cov": int(state.get("fuzz_max_cov") or 0),
+        "fuzz_max_ft": int(state.get("fuzz_max_ft") or 0),
+        "fuzz_total_execs_per_sec": int(state.get("fuzz_total_execs_per_sec") or 0),
+        "fuzz_crash_found": bool(state.get("fuzz_crash_found") or False),
+        "fuzz_coverage_plateau_streak": int(state.get("fuzz_coverage_plateau_streak") or 0),
+        "fuzz_coverage_bottleneck_kind": str(state.get("fuzz_coverage_bottleneck_kind") or ""),
+        # vuln-hunt / companion / memory (cross-stage)
+        "vuln_hunt_candidate_count": int(state.get("vuln_hunt_candidate_count") or 0),
+        "vuln_hunt_active_candidate_id": str(state.get("vuln_hunt_active_candidate_id") or ""),
+        "crash_vuln_candidate_count": int(state.get("crash_vuln_candidate_count") or 0),
+        "analysis_companion_ready": bool(state.get("analysis_companion_ready") or False),
+        "analysis_companion_backend": str(state.get("analysis_companion_backend") or ""),
+        "constraint_memory_count": int(state.get("constraint_memory_count") or 0),
+        "decision_trace_count": int(state.get("decision_trace_count") or 0),
+        "workflow_active_step": str(state.get("workflow_active_step") or ""),
     }
 
 
@@ -85,6 +101,10 @@ def record_decision_trace(
         "error_code": str(error_code or "").strip(),
         "retry_count": int(retry_count or 0),
         "decision_snapshot": dict(decision_snapshot or {}),
+        # Always embed a compact cross-stage field snapshot so the event
+        # timeline shows how the pipeline's key fields evolve stage-to-stage,
+        # not just the per-decision metadata.
+        "cross_stage": decision_snapshot_from_state(out),
     }
     traces.append(trace)
     max_items = _decision_trace_max_items()
