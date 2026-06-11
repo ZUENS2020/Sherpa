@@ -28,6 +28,7 @@ import workflow_normalization as _wf_norm
 import workflow_target_scoring as _wf_target_scoring
 import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
+import procedural_memory as _proc_mem
 from coverage_replay import collect_per_input_frontier
 from seed_families import seed_families_for_target as _seed_families_for_target
 from workflow_context_store import (
@@ -1352,6 +1353,70 @@ def _constraint_memory_snapshot_from_state(state: dict[str, Any]) -> tuple[dict[
     return latest_entry, len(entries), str(_constraint_memory_path(repo_root))
 
 
+def _procedural_memory_library_class(repo_root: Path) -> str:
+    """Coarse build-system label used as procedural-memory scope."""
+    for rel in ("fuzz/build_strategy.json", "fuzz/build_runtime_facts.json", "fuzz/repo_understanding.json"):
+        try:
+            p = repo_root / rel
+            if not p.is_file():
+                continue
+            doc = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            bs = str((doc or {}).get("build_system") or "").strip().lower()
+            if bs and bs != "unknown":
+                return bs
+        except Exception:
+            continue
+    return ""
+
+
+def _procedural_memory_system_packages_nonempty(repo_root: Path) -> bool:
+    try:
+        p = repo_root / "fuzz" / "system_packages.txt"
+        if not p.is_file():
+            return False
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.split("#", 1)[0].strip():
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _record_procedural_memory(state: dict[str, Any], repair_snapshot: dict[str, Any]) -> None:
+    """Reflexion-style write path: when a stage fails into repair, distill a
+    known failure class into a cross-job lesson. No-op unless
+    SHERPA_PROCEDURAL_MEMORY is enabled; never raises. (Phase 2: accumulate
+    only — injection into prompts is gated for Phase 3.)"""
+    if not _proc_mem.memory_enabled():
+        return
+    repo_root_text = str(state.get("repo_root") or "").strip()
+    if not repo_root_text:
+        return
+    try:
+        repo_root = Path(repo_root_text)
+        stage = str(repair_snapshot.get("repair_origin_stage") or "").strip()
+        if not stage:
+            return
+        lesson = _proc_mem.classify_stage_failure(
+            stage=stage,
+            error_code=str(repair_snapshot.get("repair_error_code") or ""),
+            error_kind=str(repair_snapshot.get("repair_error_kind") or ""),
+            diagnostics=" ".join(
+                [
+                    str(repair_snapshot.get("repair_error_text") or ""),
+                    str(repair_snapshot.get("repair_stderr_tail") or ""),
+                ]
+            )[:4000],
+            system_packages_nonempty=_procedural_memory_system_packages_nonempty(repo_root),
+            api_surface_exception_used=bool(state.get("api_surface_exception_used")),
+            library_class=_procedural_memory_library_class(repo_root),
+        )
+        if lesson:
+            _proc_mem.record_lesson(job_id=str(os.environ.get("SHERPA_JOB_ID") or ""), **lesson)
+    except Exception:
+        return
+
+
 def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     state = _normalize_error_state(state)
     err = dict(state.get("error") or {})
@@ -1405,6 +1470,7 @@ def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     if dedup_count >= 2:
         snapshot["repair_strategy_force_change"] = True
         snapshot["crash_signature_dedup_hit"] = True
+    _record_procedural_memory(state, snapshot)
     return snapshot
 
 
