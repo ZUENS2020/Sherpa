@@ -200,6 +200,25 @@ def _is_non_public_api(api: str, public_set: frozenset[str]) -> bool:
     return _api_surface_class(api, public_set) == "internal"
 
 
+def _is_unlinkable_binding_api(api: str) -> bool:
+    """True when the symbol is a language-binding/shim (``*_wasm``, ``*_napi``,
+    ``*_jni``, emscripten/cffi shims, ...) that is structurally unlinkable from a
+    native fuzz harness regardless of how high its vuln score is.
+
+    Unlike plain statics (which owning-source linkage can sometimes pull into the
+    harness), these bindings have no native public caller: they are driven by a
+    JS/WASM/managed host, not by the C library's public API. So when the
+    internal->public remap cannot find a public caller, they must be dropped
+    rather than admitted through the high-risk ``api_surface_exception``
+    escape-hatch — selecting them only burns a plan/synthesize/build/repair cycle
+    before ``non_public_api_usage`` rejects them at link time.
+    """
+    low = str(api or "").strip().lower()
+    if not low:
+        return False
+    return any(p in low for p in _NON_PUBLIC_API_NAME_PATTERNS)
+
+
 # Cache: repo_root str -> reverse adjacency {callee_name -> set(caller_name)}.
 _CALLGRAPH_REVERSE_CACHE: dict[str, dict[str, set[str]]] = {}
 

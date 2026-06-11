@@ -1782,6 +1782,7 @@ from workflow_public_api import (  # noqa: E402
     _load_api_loc_index,
     _api_surface_class,
     _is_non_public_api,
+    _is_unlinkable_binding_api,
     _load_callgraph_reverse,
     _nearest_public_entry,
 )
@@ -2030,6 +2031,12 @@ def _apply_selected_target_filters(
     exclude_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = list(ranked_items)
+    # Hard-drop structurally-unlinkable language bindings that the selection
+    # gate flagged (wasm/napi/jni shims with no public caller). Keep at least
+    # one row as a safety net so we never hand an empty selection downstream.
+    if any(row.get("unlinkable_binding_dropped") for row in rows):
+        linkable = [row for row in rows if not row.get("unlinkable_binding_dropped")]
+        rows = linkable or rows
     excluded = {
         _selection_target_key(name)
         for name in list(exclude_names or [])
@@ -3072,8 +3079,34 @@ def _build_selected_target_row(
     internal_api = _is_non_public_api(api, _public_set)
     internal_min = _vuln_internal_api_min_score()
     api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
+    # Structurally-unlinkable language bindings (wasm/napi/jni/emscripten shims)
+    # have no native public caller. The internal->public remap above already
+    # tried to find one; an empty `_sink_remap` means it failed. Such a symbol
+    # can never link into a native harness regardless of its vuln score, so the
+    # high-risk escape-hatch must NOT admit it — flag it for a hard drop instead
+    # (filtered in `_apply_selected_target_filters`) so it can't waste a
+    # plan/synthesize/build/repair cycle. Honour the enforce kill-switch.
+    unlinkable_binding_dropped = bool(
+        _vuln_public_api_enforce()
+        and internal_api
+        and not _sink_remap
+        and _is_unlinkable_binding_api(api)
+    )
     if internal_api:
-        if security_priority_mode and vuln_likelihood >= internal_min:
+        if unlinkable_binding_dropped:
+            adjusted_target_score = 0.0
+            api_surface_exception = {
+                "used": False,
+                "reason": f"unlinkable_binding_no_public_entry({api})",
+                "evidence_ids": list(security_candidate.get("evidence_ids") or []),
+            }
+            if not runtime_penalty.get("reason"):
+                runtime_penalty["reason"] = "unlinkable_binding_dropped"
+            elif "unlinkable_binding_dropped" not in str(runtime_penalty.get("reason") or ""):
+                runtime_penalty["reason"] = (
+                    f"{runtime_penalty.get('reason')};unlinkable_binding_dropped"
+                )
+        elif security_priority_mode and vuln_likelihood >= internal_min:
             api_surface_exception = {
                 "used": True,
                 "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
@@ -3189,6 +3222,7 @@ def _build_selected_target_row(
         "security_signals": _top_security_signals(security_scores),
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
         "api_surface_exception": api_surface_exception,
+        "unlinkable_binding_dropped": bool(unlinkable_binding_dropped),
         "target_score_breakdown": score_breakdown,
         "target_score": float(adjusted_target_score),
         "target_score_penalty": float(score_penalty + target_surface_penalty),
@@ -3216,6 +3250,13 @@ def _build_selected_targets_doc(
         try:
             _vc_doc = _load_vuln_candidates_doc(repo_root)
             for _vc in _vc_doc.get("candidates") or []:
+                # Exhausted/cooling candidates have already been driven to a
+                # plateau; do not let their stale priority override re-boost the
+                # same target (and re-inject it below), or risk-first ranking
+                # keeps reselecting a target the fuzzer can't make progress on.
+                _vc_status = str(_vc.get("validation_status") or "").strip().lower()
+                if _vc_status in {"exhausted", "cooling"}:
+                    continue
                 _vc_api = str(_vc.get("api") or _vc.get("target_api") or "").strip()
                 _vc_prio = float(_vc.get("priority") or 0.0)
                 if _vc_api and _vc_prio > 0:

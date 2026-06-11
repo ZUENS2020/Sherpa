@@ -13,11 +13,24 @@ def sort_ranked_items(
 ) -> list[dict[str, Any]]:
     rows = list(ranked_items)
     if security_priority_mode:
-        # Pure vuln-driven sort: likelihood → exploitability → reachability.
-        # Non-vuln factors (coverage_gap, complexity, api_relevance, depth)
-        # are deliberately excluded from security-priority ordering.
+        # Vuln-driven sort on *effective* risk: likelihood minus the demotion
+        # penalties (non-core/contrib/helper surface + recent-yield/exhaustion),
+        # then exploitability → reachability. Without subtracting the penalty an
+        # auxiliary/platform helper (contrib, arm-neon, *_wasm, exhausted target)
+        # with a marginally higher raw likelihood outranks a core decoder API,
+        # which is exactly the demotion this penalty is meant to apply. Non-vuln
+        # factors (coverage_gap, complexity, api_relevance, depth) stay excluded.
+        def _effective_risk(row: dict) -> float:
+            penalty = float(
+                row.get("target_score_penalty")
+                or row.get("target_surface_penalty")
+                or 0.0
+            )
+            return float(row.get("vuln_likelihood") or 0.0) - penalty
+
         rows.sort(
             key=lambda row: (
+                -_effective_risk(row),
                 -float(row.get("vuln_likelihood") or 0.0),
                 -float(row.get("exploitability") or 0.0),
                 -float(row.get("reachability_confidence") or 0.0),
