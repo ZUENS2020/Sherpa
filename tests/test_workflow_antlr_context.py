@@ -169,12 +169,22 @@ def test_node_plan_writes_antlr_context_and_hint(tmp_path: Path, monkeypatch):
     assert selected_targets.is_file()
     selected_doc = json.loads(selected_targets.read_text(encoding="utf-8"))
     assert selected_doc
+    # risk-first refactor: `score_breakdown` now carries the security/risk
+    # dimensions that actually drive ranking; the legacy static breakdown
+    # (coverage_gap/complexity_depth/api_relevance) moved to
+    # `target_score_breakdown`.
     assert isinstance(selected_doc[0].get("target_score_breakdown"), dict)
-    assert isinstance(selected_doc[0].get("score_breakdown"), dict)
-    assert set(selected_doc[0].get("score_breakdown", {}).keys()) == {
+    assert set(selected_doc[0].get("target_score_breakdown", {}).keys()) >= {
         "coverage_gap",
         "complexity_depth",
         "api_relevance",
+        "recent_yield_penalty",
+    }
+    assert isinstance(selected_doc[0].get("score_breakdown"), dict)
+    assert set(selected_doc[0].get("score_breakdown", {}).keys()) == {
+        "vuln_likelihood",
+        "exploitability",
+        "reachability_confidence",
         "recent_yield_penalty",
     }
     assert "target" in selected_doc[0]
