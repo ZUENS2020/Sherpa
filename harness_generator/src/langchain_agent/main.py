@@ -2182,8 +2182,31 @@ def _init_job_store() -> None:
     _restore_jobs_from_store()
 
 
+def _looks_like_shell_source(txt: str) -> bool:
+    """True when a captured line is echoed shell-script *source* rather than a
+    real runtime log line. Such lines (e.g. the deps-bootstrap script being
+    printed) contain literal ``[error]``/``failed``/``warn`` substrings inside
+    ``echo`` statements or unexpanded ``$variables`` and must not be routed to
+    the error/warn log streams. Real runtime output has its variables expanded
+    and no ``echo``/shell-keyword prefix, so it is unaffected."""
+    t = (txt or "").strip()
+    if not t:
+        return False
+    # unexpanded shell variable refs / command substitution => source, not output
+    if "$(" in t or re.search(r"\$\{?[a-zA-Z_][a-zA-Z0-9_]*", t):
+        return True
+    # echoing a bracketed tag, helper invocations, or shell control keywords
+    if 'echo "[' in t or "echo '[" in t:
+        return True
+    if t.startswith(("echo ", "if [", "fi", "then", "else", "done", "do ", "export ", "install_", "_vcpkg", "while ", "for ", "case ", "esac")):
+        return True
+    return False
+
+
 def _classify_log_level(line: str) -> str:
     txt = (line or "").lower()
+    if _looks_like_shell_source(line):
+        return "info"
     if any(k in txt for k in ["traceback", "exception", " fatal", "error", "failed", "cannot find"]):
         return "error"
     if any(k in txt for k in ["warn", "retry", "timeout", "deprecation"]):

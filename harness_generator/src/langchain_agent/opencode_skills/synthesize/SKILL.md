@@ -180,7 +180,7 @@ Rules:
 - Required scaffold files exist.
 - `fuzz/harness_index.json` maps each execution target to an existing harness source file.
 - README field `Harness file:` points to a real harness file.
-- `fuzz/repo_understanding.json` is semantically valid and complete.
+- `fuzz/repo_understanding.json` is semantically valid and complete. **Before writing `./done`, re-read it and confirm ALL of these keys are present and non-empty: `build_system` (not `unknown`), `chosen_target_api` (an API identifier, not a harness path), `chosen_target_reason`, `fuzzer_entry_strategy`, and a non-empty `evidence` array.** A missing field fails the stage with `synthesize incomplete: repo understanding missing <field>` and forces a wasted replan — never finish synthesize with an incomplete `repo_understanding.json`.
 - Build script follows compiler-by-suffix and static-lib-discovery contracts.
 - `fuzz/out/replay/<name>` exists for each built native fuzzer and can emit `LLVM_PROFILE_FILE=...profraw` during single-input replay.
 

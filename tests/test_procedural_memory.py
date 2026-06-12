@@ -132,6 +132,20 @@ def test_classify_non_public_selection(store):
     assert res and res["error_class"] == "non_public_api_selection"
 
 
+def test_classify_synthesize_incomplete_repo_understanding(store):
+    res = pm.classify_stage_failure(
+        stage="synthesize",
+        error_code="",
+        error_kind="generic_failure",
+        diagnostics="synthesize incomplete: repo understanding missing `chosen_target_api`",
+        library_class="makefile-selfcontained",
+    )
+    assert res and res["error_class"] == "synthesize_incomplete_repo_understanding"
+    assert "repo_understanding.json" in res["lesson"]
+    e = pm.record_lesson(job_id="j", path=store, **res)
+    assert e["error_class"] == "synthesize_incomplete_repo_understanding"
+
+
 def test_classify_unknown_returns_none(store):
     assert (
         pm.classify_stage_failure(stage="build", error_code="cxx_for_c_source_mismatch")
