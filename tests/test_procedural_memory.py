@@ -37,8 +37,14 @@ def _record(path, **over):
     return pm.record_lesson(**base)
 
 
-def test_disabled_by_default(tmp_path, monkeypatch):
+def test_enabled_by_default(monkeypatch):
+    # Phase 3: memory is ON unless explicitly disabled.
     monkeypatch.delenv("SHERPA_PROCEDURAL_MEMORY", raising=False)
+    assert pm.memory_enabled() is True
+
+
+def test_disabled_when_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHERPA_PROCEDURAL_MEMORY", "0")
     monkeypatch.setenv("SHERPA_PROCEDURAL_MEMORY_PATH", str(tmp_path / "m.json"))
     assert _record(tmp_path / "m.json") is None
     assert pm.retrieve(stage="synthesize") == []
