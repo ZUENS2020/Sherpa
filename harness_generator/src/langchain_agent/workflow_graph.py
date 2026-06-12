@@ -2042,6 +2042,37 @@ def _is_library_entrypoint(api: str) -> bool:
     return any(name.endswith(s) for s in _ENTRYPOINT_HINTS_SUFFIX)
 
 
+# Infrastructure helpers / allocator macros that are not meaningful, harnessable
+# fuzz targets on their own. vuln-hunt sometimes flags them on a raw "memory" /
+# "array" risk signal, but selecting them as must_run execution targets only
+# produces execution_plan_harness_mismatch (the synthesizer correctly refuses to
+# build an isolated harness for e.g. a CALLOC macro), churning the loop.
+_NON_HARNESSABLE_EXACT = {
+    "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+    "strdup", "strndup", "xmalloc", "xcalloc", "xrealloc", "xfree",
+}
+_NON_HARNESSABLE_TOKENS = (
+    "_alloc", "alloc_", "_free", "_realloc", "_ptrarr", "_grow", "expand_",
+    "_resize", "_reserve", "_xmalloc", "_memdup", "_strdup",
+)
+
+
+def _is_non_harnessable_target(api: str) -> bool:
+    """True for allocator/memory-infra helpers and alloc macros that should not
+    be selected as standalone fuzz targets. Conservative: only matches clear
+    allocation/growth infrastructure, not parse/decode logic."""
+    name = str(api or "").strip().lower().split("::")[-1].split(".")[-1]
+    if not name:
+        return False
+    # ALL-CAPS macros like CALLOC / MALLOC / REALLOC / FREE
+    bare = str(api or "").strip().split("::")[-1].split(".")[-1]
+    if bare.isupper() and any(k in name for k in ("alloc", "free", "realloc")):
+        return True
+    if name in _NON_HARNESSABLE_EXACT:
+        return True
+    return any(tok in name for tok in _NON_HARNESSABLE_TOKENS)
+
+
 def _library_entrypoint_bias(api: str, target_type: str) -> float:
     """Positive risk bias for whole-input library entrypoints (0 otherwise).
     Strongest for parser/decoder/archive libraries. Disable with
@@ -2158,6 +2189,12 @@ def _apply_selected_target_filters(
     if any(row.get("unlinkable_binding_dropped") for row in rows):
         linkable = [row for row in rows if not row.get("unlinkable_binding_dropped")]
         rows = linkable or rows
+    # Hard-drop allocator/infra helpers (CALLOC macro, expand_ptrarr, ...) that
+    # cannot be harnessed standalone — selecting them as must_run only produces
+    # execution_plan_harness_mismatch and churns the loop.
+    if any(row.get("non_harnessable_dropped") for row in rows):
+        harnessable = [row for row in rows if not row.get("non_harnessable_dropped")]
+        rows = harnessable or rows
     excluded = {
         _selection_target_key(name)
         for name in list(exclude_names or [])
@@ -3174,6 +3211,7 @@ def _build_selected_target_row(
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
     target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
     entrypoint_bias = _library_entrypoint_bias(api, target_type)
+    non_harnessable_dropped = _is_non_harnessable_target(api)
     score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
         float(score_weights.get("vuln_likelihood", 0.50)) * float(vuln_likelihood)
@@ -3348,6 +3386,7 @@ def _build_selected_target_row(
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
         "api_surface_exception": api_surface_exception,
         "unlinkable_binding_dropped": bool(unlinkable_binding_dropped),
+        "non_harnessable_dropped": bool(non_harnessable_dropped),
         "target_score_breakdown": score_breakdown,
         "target_score": float(adjusted_target_score),
         "target_score_penalty": float(score_penalty + target_surface_penalty),
@@ -3441,6 +3480,44 @@ def _build_selected_targets_doc(
                 )
             )
             _seen_apis.add(_vc_api.lower())
+    # Inject the library's public entrypoints (whole-input parse/decode/load
+    # APIs) as candidates. vuln-hunt is a "sniper" that proposes risky internal
+    # helpers but rarely the top-level public entry (e.g. toml_parse), which
+    # drives the whole parser for far more coverage. With the entry present, the
+    # entrypoint bias can promote it into the execution plan. No-op when the
+    # public-API oracle is empty (degraded) or enforcement is disabled.
+    if _vuln_public_api_enforce():
+        try:
+            _public_syms = _load_public_api_symbols(repo_root)
+            _entry_syms = sorted(n for n in _public_syms if _is_library_entrypoint(n))
+            for _ep in _entry_syms:
+                if _ep.lower() in _seen_apis or len(ranked_items) >= _execution_targets_max() * 2:
+                    continue
+                _ep_item = {
+                    "name": _ep,
+                    "api": _ep,
+                    "lang": "c",
+                    "target_type": "parser",
+                    "seed_profile": "generic",
+                    "vuln_likelihood": 0.62,
+                    "exploitability": 0.5,
+                    "reachability_confidence": 0.65,
+                    "_synthetic_public_entrypoint": True,
+                }
+                ranked_items.append(
+                    _build_selected_target_row(
+                        repo_root=repo_root,
+                        item=_ep_item,
+                        security_lookup=security_lookup,
+                        security_priority_mode=security_priority_mode,
+                        degrade_reason=degrade_reason,
+                        score_weights=score_weights,
+                        vuln_priority_by_api=_vuln_priority_by_api,
+                    )
+                )
+                _seen_apis.add(_ep.lower())
+        except Exception:
+            pass
     # In risk-first mode, ranking is driven by security risk directly.
     # `score_total` is still emitted for observability/reference, not as the
     # primary ordering key.
@@ -4747,10 +4824,21 @@ def _validate_execution_plan_harness_consistency(
                 must_run_names.add(name)
     must_run_missing = [n for n in missing_all if n in must_run_names]
     if must_run_missing:
+        # A non-harnessable infra helper (CALLOC macro, expand_ptrarr, ...) that
+        # the plan wrongly marked must_run should not fail a synthesize that
+        # produced valid harnesses for the real targets — the synthesizer
+        # correctly declined to harness it. Tolerate missing must_run targets
+        # only when ALL of them are non-harnessable; genuine missing targets
+        # still fail (preserving execution_plan_harness_mismatch detection).
+        residual = [n for n in must_run_missing if not _is_non_harnessable_target(n)]
+        if not residual:
+            doc = dict(doc)
+            doc["dropped_non_harnessable_must_run"] = must_run_missing
+            return True, "", doc
         extras = [str(x).strip() for x in list(doc.get("extra_harnesses") or []) if str(x).strip()]
         msg = (
             "execution_plan_harness_mismatch: missing harness source for must_run targets="
-            + ",".join(must_run_missing)
+            + ",".join(residual)
             + (f"; extra_harnesses={','.join(extras[:8])}" if extras else "")
         )
         return False, msg, doc
