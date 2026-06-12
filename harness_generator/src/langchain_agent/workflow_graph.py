@@ -2001,6 +2001,61 @@ def _selection_target_key(name: str) -> str:
     return str(name or "").strip().lower()
 
 
+# Top-level "whole-input" library entrypoints drive the entire parser/decoder
+# and yield far more coverage + reachable bug surface than an isolated leaf
+# helper. We distinguish the real entry (e.g. ``toml_parse`` / ``json_loads`` /
+# ``*_decode``) from sub-parsers (``parse_array``, ``parse_keyval``) and leaf
+# scanners (``scan_time``, ``next_token``) by suffix/exact match.
+_ENTRYPOINT_HINTS_SUFFIX = (
+    "_parse", "_parse_file", "_parse_string", "_parse_buffer",
+    "_loads", "_load", "_load_file", "_decode", "_deserialize", "_unmarshal",
+    "_read_file", "_read_buffer", "_from_string", "_from_buffer", "_fromjson",
+)
+_ENTRYPOINT_HINTS_EXACT = {
+    "parse", "loads", "load", "decode", "deserialize", "unmarshal",
+    "parse_file", "parse_string", "parse_buffer",
+}
+_ENTRYPOINT_LEAF_HINTS = (
+    "scan_", "lex", "next_token", "nexttoken", "next_char", "_digit", "_char",
+    "_byte", "peek", "advance", "getc", "ungetc",
+)
+
+
+def _vuln_entrypoint_bias_weight() -> float:
+    raw = os.environ.get("SHERPA_VULN_ENTRYPOINT_BIAS")
+    if raw is None or str(raw).strip() == "":
+        return 0.15
+    try:
+        return max(0.0, min(float(raw), 0.5))
+    except Exception:
+        return 0.15
+
+
+def _is_library_entrypoint(api: str) -> bool:
+    name = str(api or "").strip().lower().split("::")[-1].split(".")[-1]
+    if not name:
+        return False
+    if any(h in name for h in _ENTRYPOINT_LEAF_HINTS):
+        return False
+    if name in _ENTRYPOINT_HINTS_EXACT:
+        return True
+    return any(name.endswith(s) for s in _ENTRYPOINT_HINTS_SUFFIX)
+
+
+def _library_entrypoint_bias(api: str, target_type: str) -> float:
+    """Positive risk bias for whole-input library entrypoints (0 otherwise).
+    Strongest for parser/decoder/archive libraries. Disable with
+    SHERPA_VULN_ENTRYPOINT_BIAS=0."""
+    if not _is_library_entrypoint(api):
+        return 0.0
+    weight = _vuln_entrypoint_bias_weight()
+    if weight <= 0.0:
+        return 0.0
+    if str(target_type or "").strip().lower() in {"parser", "decoder", "archive", "deserializer"}:
+        return round(weight, 4)
+    return round(weight * 0.6, 4)
+
+
 def _execution_depth_bias(
     *,
     target_name: str,
@@ -3118,12 +3173,14 @@ def _build_selected_target_row(
     )
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
     target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
+    entrypoint_bias = _library_entrypoint_bias(api, target_type)
     score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
         float(score_weights.get("vuln_likelihood", 0.50)) * float(vuln_likelihood)
         + float(score_weights.get("exploitability", 0.30)) * float(exploitability)
         + float(score_weights.get("reachability_confidence", 0.20)) * float(reachability_confidence)
         + float(execution_bias.get("execution_depth_bias") or 0.0)
+        + float(entrypoint_bias)
         - float(score_penalty)
         - float(target_surface_penalty)
     )
@@ -3216,7 +3273,8 @@ def _build_selected_target_row(
                 1.0,
                 float(priority_base)
                 - float(priority_penalty)
-                + float(execution_bias.get("execution_depth_bias") or 0.0),
+                + float(execution_bias.get("execution_depth_bias") or 0.0)
+                + float(entrypoint_bias),
             ),
         ),
         4,
@@ -3272,6 +3330,7 @@ def _build_selected_target_row(
         "priority": float(priority_base),
         "effective_priority": float(effective_priority),
         "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
+        "entrypoint_bias": float(entrypoint_bias),
         "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
         "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
         "target_surface_penalty": float(target_surface_penalty),
