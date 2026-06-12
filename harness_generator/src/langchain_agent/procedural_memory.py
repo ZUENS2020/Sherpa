@@ -33,6 +33,7 @@ SCHEMA_VERSION = 1
 ERROR_CLASSES = (
     "vcpkg_overdeclare",
     "non_public_api_selection",
+    "synthesize_incomplete_repo_understanding",
     "missing_owning_source",
     "coverage_trivial_context",
     "harness_bad_free",
@@ -309,6 +310,24 @@ def classify_stage_failure(
                 "for code the repo vendors/builds itself."
             ),
             "evidence": [f"error_code={error_code}", f"error_kind={error_kind}"],
+            "confidence": 0.85,
+        }
+
+    # synthesize produced an incomplete repo_understanding.json (missing a
+    # required field) -> schema validation rejected the stage
+    if "synthesize incomplete" in text or "repo understanding missing" in text or "repo_understanding" in text:
+        return {
+            "stage": stage or "synthesize",
+            "error_class": "synthesize_incomplete_repo_understanding",
+            "scope": scope,
+            "signature": "synthesize incomplete: repo_understanding missing a required field",
+            "lesson": (
+                "fuzz/repo_understanding.json MUST be complete before finishing synthesize: "
+                "populate non-empty build_system, chosen_target_api (an API identifier, not a "
+                "harness path), chosen_target_reason, fuzzer_entry_strategy, and a non-empty "
+                "evidence array. Validate these fields exist before writing ./done."
+            ),
+            "evidence": [f"error_code={error_code}", f"diagnostics={diagnostics[:160]}"],
             "confidence": 0.85,
         }
 
