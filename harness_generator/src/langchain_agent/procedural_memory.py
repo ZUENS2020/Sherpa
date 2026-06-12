@@ -50,8 +50,9 @@ def _truthy(raw: str | None, default: bool = False) -> bool:
 
 
 def memory_enabled() -> bool:
-    """Master switch. Default OFF until validated end-to-end (Phase 3)."""
-    return _truthy(os.environ.get("SHERPA_PROCEDURAL_MEMORY"), False)
+    """Master switch. Default ON (Phase 3). Set SHERPA_PROCEDURAL_MEMORY=0 to
+    fully disable read + write."""
+    return _truthy(os.environ.get("SHERPA_PROCEDURAL_MEMORY"), True)
 
 
 def memory_readonly() -> bool:
@@ -96,22 +97,37 @@ def _empty_store() -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "updated_at": 0, "lessons": {}}
 
 
+# Small TTL cache so default-on retrieval doesn't re-read the shared-volume JSON
+# on every prompt render. Writes invalidate the entry for same-process freshness;
+# cross-process staleness is bounded by the TTL.
+_STORE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_STORE_CACHE_TTL = 5.0
+
+
 def load_store(path: Path | None = None) -> dict[str, Any]:
     p = path or store_path()
+    key = str(p)
+    cached = _STORE_CACHE.get(key)
+    if cached is not None and (time.time() - cached[0]) < _STORE_CACHE_TTL:
+        return cached[1]
     try:
         if not p.is_file():
-            return _empty_store()
+            doc = _empty_store()
+            _STORE_CACHE[key] = (time.time(), doc)
+            return doc
         raw = json.loads(p.read_text(encoding="utf-8", errors="replace"))
         if not isinstance(raw, dict):
             return _empty_store()
         lessons = raw.get("lessons")
         if not isinstance(lessons, dict):
             lessons = {}
-        return {
+        doc = {
             "schema_version": SCHEMA_VERSION,
             "updated_at": int(raw.get("updated_at") or 0),
             "lessons": lessons,
         }
+        _STORE_CACHE[key] = (time.time(), doc)
+        return doc
     except Exception:
         return _empty_store()
 
@@ -124,6 +140,7 @@ def _atomic_write(path: Path, doc: dict[str, Any]) -> None:
             json.dump(doc, fp, ensure_ascii=False, indent=2)
             fp.write("\n")
         os.replace(tmp, path)
+        _STORE_CACHE[str(path)] = (time.time(), doc)  # keep same-process reads fresh
     except Exception:
         try:
             os.unlink(tmp)

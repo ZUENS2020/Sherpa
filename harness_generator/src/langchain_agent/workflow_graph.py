@@ -6222,6 +6222,46 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
+def _procedural_stage_for_prompt(name: str) -> str:
+    """Map an opencode prompt/template name to its pipeline stage for
+    procedural-memory lesson retrieval."""
+    n = str(name or "").lower()
+    if "synthesize" in n:
+        return "synthesize"
+    if "plan" in n:
+        return "plan"
+    if "fix_build" in n or "build" in n:
+        return "build"
+    if "vuln" in n or "hunt" in n:
+        return "vuln-hunt"
+    if "analysis" in n:
+        return "analysis"
+    if "crash" in n:
+        return "crash-triage"
+    return ""
+
+
+def _inject_procedural_lessons(name: str, kwargs: dict[str, object]) -> None:
+    """Phase 3 read path: prepend learned 'known pitfalls' for this stage into
+    the prompt hint, so cross-job lessons steer the agent away from repeating
+    past failures. No-op unless SHERPA_PROCEDURAL_MEMORY is enabled, only when
+    the template already takes a `hint`, and never raises."""
+    try:
+        if "hint" not in kwargs or not _proc_mem.memory_enabled():
+            return
+        stage = _procedural_stage_for_prompt(name)
+        if not stage:
+            return
+        lessons = _proc_mem.retrieve(stage=stage, library_class="")
+        block = _proc_mem.render_lessons_block(lessons)
+        if not block:
+            return
+        base = str(kwargs.get("hint") or "").strip()
+        kwargs["hint"] = (block + "\n\n" + base).strip() if base else block
+    except Exception:
+        return
+
+
 def _render_opencode_prompt_safe(
     name: str,
     *,
@@ -6237,6 +6277,7 @@ def _render_opencode_prompt_safe(
       (rendered_prompt, render_issue)
       render_issue is empty when primary render succeeds.
     """
+    _inject_procedural_lessons(name, kwargs)
     try:
         return _render_opencode_prompt(name, **kwargs), ""
     except Exception as e:
