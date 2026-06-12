@@ -26,7 +26,13 @@ def sort_ranked_items(
                 or row.get("target_surface_penalty")
                 or 0.0
             )
-            return float(row.get("vuln_likelihood") or 0.0) - penalty
+            # Library entrypoints (top-level whole-input parse/decode APIs) drive
+            # the entire library, so they yield far more coverage and reachable
+            # bug surface than an isolated leaf helper (scan_time, scan_digits).
+            # A positive bias lifts them alongside high-likelihood sniper targets
+            # so the execution plan includes a whole-parser driver, not only leaves.
+            entry_bias = float(row.get("entrypoint_bias") or 0.0)
+            return float(row.get("vuln_likelihood") or 0.0) - penalty + entry_bias
 
         rows.sort(
             key=lambda row: (
