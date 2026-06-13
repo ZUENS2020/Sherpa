@@ -1087,6 +1087,26 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
     return wrapper_dir
 
 
+def _apply_coverage_cc_wrapper_env(build_env: dict[str, str], repo_root: Path) -> dict[str, str]:
+    """Prepend the coverage cc-wrapper to a build env's PATH so EVERY bare
+    `clang`/`clang++` invocation in build.py (library objects included, not just
+    the harness link) gets `-fsanitize-coverage` instrumentation.
+
+    Without this, build.py compiles the target library WITHOUT coverage and
+    libFuzzer is blind to it — the fuzzer cannot guide mutation into the library
+    and coverage flatlines. The main build stage already wired this; the
+    run-stage workspace rebuild (which produces the binary that is actually
+    fuzzed) did not, so the fuzzed binary was uninstrumented. Best-effort."""
+    try:
+        wrapper_dir = _install_coverage_cc_wrapper(repo_root)
+        build_env["PATH"] = f"{wrapper_dir}:{build_env.get('PATH', '')}"
+        build_env.setdefault("CC", "clang")
+        build_env.setdefault("CXX", "clang++")
+    except Exception:
+        pass
+    return build_env
+
+
 def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) -> None:
     """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
 
@@ -15678,6 +15698,8 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
             except Exception:
                 pass
+        # Instrument the whole library (not just the harness) for libFuzzer.
+        build_env = _apply_coverage_cc_wrapper_env(build_env, clone_root)
         if hasattr(gen, "_run_cmd"):
             rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
                 build_cmd,
@@ -15940,6 +15962,8 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
             except Exception:
                 pass
+        # Instrument the whole library (not just the harness) for libFuzzer.
+        build_env = _apply_coverage_cc_wrapper_env(build_env, clone_root)
         if hasattr(gen, "_run_cmd"):
             rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
                 build_cmd,
