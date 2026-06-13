@@ -283,3 +283,91 @@ def _nearest_public_entry(
             if caller not in seen:
                 queue.append((caller, depth + 1))
     return ""
+
+
+# Cache: repo_root str -> forward adjacency {caller_name -> set(callee_name)}.
+_CALLGRAPH_FORWARD_CACHE: dict[str, dict[str, set[str]]] = {}
+
+
+def _load_callgraph_forward(repo_root: Path) -> dict[str, set[str]]:
+    """Build a caller -> {callees} index from companion coverage_hints.json.
+
+    Same source as ``_load_callgraph_reverse`` (the ``callgraph_summary`` edge
+    list), but the forward direction so we can measure how much code a candidate
+    transitively reaches. Empty dict when no callgraph data is available.
+    """
+    key = str(repo_root)
+    if key in _CALLGRAPH_FORWARD_CACHE:
+        return _CALLGRAPH_FORWARD_CACHE[key]
+    fwd: dict[str, set[str]] = {}
+    job_id = str(os.environ.get("SHERPA_JOB_ID") or "").strip()
+    if job_id:
+        base_output = Path(os.environ.get("SHERPA_OUTPUT_DIR", "/shared/output")).expanduser()
+        hints_path = base_output / "_k8s_jobs" / job_id / "promefuzz" / "coverage_hints.json"
+        if hints_path.is_file():
+            try:
+                doc = json.loads(hints_path.read_text(encoding="utf-8", errors="replace"))
+                for edge in doc.get("callgraph_summary") or []:
+                    if not isinstance(edge, dict):
+                        continue
+                    caller = str(edge.get("caller") or "").strip()
+                    callee = str(edge.get("callee") or "").strip()
+                    if caller and callee:
+                        fwd.setdefault(caller, set()).add(callee)
+            except Exception:
+                fwd = {}
+    _CALLGRAPH_FORWARD_CACHE[key] = fwd
+    return fwd
+
+
+def _reachable_fanout(
+    api: str,
+    forward_cg: dict[str, set[str]],
+    *,
+    max_nodes: int = 400,
+    max_depth: int = 8,
+) -> int:
+    """Number of distinct functions transitively reachable from ``api`` via a
+    capped forward BFS. A whole-library entrypoint reaches many functions; a leaf
+    helper reaches few. Bounded so it stays cheap and recursion-safe; 0 when the
+    symbol is absent from the callgraph."""
+    if not api or not forward_cg:
+        return 0
+    from collections import deque
+
+    start = str(api or "").strip()
+    seen: set[str] = {start}
+    queue: deque[tuple[str, int]] = deque((c, 1) for c in forward_cg.get(start, set()))
+    reached: set[str] = set()
+    while queue and len(reached) < max_nodes:
+        node, depth = queue.popleft()
+        if node in seen:
+            continue
+        seen.add(node)
+        reached.add(node)
+        if depth >= max_depth:
+            continue
+        for callee in forward_cg.get(node, set()):
+            if callee not in seen:
+                queue.append((callee, depth + 1))
+    return len(reached)
+
+
+def _coverage_potential_norm() -> float:
+    raw = os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL_NORM")
+    if raw is None or str(raw).strip() == "":
+        return 40.0
+    try:
+        return max(1.0, float(raw))
+    except Exception:
+        return 40.0
+
+
+def coverage_potential(api: str, forward_cg: dict[str, set[str]]) -> float:
+    """Structural 'how much of the library does this target drive' signal in
+    [0, 1], derived from reachable fan-out. 0 when the callgraph is empty/absent
+    (callers then fall back to the name heuristic)."""
+    fanout = _reachable_fanout(api, forward_cg)
+    if fanout <= 0:
+        return 0.0
+    return min(1.0, float(fanout) / _coverage_potential_norm())

@@ -27,6 +27,7 @@ Use this skill in the internal hunt subphase before `plan` materializes `selecte
 2. Read existing `fuzz/vuln_candidates.json` and preserve useful candidate state such as `validation_status`, `attempt_count`, and `last_result`.
 3. Read per-iteration fuzz feedback from `fuzz/run_feedback.json` and `fuzz/vuln_hunt_events.jsonl` to refine confidence scores with actual runtime data.
 4. Rank candidates **purely by vulnerability risk** (likelihood + exploitability + reachability). Coverage, complexity, and API surface metrics are NOT used in ranking.
+   - **Reachability must account for whole-library reach.** A top-level public entrypoint that drives the entire parse/decode/load flow (e.g. `toml_parse`, `*_loads`, `*_decode`) reaches the most code and therefore the most *reachable bug surface* — rate its `reachability_confidence` high and always propose it as a candidate, not only the isolated internal helpers it calls. A bug reachable only through the public entry is more valuable than the same risk buried in a leaf helper fuzzed in isolation. Keep the dangerous internal sink as `attack_hint.key_code_path` so the entry harness still steers toward it. This is reachability, not a coverage metric.
 5. Calibrate analysis depth per iteration (read `vuln_hunt_iteration` from workflow context):
    - Iteration 1-2: broad candidates from static analysis of all reachable APIs.
    - Iteration 3-4: narrow to candidates with crash/coverage evidence from fuzz runs; increase exploitability estimates.
