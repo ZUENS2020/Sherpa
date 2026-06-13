@@ -2092,6 +2092,19 @@ def _library_entrypoint_bias(api: str, target_type: str) -> float:
     return round(weight * 0.6, 4)
 
 
+def _selection_mode() -> str:
+    """Target-selection mode (hybrid experiment).
+
+    - "score" (default): deterministic value arithmetic re-ranks candidates
+      (effective_risk = vuln_likelihood - penalties + entrypoint_bias).
+    - "llm_first": trust the agent's own risk judgement — order by the LLM
+      dimensions only, keep the feedback-gating + hard guardrail-drop pillars,
+      drop the value arithmetic. Lets us A/B whether the scorer helps or fights
+      the LLM."""
+    mode = (os.environ.get("SHERPA_SELECTION_MODE") or "score").strip().lower()
+    return "llm_first" if mode in {"llm_first", "llm-first", "llm"} else "score"
+
+
 def _coverage_potential_enabled() -> bool:
     raw = (os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -3568,6 +3581,7 @@ def _build_selected_targets_doc(
         is_internal_api_symbol_fn=_is_internal_api_symbol,
         runtime_viability_rank_fn=_runtime_viability_rank,
         prefer_deeper=prefer_deeper,
+        selection_mode=_selection_mode(),
     )
     ranked_items = _apply_selected_target_filters(
         ranked_items,
