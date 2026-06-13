@@ -53,6 +53,42 @@ def test_inject_leaves_replay_lines_alone(tmp_path: Path) -> None:
     assert bp.read_text(encoding="utf-8") == line
 
 
+def test_inject_instruments_library_make_cflags(tmp_path: Path) -> None:
+    # The real failure: the target library is compiled via `make` with a
+    # hardcoded CFLAGS string that lacks coverage, so libFuzzer is blind to the
+    # library and coverage flatlines at the few harness edges. The injector must
+    # append coverage to that library compile-flags string.
+    bp = tmp_path / "build.py"
+    bp.write_text(
+        "def build_make(repo_root, cc='clang', cflags=None):\n"
+        "    if cflags is None:\n"
+        "        cflags = \"-std=c99 -Wall -Wextra -fpic -O2 -DNDEBUG\"\n"
+        "    env = os.environ.copy()\n"
+        "    env['CFLAGS'] = cflags\n"
+        "    run(['make', '-C', str(repo_root), 'libtoml.a'], env=env)\n",
+        encoding="utf-8",
+    )
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    out = bp.read_text(encoding="utf-8")
+    # the library CFLAGS string now carries libFuzzer coverage
+    assert 'cflags = "-std=c99 -Wall -Wextra -fpic -O2 -DNDEBUG ' + MODERN + '"' in out
+    # and the file is still valid Python
+    compile(out, str(bp), "exec")
+
+
+def test_inject_skips_replay_cflags_string(tmp_path: Path) -> None:
+    # A replay CFLAGS string (-fprofile-instr-generate) is for llvm-cov, not
+    # libFuzzer; the library pass must leave it untouched.
+    bp = tmp_path / "build.py"
+    replay = (
+        "    env['CFLAGS'] = "
+        "\"-std=c99 -fpic -fprofile-instr-generate -fcoverage-mapping\"\n"
+    )
+    bp.write_text(replay, encoding="utf-8")
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    assert bp.read_text(encoding="utf-8") == replay
+
+
 def test_cc_wrapper_is_valid_bash_and_rewrites(tmp_path: Path) -> None:
     wdir = workflow_graph._install_coverage_cc_wrapper(tmp_path)
     sh = wdir / "sherpa-cc-wrapper.sh"

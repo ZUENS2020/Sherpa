@@ -1146,9 +1146,49 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
             except Exception:
                 pass
 
-    if COVERAGE_FLAGS in text:
-        return
+    # --- Pass A: instrument the target *library* build ---------------------
+    # Many agent build.py's compile the target library via `make` with a
+    # hardcoded compile-flags string that lacks coverage, e.g.:
+    #     cflags = "-std=c99 -Wall -Wextra -fpic -O2 -DNDEBUG"
+    #     env["CFLAGS"] = cflags
+    # That object is then linked into the fuzzer, but without
+    # -fsanitize-coverage libFuzzer is BLIND to the library and coverage
+    # flatlines at the handful of harness edges (observed: cov stuck at ~7 even
+    # on valid inputs that should drive the whole parser). The PATH cc-wrapper
+    # is best-effort and does not reliably reach `make` subprocesses, so here we
+    # deterministically append coverage to every compile-flags string literal
+    # that is NOT a replay build (-fprofile-instr-generate) and does not already
+    # carry coverage. This is the reliable, format-agnostic library hook.
+    def _augment_cflags(m: "re.Match[str]") -> str:
+        head, quote, body = m.group(1), m.group(2), m.group(3)
+        if (
+            "-fprofile-instr-generate" in body
+            or "-fcoverage-mapping" in body
+            or "-fsanitize-coverage" in body
+            or "-fsanitize=fuzzer" in body
+            or "-" not in body
+        ):
+            return m.group(0)
+        return f"{head}{quote}{body} {COVERAGE_FLAGS}{quote}"
 
+    lib_cflags_re = re.compile(
+        r"((?:\b(?:cflags|c_flags|cxxflags|cxx_flags)\b\s*=\s*"
+        r"|\[\s*['\"](?:CFLAGS|CXXFLAGS)['\"]\s*\]\s*=\s*))"
+        r"(['\"])([^'\"]*)\2",
+        re.IGNORECASE,
+    )
+    lib_text = lib_cflags_re.sub(_augment_cflags, text)
+    if lib_text != text:
+        text = lib_text
+        try:
+            bp.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into library CFLAGS in build.py")
+        except Exception:
+            pass
+
+    # --- Pass B: instrument the harness link (clang -fsanitize=fuzzer ...) ---
+    # Idempotent: per-line guards below skip lines that already carry coverage
+    # or are replay builds, so this is safe even after Pass A added coverage.
     lines = text.splitlines()
     changed = False
     for i, line in enumerate(lines):
@@ -10080,6 +10120,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             build_cmd = [gen._python_runner(), "build.py"]
             fallback_cmd = [gen._python_runner(), "fuzz/build.py"]
             fallback_cwd = gen.repo_root
+            # Deterministically instrument the library + harness build (does not
+            # rely on the PATH cc-wrapper reaching `make` subprocesses).
+            _inject_coverage_instrumentation(str(build_py), cast(dict[str, Any], state))
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
         elif build_sh.is_file():
@@ -15684,6 +15727,10 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if (clone_root / "fuzz" / "build.py").is_file():
             build_cmd = [python_runner, "build.py"]
             build_cwd = clone_root / "fuzz"
+            # The run-stage rebuild produces the binary that is actually fuzzed;
+            # instrument its library + harness build deterministically so the
+            # fuzzed binary is not blind to the target library.
+            _inject_coverage_instrumentation(str(clone_root / "fuzz" / "build.py"), state)
         elif (clone_root / "fuzz" / "build.sh").is_file():
             build_cmd = ["bash", "build.sh"]
             build_cwd = clone_root / "fuzz"
