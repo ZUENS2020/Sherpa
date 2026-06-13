@@ -343,6 +343,37 @@ _C_ESCAPE_TO_HEX: Dict[str, str] = {
 }
 
 
+_FOPEN_MODES = {
+    "r", "w", "a", "rb", "wb", "ab", "r+", "w+", "a+", "rb+", "wb+", "ab+",
+    "r+b", "w+b", "a+b", "rt", "wt", "at", "rbe", "wbe",
+}
+
+
+def _is_scaffold_dict_literal(inner: str) -> bool:
+    """True for harness *scaffold* string literals that are noise for the target
+    format (header/source filenames, temp paths, fopen modes, lone format
+    specifiers). These pollute the dictionary — e.g. a TOML harness scrapes
+    "toml.h", "/tmp/tomlfuzz_XXXXXX", "rb" — and crowd out real grammar tokens,
+    so the fuzzer never gets past the 'reject invalid input' path."""
+    s = inner.strip()
+    if not s:
+        return True
+    low = s.lower()
+    # include/source filenames
+    if re.search(r"\.(h|hpp|hh|hxx|c|cc|cpp|cxx|inc)$", low):
+        return True
+    # paths / temp templates
+    if "/" in s or "\\" in s or "xxxxxx" in low:
+        return True
+    # libc fopen modes
+    if low in _FOPEN_MODES:
+        return True
+    # a lone printf/format specifier
+    if re.fullmatch(r"%[-+ #0-9.]*[sdiouxXeEfgGpcn%]", s):
+        return True
+    return False
+
+
 def _normalize_dict_token(tok: str) -> str:
     r"""Normalize a quoted token to libFuzzer's conservative ``\xNN`` form.
 
@@ -5348,8 +5379,13 @@ EOF
                     # Extract C string literals (simple heuristic)
                     for m in re.finditer(r'"([^"\\]{1,64}(?:\\.[^"\\]{0,64})*)"', content):
                         literal = m.group(0)
-                        # Skip very common/useless strings
-                        if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
+                        inner = m.group(1)
+                        # Skip very common/useless strings and harness scaffold
+                        # noise (header names, temp paths, fopen modes, …) that
+                        # otherwise dominate the dictionary and starve real
+                        # grammar tokens.
+                        if len(inner) >= 2 and literal not in {'"\\n"', '"\\0"', '""'} \
+                                and not _is_scaffold_dict_literal(inner):
                             harness_tokens.append(_normalize_dict_token(literal))
                 except Exception:
                     pass
@@ -5376,8 +5412,11 @@ EOF
         if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
             vuln_tokens = list(VULN_DICTIONARY_TOKENS.get(seed_profile or "generic", []))
 
-        # Merge in priority order
-        tokens: list[str] = harness_tokens + vuln_tokens + existing_dict_tokens + profile_tokens
+        # Merge in priority order. Curated grammar/format tokens (profile + vuln)
+        # come FIRST — they are the reliable target-format syntax that lets the
+        # fuzzer get past input validation. Filtered harness literals and any
+        # pre-existing dict tokens follow as project-specific fill-up.
+        tokens: list[str] = profile_tokens + vuln_tokens + harness_tokens + existing_dict_tokens
 
         # Deduplicate while preserving order
         seen: set[str] = set()
@@ -5953,6 +5992,13 @@ EOF
             f"-rss_limit_mb={self.rss_limit_mb}",
             f"-timeout={_run_libfuzzer_timeout_sec()}",
         ]
+        # Input-to-state (poor-man's RedQueen): lets libFuzzer discover magic
+        # bytes / keyword comparisons (e.g. parser syntax) by observing compare
+        # operands, which is critical for getting past input validation when the
+        # seed corpus is weak. Disable with SHERPA_LIBFUZZER_VALUE_PROFILE=0.
+        if (os.environ.get("SHERPA_LIBFUZZER_VALUE_PROFILE", "1").strip().lower()
+                not in {"0", "false", "no", "off"}):
+            cmd.append("-use_value_profile=1")
 
         # Adaptive max_len based on seed_profile
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
