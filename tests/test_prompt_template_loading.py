@@ -59,6 +59,9 @@ def test_plan_prompt_references_stage_skill_and_schema_contract():
     assert "Target selection is vulnerability-first" in out
     assert "ranking must be driven by risk dimensions first" in out
     assert "score_total = 0.50*vuln_likelihood" in out
+    # whole-input public entrypoints carry high reachable bug surface
+    assert "whole-input public entrypoints" in out
+    assert "reachable bug surface" in out
     assert "`security_score_breakdown`" in out
     assert "`api_surface_exception`" in out
     assert "normalized system result" in out

@@ -35,6 +35,7 @@ Constraints:
   - otherwise prefer public/stable API and keep `api_surface_exception.used=false`.
 - Target selection is vulnerability-first by default (`security_priority_mode=true`):
   - ranking must be driven by risk dimensions first: `vuln_likelihood`, then `exploitability`, then `reachability_confidence`
+  - whole-input public entrypoints (e.g. `toml_parse`, `*_loads`, `*_decode`) that drive the entire library have high *reachable bug surface* — reflect that in their `reachability_confidence` and keep at least one such driver in the execution plan, alongside (not instead of) high-risk internal sinks.
   - treat `score_total` and non-security dimensions (coverage/complexity/api-relevance) as reference output only, not the primary ordering basis.
   - `score_total = 0.50*vuln_likelihood + 0.30*exploitability + 0.20*reachability_confidence - recent_yield_penalty`. Non-vuln dimensions (coverage_gap, complexity_depth, api_relevance, consumer_order_support) are NOT scored.
 - `fuzz/selected_targets.json` must include per-target:

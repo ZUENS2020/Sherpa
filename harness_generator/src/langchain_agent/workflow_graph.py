@@ -1850,7 +1850,9 @@ from workflow_public_api import (  # noqa: E402
     _is_non_public_api,
     _is_unlinkable_binding_api,
     _load_callgraph_reverse,
+    _load_callgraph_forward,
     _nearest_public_entry,
+    coverage_potential,
 )
 
 
@@ -2076,7 +2078,10 @@ def _is_non_harnessable_target(api: str) -> bool:
 def _library_entrypoint_bias(api: str, target_type: str) -> float:
     """Positive risk bias for whole-input library entrypoints (0 otherwise).
     Strongest for parser/decoder/archive libraries. Disable with
-    SHERPA_VULN_ENTRYPOINT_BIAS=0."""
+    SHERPA_VULN_ENTRYPOINT_BIAS=0.
+
+    This is the NAME heuristic — used as a fallback when the call graph is
+    unavailable (see _entrypoint_risk_bias for the primary structural signal)."""
     if not _is_library_entrypoint(api):
         return 0.0
     weight = _vuln_entrypoint_bias_weight()
@@ -2085,6 +2090,41 @@ def _library_entrypoint_bias(api: str, target_type: str) -> float:
     if str(target_type or "").strip().lower() in {"parser", "decoder", "archive", "deserializer"}:
         return round(weight, 4)
     return round(weight * 0.6, 4)
+
+
+def _coverage_potential_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _coverage_potential_weight() -> float:
+    raw = os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL_WEIGHT")
+    if raw is None or str(raw).strip() == "":
+        return 0.25
+    try:
+        return max(0.0, min(float(raw), 0.5))
+    except Exception:
+        return 0.25
+
+
+def _entrypoint_risk_bias(api: str, target_type: str, repo_root: Path) -> tuple[float, float]:
+    """Combined entrypoint risk bias + the raw coverage_potential signal.
+
+    Primary signal is structural: a target's call-graph reachable fan-out
+    ('coverage_potential' in [0,1]) — a whole-library entrypoint drives much more
+    reachable bug surface than an isolated leaf. The name heuristic
+    (_library_entrypoint_bias) is the fallback used when the call graph is
+    empty/degraded. We take the MAX of the two (never sum) so neither
+    double-counts. Returns (bias, coverage_potential)."""
+    name_bias = _library_entrypoint_bias(api, target_type)
+    cov_pot = 0.0
+    if _coverage_potential_enabled():
+        try:
+            cov_pot = coverage_potential(api, _load_callgraph_forward(repo_root))
+        except Exception:
+            cov_pot = 0.0
+    structural_bias = round(_coverage_potential_weight() * cov_pot, 4)
+    return max(structural_bias, name_bias), round(cov_pot, 4)
 
 
 def _execution_depth_bias(
@@ -3210,7 +3250,7 @@ def _build_selected_target_row(
     )
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
     target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
-    entrypoint_bias = _library_entrypoint_bias(api, target_type)
+    entrypoint_bias, coverage_potential_score = _entrypoint_risk_bias(api, target_type, repo_root)
     non_harnessable_dropped = _is_non_harnessable_target(api)
     score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
@@ -3369,6 +3409,7 @@ def _build_selected_target_row(
         "effective_priority": float(effective_priority),
         "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
         "entrypoint_bias": float(entrypoint_bias),
+        "coverage_potential": float(coverage_potential_score),
         "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
         "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
         "target_surface_penalty": float(target_surface_penalty),
