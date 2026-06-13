@@ -13,6 +13,20 @@ Builds a complete `fuzz/` scaffold from planning artifacts, including harness so
 ## When to use this skill
 Use this skill in the primary `synthesize` stage after `plan`.
 
+## CRITICAL (read first — violating any of these fails the stage or freezes coverage)
+1. **Harness-first, targets-only.** Write ≥1 harness source before any docs/json,
+   and ONLY for targets in `fuzz/targets.json` (extra harnesses are rejected).
+2. **libFuzzer entry only.** `LLVMFuzzerTestOneInput`, no custom `main()`, no
+   argv/file-driven input. (See LibFuzzer harness contract.)
+3. **Complete `repo_understanding.json` before `./done`** — all required fields
+   non-empty (see its template contract). A missing field fails the stage.
+4. **Initialize a valid input context before the target call** — the #1 cause of
+   frozen coverage. (See the Stateful context initialization contract.)
+
+Everything below is the detail behind these four. Coverage instrumentation
+flags are added automatically by the build wrapper — you do NOT write
+`-fsanitize-coverage` yourself.
+
 ## Required inputs
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
@@ -84,7 +98,7 @@ Minimal valid template:
   - owning source linkage: when a harness calls APIs implemented in contrib/example/demo source files outside the main static library, compile the owning source file alongside the harness or switch to a public library API
   - never call a static example helper directly from a harness; static example helpers are not linkable API and example sources with their own `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
   - primary runnable fuzzers must link the libFuzzer runtime with `-fsanitize=fuzzer,address,undefined` (or equivalent sanitizer set including `fuzzer`); do not use `-fsanitize=fuzzer-no-link` for final binaries unless you also provide and link a valid fuzzer `main`
-  - `-fsanitize=fuzzer` already provides libFuzzer coverage instrumentation; do NOT add the deprecated `-fsanitize-coverage=trace-pc-guard` — modern libFuzzer (clang >= 14) refuses to run such binaries (`trace-pc-guard is no longer supported by libFuzzer`). If you pass explicit coverage flags, use `-fsanitize-coverage=inline-8bit-counters,pc-table`
+  - do NOT add `-fsanitize-coverage` flags yourself: the build wrapper injects libFuzzer coverage instrumentation into every compile automatically (and normalizes any deprecated `trace-pc-guard`). Just write a normal compile/link.
   - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
   - coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild the static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`
   - coverage/replay CMake builds that use LLVM coverage flags must configure with `clang`/`clang++` (for example `-DCMAKE_C_COMPILER=clang` and `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`); do not pass LLVM coverage flags to `/usr/bin/cc`/GCC
