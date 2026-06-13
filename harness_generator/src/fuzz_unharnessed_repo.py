@@ -289,6 +289,10 @@ FMT_SEED_FAMILIES = {
 # Each entry is a raw byte-string that libFuzzer will use as a mutation hint.
 PROFILE_DICTIONARY_TOKENS: Dict[str, List[str]] = {
     "parser-structure": [
+        # key/value + table syntax shared by TOML/INI/properties (=) and the
+        # JSON/YAML family (: { }). '=' was missing, which starved TOML-style
+        # `key = value` documents.
+        '"="', '" = "', '"[["', '"]]"', '"."', '"\\"\\"\\""', "\"'''\"",
         '":"', '"{"', '"}"', '"["', '"]"', '","', '"true"', '"false"', '"null"',
         '"---"', '"..."', '": "', '"- "', '"\\n"', '"\\t"',
     ],
@@ -3957,8 +3961,35 @@ EOF
                 return True
             return False
 
-        for rel_root in search_roots:
-            root = self.repo_root / rel_root
+        # Static roots + dynamically-discovered sample dirs. Many repos use
+        # non-standard names (tomlc99: test1/test2; others: t/, cases/,
+        # fixtures/) that the fixed list misses, so also scan the top two levels
+        # for any directory whose name looks like a test/sample/fixture set.
+        _seed_dir_name_re = re.compile(
+            r"(test|tests?\d*|example|examples|sample|samples|fixture|fixtures|"
+            r"corpus|cases|inputs?|testdata|regression|golden|data)",
+            re.IGNORECASE,
+        )
+        discovered_roots: list[Path] = []
+        try:
+            for lvl1 in self.repo_root.iterdir():
+                if not lvl1.is_dir() or lvl1.name.startswith("."):
+                    continue
+                if _seed_dir_name_re.fullmatch(lvl1.name) or _seed_dir_name_re.match(lvl1.name):
+                    discovered_roots.append(lvl1)
+                else:
+                    for lvl2 in lvl1.iterdir():
+                        if lvl2.is_dir() and not lvl2.name.startswith(".") and _seed_dir_name_re.match(lvl2.name):
+                            discovered_roots.append(lvl2)
+        except Exception:
+            pass
+        effective_roots = [self.repo_root / r for r in search_roots] + discovered_roots
+        seen_roots: set[str] = set()
+        for root in effective_roots:
+            rp = str(root)
+            if rp in seen_roots:
+                continue
+            seen_roots.add(rp)
             if not root.is_dir():
                 continue
             for path in root.rglob("*"):
