@@ -3,6 +3,21 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+_FEEDBACK_PENALTY_TOKENS = (
+    "persistent_low_yield_target",
+    "coverage_exhausted_target",
+    "cold_start_low_yield",
+    "very_low_seed_score",
+)
+
+
+def _is_feedback_demoted(row: dict[str, Any]) -> bool:
+    """True when run feedback says this target is spent (exhausted/low-yield).
+    Used by llm_first to keep the feedback-gating pillar without the numeric
+    value arithmetic."""
+    return any(tok in str(row.get("penalty_reason") or "") for tok in _FEEDBACK_PENALTY_TOKENS)
+
+
 def sort_ranked_items(
     ranked_items: list[dict[str, Any]],
     *,
@@ -10,8 +25,28 @@ def sort_ranked_items(
     is_internal_api_symbol_fn: Callable[[str], bool],
     runtime_viability_rank_fn: Callable[[str], int],
     prefer_deeper: bool = False,
+    selection_mode: str = "score",
 ) -> list[dict[str, Any]]:
     rows = list(ranked_items)
+    if security_priority_mode and selection_mode == "llm_first":
+        # Hybrid experiment: trust the agent's own risk judgement instead of the
+        # deterministic value arithmetic. Order by the LLM-assigned dimensions
+        # (vuln_likelihood -> exploitability -> reachability), and keep ONLY the
+        # feedback-gating pillar — targets run feedback marks as spent sink to the
+        # back. No entrypoint_bias / surface / recent-yield arithmetic in the key;
+        # hard guardrail drops (unlinkable/non-harnessable) are still applied by
+        # the caller's filter step.
+        rows.sort(
+            key=lambda row: (
+                1 if _is_feedback_demoted(row) else 0,
+                -float(row.get("vuln_likelihood") or 0.0),
+                -float(row.get("exploitability") or 0.0),
+                -float(row.get("reachability_confidence") or 0.0),
+                -len(list(row.get("evidence_ids") or [])),
+                str(row.get("target_name") or ""),
+            )
+        )
+        return rows
     if security_priority_mode:
         # Vuln-driven sort on *effective* risk: likelihood minus the demotion
         # penalties (non-core/contrib/helper surface + recent-yield/exhaustion),
