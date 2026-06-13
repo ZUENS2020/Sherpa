@@ -21,6 +21,15 @@ def test_detects_top_level_parse_entry_not_subparser_or_leaf():
     assert wg._is_library_entrypoint("yaml_load")
     assert wg._is_library_entrypoint("png_decode")
     assert wg._is_library_entrypoint("parse")
+    # decoder read-entrypoints (callgraph often incomplete for generated-header
+    # libs like libpng, so the name fallback must still recognize these)
+    assert wg._is_library_entrypoint("png_read_image")
+    assert wg._is_library_entrypoint("png_read_info")
+    assert wg._is_library_entrypoint("png_read_png")
+    # but low-level readers stay leaves, not promoted
+    assert not wg._is_library_entrypoint("png_read_filter_row")
+    assert not wg._is_library_entrypoint("png_read_data")
+    assert not wg._is_library_entrypoint("png_read_chunk")
     # sub-parsers (must NOT count — these are the leaves we want to de-prioritize)
     assert not wg._is_library_entrypoint("parse_array")
     assert not wg._is_library_entrypoint("parse_keyval")

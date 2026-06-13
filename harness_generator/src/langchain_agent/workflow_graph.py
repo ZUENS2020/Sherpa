@@ -2012,6 +2012,12 @@ _ENTRYPOINT_HINTS_SUFFIX = (
     "_parse", "_parse_file", "_parse_string", "_parse_buffer",
     "_loads", "_load", "_load_file", "_decode", "_deserialize", "_unmarshal",
     "_read_file", "_read_buffer", "_from_string", "_from_buffer", "_fromjson",
+    # whole-input decoder read-entrypoints (e.g. libpng png_read_image /
+    # png_read_png / png_read_info). Kept specific so low-level readers
+    # (png_read_filter_row -> _row, png_read_data -> _data, *_chunk/_byte) are
+    # excluded as leaves rather than promoted.
+    "_read_image", "_read_png", "_read_info", "_read_document", "_read_memory",
+    "_read_stream", "_readimage", "_readfile",
 )
 _ENTRYPOINT_HINTS_EXACT = {
     "parse", "loads", "load", "decode", "deserialize", "unmarshal",
