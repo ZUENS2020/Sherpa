@@ -89,6 +89,39 @@ def test_inject_skips_replay_cflags_string(tmp_path: Path) -> None:
     assert bp.read_text(encoding="utf-8") == replay
 
 
+def test_inject_forces_cc_wrapper_onto_bare_make(tmp_path: Path) -> None:
+    # The hard case: build.py builds the library via a BARE `make` with no
+    # CFLAGS at all, relying on the project Makefile (which may hard-assign
+    # CFLAGS and ignore the environment). The injector must force the library
+    # compiler to the cc-wrapper via a command-line `make CC=...` override so
+    # coverage is appended regardless of the Makefile's own flags.
+    fuzz = tmp_path / "fuzz"
+    fuzz.mkdir()
+    bp = fuzz / "build.py"
+    bp.write_text(
+        "import subprocess\n"
+        "def run(cmd, **kw):\n"
+        "    return subprocess.run(cmd, check=True, **kw)\n"
+        "def build_make_library():\n"
+        "    run(['make', '-C', str(REPO_ROOT), 'libtoml.a', '-j', '4'])\n"
+        "def build_make_library_coverage():\n"
+        "    env = os.environ.copy()\n"
+        "    env['CFLAGS'] = '-fprofile-instr-generate -fcoverage-mapping'\n"
+        "    run(['make', '-C', str(REPO_ROOT), 'libtoml.a'], env=env)\n",
+        encoding="utf-8",
+    )
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    out = bp.read_text(encoding="utf-8")
+    wdir = fuzz / ".sherpa-cc"
+    # primary (no env=) make now forces CC/CXX to the wrapper
+    assert f'"CC={wdir / "clang"}"' in out
+    assert f'"CXX={wdir / "clang++"}"' in out
+    # the replay make (env=env) is left untouched — its CC override count is 0
+    assert out.count("'libtoml.a'], env=env)") == 1  # unchanged replay line
+    # still valid Python
+    compile(out, str(bp), "exec")
+
+
 def test_cc_wrapper_is_valid_bash_and_rewrites(tmp_path: Path) -> None:
     wdir = workflow_graph._install_coverage_cc_wrapper(tmp_path)
     sh = wdir / "sherpa-cc-wrapper.sh"

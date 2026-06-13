@@ -1186,6 +1186,44 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
         except Exception:
             pass
 
+    # --- Pass C: force coverage onto the library `make` build via CC=wrapper -
+    # Pass A only helps when build.py passes a CFLAGS string the Makefile
+    # honours. Many real Makefiles (e.g. tomlc99) HARD-ASSIGN `CFLAGS = ...`,
+    # which overrides the environment, so env/CFLAGS-string coverage never
+    # reaches the library and coverage flatlines (observed: cov plateaus at ~23
+    # with ft in the thousands — value-profile churns on a couple dozen edges).
+    # A command-line `make CC=<wrapper>` overrides even a hard-assigned Makefile
+    # variable, and the wrapper appends -fsanitize-coverage to every compile
+    # while preserving the project's own CFLAGS. The wrapper internally skips
+    # replay builds (-fprofile-instr-generate), and we only touch make calls
+    # WITHOUT an `env=` kwarg, which targets the primary (non-replay) library
+    # build and leaves coverage/replay make calls (which pass env=) alone.
+    try:
+        repo_root = bp.parent.parent
+        wrapper_dir = _install_coverage_cc_wrapper(repo_root)
+        cc_path = str(wrapper_dir / "clang")
+        cxx_path = str(wrapper_dir / "clang++")
+        if cc_path not in text:
+            # Match `run([... "make" ...])` / `subprocess.run([... "make" ...])`
+            # where the list is closed immediately by `)` (no env= kwarg).
+            make_call_re = re.compile(
+                r"((?:subprocess\.)?run\(\s*\[\s*['\"]make['\"][^\]]*?)(\]\s*\))"
+            )
+
+            def _augment_make(m: "re.Match[str]") -> str:
+                head, tail = m.group(1), m.group(2)
+                if ".sherpa-cc" in head:
+                    return m.group(0)
+                return f'{head}, "CC={cc_path}", "CXX={cxx_path}"{tail}'
+
+            new_make = make_call_re.sub(_augment_make, text)
+            if new_make != text:
+                text = new_make
+                bp.write_text(text, encoding="utf-8", errors="replace")
+                _wf_log(state, "build: forced coverage onto library make build via CC=<cc-wrapper>")
+    except Exception:
+        pass
+
     # --- Pass B: instrument the harness link (clang -fsanitize=fuzzer ...) ---
     # Idempotent: per-line guards below skip lines that already carry coverage
     # or are replay builds, so this is safe even after Pass A added coverage.
