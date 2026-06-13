@@ -1224,6 +1224,40 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
     except Exception:
         pass
 
+    # --- Pass D: instrument direct `clang -c` library/object compiles --------
+    # Some build.py's skip make entirely and compile the library with explicit
+    # clang commands that carry no coverage and no -fsanitize=fuzzer, e.g.
+    #     cmd = ["clang", "-c", "-std=c99", "-Wall", "-Wextra"]
+    # The resulting object is linked into the fuzzer uninstrumented and coverage
+    # flatlines. Append coverage to any single-line clang/clang++ command list
+    # that starts with the compiler, compiles (-c), and is neither a libFuzzer
+    # build (-fsanitize=fuzzer) nor a replay build (-fprofile-instr-generate)
+    # nor already instrumented.
+    def _augment_clang_compile(m: "re.Match[str]") -> str:
+        seg, close = m.group(1), m.group(2)
+        if not ('"-c"' in seg or "'-c'" in seg):
+            return m.group(0)
+        if (
+            "-fsanitize=fuzzer" in seg
+            or "-fprofile-instr-generate" in seg
+            or "-fcoverage-mapping" in seg
+            or "-fsanitize-coverage" in seg
+        ):
+            return m.group(0)
+        return f'{seg}, "{COVERAGE_FLAGS}"{close}'
+
+    clang_compile_re = re.compile(
+        r"(\[\s*['\"]clang(?:\+\+)?['\"][^\[\]\n]*?)(\])"
+    )
+    new_clang = clang_compile_re.sub(_augment_clang_compile, text)
+    if new_clang != text:
+        text = new_clang
+        try:
+            bp.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into direct clang -c compile in build.py")
+        except Exception:
+            pass
+
     # --- Pass B: instrument the harness link (clang -fsanitize=fuzzer ...) ---
     # Idempotent: per-line guards below skip lines that already carry coverage
     # or are replay builds, so this is safe even after Pass A added coverage.
