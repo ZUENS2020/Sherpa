@@ -333,7 +333,68 @@ def _try_generate_compile_commands(repo_root: Path) -> Path | None:
             print("[promefuzz-companion] bear/make timed out after 120s", flush=True)
         except Exception as e:
             print(f"[promefuzz-companion] bear/make failed: {e}", flush=True)
+    # Final fallback: synthesize a best-effort compile_commands.json. CMake
+    # projects export one and `bear` captures Makefile builds, but plain
+    # Makefile/configure libs (e.g. tomlc99) produce neither and the image has
+    # no bear. A minimal DB (each source compiled with the repo's header dirs on
+    # the include path) is enough for the clang-based cgprocessor to extract a
+    # usable call graph — approximate flags are fine since we only need relative
+    # reachability, not an exact build.
+    synthesized = _synthesize_compile_commands(repo_root)
+    if synthesized:
+        return synthesized
     return None
+
+
+def _synth_compile_commands_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_SYNTH_COMPILE_COMMANDS") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _synthesize_compile_commands(repo_root: Path) -> Path | None:
+    """Write a best-effort compile_commands.json (no external tools) so the call
+    graph can be built for projects that export none. Returns the path or None."""
+    if not _synth_compile_commands_enabled():
+        return None
+    try:
+        sources = _enumerate_source_files(repo_root, _callgraph_max_files())
+        if not sources:
+            return None
+        # Include dirs = repo root + every directory that holds a header, capped.
+        header_suffixes = {".h", ".hh", ".hpp", ".hxx"}
+        include_dirs: list[str] = [str(repo_root.resolve())]
+        seen: set[str] = {str(repo_root.resolve())}
+        skip = _PROGRESS_SKIP_DIRS | {"test", "tests", "example", "examples"}
+        for base, dirs, files in os.walk(repo_root):
+            dirs[:] = [d for d in dirs if d.lower() not in skip]
+            if any(Path(n).suffix.lower() in header_suffixes for n in files):
+                rp = str(Path(base).resolve())
+                if rp not in seen:
+                    seen.add(rp)
+                    include_dirs.append(rp)
+            if len(include_dirs) >= 64:
+                break
+        inc_flags = [f"-I{d}" for d in include_dirs]
+        entries = []
+        for src in sources:
+            srcp = str(src.resolve())
+            args = ["clang", *inc_flags, "-ferror-limit=0", "-w", "-c", srcp]
+            entries.append({
+                "directory": str(repo_root.resolve()),
+                "file": srcp,
+                "arguments": args,
+            })
+        out = repo_root / "compile_commands.json"
+        out.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+        print(
+            f"[promefuzz-companion] synthesized compile_commands.json: "
+            f"{len(entries)} sources, {len(include_dirs)} include dirs",
+            flush=True,
+        )
+        return out
+    except Exception as e:
+        print(f"[promefuzz-companion] synthesize compile_commands failed: {e}", flush=True)
+        return None
 
 
 def _promefuzz_available() -> bool:
@@ -574,10 +635,10 @@ def _build_callgraph_summary(
     if not _callgraph_enabled():
         return [], "callgraph_disabled"
 
-    compile_commands = _compile_commands_path(repo_root)
+    # Use (or generate) a compilation database: CMake export, bear-captured make,
+    # or a synthesized best-effort DB. Without one cgprocessor yields nothing.
+    compile_commands = _try_generate_compile_commands(repo_root)
     if not compile_commands:
-        # cgprocessor without compile_commands almost always fails on real repos;
-        # skip rather than spend clang invocations that yield nothing.
         return [], "no_compile_commands"
 
     try:
