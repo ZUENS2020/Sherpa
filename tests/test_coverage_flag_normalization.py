@@ -122,6 +122,32 @@ def test_inject_forces_cc_wrapper_onto_bare_make(tmp_path: Path) -> None:
     compile(out, str(bp), "exec")
 
 
+def test_inject_instruments_direct_clang_c_library_compile(tmp_path: Path) -> None:
+    # build.py that skips make and compiles the library directly with clang -c.
+    # The library object must get coverage; the harness link and a replay
+    # compile must be left to the other passes / untouched.
+    bp = tmp_path / "build.py"
+    bp.write_text(
+        "lib_cmd = [\"clang\", \"-c\", \"-std=c99\", \"-Wall\", \"-Wextra\"]\n"
+        "lib_cmd += sources\n"
+        "run(lib_cmd)\n"
+        "link = [\"clang\", \"-fsanitize=fuzzer,address,undefined\", \"-o\", \"out\", \"h.c\", \"lib.a\"]\n"
+        "run(link)\n"
+        "replay = [\"clang\", \"-c\", \"-fprofile-instr-generate\", \"-fcoverage-mapping\", \"toml.c\"]\n"
+        "run(replay)\n",
+        encoding="utf-8",
+    )
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    out = bp.read_text(encoding="utf-8")
+    # the library compile got coverage appended
+    assert 'lib_cmd = ["clang", "-c", "-std=c99", "-Wall", "-Wextra", "' + MODERN + '"]' in out
+    # the replay clang -c (with -fprofile) was NOT touched
+    assert '["clang", "-c", "-fprofile-instr-generate", "-fcoverage-mapping", "toml.c"]' in out
+    # the fuzzer link got coverage via the harness-link pass (not double via Pass D)
+    assert out.count(MODERN) == 2  # library compile + harness link
+    compile(out, str(bp), "exec")
+
+
 def test_cc_wrapper_is_valid_bash_and_rewrites(tmp_path: Path) -> None:
     wdir = workflow_graph._install_coverage_cc_wrapper(tmp_path)
     sh = wdir / "sherpa-cc-wrapper.sh"
