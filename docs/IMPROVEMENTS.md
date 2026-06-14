@@ -120,6 +120,21 @@ stop wasting harness slots and fuzz budget.
 
 ## 4. Validation / findings log
 
+### utf8.h — heap-buffer-overflow READ in `utf8nlen()` / `utf8len()` (utf8.h:550)  — PR submitted
+- Real CWE-125 OOB read on a NUL-terminated string whose final byte is a multibyte lead
+  byte with no continuation (PoC: 2 bytes `0x2c 0xdf`). The codepoint width is taken from
+  the lead byte and `str` advanced unconditionally → steps past the NUL → next `'\0' != *str`
+  reads OOB. Reachable via the **default** `utf8len()` — no flag needed (broader than the
+  json.h one).
+- **Not a duplicate of the exact function:** same root-cause class as open issue
+  `sheredom/utf8.h#117` (multibyte lookahead past end, reported there for
+  `utf8makevalid`/`utf8codepoint`), but #117 does not name `utf8nlen`/`utf8len`.
+- **Fixed + PR'd:** [sheredom/utf8.h#136](https://github.com/sheredom/utf8.h/pull/136) —
+  bounded one-byte-at-a-time advance + regression test; full suite passes under ASan (157).
+- Value: pipeline found it; S-465 contract-aware triage correctly kept it `upstream_bug`
+  (harness satisfies the documented `nul_terminated` precondition → in-contract → real bug).
+  Materials archived at `~/Downloads/utf8h-oob-read-2026-06-14/`.
+
 ### json.h — heap-buffer-overflow READ in `json_parse_number()` (json.h:1925)
 - Real CWE-125 OOB read (1 byte) on input `"0"` with `allow_json5`; `src[offset+1]` read
   without `offset+1 < size` (the sizing pass at :1187 has the guard, the data pass doesn't).
