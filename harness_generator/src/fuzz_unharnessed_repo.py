@@ -171,12 +171,24 @@ except Exception:  # pragma: no cover
 # ────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
+
+# UBSan runtime options for fuzzing runs. UBSan flags *undefined behavior* per
+# the C standard, but many categories (e.g. pointer-overflow — the pervasive
+# `(char*)0 + n` pointer-as-accumulator idiom) are NOT memory-safety bugs: they
+# fire on nearly every input, would masquerade as crashes, and abort the fuzzer
+# before the corpus can grow. We therefore run UBSan NON-FATAL by default
+# (halt_on_error=0) so it stays advisory while ASan remains the hard
+# memory-safety gate. Set SHERPA_UBSAN_HALT=1 to restore aborting UBSan.
+_UBSAN_RUN_OPTIONS = "print_stacktrace=1:halt_on_error=" + (
+    "1" if os.environ.get("SHERPA_UBSAN_HALT", "0").strip().lower() in ("1", "true", "yes", "on") else "0"
+)
+
 # Supported sanitizer configurations for multi-sanitizer fuzzing
 SANITIZER_CONFIGS: Dict[str, Dict[str, str]] = {
     "address": {
         "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=inline-8bit-counters,pc-table",
         "asan_options": "exitcode=76:detect_leaks=0",
-        "ubsan_options": "print_stacktrace=1",
+        "ubsan_options": _UBSAN_RUN_OPTIONS,
     },
     "memory": {
         "compile_flags": "-fsanitize=memory,fuzzer -fno-omit-frame-pointer -fPIE",
@@ -727,6 +739,76 @@ _RE_SANITIZER_SUMMARY = re.compile(
 )
 _RE_RUNTIME_ERROR = re.compile(r"\bruntime error:\b", re.IGNORECASE)
 _RE_LF_DEADLY_SIGNAL = re.compile(r"ERROR: libFuzzer: deadly signal")
+
+# ── Sanitizer severity classification ───────────────────────────────────────
+# Genuine memory-safety / dangerous categories (ASan + the dangerous UBSan
+# checks). These are real, blocking crashes worth triaging/reporting.
+_RE_MEMORY_SAFETY = re.compile(
+    r"(heap-buffer-overflow|stack-buffer-overflow|global-buffer-overflow"
+    r"|heap-use-after-free|use-after-free|use-after-poison|double-free"
+    r"|stack-use-after-(?:return|scope)|alloc-dealloc-mismatch|attempting free"
+    r"|negative-size-param|dynamic-stack-buffer-overflow|SEGV|segmentation"
+    r"|deadly signal|wild pointer"
+    # dangerous UBSan: actual null *dereference*, OOB indexing, bad shifts
+    r"|member access within null pointer|member call on null pointer"
+    r"|load of null pointer|store to null pointer|reference binding to null"
+    r"|index \d+ out of bounds|out of bounds for type"
+    r"|shift exponent|left shift of negative)",
+    re.IGNORECASE,
+)
+# UBSan categories that are undefined behavior per the C standard but are NOT
+# memory-safety bugs: pervasive in real C, fire on nearly every input, and would
+# otherwise masquerade as crashes and block fuzzing. The headline example is
+# pointer-overflow — `(char*)0 + n`, the pointer-as-accumulator idiom used by
+# json-parser, tomlc99, etc. Note: applying an *offset* to a null pointer is
+# benign here; *dereferencing* null is caught by _RE_MEMORY_SAFETY above.
+_RE_UB_BENIGN = re.compile(
+    r"runtime error:\s*[^\n]*?("
+    r"offset[^\n]*\bnull pointer\b"            # applying (non-)zero offset to null pointer
+    r"|pointer index expression[^\n]*overflow"  # pointer-overflow arithmetic
+    r"|misaligned address|load of misaligned"
+    r"|not a valid value for type '(?:bool|_Bool)'"
+    r"|outside the range of representable values"  # float/implicit conversion
+    r"|implicit conversion[^\n]*chang)",
+    re.IGNORECASE,
+)
+# A non-UBSan sanitizer error line (ASan/MSan/TSan/Leak) — used to ensure a
+# "benign UB" verdict isn't masking a co-occurring real sanitizer crash.
+_RE_NON_UB_SANITIZER = re.compile(
+    r"==[0-9]+==ERROR: (Address|Memory|Thread|Leak)Sanitizer", re.IGNORECASE
+)
+
+
+def classify_sanitizer_severity(log: str) -> str:
+    """Classify sanitizer output by severity for triage/gating.
+
+    Returns:
+      - ``"memory_safety"``: a real, blocking crash (ASan overflow/UAF/SEGV,
+        null deref, OOB, bad shift) — always treated as a crash.
+      - ``"benign_ub"``: the ONLY sanitizer evidence is benign undefined
+        behavior (e.g. pointer-overflow / offset-to-null) — advisory, should
+        not block fuzzing or be reported as a vulnerability.
+      - ``"other"``: a sanitizer report we don't positively recognize as benign
+        — treated conservatively as a real crash.
+      - ``"none"``: no sanitizer evidence.
+    """
+    if not log:
+        return "none"
+    if _RE_MEMORY_SAFETY.search(log):
+        return "memory_safety"
+    has_ub = bool(_RE_RUNTIME_ERROR.search(log)) or "UndefinedBehaviorSanitizer" in log
+    if has_ub and _RE_UB_BENIGN.search(log) and not _RE_NON_UB_SANITIZER.search(log):
+        return "benign_ub"
+    if _RE_SANITIZER_ERROR.search(log) or _RE_SANITIZER_SUMMARY.search(log) or _RE_RUNTIME_ERROR.search(log):
+        return "other"
+    return "none"
+
+
+def _benign_ub_nonfatal() -> bool:
+    """Whether a benign-UB-only sanitizer report should be treated as a
+    non-blocking advisory finding rather than a crash. On by default; set
+    SHERPA_BENIGN_UB_NONFATAL=0 to treat all UBSan reports as crashes."""
+    return _env_bool("SHERPA_BENIGN_UB_NONFATAL", True)
 
 
 def _default_diff_excludes() -> set[str]:
@@ -1612,6 +1694,9 @@ def extract_crash_stack_signature(log: str, top_n: int = 3) -> Dict[str, str]:
         "crash_type": crash_type,
         "stack_signature": stack_signature,
         "top_frames": top_frames,
+        # Severity lets triage separate real memory-safety bugs from benign
+        # undefined behavior (advisory) so the latter isn't reported as a vuln.
+        "severity": classify_sanitizer_severity(log),
     }
 
 
@@ -5501,7 +5586,7 @@ EOF
         env = os.environ.copy()
         env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         cmd = [str(bin_path), "-merge=1", str(merged_dir), str(corpus_dir)]
@@ -5569,7 +5654,7 @@ EOF
             env = os.environ.copy()
             env["LLVM_PROFILE_FILE"] = str(self.fuzz_dir / "coverage.profraw")
             env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-            env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+            env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
             env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
             # Sample corpus files for coverage profiling.  Prefer the most
@@ -5825,7 +5910,7 @@ EOF
         env = os.environ.copy()
         env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         cmd = [
@@ -5902,7 +5987,7 @@ EOF
                 env_key = key.upper()  # e.g. asan_options -> ASAN_OPTIONS
                 env.setdefault(env_key, val)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
@@ -6151,6 +6236,13 @@ EOF
             if _RE_ASAN_SHADOW_FAIL.search(text):
                 return False
             if _RE_FAILED_MMAP.search(text):
+                return False
+            # Benign undefined behavior (e.g. pointer-overflow / offset-to-null —
+            # the pointer-as-accumulator idiom) is advisory, not a memory-safety
+            # crash: it fires on nearly every input and must not block fuzzing or
+            # be reported as a vulnerability. Real ASan/UAF/OOB/null-deref still
+            # take precedence via classify_sanitizer_severity().
+            if _benign_ub_nonfatal() and classify_sanitizer_severity(text) == "benign_ub":
                 return False
             if _RE_SANITIZER_ERROR.search(text):
                 return True
