@@ -1281,12 +1281,26 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
             changed = True
             break
 
-        # Case 2: flag inside a longer line — insert after the sanitize element
-        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"]\s*,?\s*)", line)
+        # Case 2: flag inside a longer line (e.g. a Python list element) — insert
+        # the coverage flag as a SEPARATE quoted element. Capture the element and
+        # any trailing separator separately so a comma is guaranteed between
+        # them: without it two adjacent Python string literals silently
+        # concatenate into one malformed flag (e.g.
+        # "...undefined""-fsanitize-coverage=..." -> a single invalid
+        # `-fsanitize=...undefined-fsanitize-coverage` arg that fails to compile).
+        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"])(\s*,?\s*)", line)
         if m2:
             q = m2.group(1)[0]
-            ins = f"{q}{COVERAGE_FLAGS}{q}, "
-            lines[i] = line[:m2.end()] + ins + line[m2.end():]
+            sep = m2.group(2)
+            if "," in sep:
+                # already comma-separated: insert after the separator
+                ins = f"{q}{COVERAGE_FLAGS}{q}, "
+                lines[i] = line[:m2.end()] + ins + line[m2.end():]
+            else:
+                # no trailing comma (last/only list element): add one before the
+                # inserted element so the two literals don't concatenate
+                ins = f", {q}{COVERAGE_FLAGS}{q}"
+                lines[i] = line[:m2.end(1)] + ins + line[m2.end(1):]
             changed = True
             break
 

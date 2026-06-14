@@ -148,6 +148,45 @@ def test_inject_instruments_direct_clang_c_library_compile(tmp_path: Path) -> No
     compile(out, str(bp), "exec")
 
 
+def test_inject_single_element_list_no_string_concat(tmp_path: Path) -> None:
+    # Regression: a single-element flags list with NO trailing comma
+    #   PRIMARY_SANITIZER_FLAGS = ["-fsanitize=fuzzer,address,undefined"]
+    # must not produce two adjacent string literals (which Python silently
+    # concatenates into one malformed `-fsanitize=...undefined-fsanitize-coverage`
+    # flag that fails to compile — broke tinyexpr builds).
+    import ast
+
+    bp = tmp_path / "build.py"
+    bp.write_text(
+        'PRIMARY_SANITIZER_FLAGS = ["-fsanitize=fuzzer,address,undefined"]\n',
+        encoding="utf-8",
+    )
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    out = bp.read_text(encoding="utf-8")
+    assert "undefined-fsanitize-coverage" not in out  # the concatenation bug
+    tree = ast.parse(out)  # still valid Python
+    elts = [e.value for e in tree.body[0].value.elts]
+    assert elts == [
+        "-fsanitize=fuzzer,address,undefined",
+        MODERN,
+    ], elts
+
+
+def test_inject_multi_element_list_keeps_separate_elements(tmp_path: Path) -> None:
+    import ast
+
+    bp = tmp_path / "build.py"
+    bp.write_text(
+        'cmd = ["clang", "-fsanitize=fuzzer,address,undefined", "h.c"]\n',
+        encoding="utf-8",
+    )
+    workflow_graph._inject_coverage_instrumentation(str(bp), {})
+    out = bp.read_text(encoding="utf-8")
+    assert "undefined-fsanitize-coverage" not in out
+    elts = [e.value for e in ast.parse(out).body[0].value.elts]
+    assert MODERN in elts and "-fsanitize=fuzzer,address,undefined" in elts
+
+
 def test_cc_wrapper_is_valid_bash_and_rewrites(tmp_path: Path) -> None:
     wdir = workflow_graph._install_coverage_cc_wrapper(tmp_path)
     sh = wdir / "sherpa-cc-wrapper.sh"
