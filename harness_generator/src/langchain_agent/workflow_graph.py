@@ -15146,6 +15146,23 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         context_parts.append("=== re_run_report.md ===\n" + _trim_feedback_text(re_run_text))
     if stderr_tail:
         context_parts.append("=== repair_stderr_tail ===\n" + stderr_tail)
+
+    # Contract-aware triage: surface documented preconditions of the crashing
+    # functions so out-of-contract crashes (harness fed input the API docs
+    # forbid) are classified as harness_bug, not upstream_bug/vulnerability.
+    if (os.environ.get("SHERPA_CONTRACT_TRIAGE") or "1").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            import contract_analysis  # local import; best-effort
+            crash_text = "\n".join(filter(None, [info_text, analysis_text, stderr_tail]))
+            contract_block = contract_analysis.build_contract_triage_context(
+                repo_root, crash_text
+            )
+            if contract_block:
+                context_parts.append(contract_block)
+                _wf_log(cast(dict[str, Any], state), "crash-triage: injected documented API preconditions (contract-aware)")
+        except Exception as _e:
+            _wf_log(cast(dict[str, Any], state), f"crash-triage contract context skipped: {_e}")
+
     context = "\n\n".join(context_parts)
 
     label = "inconclusive"

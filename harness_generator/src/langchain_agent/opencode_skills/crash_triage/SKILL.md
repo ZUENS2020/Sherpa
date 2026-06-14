@@ -38,6 +38,14 @@ Use this skill in the `crash-triage` stage after `run` or `re-run` crash evidenc
 - Keep reason/evidence grounded in observed logs and traces.
 - Do not classify `upstream_bug` from sanitizer keywords alone.
 - If evidence is weak or missing, output `inconclusive` and explain missing evidence explicitly.
+- **Out-of-contract crashes are NOT vulnerabilities.** If an `api_contract` section is
+  provided, check whether the crash is only reachable because the harness fed input that
+  VIOLATES a documented precondition (e.g. a non-NUL-terminated buffer where the docs
+  require NUL-termination, a NULL where the docs require non-NULL, a length the docs forbid,
+  or use without the required init/allocator setup). If so, classify as `harness_bug` and
+  name the violated precondition in `reason`/`evidence` — do NOT classify `upstream_bug`.
+  Only classify `upstream_bug` when the crash is reachable with input that RESPECTS every
+  documented precondition.
 
 ## Command policy
 - Allowed: read-only commands only (`find`, `grep`, `rg`, `cat`, `ls`, `sed -n`, `head`, `tail`).
