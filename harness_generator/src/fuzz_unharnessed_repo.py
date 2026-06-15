@@ -2968,7 +2968,6 @@ EOF
         crash_evidence = "none"
         run_error_kind = ""
         seed_gen_failed_fuzzers: List[str] = []
-        harness_invalid_fuzzers: List[str] = []
         previous_seed_timeout = self.seed_generation_timeout_sec
         total_seed_budget = (
             int(previous_seed_timeout)
@@ -2990,19 +2989,9 @@ EOF
                     print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
                     seed_gen_failed_fuzzers.append(fuzzer_name)
 
-                if _harness_validity_gate_enabled():
-                    v = self.assess_harness_validity(bin_path)
-                    if not v.get("valid", True):
-                        print(
-                            f"[harness-gate] {fuzzer_name} crashes on VALID seed from its own "
-                            f"code (severity={v.get('severity')}, frame={v.get('frame_file')}); "
-                            f"skipping fuzz run and flagging for repair."
-                        )
-                        self._record_harness_validity_defect(fuzzer_name, v)
-                        harness_invalid_fuzzers.append(fuzzer_name)
-                        continue
-
                 print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
+                # The harness-validity gate runs inside _run_fuzzer (single
+                # chokepoint shared with the LangGraph run node).
                 run = self._run_fuzzer(bin_path)
                 run_rc = run.rc
                 crash_evidence = run.crash_evidence
@@ -3025,13 +3014,6 @@ EOF
                     print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
         finally:
             self.seed_generation_timeout_sec = previous_seed_timeout
-
-        if harness_invalid_fuzzers:
-            print(
-                "[harness-gate] harnesses skipped as defective (crash on valid input "
-                f"from harness code): {', '.join(harness_invalid_fuzzers)} — repair notes "
-                f"under {self.fuzz_out_dir}/harness_validity_*.md"
-            )
 
         print("[*] Workflow complete.")
         self._write_run_summary(
@@ -6132,6 +6114,27 @@ EOF
         Run a single local fuzzer binary with sane defaults.
         Returns a structured result including artifacts and crash evidence.
         """
+        # Phase B harness-validity gate (single chokepoint for both the CLI Pass-E
+        # loop and the LangGraph run node, which both call _run_fuzzer): if the
+        # harness crashes on KNOWN-VALID seeds from its OWN code, skip the doomed
+        # run and flag it for repair. A library-origin crash on valid input is a
+        # real bug and is NOT gated (assess_harness_validity returns valid=True).
+        if _harness_validity_gate_enabled():
+            v = self.assess_harness_validity(bin_path)
+            if not v.get("valid", True):
+                print(
+                    f"[harness-gate] {bin_path.name} crashes on VALID seed from its own "
+                    f"code (severity={v.get('severity')}, frame={v.get('frame_file')}); "
+                    f"skipping fuzz run and flagging for repair."
+                )
+                self._record_harness_validity_defect(bin_path.name, v)
+                return FuzzerRunResult(
+                    rc=0, new_artifacts=[], crash_found=False,
+                    crash_evidence="harness_invalid",
+                    first_artifact="", log_tail=str(v.get("log_tail") or "")[-2000:],
+                    error="", run_error_kind="harness_invalid_on_valid_seed",
+                )
+
         bin_dir = bin_path.parent
         artifacts_dir = bin_dir / ARTIFACT_PREFIX
         artifacts_dir.mkdir(parents=True, exist_ok=True)
