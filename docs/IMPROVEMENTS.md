@@ -10,6 +10,23 @@ Statuses: `OPEN` · `IN PROGRESS` · `SHIPPED (#PR)` · `WONTFIX`.
 
 ## 1. Shipped fixes
 
+### [S-473] Harness-validity gate, robust origin by crashing function (Phase B)
+- Phase B: before fuzzing, replay KNOWN-VALID seeds through a harness; if it
+  crashes from its OWN code, skip + write a repair note instead of self-crashing.
+  Wired at the single chokepoint `_run_fuzzer` (PR #471 fixed an earlier
+  mis-wiring into the CLI-only Pass-E loop, which the k8s run node bypassed).
+- **Origin classification by crashing FUNCTION, not just file** (PR #472): single-
+  header libs compiled into the harness TU attribute library frames to `*_fuzz.c`;
+  classifying by file alone could mis-skip a real library bug (e.g. tinyobj
+  `parseLine`). Now harness-origin only when the crashing function is one the
+  harness source defines (`dump`, `fuzz_file_reader`, `LLVMFuzzerTestOneInput`);
+  library functions stay library-origin and are never skipped. **Resolves O-6.**
+  `SHERPA_HARNESS_VALIDITY_GATE` (default on). Validated live on dev: tinyobjloader
+  defective harnesses flagged (`harness_validity_*.md`), json.h/utf8.h real bugs
+  still found (`upstream_bug`). *Known limit:* a harness bug that only triggers on
+  deep fuzzer-found input (jsmn `dump`) isn't caught by valid-seed replay — the
+  LLM triage safety net still classifies it `harness_bug`.
+
 ### [S-465] Contract-aware crash triage — out-of-contract crashes ≠ vulnerabilities
 - Crashes only reachable by violating a *documented* precondition (NUL-termination,
   non-NULL, required init, length bounds) are harness/API-misuse, not library bugs.
@@ -138,9 +155,34 @@ stop wasting harness slots and fuzz budget.
   hypotheses (e.g. "unbounded `for(;;)` loop") are useful as evidence but are not, on their
   own, a confirmed finding.
 
+### [O-6] Harness-validity origin mis-attributed for single-header libs  — RESOLVED (S-473)
+- The Phase B gate classified harness- vs library-origin by the crashing frame's
+  source *file*. Single-header libraries (tinyobjloader-c, json.h, utf8.h) compile
+  library code into the harness TU, so library frames are attributed to `*_fuzz.c`
+  — a file-only check could mis-skip a real library bug (e.g. tinyobj `parseLine`).
+  Fixed by classifying on the crashing **function** (is it harness-defined?) with
+  the file pattern only as fallback. See **S-473**.
+
 ---
 
 ## 4. Validation / findings log
+
+### tinyobjloader-c — stack-buffer-overflow WRITE in `parseLine()` (tinyobj_loader_c.h)  — PR submitted
+- Real CWE-787 stack **write** overflow (more serious than the read OOBs): an OBJ
+  face (`f`) line with > `TINYOBJ_MAX_FACES_PER_F_LINE` (16) vertices overflows the
+  fixed stack array `f[16]`; the guard `assert` is compiled out under `-DNDEBUG`.
+  With `TINYOBJ_FLAG_TRIANGULATE`, `command->f[3*n+..]` also overflows for >7-vertex
+  faces. Reachable via public `tinyobj_parse_obj(..., TINYOBJ_FLAG_TRIANGULATE)` on a
+  valid OBJ (minimal PoC: one `f` line with 20 verts). Source-verified + independently
+  reproduced on a clean clone (commit 0f8ea84).
+- Not a duplicate (#55 = sscanf overflow; #60 = triangulation indexing correctness,
+  doesn't address the unbounded write). Issues disabled upstream → fixed + filed as
+  [syoyo/tinyobjloader-c#73](https://github.com/syoyo/tinyobjloader-c/pull/73)
+  (bounds-check stop-gap; real fix = size buffers for the triangulated face).
+  Materials at `~/Downloads/tinyobjloader-c-stack-overflow-2026-06-16/`.
+- Surfaced + validated the S-473 origin-by-function fix (O-6): `parseLine` is
+  attributed to `*_fuzz.c` (single-header lib) but is library code → correctly NOT
+  skipped by the validity gate.
 
 ### dr_libs (dr_flac) — unreproducible timeout/hang — NOT confirmed
 - Triage labeled `upstream_bug` (0.85): hypothesised unbounded `for(;;)` loops in dr_flac
