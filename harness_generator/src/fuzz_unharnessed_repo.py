@@ -811,6 +811,59 @@ def _benign_ub_nonfatal() -> bool:
     return _env_bool("SHERPA_BENIGN_UB_NONFATAL", True)
 
 
+# ── Harness-validity gate (synthesis hardening, Phase B) ─────────────────────
+# A correct harness must not crash on KNOWN-VALID input. When it does, we must
+# tell apart two cases so we never discard a real library bug:
+#   * harness-origin  — the fault is in the generated harness code itself
+#     (e.g. an unbounded tree-walker `dump()` in <name>_fuzz.c, or a buffer the
+#     harness's reader callback leaks). These should be repaired, not reported.
+#   * library-origin  — the crash is in the target library reached via a minimal
+#     harness on valid input (e.g. json.h:1925, utf8.h:550). These are REAL
+#     findings and must be preserved.
+# We classify by the first user-code stack frame's source file: a harness source
+# (matches the `*_fuzz.<ext>` convention, or a known harness basename) => harness
+# origin. Library/header files (json.h, utf8.h, …) => library origin. This is
+# deliberately conservative: a harness-caused fault that executes *inside* a
+# library function (e.g. invalid-free in mpc.c) reads as library-origin and is
+# left to LLM crash-triage rather than risk dropping a real bug.
+_RE_STACK_FRAME_FILE = re.compile(
+    r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+\S+\s+([^\s():]+\.(?:c|cc|cpp|cxx|h|hh|hpp))(?::\d+)?",
+    re.IGNORECASE,
+)
+_HARNESS_SRC_SUFFIXES = ("_fuzz.c", "_fuzz.cc", "_fuzz.cpp", "_fuzz.cxx")
+
+
+def crash_first_user_frame_file(log: str) -> str:
+    """Basename of the first user-code source file on the sanitizer stack, or ""
+    (skips sanitizer/libfuzzer/libc internals that have no source-file frame)."""
+    for m in _RE_STACK_FRAME_FILE.finditer(log or ""):
+        path = m.group(1)
+        base = path.rsplit("/", 1)[-1]
+        if base in ("", "libc.so"):
+            continue
+        return base
+    return ""
+
+
+def crash_is_harness_origin(log: str, harness_basenames: tuple[str, ...] = ()) -> bool:
+    """True when the first user-code frame is a harness source file (so the crash
+    is the harness's own fault, not a library bug on valid input)."""
+    base = crash_first_user_frame_file(log)
+    if not base:
+        return False
+    if base in harness_basenames:
+        return True
+    return base.endswith(_HARNESS_SRC_SUFFIXES)
+
+
+def _harness_validity_gate_enabled() -> bool:
+    """Phase B gate: replay known-valid seeds through a freshly built harness and,
+    if it crashes from its OWN code, skip the doomed fuzz run and flag it for
+    repair instead of wasting the budget self-crashing. On by default; set
+    SHERPA_HARNESS_VALIDITY_GATE=0 to disable."""
+    return _env_bool("SHERPA_HARNESS_VALIDITY_GATE", True)
+
+
 def _default_diff_excludes() -> set[str]:
     return {
         ".git",
@@ -2915,6 +2968,7 @@ EOF
         crash_evidence = "none"
         run_error_kind = ""
         seed_gen_failed_fuzzers: List[str] = []
+        harness_invalid_fuzzers: List[str] = []
         previous_seed_timeout = self.seed_generation_timeout_sec
         total_seed_budget = (
             int(previous_seed_timeout)
@@ -2935,6 +2989,18 @@ EOF
                 except HarnessGeneratorError as e:
                     print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
                     seed_gen_failed_fuzzers.append(fuzzer_name)
+
+                if _harness_validity_gate_enabled():
+                    v = self.assess_harness_validity(bin_path)
+                    if not v.get("valid", True):
+                        print(
+                            f"[harness-gate] {fuzzer_name} crashes on VALID seed from its own "
+                            f"code (severity={v.get('severity')}, frame={v.get('frame_file')}); "
+                            f"skipping fuzz run and flagging for repair."
+                        )
+                        self._record_harness_validity_defect(fuzzer_name, v)
+                        harness_invalid_fuzzers.append(fuzzer_name)
+                        continue
 
                 print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
                 run = self._run_fuzzer(bin_path)
@@ -2959,6 +3025,13 @@ EOF
                     print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
         finally:
             self.seed_generation_timeout_sec = previous_seed_timeout
+
+        if harness_invalid_fuzzers:
+            print(
+                "[harness-gate] harnesses skipped as defective (crash on valid input "
+                f"from harness code): {', '.join(harness_invalid_fuzzers)} — repair notes "
+                f"under {self.fuzz_out_dir}/harness_validity_*.md"
+            )
 
         print("[*] Workflow complete.")
         self._write_run_summary(
@@ -5964,6 +6037,91 @@ EOF
             print(f"[*] Dry-run passed for {bin_path.name}: cov={result['cov']}, ft={result['ft']}, "
                   f"exec/s={result['execs_per_sec']}")
         return result
+
+    def _harness_source_basenames(self, bin_path: Path) -> tuple[str, ...]:
+        """Candidate harness source filenames for this binary (used to attribute
+        a crash to harness vs library code)."""
+        stem = bin_path.name
+        names = {
+            f"{stem}_fuzz.c", f"{stem}_fuzz.cc", f"{stem}_fuzz.cpp", f"{stem}_fuzz.cxx",
+            f"{stem}.c", f"{stem}.cc", f"{stem}.cpp", f"{stem}.cxx",
+        }
+        try:
+            for p in self.fuzz_dir.glob("*_fuzz.*"):
+                names.add(p.name)
+        except Exception:
+            pass
+        return tuple(names)
+
+    def assess_harness_validity(self, bin_path: Path) -> Dict[str, object]:
+        """Phase B validity gate: replay the KNOWN-VALID seed corpus through the
+        freshly built harness. If it crashes from its OWN code (harness-origin),
+        the harness is defective and the fuzz run would only self-crash; return
+        valid=False so the caller can skip it and flag it for repair. A crash in
+        LIBRARY code on valid input is a real finding — return valid=True so the
+        normal run still discovers/reports it. Best-effort; never raises."""
+        verdict: Dict[str, object] = {
+            "valid": True, "harness_origin": False, "severity": "none",
+            "frame_file": "", "seeds": 0, "log_tail": "",
+        }
+        try:
+            corpus_dir = self.fuzz_corpus_dir / bin_path.name
+            seeds = [p for p in corpus_dir.glob("*") if p.is_file()] if corpus_dir.is_dir() else []
+            verdict["seeds"] = len(seeds)
+            if not seeds:
+                return verdict  # no valid seeds to assess against → don't gate
+
+            env = os.environ.copy()
+            env = self._compose_vcpkg_runtime_env(env)
+            # Detect leaks here (unlike the fuzz run) so harness buffer leaks are
+            # caught; keep UBSan non-fatal so benign UB doesn't false-flag.
+            env["ASAN_OPTIONS"] = "exitcode=76:detect_leaks=1"
+            env["UBSAN_OPTIONS"] = _UBSAN_RUN_OPTIONS
+            env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
+
+            # -runs=0 replays the corpus once without fuzzing.
+            cmd = [str(bin_path), "-runs=0", str(corpus_dir)]
+            rc, out, err = self._run_cmd(cmd, cwd=self.repo_root, env=env, timeout=90)
+            log = (str(out or "") + "\n" + str(err or "")).replace("\r", "\n")
+            severity = classify_sanitizer_severity(log)
+            verdict["severity"] = severity
+            if severity in ("none", "benign_ub"):
+                return verdict  # clean (or only benign UB) on valid input → valid
+
+            base = crash_first_user_frame_file(log)
+            verdict["frame_file"] = base
+            verdict["log_tail"] = log[-4000:]
+            if crash_is_harness_origin(log, self._harness_source_basenames(bin_path)):
+                verdict["valid"] = False
+                verdict["harness_origin"] = True
+            # else: crash is in library code on valid input → real bug → valid=True
+            return verdict
+        except Exception as exc:
+            verdict["severity"] = f"assess_error:{exc}"
+            return verdict
+
+    def _record_harness_validity_defect(self, fuzzer_name: str, verdict: Dict[str, object]) -> None:
+        """Write a repair-feedback note so the next plan/synthesize round knows the
+        harness is defective and why."""
+        try:
+            self.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+            note = self.fuzz_out_dir / f"harness_validity_{fuzzer_name}.md"
+            note.write_text(
+                f"# Harness validity gate FAILED — {fuzzer_name}\n\n"
+                f"The harness crashed on KNOWN-VALID seed input from its OWN code "
+                f"(harness-origin), so it is defective and was NOT fuzzed.\n\n"
+                f"- severity: {verdict.get('severity')}\n"
+                f"- crashing frame file: {verdict.get('frame_file')}\n"
+                f"- seeds replayed: {verdict.get('seeds')}\n\n"
+                f"Fix the harness (correct API setup/teardown — e.g. result-union "
+                f"branch, allocator pairing, callback-buffer ownership, bounds in "
+                f"any harness-side walker) so it does not crash on valid input.\n\n"
+                f"## sanitizer log (tail)\n```\n{verdict.get('log_tail') or ''}\n```\n",
+                encoding="utf-8",
+            )
+            print(f"[harness-gate] wrote repair note: {note}")
+        except Exception as exc:
+            print(f"[harness-gate] failed to write repair note: {exc}")
 
     # ────────────────────────────────────────────────────────────────────
     # Step E – Run fuzzer
