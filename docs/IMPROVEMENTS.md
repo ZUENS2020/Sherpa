@@ -92,6 +92,17 @@ stop wasting harness slots and fuzz budget.
   preconditions before calling (NUL-terminate, clamp lengths, init structs) so the fuzzer
   stays in-contract and crashes are real. Depends on `api_contract` extraction (S-465 Part 1).
 
+### [H-7] Parser-combinator / tagged-union-result APIs — harness invalid-free  — OPEN
+- orangeduck/mpc: every generated harness SEGVs on the first input, so the library never
+  fuzzes (`cov=0 ft=0 corpus=0 exec/s=0`, run rc=76). mpc requires building a grammar first
+  and returns a tagged union (`.output` = `mpc_ast_t*` on success, `.error` needs
+  `mpc_err_delete` on failure); the harness calls `mpc_ast_delete()` unconditionally /
+  on the wrong union member → invalid free → SEGV in `mpc_ast_delete` (mpc.c:2947).
+- Same family as H-1/H-2/H-3: synthesize can't set up unusual APIs (grammar-building +
+  result unions + type-specific destructors). Fix: detect tagged-union/result APIs and
+  branch the cleanup on the success/error tag; skip targets whose setup can't be inferred
+  rather than emitting a harness that self-crashes on every input.
+
 ---
 
 ## 3. Open improvement backlog (orchestration / robustness)
@@ -116,9 +127,33 @@ stop wasting harness slots and fuzz budget.
   `json_parse_object` OOB (json.h:1695) that another researcher found. Consider fuzzing
   across the library's documented flag/mode combinations, not just one default mode.
 
+### [O-5] Triage over-confident on unreproducible timeouts/hangs  — OPEN
+- dr_libs: an idle-timeout/hang artifact that **re-runs clean in 8ms** (does not reproduce,
+  filed under `unreproducible/`) was labeled `upstream_bug` confidence 0.85 — the evidence
+  itself said "ASAN re-run completed in 8ms without error — timeout/hang, not a memory
+  safety violation". An unreproducible timeout is most often a busy-node/idle-kill artifact,
+  not a confirmed bug. Calibration fix: timeouts/hangs that do not reproduce (and any
+  finding under `unreproducible/`) should be capped at `inconclusive` / low confidence and
+  must NOT be presented as `upstream_bug` without a reproducing input. Code-review
+  hypotheses (e.g. "unbounded `for(;;)` loop") are useful as evidence but are not, on their
+  own, a confirmed finding.
+
 ---
 
 ## 4. Validation / findings log
+
+### dr_libs (dr_flac) — unreproducible timeout/hang — NOT confirmed
+- Triage labeled `upstream_bug` (0.85): hypothesised unbounded `for(;;)` loops in dr_flac
+  Ogg/frame decoding + no `totalPCMFrameCount` sanity check → CPU-exhaustion DoS. But the
+  artifact **does not reproduce** (re-runs clean in 8ms; filed under `unreproducible/`) — it
+  was an idle-timeout kill, not a memory-safety crash. Treated as **not a confirmed bug**;
+  not disclosed. Surfaced calibration gap [O-5]. dr_flac is widely used / OSS-Fuzz'd, so a
+  trivial hang would likely already be known.
+
+### mpc — generated harness invalid-free → no fuzz data (harness bug)
+- Every generated mpc harness SEGVs on the first input (`mpc_ast_delete` invalid free,
+  mpc.c:2947), so the library never fuzzes (cov=0/corpus=0). Triage correctly returned
+  `harness_bug` (false_positive). Root cause is harness-gen, not mpc — see [H-7].
 
 ### utf8.h — heap-buffer-overflow READ in `utf8nlen()` / `utf8len()` (utf8.h:550)  — PR submitted
 - Real CWE-125 OOB read on a NUL-terminated string whose final byte is a multibyte lead
