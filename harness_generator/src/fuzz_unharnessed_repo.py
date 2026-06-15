@@ -820,37 +820,79 @@ def _benign_ub_nonfatal() -> bool:
 #   * library-origin  — the crash is in the target library reached via a minimal
 #     harness on valid input (e.g. json.h:1925, utf8.h:550). These are REAL
 #     findings and must be preserved.
-# We classify by the first user-code stack frame's source file: a harness source
-# (matches the `*_fuzz.<ext>` convention, or a known harness basename) => harness
-# origin. Library/header files (json.h, utf8.h, …) => library origin. This is
-# deliberately conservative: a harness-caused fault that executes *inside* a
-# library function (e.g. invalid-free in mpc.c) reads as library-origin and is
-# left to LLM crash-triage rather than risk dropping a real bug.
-_RE_STACK_FRAME_FILE = re.compile(
-    r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+\S+\s+([^\s():]+\.(?:c|cc|cpp|cxx|h|hh|hpp))(?::\d+)?",
+# We classify by the first user-code stack frame. The reliable signal is the
+# crashing FUNCTION: if it is one the harness source DEFINES, the crash is the
+# harness's own fault; otherwise it is library code (a real bug) — even when that
+# library function is compiled into the harness translation unit and the frame is
+# therefore attributed to the `*_fuzz.c` file (the single-header-library case,
+# e.g. tinyobj parseLine). We fall back to the file-name pattern only when the
+# harness function list is unavailable. A harness-caused fault that executes
+# inside a library function (e.g. invalid-free in mpc.c) reads as library-origin
+# and is left to LLM crash-triage rather than risk dropping a real bug.
+_RE_STACK_FRAME = re.compile(
+    r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][\w:]*)"
+    r"(?:\s+([^\s():]+\.(?:c|cc|cpp|cxx|h|hh|hpp)))?",
     re.IGNORECASE,
 )
 _HARNESS_SRC_SUFFIXES = ("_fuzz.c", "_fuzz.cc", "_fuzz.cpp", "_fuzz.cxx")
+# Matches C/C++ function DEFINITIONS, to learn which functions a harness source
+# actually defines.
+_RE_C_FUNC_DEF = re.compile(
+    r"^[A-Za-z_][\w\s\*\(\),]*?\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*\{", re.MULTILINE
+)
+
+
+def crash_first_user_frame(log: str) -> tuple[str, str]:
+    """(function, file-basename) of the first user-code frame on the sanitizer
+    stack, skipping sanitizer/libfuzzer/libc internals. Either may be ""."""
+    for m in _RE_STACK_FRAME.finditer(log or ""):
+        func = m.group(1) or ""
+        path = m.group(2) or ""
+        base = path.rsplit("/", 1)[-1] if path else ""
+        if func.startswith(("__asan", "__ubsan", "__lsan", "__sanitizer",
+                            "__interceptor")) or func.startswith("operator"):
+            continue
+        # Allocator interceptors carry no user source frame — skip to the first
+        # real caller (e.g. a leak's allocation site).
+        if func in ("malloc", "calloc", "realloc", "free", "aligned_alloc",
+                    "posix_memalign", "memcpy", "memmove", "memset", "strdup"):
+            continue
+        if base == "libc.so" or "libc.so" in path:
+            continue
+        if not func and not base:
+            continue
+        return func, base
+    return "", ""
 
 
 def crash_first_user_frame_file(log: str) -> str:
-    """Basename of the first user-code source file on the sanitizer stack, or ""
-    (skips sanitizer/libfuzzer/libc internals that have no source-file frame)."""
-    for m in _RE_STACK_FRAME_FILE.finditer(log or ""):
-        path = m.group(1)
-        base = path.rsplit("/", 1)[-1]
-        if base in ("", "libc.so"):
-            continue
-        return base
-    return ""
+    """Basename of the first user-code source file on the sanitizer stack."""
+    return crash_first_user_frame(log)[1]
 
 
-def crash_is_harness_origin(log: str, harness_basenames: tuple[str, ...] = ()) -> bool:
-    """True when the first user-code frame is a harness source file (so the crash
-    is the harness's own fault, not a library bug on valid input)."""
-    base = crash_first_user_frame_file(log)
-    if not base:
+def harness_function_names(source: str) -> set[str]:
+    """Function names DEFINED in a harness source file (best-effort, regex)."""
+    names = {"LLVMFuzzerTestOneInput"}
+    for m in _RE_C_FUNC_DEF.finditer(source or ""):
+        nm = m.group(1)
+        if nm and nm not in ("if", "for", "while", "switch", "return", "sizeof"):
+            names.add(nm)
+    return names
+
+
+def crash_is_harness_origin(
+    log: str,
+    harness_funcs: tuple[str, ...] | set[str] = (),
+    harness_basenames: tuple[str, ...] = (),
+) -> bool:
+    """True when the crash is the harness's OWN fault, not a library bug on valid
+    input. Prefer the crashing-function signal (does the harness source define
+    it?); fall back to the file-name pattern only when no function list is given."""
+    func, base = crash_first_user_frame(log)
+    if not func and not base:
         return False
+    if harness_funcs:
+        return func in set(harness_funcs)
     if base in harness_basenames:
         return True
     return base.endswith(_HARNESS_SRC_SUFFIXES)
@@ -6055,6 +6097,22 @@ EOF
             pass
         return tuple(names)
 
+    def _harness_defined_functions(self, bin_path: Path) -> set[str]:
+        """Functions DEFINED in this harness's source file(s) — so a library
+        function compiled into the harness TU (single-header libs) is not
+        mistaken for harness code when attributing a crash."""
+        funcs: set[str] = {"LLVMFuzzerTestOneInput"}
+        stem = bin_path.name
+        candidates = [self.fuzz_dir / f"{stem}_fuzz.{e}" for e in ("c", "cc", "cpp", "cxx")]
+        candidates += [self.fuzz_dir / f"{stem}.{e}" for e in ("c", "cc", "cpp", "cxx")]
+        for src in candidates:
+            try:
+                if src.is_file():
+                    funcs |= harness_function_names(src.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+        return funcs
+
     def assess_harness_validity(self, bin_path: Path) -> Dict[str, object]:
         """Phase B validity gate: replay the KNOWN-VALID seed corpus through the
         freshly built harness. If it crashes from its OWN code (harness-origin),
@@ -6093,7 +6151,11 @@ EOF
             base = crash_first_user_frame_file(log)
             verdict["frame_file"] = base
             verdict["log_tail"] = log[-4000:]
-            if crash_is_harness_origin(log, self._harness_source_basenames(bin_path)):
+            if crash_is_harness_origin(
+                log,
+                self._harness_defined_functions(bin_path),
+                self._harness_source_basenames(bin_path),
+            ):
                 verdict["valid"] = False
                 verdict["harness_origin"] = True
             # else: crash is in library code on valid input → real bug → valid=True
