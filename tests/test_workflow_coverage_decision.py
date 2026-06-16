@@ -145,3 +145,66 @@ def test_harness_limited_requires_replay_gates() -> None:
     assert out["coverage_bottleneck_kind"] == "harness_limited"
     assert out["coverage_bottleneck_reason"] == "plateau_without_seed_or_target_signal"
     assert out["coverage_replay_frontier_ready"] is True
+
+
+def test_trivial_coverage_flags_uninitialized_context() -> None:
+    # cov + ft both frozen at a trivial value while the fuzzer executes => the
+    # harness reaches the target with an empty/uninitialized context
+    # (e.g. tree-sitter parser without ts_parser_set_language).
+    kwargs = _base_kwargs()
+    kwargs.update(
+        {
+            "current_cov": 7,
+            "prev_cov": 7,
+            "current_ft": 7,
+            "prev_ft": 7,
+            "plateau_detected": True,
+            "prev_plateau_streak": 2,
+            "total_execs_per_sec": 700000,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["coverage_bottleneck_kind"] == "harness_limited"
+    assert out["coverage_bottleneck_reason"] == "trivial_coverage_uninitialized_context"
+    assert out["should_improve"] is True
+    assert out["improve_mode"] == "in_place"
+
+
+def test_trivial_coverage_does_not_fire_when_features_grow() -> None:
+    # Low edge coverage but healthy feature count is a real-but-shallow harness,
+    # not an empty context — must NOT be classified as uninitialized context.
+    kwargs = _base_kwargs()
+    kwargs.update(
+        {
+            "current_cov": 10,
+            "prev_cov": 10,
+            "current_ft": 40,
+            "prev_ft": 40,
+            "plateau_detected": True,
+            "prev_plateau_streak": 2,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["coverage_bottleneck_reason"] != "trivial_coverage_uninitialized_context"
+
+
+def test_trivial_coverage_yields_to_cold_start() -> None:
+    # Trivial coverage during a cold-start failure is a seed problem, not an
+    # empty-context harness; cold-start seed replan must take precedence.
+    kwargs = _base_kwargs()
+    kwargs.update(
+        {
+            "current_cov": 6,
+            "prev_cov": 6,
+            "current_ft": 6,
+            "prev_ft": 6,
+            "plateau_detected": True,
+            "prev_plateau_streak": 2,
+            "cold_start_failure": True,
+            "quality_score": 0.2,
+            "early_new_units_30s": 0,
+        }
+    )
+    out = d.evaluate_coverage_decision(**kwargs)
+    assert out["coverage_bottleneck_reason"] != "trivial_coverage_uninitialized_context"
+    assert out["improve_mode"] == "seed_replan"

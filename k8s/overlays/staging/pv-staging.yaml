@@ -1,0 +1,84 @@
+# Staging PersistentVolumes. hostPath-backed, one per shared mount.
+# Each PV is pre-bound to its PVC via claimRef so that — with multiple
+# environments sharing storageClassName "manual" — a staging PVC can never
+# accidentally bind to another environment's PV (e.g. during a dev reset
+# window when a dev PV is briefly Available).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-staging-postgres
+spec:
+  capacity:
+    storage: 30Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-staging
+    name: postgres-data-postgres-0
+  hostPath:
+    path: /shared/staging/postgres
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-staging-config
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-staging
+    name: sherpa-config
+  hostPath:
+    path: /shared/staging/config
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-staging-job-logs
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-staging
+    name: sherpa-job-logs
+  hostPath:
+    path: /shared/staging/job-logs
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-staging-shared-output
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-staging
+    name: sherpa-shared-output
+  hostPath:
+    path: /home/deploy/output/staging
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-sherpa-staging-shared-tmp
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  claimRef:
+    namespace: sherpa-staging
+    name: sherpa-shared-tmp
+  hostPath:
+    path: /shared/staging/tmp

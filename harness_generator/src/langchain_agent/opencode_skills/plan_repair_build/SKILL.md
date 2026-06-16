@@ -51,6 +51,7 @@ Use this skill when the workflow is in repair mode with `repair_origin_stage=bui
 - If non-public/internal API is unavoidable, require `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence`.
 - If diagnostics contain `non_public_api_usage`, prioritize replacing offending symbols first.
 - If MCP is unavailable, continue in degraded mode and explicitly record that in `fuzz/PLAN.md`.
+- If build diagnostics indicate missing system libraries (cmake/pkg-config errors), identify the canonical vcpkg port name and record it in `Known Issues`.
 
 ## Command policy
 - Allowed: read-only commands only.

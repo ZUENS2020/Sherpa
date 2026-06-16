@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+import os
 from typing import Any
+
+
+def _trivial_coverage_threshold() -> int:
+    """Absolute coverage at/below which a running fuzzer is considered to be
+    exercising essentially nothing (uninitialized/empty harness context).
+    Override via SHERPA_TRIVIAL_COVERAGE_MAX (default 15)."""
+    raw = (os.environ.get("SHERPA_TRIVIAL_COVERAGE_MAX") or "15").strip()
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 15
 
 
 def evaluate_coverage_decision(
@@ -131,7 +143,28 @@ def evaluate_coverage_decision(
         and coverage_replay_queue_drained
     )
 
-    if seed_quality_issue:
+    # Uninitialized/empty harness context: the fuzzer is actively executing but
+    # absolute coverage is frozen at a trivial value. This is the signature of a
+    # harness that reaches the target API with an unpopulated input object (e.g.
+    # a tree-sitter parser without ts_parser_set_language, or a decoder without
+    # an initialized context). Classified first because seeds cannot rescue an
+    # empty-context harness — the harness itself must initialize its context.
+    _trivial_cov_max = _trivial_coverage_threshold()
+    trivial_coverage_context = bool(
+        total_execs_per_sec > 0
+        and plateau_no_gain
+        # Both edge (cov) AND feature (ft) coverage frozen at trivial values is
+        # the empty-context signature; a real-but-shallow harness still grows
+        # features. Exclude cold-start / degraded-seed cases (different cause).
+        and 0 < int(current_cov) <= _trivial_cov_max
+        and 0 < int(current_ft) <= _trivial_cov_max
+        and not cold_start_failure
+        and not seed_generation_degraded
+    )
+    if trivial_coverage_context:
+        coverage_bottleneck_kind = "harness_limited"
+        coverage_bottleneck_reason = "trivial_coverage_uninitialized_context"
+    elif seed_quality_issue:
         coverage_bottleneck_kind = "seed_limited"
         if cold_start_failure:
             coverage_bottleneck_reason = "cold_start_failure"
@@ -177,6 +210,14 @@ def evaluate_coverage_decision(
             replan_required = True
             improve_mode = "replan"
             replan_reason = "zero_coverage_force_replan"
+        elif trivial_coverage_context and can_in_place:
+            # Non-zero but trivial coverage with active execution => the harness
+            # reaches the target with an empty/uninitialized context. Repair the
+            # harness in place (initialize parser language / decoder context);
+            # seeds and target re-selection won't help an empty-context harness.
+            should_improve = True
+            improve_mode = "in_place"
+            replan_reason = "trivial_coverage_uninitialized_context"
         elif cold_start_seed_replan_triggered or degraded_seed_replan_triggered:
             if can_replan:
                 should_improve = True

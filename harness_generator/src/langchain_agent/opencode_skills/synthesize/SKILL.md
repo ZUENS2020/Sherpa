@@ -13,6 +13,20 @@ Builds a complete `fuzz/` scaffold from planning artifacts, including harness so
 ## When to use this skill
 Use this skill in the primary `synthesize` stage after `plan`.
 
+## CRITICAL (read first — violating any of these fails the stage or freezes coverage)
+1. **Harness-first, targets-only.** Write ≥1 harness source before any docs/json,
+   and ONLY for targets in `fuzz/targets.json` (extra harnesses are rejected).
+2. **libFuzzer entry only.** `LLVMFuzzerTestOneInput`, no custom `main()`, no
+   argv/file-driven input. (See LibFuzzer harness contract.)
+3. **Complete `repo_understanding.json` before `./done`** — all required fields
+   non-empty (see its template contract). A missing field fails the stage.
+4. **Initialize a valid input context before the target call** — the #1 cause of
+   frozen coverage. (See the Stateful context initialization contract.)
+
+Everything below is the detail behind these four. Coverage instrumentation
+flags are added automatically by the build wrapper — you do NOT write
+`-fsanitize-coverage` yourself.
+
 ## Required inputs
 - `fuzz/PLAN.md`
 - `fuzz/targets.json`
@@ -84,6 +98,7 @@ Minimal valid template:
   - owning source linkage: when a harness calls APIs implemented in contrib/example/demo source files outside the main static library, compile the owning source file alongside the harness or switch to a public library API
   - never call a static example helper directly from a harness; static example helpers are not linkable API and example sources with their own `main()` must not be linked into libFuzzer harnesses unless rewritten/guarded
   - primary runnable fuzzers must link the libFuzzer runtime with `-fsanitize=fuzzer,address,undefined` (or equivalent sanitizer set including `fuzzer`); do not use `-fsanitize=fuzzer-no-link` for final binaries unless you also provide and link a valid fuzzer `main`
+  - do NOT add `-fsanitize-coverage` flags yourself: the build wrapper injects libFuzzer coverage instrumentation into every compile automatically (and normalizes any deprecated `trace-pc-guard`). Just write a normal compile/link.
   - for every primary fuzzer `fuzz/out/<name>`, also build a coverage replay sibling at `fuzz/out/replay/<name>` with `-fprofile-instr-generate -fcoverage-mapping`
   - coverage replay must link coverage-instrumented repository/library objects, not only an instrumented harness object; for CMake/configure projects, use a separate replay/coverage build directory or rebuild the static libraries with `CFLAGS`/`CXXFLAGS` containing `-fprofile-instr-generate -fcoverage-mapping`
   - coverage/replay CMake builds that use LLVM coverage flags must configure with `clang`/`clang++` (for example `-DCMAKE_C_COMPILER=clang` and `-DCMAKE_CXX_COMPILER=clang++`, or `CC=clang CXX=clang++`); do not pass LLVM coverage flags to `/usr/bin/cc`/GCC
@@ -119,6 +134,41 @@ Compiler-by-suffix rule:
 - Avoid internal/private namespaces (`detail`, `_internal`, `impl`, `private`) by default.
 - If no public alternative exists, add `api_surface_exception` in `fuzz/repo_understanding.json` with non-empty `reason` and `evidence` (optional `approved_symbols`).
 
+### Stateful context initialization contract (MANDATORY)
+Many target APIs operate on an object/handle that must be fully configured
+before the call does any real work. A harness that calls the target with an
+unconfigured/empty context compiles and runs but exercises almost nothing —
+the hallmark is **code coverage frozen at a trivial value (e.g. `cov`/`ft`
+stuck below ~15) across millions of executions** while the fuzzer never grows
+its corpus. Treat such a harness as broken.
+
+Before calling the target API, the harness MUST construct a *valid, populated*
+input object using the library's own setup sequence:
+- **Grammar/parser libraries** (tree-sitter, ANTLR runtimes, PEG/state-machine
+  parsers): set the grammar/language on the parser before parsing. For
+  tree-sitter, `ts_parser_set_language(parser, tree_sitter_<grammar>())` is
+  REQUIRED before `ts_parser_parse_string(...)`; without it the tree is empty,
+  `ts_node_child_count(root)` is 0, and every input short-circuits. Link a
+  concrete grammar (e.g. an available `tree-sitter-<lang>`/grammar object) so
+  the parse produces a non-trivial tree, then exercise the node/cursor target
+  on that tree.
+- **Decoders/codecs**: initialize the decoder context with the expected
+  format/options before decoding.
+- **Serializers/protocol libraries**: register/select the concrete message or
+  schema type before parsing.
+
+Rules:
+- Verify the constructed object is non-empty before reaching the target (e.g.
+  assert child/element count > 0, or bail only after a *successful* setup).
+- Do NOT fake progress by reaching the target API with a null/empty object.
+- If the required grammar/codec/schema is not linkable in this repo, record it
+  in `fuzz/repo_understanding.json` (`chosen_target_reason` / `evidence`) and
+  pick a target whose context *can* be constructed from the available sources,
+  rather than shipping a harness that cannot reach real code.
+- Do NOT route the data flow through internal binding/transfer shims (e.g.
+  `*_wasm`, marshal-buffer indirection) in place of the real public API; those
+  paths bypass the parse/decode the fuzzer needs to drive.
+
 ## Constraints
 - Do not modify repository source files outside `fuzz/` and `./done`.
 - If upstream source appears syntactically broken, do not edit it; adapt the external harness/build glue, avoid that example/demo source, or record the limitation in `fuzz/repo_understanding.json`.
@@ -144,7 +194,7 @@ Compiler-by-suffix rule:
 - Required scaffold files exist.
 - `fuzz/harness_index.json` maps each execution target to an existing harness source file.
 - README field `Harness file:` points to a real harness file.
-- `fuzz/repo_understanding.json` is semantically valid and complete.
+- `fuzz/repo_understanding.json` is semantically valid and complete. **Before writing `./done`, re-read it and confirm ALL of these keys are present and non-empty: `build_system` (not `unknown`), `chosen_target_api` (an API identifier, not a harness path), `chosen_target_reason`, `fuzzer_entry_strategy`, and a non-empty `evidence` array.** A missing field fails the stage with `synthesize incomplete: repo understanding missing <field>` and forces a wasted replan — never finish synthesize with an incomplete `repo_understanding.json`.
 - Build script follows compiler-by-suffix and static-lib-discovery contracts.
 - `fuzz/out/replay/<name>` exists for each built native fuzzer and can emit `LLVM_PROFILE_FILE=...profraw` during single-input replay.
 

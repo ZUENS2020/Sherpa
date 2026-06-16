@@ -28,6 +28,7 @@ import workflow_normalization as _wf_norm
 import workflow_target_scoring as _wf_target_scoring
 import workflow_target_selection as _wf_target_selection
 import workflow_summary as _wf_summary
+import procedural_memory as _proc_mem
 from coverage_replay import collect_per_input_frontier
 from seed_families import seed_families_for_target as _seed_families_for_target
 from workflow_context_store import (
@@ -1025,7 +1026,7 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
 
     Returns the wrapper directory path (add it to ``PATH`` before the real
     compiler).  The wrapper delegates every call to the system clang/clang++
-    and silently appends ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    and silently appends ``-fsanitize-coverage=inline-8bit-counters,pc-table``
     unless the command already contains ``-fsanitize-coverage`` or
     ``-fprofile-instr-generate`` (replay builds).
 
@@ -1036,7 +1037,7 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
     wrapper_dir = repo_root / "fuzz" / ".sherpa-cc"
     wrapper_dir.mkdir(parents=True, exist_ok=True)
 
-    _COV_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    _COV_FLAGS = "-fsanitize-coverage=inline-8bit-counters,pc-table"
 
     wrapper_sh = wrapper_dir / "sherpa-cc-wrapper.sh"
     wrapper_sh.write_text(textwrap.dedent(f"""\
@@ -1049,7 +1050,15 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
         COV_FLAGS="{_COV_FLAGS}"
         HAS_COV=0
         HAS_REPLAY=0
+        # Rewrite any deprecated trace-pc-guard coverage flag to the modern set.
+        # clang>=14 libFuzzer refuses trace-pc-guard binaries at runtime, so a
+        # flag from build.py/CMake/anywhere must be normalized at compile time.
+        ARGS=()
         for arg in "$@"; do
+            case "$arg" in
+                *trace-pc-guard*) arg="{_COV_FLAGS}" ;;
+            esac
+            ARGS+=("$arg")
             [[ "$arg" == *fsanitize-coverage* ]] && HAS_COV=1
             [[ "$arg" == *fprofile-instr-generate* ]] && HAS_REPLAY=1
         done
@@ -1060,9 +1069,9 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
             REAL_PATH=$(PATH=${{PATH#*:}} command -v "$REAL_CC" 2>/dev/null || echo "/usr/bin/$REAL_CC")
         fi
         if [[ $HAS_COV -eq 0 && $HAS_REPLAY -eq 0 ]]; then
-            exec "$REAL_PATH" "$@" $COV_FLAGS
+            exec "$REAL_PATH" "${{ARGS[@]}}" $COV_FLAGS
         else
-            exec "$REAL_PATH" "$@"
+            exec "$REAL_PATH" "${{ARGS[@]}}"
         fi
     """))
     wrapper_sh.chmod(0o755)
@@ -1078,18 +1087,38 @@ def _install_coverage_cc_wrapper(repo_root: Path) -> Path:
     return wrapper_dir
 
 
+def _apply_coverage_cc_wrapper_env(build_env: dict[str, str], repo_root: Path) -> dict[str, str]:
+    """Prepend the coverage cc-wrapper to a build env's PATH so EVERY bare
+    `clang`/`clang++` invocation in build.py (library objects included, not just
+    the harness link) gets `-fsanitize-coverage` instrumentation.
+
+    Without this, build.py compiles the target library WITHOUT coverage and
+    libFuzzer is blind to it — the fuzzer cannot guide mutation into the library
+    and coverage flatlines. The main build stage already wired this; the
+    run-stage workspace rebuild (which produces the binary that is actually
+    fuzzed) did not, so the fuzzed binary was uninstrumented. Best-effort."""
+    try:
+        wrapper_dir = _install_coverage_cc_wrapper(repo_root)
+        build_env["PATH"] = f"{wrapper_dir}:{build_env.get('PATH', '')}"
+        build_env.setdefault("CC", "clang")
+        build_env.setdefault("CXX", "clang++")
+    except Exception:
+        pass
+    return build_env
+
+
 def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) -> None:
     """Inject -fsanitize-coverage flags into build.py primary fuzz link commands.
 
     LibFuzzer requires coverage feedback instrumentation to guide its mutation
-    engine.  Without ``-fsanitize-coverage=trace-pc-guard,inline-8bit-counters``
+    engine.  Without ``-fsanitize-coverage=inline-8bit-counters,pc-table``
     the fuzzer runs blind (corp:1/1b, no corpus growth).  The synthesize agent
     occasionally omits these flags even when the SKILL.md contract requires them.
     This function inserts a separate ``'-fsanitize-coverage=...'`` list element
     after the ``-fsanitize=fuzzer`` element so that clang receives them as
     distinct arguments.
     """
-    COVERAGE_FLAGS = "-fsanitize-coverage=trace-pc-guard,inline-8bit-counters"
+    COVERAGE_FLAGS = "-fsanitize-coverage=inline-8bit-counters,pc-table"
     bp = Path(build_py_path)
     if not bp.is_file():
         return
@@ -1097,9 +1126,141 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
         text = bp.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return
-    if COVERAGE_FLAGS in text:
-        return
 
+    # Normalize any deprecated trace-pc-guard the synthesize agent may have
+    # written directly. Modern libFuzzer (clang >= ~14) removed trace-pc-guard
+    # and refuses to run such binaries at startup
+    # ("trace-pc-guard is no longer supported by libFuzzer"). Rewrite it to the
+    # supported inline-8bit-counters,pc-table set in place.
+    if "trace-pc-guard" in text:
+        normalized = re.sub(
+            r"-fsanitize-coverage=[\w,\-]*trace-pc-guard[\w,\-]*",
+            COVERAGE_FLAGS,
+            text,
+        )
+        if normalized != text:
+            text = normalized
+            try:
+                bp.write_text(text, encoding="utf-8", errors="replace")
+                _wf_log(state, "build: normalized deprecated trace-pc-guard -> inline-8bit-counters,pc-table")
+            except Exception:
+                pass
+
+    # --- Pass A: instrument the target *library* build ---------------------
+    # Many agent build.py's compile the target library via `make` with a
+    # hardcoded compile-flags string that lacks coverage, e.g.:
+    #     cflags = "-std=c99 -Wall -Wextra -fpic -O2 -DNDEBUG"
+    #     env["CFLAGS"] = cflags
+    # That object is then linked into the fuzzer, but without
+    # -fsanitize-coverage libFuzzer is BLIND to the library and coverage
+    # flatlines at the handful of harness edges (observed: cov stuck at ~7 even
+    # on valid inputs that should drive the whole parser). The PATH cc-wrapper
+    # is best-effort and does not reliably reach `make` subprocesses, so here we
+    # deterministically append coverage to every compile-flags string literal
+    # that is NOT a replay build (-fprofile-instr-generate) and does not already
+    # carry coverage. This is the reliable, format-agnostic library hook.
+    def _augment_cflags(m: "re.Match[str]") -> str:
+        head, quote, body = m.group(1), m.group(2), m.group(3)
+        if (
+            "-fprofile-instr-generate" in body
+            or "-fcoverage-mapping" in body
+            or "-fsanitize-coverage" in body
+            or "-fsanitize=fuzzer" in body
+            or "-" not in body
+        ):
+            return m.group(0)
+        return f"{head}{quote}{body} {COVERAGE_FLAGS}{quote}"
+
+    lib_cflags_re = re.compile(
+        r"((?:\b(?:cflags|c_flags|cxxflags|cxx_flags)\b\s*=\s*"
+        r"|\[\s*['\"](?:CFLAGS|CXXFLAGS)['\"]\s*\]\s*=\s*))"
+        r"(['\"])([^'\"]*)\2",
+        re.IGNORECASE,
+    )
+    lib_text = lib_cflags_re.sub(_augment_cflags, text)
+    if lib_text != text:
+        text = lib_text
+        try:
+            bp.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into library CFLAGS in build.py")
+        except Exception:
+            pass
+
+    # --- Pass C: force coverage onto the library `make` build via CC=wrapper -
+    # Pass A only helps when build.py passes a CFLAGS string the Makefile
+    # honours. Many real Makefiles (e.g. tomlc99) HARD-ASSIGN `CFLAGS = ...`,
+    # which overrides the environment, so env/CFLAGS-string coverage never
+    # reaches the library and coverage flatlines (observed: cov plateaus at ~23
+    # with ft in the thousands — value-profile churns on a couple dozen edges).
+    # A command-line `make CC=<wrapper>` overrides even a hard-assigned Makefile
+    # variable, and the wrapper appends -fsanitize-coverage to every compile
+    # while preserving the project's own CFLAGS. The wrapper internally skips
+    # replay builds (-fprofile-instr-generate), and we only touch make calls
+    # WITHOUT an `env=` kwarg, which targets the primary (non-replay) library
+    # build and leaves coverage/replay make calls (which pass env=) alone.
+    try:
+        repo_root = bp.parent.parent
+        wrapper_dir = _install_coverage_cc_wrapper(repo_root)
+        cc_path = str(wrapper_dir / "clang")
+        cxx_path = str(wrapper_dir / "clang++")
+        if cc_path not in text:
+            # Match `run([... "make" ...])` / `subprocess.run([... "make" ...])`
+            # where the list is closed immediately by `)` (no env= kwarg).
+            make_call_re = re.compile(
+                r"((?:subprocess\.)?run\(\s*\[\s*['\"]make['\"][^\]]*?)(\]\s*\))"
+            )
+
+            def _augment_make(m: "re.Match[str]") -> str:
+                head, tail = m.group(1), m.group(2)
+                if ".sherpa-cc" in head:
+                    return m.group(0)
+                return f'{head}, "CC={cc_path}", "CXX={cxx_path}"{tail}'
+
+            new_make = make_call_re.sub(_augment_make, text)
+            if new_make != text:
+                text = new_make
+                bp.write_text(text, encoding="utf-8", errors="replace")
+                _wf_log(state, "build: forced coverage onto library make build via CC=<cc-wrapper>")
+    except Exception:
+        pass
+
+    # --- Pass D: instrument direct `clang -c` library/object compiles --------
+    # Some build.py's skip make entirely and compile the library with explicit
+    # clang commands that carry no coverage and no -fsanitize=fuzzer, e.g.
+    #     cmd = ["clang", "-c", "-std=c99", "-Wall", "-Wextra"]
+    # The resulting object is linked into the fuzzer uninstrumented and coverage
+    # flatlines. Append coverage to any single-line clang/clang++ command list
+    # that starts with the compiler, compiles (-c), and is neither a libFuzzer
+    # build (-fsanitize=fuzzer) nor a replay build (-fprofile-instr-generate)
+    # nor already instrumented.
+    def _augment_clang_compile(m: "re.Match[str]") -> str:
+        seg, close = m.group(1), m.group(2)
+        if not ('"-c"' in seg or "'-c'" in seg):
+            return m.group(0)
+        if (
+            "-fsanitize=fuzzer" in seg
+            or "-fprofile-instr-generate" in seg
+            or "-fcoverage-mapping" in seg
+            or "-fsanitize-coverage" in seg
+        ):
+            return m.group(0)
+        return f'{seg}, "{COVERAGE_FLAGS}"{close}'
+
+    clang_compile_re = re.compile(
+        r"(\[\s*['\"]clang(?:\+\+)?['\"][^\[\]\n]*?)(\])"
+    )
+    new_clang = clang_compile_re.sub(_augment_clang_compile, text)
+    if new_clang != text:
+        text = new_clang
+        try:
+            bp.write_text(text, encoding="utf-8", errors="replace")
+            _wf_log(state, f"build: injected {COVERAGE_FLAGS} into direct clang -c compile in build.py")
+        except Exception:
+            pass
+
+    # --- Pass B: instrument the harness link (clang -fsanitize=fuzzer ...) ---
+    # Idempotent: per-line guards below skip lines that already carry coverage
+    # or are replay builds, so this is safe even after Pass A added coverage.
     lines = text.splitlines()
     changed = False
     for i, line in enumerate(lines):
@@ -1120,12 +1281,26 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
             changed = True
             break
 
-        # Case 2: flag inside a longer line — insert after the sanitize element
-        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"]\s*,?\s*)", line)
+        # Case 2: flag inside a longer line (e.g. a Python list element) — insert
+        # the coverage flag as a SEPARATE quoted element. Capture the element and
+        # any trailing separator separately so a comma is guaranteed between
+        # them: without it two adjacent Python string literals silently
+        # concatenate into one malformed flag (e.g.
+        # "...undefined""-fsanitize-coverage=..." -> a single invalid
+        # `-fsanitize=...undefined-fsanitize-coverage` arg that fails to compile).
+        m2 = re.search(r"(['\"]-fsanitize=fuzzer[^'\"]*['\"])(\s*,?\s*)", line)
         if m2:
             q = m2.group(1)[0]
-            ins = f"{q}{COVERAGE_FLAGS}{q}, "
-            lines[i] = line[:m2.end()] + ins + line[m2.end():]
+            sep = m2.group(2)
+            if "," in sep:
+                # already comma-separated: insert after the separator
+                ins = f"{q}{COVERAGE_FLAGS}{q}, "
+                lines[i] = line[:m2.end()] + ins + line[m2.end():]
+            else:
+                # no trailing comma (last/only list element): add one before the
+                # inserted element so the two literals don't concatenate
+                ins = f", {q}{COVERAGE_FLAGS}{q}"
+                lines[i] = line[:m2.end(1)] + ins + line[m2.end(1):]
             changed = True
             break
 
@@ -1134,7 +1309,7 @@ def _inject_coverage_instrumentation(build_py_path: str, state: dict[str, Any]) 
             if "-fsanitize=fuzzer" in line and COVERAGE_FLAGS not in line and "replay" not in line.lower() and "-fprofile" not in line:
                 lines[i] = line.replace(
                     "-fsanitize=fuzzer,address,undefined",
-                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
+                    f"-fsanitize=fuzzer,address,undefined -fsanitize-coverage=inline-8bit-counters,pc-table",
                 )
                 if lines[i] != line:
                     changed = True
@@ -1324,6 +1499,70 @@ def _constraint_memory_snapshot_from_state(state: dict[str, Any]) -> tuple[dict[
     return latest_entry, len(entries), str(_constraint_memory_path(repo_root))
 
 
+def _procedural_memory_library_class(repo_root: Path) -> str:
+    """Coarse build-system label used as procedural-memory scope."""
+    for rel in ("fuzz/build_strategy.json", "fuzz/build_runtime_facts.json", "fuzz/repo_understanding.json"):
+        try:
+            p = repo_root / rel
+            if not p.is_file():
+                continue
+            doc = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            bs = str((doc or {}).get("build_system") or "").strip().lower()
+            if bs and bs != "unknown":
+                return bs
+        except Exception:
+            continue
+    return ""
+
+
+def _procedural_memory_system_packages_nonempty(repo_root: Path) -> bool:
+    try:
+        p = repo_root / "fuzz" / "system_packages.txt"
+        if not p.is_file():
+            return False
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.split("#", 1)[0].strip():
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _record_procedural_memory(state: dict[str, Any], repair_snapshot: dict[str, Any]) -> None:
+    """Reflexion-style write path: when a stage fails into repair, distill a
+    known failure class into a cross-job lesson. No-op unless
+    SHERPA_PROCEDURAL_MEMORY is enabled; never raises. (Phase 2: accumulate
+    only — injection into prompts is gated for Phase 3.)"""
+    if not _proc_mem.memory_enabled():
+        return
+    repo_root_text = str(state.get("repo_root") or "").strip()
+    if not repo_root_text:
+        return
+    try:
+        repo_root = Path(repo_root_text)
+        stage = str(repair_snapshot.get("repair_origin_stage") or "").strip()
+        if not stage:
+            return
+        lesson = _proc_mem.classify_stage_failure(
+            stage=stage,
+            error_code=str(repair_snapshot.get("repair_error_code") or ""),
+            error_kind=str(repair_snapshot.get("repair_error_kind") or ""),
+            diagnostics=" ".join(
+                [
+                    str(repair_snapshot.get("repair_error_text") or ""),
+                    str(repair_snapshot.get("repair_stderr_tail") or ""),
+                ]
+            )[:4000],
+            system_packages_nonempty=_procedural_memory_system_packages_nonempty(repo_root),
+            api_surface_exception_used=bool(state.get("api_surface_exception_used")),
+            library_class=_procedural_memory_library_class(repo_root),
+        )
+        if lesson:
+            _proc_mem.record_lesson(job_id=str(os.environ.get("SHERPA_JOB_ID") or ""), **lesson)
+    except Exception:
+        return
+
+
 def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     state = _normalize_error_state(state)
     err = dict(state.get("error") or {})
@@ -1377,6 +1616,7 @@ def _build_repair_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     if dedup_count >= 2:
         snapshot["repair_strategy_force_change"] = True
         snapshot["crash_signature_dedup_hit"] = True
+    _record_procedural_memory(state, snapshot)
     return snapshot
 
 
@@ -1709,385 +1949,57 @@ def _target_scoring_weights() -> dict[str, float]:
     }
 
 
-def _vuln_hunting_enabled() -> bool:
-    raw = (os.environ.get("SHERPA_VULN_HUNTING_ENABLED") or "1").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+# Vuln-directed scoring / attack-hint / candidate-priority helpers — extracted
+# to workflow_vuln_scoring.py. Re-exported here so existing call sites and tests
+# referencing `workflow_graph._<name>` keep working.
+from workflow_vuln_scoring import (  # noqa: E402
+    _VULN_REPLAN_PRIORITY_THRESHOLD,
+    _vuln_hunting_enabled,
+    _vuln_score_mode,
+    _vuln_internal_api_min_score,
+    _vuln_non_public_reachability_cap,
+    _vuln_min_evidence_confidence,
+    _vuln_topk,
+    _vuln_max_iterations_per_candidate,
+    _vuln_replan_priority_threshold,
+    _vuln_score_weights,
+    _security_signal_ids,
+    _security_signal_patterns,
+    _empty_security_scores,
+    _compute_security_signal_scores,
+    _derive_security_priority,
+    _extract_security_scores,
+    _top_security_signals,
+    _signal_slug,
+    _signal_vuln_category,
+    _signal_sanitizer_hint,
+    _attack_boundary_values,
+    _candidate_attack_hint,
+    _normalize_attack_hint,
+    _candidate_priority,
+)
 
 
-def _vuln_score_mode() -> str:
-    raw = (os.environ.get("SHERPA_VULN_SCORE_MODE") or "risk_first_v1").strip().lower()
-    if raw in {"risk_first_v1"}:
-        return raw
-    return "risk_first_v1"
-
-
-def _vuln_internal_api_min_score() -> float:
-    raw = (os.environ.get("SHERPA_VULN_INTERNAL_API_MIN_SCORE") or "0.75").strip()
-    try:
-        return max(0.0, min(float(raw), 1.0))
-    except Exception:
-        return 0.75
-
-
-def _vuln_min_evidence_confidence() -> float:
-    raw = (os.environ.get("SHERPA_VULN_MIN_EVIDENCE_CONFIDENCE") or "0.45").strip()
-    try:
-        return max(0.0, min(float(raw), 1.0))
-    except Exception:
-        return 0.45
-
-
-def _vuln_topk() -> int:
-    raw = (os.environ.get("SHERPA_VULN_TOPK") or "24").strip()
-    try:
-        return max(1, min(int(raw), 80))
-    except Exception:
-        return 24
-
-
-def _vuln_max_iterations_per_candidate() -> int:
-    raw = (os.environ.get("SHERPA_VULN_MAX_ITERATIONS_PER_CANDIDATE") or "5").strip()
-    try:
-        return max(1, min(int(raw), 50))
-    except Exception:
-        return 5
-
-
-_VULN_REPLAN_PRIORITY_THRESHOLD = 0.65
-
-
-def _vuln_replan_priority_threshold() -> float:
-    raw = os.environ.get("SHERPA_VULN_REPLAN_PRIORITY_THRESHOLD") or ""
-    if raw:
-        try:
-            return max(0.0, min(float(raw.strip()), 1.0))
-        except ValueError:
-            pass
-    return _VULN_REPLAN_PRIORITY_THRESHOLD
-
-
-def _vuln_score_weights() -> dict[str, float]:
-    # Pure vuln-driven scoring. All non-vuln factors removed.
-    return {
-        "vuln_likelihood": 0.50,
-        "exploitability": 0.30,
-        "reachability_confidence": 0.20,
-    }
-
-
-def _security_signal_ids() -> tuple[str, ...]:
-    return (
-        "mem_oob_candidate",
-        "integer_overflow_candidate",
-        "format_string_candidate",
-        "path_traversal_candidate",
-        "command_injection_candidate",
-        "authz_bypass_candidate",
-        "null_deref_candidate",
-        "uaf_candidate",
-    )
-
-
-def _security_signal_patterns() -> dict[str, str]:
-    return {
-        "mem_oob_candidate": r"(memcpy|memmove|strcpy|strncpy|strcat|strncat|\[[^\]]+\]|pointer|offset|index|bounds?)",
-        "integer_overflow_candidate": (
-            r"(overflow|underflow|wrap(?:around)?|truncat|narrow(?:ing)?|"
-            r"(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)"
-            r"\s*(?:[\*\+\-]|<<)|"
-            r"(?:[\*\+\-]|<<)\s*(?:width|height|stride|rowbytes|rowsize|pitch|offset|size|len|length|capacity)|"
-            r"(?:size_t|ssize_t|uint(?:8|16|32|64)?_t|int(?:8|16|32|64)?_t)\s*\)|"
-            r"(?:alloc|malloc|calloc|realloc)[^;\n]{0,80}(?:width|height|stride|rowbytes|rowsize|size|len|length|capacity))"
-        ),
-        "format_string_candidate": r"(printf|fprintf|sprintf|snprintf|vsnprintf|vprintf|format|string_format|fmt::)",
-        "path_traversal_candidate": r"(path|filepath|filename|fopen|open\(|readfile|writefile|\.\./)",
-        "command_injection_candidate": r"(system\(|popen\(|exec\(|spawn\(|shell|command)",
-        "authz_bypass_candidate": r"(auth|authorize|permission|acl|role|token|session|bypass|skip[_-]?check)",
-        "null_deref_candidate": r"(null|nullptr|none|optional|dereference|->)",
-        "uaf_candidate": r"(free\(|delete|release|destroy|dispose|lifetime|dangling)",
-    }
-
-
-def _empty_security_scores() -> dict[str, float]:
-    return {signal: 0.0 for signal in _security_signal_ids()}
-
-
-def _compute_security_signal_scores(
-    *,
-    name: str,
-    signature: str,
-    file_hint: str,
-    risk_signals: list[str] | None = None,
-    risk_signal_source_breakdown: dict[str, list[str]] | None = None,
-) -> dict[str, float]:
-    text = f"{name}\n{signature}\n{file_hint}".lower()
-    scores = _empty_security_scores()
-    signals = {str(x).strip().lower() for x in list(risk_signals or []) if str(x).strip()}
-    source_breakdown: dict[str, set[str]] = {}
-    for source_name, values in dict(risk_signal_source_breakdown or {}).items():
-        if not isinstance(values, list):
-            continue
-        source_breakdown[str(source_name).strip().lower()] = {
-            str(x).strip().lower() for x in values if str(x).strip()
-        }
-    for signal_id, pattern in _security_signal_patterns().items():
-        if re.search(pattern, text, re.IGNORECASE):
-            scores[signal_id] = max(scores[signal_id], 0.62)
-        if signal_id in source_breakdown.get("regex", set()) or signal_id in source_breakdown.get("semantic", set()):
-            scores[signal_id] = max(scores[signal_id], 0.78)
-        elif signal_id in source_breakdown.get("weak_file", set()) or signal_id in source_breakdown.get("file", set()):
-            scores[signal_id] = max(scores[signal_id], 0.44)
-        elif signal_id in signals:
-            scores[signal_id] = max(scores[signal_id], 0.68)
-    if "bounds" in signals:
-        scores["mem_oob_candidate"] = max(scores["mem_oob_candidate"], 0.68)
-        scores["integer_overflow_candidate"] = max(scores["integer_overflow_candidate"], 0.56)
-    if "parser-like" in signals or "state-machine" in signals:
-        scores["null_deref_candidate"] = max(scores["null_deref_candidate"], 0.5)
-    return {k: round(max(0.0, min(float(v), 1.0)), 4) for k, v in scores.items()}
-
-
-def _derive_security_priority(
-    *,
-    target_type: str,
-    runtime_viability: str,
-    security_scores: dict[str, float] | None = None,
-) -> tuple[float, float, float, str]:
-    scores = dict(_empty_security_scores())
-    for key, value in dict(security_scores or {}).items():
-        if key in scores:
-            try:
-                scores[key] = max(0.0, min(float(value), 1.0))
-            except Exception:
-                scores[key] = 0.0
-    non_zero = [float(v) for v in scores.values() if float(v) > 0.0]
-    non_zero.sort(reverse=True)
-    top = non_zero[0] if non_zero else 0.0
-    top3_avg = (sum(non_zero[:3]) / min(3, len(non_zero))) if non_zero else 0.0
-    target_type_l = str(target_type or "").strip().lower()
-    runtime_viability_l = str(runtime_viability or "").strip().lower()
-
-    vuln_likelihood = 0.65 * top + 0.35 * top3_avg
-    if target_type_l in {"parser", "decoder", "archive", "document"}:
-        vuln_likelihood += 0.06
-
-    exploitability = (
-        0.50 * max(scores["mem_oob_candidate"], scores["uaf_candidate"])
-        + 0.22 * scores["integer_overflow_candidate"]
-        + 0.14 * scores["command_injection_candidate"]
-        + 0.08 * scores["path_traversal_candidate"]
-        + 0.06 * scores["authz_bypass_candidate"]
-    )
-
-    reachability = {"high": 0.82, "medium": 0.62, "low": 0.40}.get(runtime_viability_l, 0.5)
-    if target_type_l in {"parser", "decoder", "archive"}:
-        reachability += 0.08
-    if scores["format_string_candidate"] > 0.0 or scores["null_deref_candidate"] > 0.0:
-        reachability += 0.03
-
-    vuln_likelihood = max(0.0, min(vuln_likelihood, 1.0))
-    exploitability = max(0.0, min(exploitability, 1.0))
-    reachability = max(0.0, min(reachability, 1.0))
-
-    ordered = sorted(scores.items(), key=lambda kv: float(kv[1]), reverse=True)
-    reason_parts = [f"{sig}:{score:.2f}" for sig, score in ordered if float(score) > 0.0][:3]
-    reason = ", ".join(reason_parts) if reason_parts else "no_strong_security_signal"
-    return (
-        round(vuln_likelihood, 4),
-        round(exploitability, 4),
-        round(reachability, 4),
-        reason,
-    )
-
-
-def _extract_security_scores(item: dict[str, Any]) -> dict[str, float]:
-    raw = item.get("security_signal_scores")
-    if not isinstance(raw, dict):
-        return _empty_security_scores()
-    out = _empty_security_scores()
-    for key in _security_signal_ids():
-        try:
-            out[key] = max(0.0, min(float(raw.get(key) or 0.0), 1.0))
-        except Exception:
-            out[key] = 0.0
-    return out
-
-
-def _top_security_signals(
-    security_scores: dict[str, float] | None,
-    *,
-    threshold: float | None = None,
-) -> list[str]:
-    th = _vuln_min_evidence_confidence() if threshold is None else max(0.0, min(float(threshold), 1.0))
-    pairs = sorted(
-        ((str(k), float(v)) for k, v in dict(security_scores or {}).items()),
-        key=lambda kv: kv[1],
-        reverse=True,
-    )
-    return [sig for sig, score in pairs if score >= th]
-
-
-def _signal_slug(signal_id: str) -> str:
-    raw = str(signal_id or "").strip().lower()
-    if not raw:
-        return "generic"
-    raw = re.sub(r"_candidate$", "", raw)
-    raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
-    return raw or "generic"
-
-
-def _signal_vuln_category(signal_id: str) -> str:
-    mapping = {
-        "mem_oob_candidate": "heap-buffer-overflow",
-        "integer_overflow_candidate": "integer-overflow",
-        "format_string_candidate": "format-string",
-        "path_traversal_candidate": "path-traversal",
-        "command_injection_candidate": "command-injection",
-        "authz_bypass_candidate": "authorization-bypass",
-        "null_deref_candidate": "null-dereference",
-        "uaf_candidate": "use-after-free",
-    }
-    return mapping.get(str(signal_id or "").strip().lower(), "memory-corruption")
-
-
-def _signal_sanitizer_hint(signal_id: str) -> str:
-    mapping = {
-        "mem_oob_candidate": "address",
-        "integer_overflow_candidate": "undefined",
-        "format_string_candidate": "address",
-        "path_traversal_candidate": "address",
-        "command_injection_candidate": "address",
-        "authz_bypass_candidate": "address",
-        "null_deref_candidate": "address",
-        "uaf_candidate": "address",
-    }
-    return mapping.get(str(signal_id or "").strip().lower(), "address")
-
-
-def _attack_boundary_values(signal_id: str, *, target_type: str, api: str) -> list[str]:
-    signal = str(signal_id or "").strip().lower()
-    target_type_l = str(target_type or "").strip().lower()
-    api_l = str(api or "").strip().lower()
-
-    if signal == "mem_oob_candidate":
-        return ["len=0", "len=1", "len=4096", "offset=len-1", "offset=0xFFFFFFFF"]
-    if signal == "integer_overflow_candidate":
-        return ["count=0x7FFFFFFF", "count=0x80000000", "size=0xFFFFFFFF", "count*stride overflow"]
-    if signal == "format_string_candidate":
-        return ["fmt=%n", "fmt=%999999s", "fmt=%p%p%p", "fmt={{{{{"]
-    if signal == "path_traversal_candidate":
-        return ["path=../etc/passwd", "path=..\\\\windows\\\\win.ini", "path=/tmp/../../secret"]
-    if signal == "command_injection_candidate":
-        return ["arg=;id", "arg=$(id)", "arg=`id`", "arg=&&touch /tmp/pwned"]
-    if signal == "authz_bypass_candidate":
-        return ["role=admin", "token=''", "user_id=-1", "permission=wildcard"]
-    if signal == "null_deref_candidate":
-        return ["ptr=null", "count=0", "header_only=true", "optional_field_missing"]
-    if signal == "uaf_candidate":
-        return ["free_then_use", "double_close", "lifetime=end_before_use", "refcount=0"]
-
-    if target_type_l in {"parser", "decoder", "archive", "document"}:
-        return ["size=0", "size=1", "size=4096", "declared_len=0xFFFFFFFF"]
-    if "parse" in api_l or "decode" in api_l:
-        return ["input=''", "input='\\x00'", "input='A'*4096", "declared_len=actual_len+1"]
-    return ["size=0", "size=1", "size=4096", "count=0xFFFFFFFF"]
-
-
-def _candidate_attack_hint(
-    *,
-    api: str,
-    target_type: str,
-    signal_id: str,
-    source_path: str,
-    security_reason: str,
-) -> dict[str, Any]:
-    signal = str(signal_id or "").strip().lower()
-    api_text = str(api or "").strip() or "target_api"
-    source_text = str(source_path or "").strip()
-    vuln_category = _signal_vuln_category(signal)
-    key_code_path = [api_text]
-    if source_text:
-        source_stem = Path(source_text).stem.strip()
-        if source_stem and source_stem not in {api_text, api_text.split("::")[-1]}:
-            key_code_path.append(source_stem)
-    trigger_condition = {
-        "mem_oob_candidate": f"{api_text} uses attacker-influenced length or offset beyond allocated bounds",
-        "integer_overflow_candidate": f"{api_text} derives buffer or loop sizes from arithmetic that can overflow",
-        "format_string_candidate": f"{api_text} forwards attacker-controlled format content into formatter sinks",
-        "path_traversal_candidate": f"{api_text} consumes file paths without constraining traversal sequences",
-        "command_injection_candidate": f"{api_text} reaches shell or process execution with partially controlled input",
-        "authz_bypass_candidate": f"{api_text} evaluates authorization decisions with bypass-prone state combinations",
-        "null_deref_candidate": f"{api_text} dereferences optional or stateful pointers on malformed input",
-        "uaf_candidate": f"{api_text} may access released state after cleanup or ownership transfer",
-    }.get(signal, f"{api_text} exposes a high-risk path that warrants adversarial input exploration")
-    if security_reason:
-        trigger_condition = f"{trigger_condition}; evidence={security_reason}"
-    return {
-        "trigger_condition": trigger_condition,
-        "key_code_path": key_code_path,
-        "boundary_values": _attack_boundary_values(signal, target_type=target_type, api=api_text),
-        "vuln_category": vuln_category,
-        "sanitizer_hint": _signal_sanitizer_hint(signal),
-    }
-
-
-def _normalize_attack_hint(
-    value: Any,
-    *,
-    api: str,
-    target_type: str,
-    signal_id: str,
-    source_path: str,
-    security_reason: str,
-) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str) and value.strip():
-        hint = _candidate_attack_hint(
-            api=api,
-            target_type=target_type,
-            signal_id=signal_id,
-            source_path=source_path,
-            security_reason=security_reason,
-        )
-        hint["trigger_condition"] = value.strip()
-        return hint
-    return {}
-
-
-def _candidate_priority(
-    *,
-    vuln_likelihood: float,
-    exploitability: float,
-    reachability_confidence: float,
-    evidence_count: int,
-    signal_score: float,
-) -> float:
-    raw = (
-        0.50 * max(0.0, min(float(vuln_likelihood), 1.0))
-        + 0.24 * max(0.0, min(float(exploitability), 1.0))
-        + 0.18 * max(0.0, min(float(reachability_confidence), 1.0))
-        + 0.05 * max(0.0, min(float(signal_score), 1.0))
-        + 0.03 * min(max(int(evidence_count), 0), 5) / 5.0
-    )
-    return round(max(0.0, min(raw, 1.0)), 4)
-
-
-def _is_internal_api_symbol(api: str) -> bool:
-    low = str(api or "").strip().lower()
-    if not low:
-        return False
-    patterns = (
-        "::detail::",
-        "::detail",
-        "::internal::",
-        "::internal",
-        "_internal",
-        "/internal/",
-        ".internal.",
-        "__",
-    )
-    return any(p in low for p in patterns)
+# Public-API surface oracle — extracted to workflow_public_api.py.
+# Re-exported here so existing call sites and tests that reference
+# `workflow_graph._<name>` (including the shared cache objects) keep working.
+from workflow_public_api import (  # noqa: E402
+    _NON_PUBLIC_API_NAME_PATTERNS,
+    _PUBLIC_API_SYMBOL_CACHE,
+    _CALLGRAPH_REVERSE_CACHE,
+    _is_internal_api_symbol,
+    _vuln_public_api_enforce,
+    _companion_work_dir,
+    _load_public_api_symbols,
+    _load_api_loc_index,
+    _api_surface_class,
+    _is_non_public_api,
+    _is_unlinkable_binding_api,
+    _load_callgraph_reverse,
+    _load_callgraph_forward,
+    _nearest_public_entry,
+    coverage_potential,
+)
 
 
 def _clamp_score(value: float, *, lo: float = 0.0, hi: float = 10.0) -> float:
@@ -2237,6 +2149,149 @@ def _selection_target_key(name: str) -> str:
     return str(name or "").strip().lower()
 
 
+# Top-level "whole-input" library entrypoints drive the entire parser/decoder
+# and yield far more coverage + reachable bug surface than an isolated leaf
+# helper. We distinguish the real entry (e.g. ``toml_parse`` / ``json_loads`` /
+# ``*_decode``) from sub-parsers (``parse_array``, ``parse_keyval``) and leaf
+# scanners (``scan_time``, ``next_token``) by suffix/exact match.
+_ENTRYPOINT_HINTS_SUFFIX = (
+    "_parse", "_parse_file", "_parse_string", "_parse_buffer",
+    "_loads", "_load", "_load_file", "_decode", "_deserialize", "_unmarshal",
+    "_read_file", "_read_buffer", "_from_string", "_from_buffer", "_fromjson",
+    # whole-input decoder read-entrypoints (e.g. libpng png_read_image /
+    # png_read_png / png_read_info). Kept specific so low-level readers
+    # (png_read_filter_row -> _row, png_read_data -> _data, *_chunk/_byte) are
+    # excluded as leaves rather than promoted.
+    "_read_image", "_read_png", "_read_info", "_read_document", "_read_memory",
+    "_read_stream", "_readimage", "_readfile",
+)
+_ENTRYPOINT_HINTS_EXACT = {
+    "parse", "loads", "load", "decode", "deserialize", "unmarshal",
+    "parse_file", "parse_string", "parse_buffer",
+}
+_ENTRYPOINT_LEAF_HINTS = (
+    "scan_", "lex", "next_token", "nexttoken", "next_char", "_digit", "_char",
+    "_byte", "peek", "advance", "getc", "ungetc",
+)
+
+
+def _vuln_entrypoint_bias_weight() -> float:
+    raw = os.environ.get("SHERPA_VULN_ENTRYPOINT_BIAS")
+    if raw is None or str(raw).strip() == "":
+        return 0.15
+    try:
+        return max(0.0, min(float(raw), 0.5))
+    except Exception:
+        return 0.15
+
+
+def _is_library_entrypoint(api: str) -> bool:
+    name = str(api or "").strip().lower().split("::")[-1].split(".")[-1]
+    if not name:
+        return False
+    if any(h in name for h in _ENTRYPOINT_LEAF_HINTS):
+        return False
+    if name in _ENTRYPOINT_HINTS_EXACT:
+        return True
+    return any(name.endswith(s) for s in _ENTRYPOINT_HINTS_SUFFIX)
+
+
+# Infrastructure helpers / allocator macros that are not meaningful, harnessable
+# fuzz targets on their own. vuln-hunt sometimes flags them on a raw "memory" /
+# "array" risk signal, but selecting them as must_run execution targets only
+# produces execution_plan_harness_mismatch (the synthesizer correctly refuses to
+# build an isolated harness for e.g. a CALLOC macro), churning the loop.
+_NON_HARNESSABLE_EXACT = {
+    "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+    "strdup", "strndup", "xmalloc", "xcalloc", "xrealloc", "xfree",
+}
+_NON_HARNESSABLE_TOKENS = (
+    "_alloc", "alloc_", "_free", "_realloc", "_ptrarr", "_grow", "expand_",
+    "_resize", "_reserve", "_xmalloc", "_memdup", "_strdup",
+)
+
+
+def _is_non_harnessable_target(api: str) -> bool:
+    """True for allocator/memory-infra helpers and alloc macros that should not
+    be selected as standalone fuzz targets. Conservative: only matches clear
+    allocation/growth infrastructure, not parse/decode logic."""
+    name = str(api or "").strip().lower().split("::")[-1].split(".")[-1]
+    if not name:
+        return False
+    # ALL-CAPS macros like CALLOC / MALLOC / REALLOC / FREE
+    bare = str(api or "").strip().split("::")[-1].split(".")[-1]
+    if bare.isupper() and any(k in name for k in ("alloc", "free", "realloc")):
+        return True
+    if name in _NON_HARNESSABLE_EXACT:
+        return True
+    return any(tok in name for tok in _NON_HARNESSABLE_TOKENS)
+
+
+def _library_entrypoint_bias(api: str, target_type: str) -> float:
+    """Positive risk bias for whole-input library entrypoints (0 otherwise).
+    Strongest for parser/decoder/archive libraries. Disable with
+    SHERPA_VULN_ENTRYPOINT_BIAS=0.
+
+    This is the NAME heuristic — used as a fallback when the call graph is
+    unavailable (see _entrypoint_risk_bias for the primary structural signal)."""
+    if not _is_library_entrypoint(api):
+        return 0.0
+    weight = _vuln_entrypoint_bias_weight()
+    if weight <= 0.0:
+        return 0.0
+    if str(target_type or "").strip().lower() in {"parser", "decoder", "archive", "deserializer"}:
+        return round(weight, 4)
+    return round(weight * 0.6, 4)
+
+
+def _selection_mode() -> str:
+    """Target-selection mode (hybrid experiment).
+
+    - "score" (default): deterministic value arithmetic re-ranks candidates
+      (effective_risk = vuln_likelihood - penalties + entrypoint_bias).
+    - "llm_first": trust the agent's own risk judgement — order by the LLM
+      dimensions only, keep the feedback-gating + hard guardrail-drop pillars,
+      drop the value arithmetic. Lets us A/B whether the scorer helps or fights
+      the LLM."""
+    mode = (os.environ.get("SHERPA_SELECTION_MODE") or "score").strip().lower()
+    return "llm_first" if mode in {"llm_first", "llm-first", "llm"} else "score"
+
+
+def _coverage_potential_enabled() -> bool:
+    raw = (os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _coverage_potential_weight() -> float:
+    raw = os.environ.get("SHERPA_VULN_COVERAGE_POTENTIAL_WEIGHT")
+    if raw is None or str(raw).strip() == "":
+        return 0.25
+    try:
+        return max(0.0, min(float(raw), 0.5))
+    except Exception:
+        return 0.25
+
+
+def _entrypoint_risk_bias(api: str, target_type: str, repo_root: Path) -> tuple[float, float]:
+    """Combined entrypoint risk bias + the raw coverage_potential signal.
+
+    Primary signal is structural: a target's call-graph reachable fan-out
+    ('coverage_potential' in [0,1]) — a whole-library entrypoint drives much more
+    reachable bug surface than an isolated leaf. The name heuristic
+    (_library_entrypoint_bias) is the fallback used when the call graph is
+    empty/degraded. We take the MAX of the two (never sum) so neither
+    double-counts. Returns (bias, coverage_potential)."""
+    name_bias = _library_entrypoint_bias(api, target_type)
+    cov_pot = 0.0
+    if _coverage_potential_enabled():
+        try:
+            cov_pot = coverage_potential(api, _load_callgraph_forward(repo_root))
+        except Exception:
+            cov_pot = 0.0
+    structural_bias = round(_coverage_potential_weight() * cov_pot, 4)
+    return max(structural_bias, name_bias), round(cov_pot, 4)
+
+
 def _execution_depth_bias(
     *,
     target_name: str,
@@ -2333,6 +2388,18 @@ def _apply_selected_target_filters(
     exclude_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = list(ranked_items)
+    # Hard-drop structurally-unlinkable language bindings that the selection
+    # gate flagged (wasm/napi/jni shims with no public caller). Keep at least
+    # one row as a safety net so we never hand an empty selection downstream.
+    if any(row.get("unlinkable_binding_dropped") for row in rows):
+        linkable = [row for row in rows if not row.get("unlinkable_binding_dropped")]
+        rows = linkable or rows
+    # Hard-drop allocator/infra helpers (CALLOC macro, expand_ptrarr, ...) that
+    # cannot be harnessed standalone — selecting them as must_run only produces
+    # execution_plan_harness_mismatch and churns the loop.
+    if any(row.get("non_harnessable_dropped") for row in rows):
+        harnessable = [row for row in rows if not row.get("non_harnessable_dropped")]
+        rows = harnessable or rows
     excluded = {
         _selection_target_key(name)
         for name in list(exclude_names or [])
@@ -2667,6 +2734,8 @@ def _normalize_analysis_vuln_candidate(
     *,
     idx: int,
     evidence_by_id: dict[str, dict[str, Any]],
+    public_set: frozenset[str] | None = None,
+    api_loc_index: dict[str, tuple[str, int]] | None = None,
 ) -> dict[str, Any]:
     api = str(item.get("api") or item.get("target_api") or item.get("name") or "").strip()
     name = str(item.get("name") or item.get("target_name") or api).strip()
@@ -2692,6 +2761,28 @@ def _normalize_analysis_vuln_candidate(
         line = int(item.get("line") or 0)
     except Exception:
         line = 0
+
+    # Classify the candidate against the public-API surface. Non-public
+    # symbols (WASM/binding shims, statics, internal-only) keep their evidence
+    # but are reachability-capped so public candidates rank ahead of them; the
+    # high-vuln-likelihood escape hatch still applies later at target selection.
+    public_set = public_set if public_set is not None else frozenset()
+    api_surface = _api_surface_class(api, public_set)
+    if api_surface == "internal":
+        cap = _vuln_non_public_reachability_cap()
+        if reachability > cap:
+            reachability = cap
+
+    # Backfill source location from the public-API index when the candidate
+    # arrived without a concrete line (line == 0) but names a known symbol.
+    if (line <= 0 or not source_path) and api_loc_index:
+        loc = api_loc_index.get(api)
+        if loc:
+            loc_path, loc_line = loc
+            if not source_path and loc_path:
+                source_path = loc_path
+            if line <= 0 and loc_line > 0:
+                line = loc_line
     attack_hint = dict(item.get("attack_hint") or {})
     if not attack_hint:
         attack_hint = _candidate_attack_hint(
@@ -2720,6 +2811,7 @@ def _normalize_analysis_vuln_candidate(
         "target_type": target_type,
         "signal_type": signal_type,
         "risk_type": signal_type,
+        "api_surface": api_surface,
         "signal_score": round(max(0.0, min(signal_score, 1.0)), 4),
         "vuln_likelihood": round(vuln_likelihood, 4),
         "exploitability": round(exploitability, 4),
@@ -2765,8 +2857,16 @@ def _write_analysis_vuln_candidates(repo_root: Path, analysis_context_path: str)
         if isinstance(x, dict) and str(x.get("source_stage") or "") != "analysis"
     ]
     topk = max(1, int(_vuln_topk()))
+    public_set = _load_public_api_symbols(repo_root)
+    api_loc_index = _load_api_loc_index(repo_root)
     analysis_candidates = [
-        _normalize_analysis_vuln_candidate(item, idx=idx, evidence_by_id=evidence_by_id)
+        _normalize_analysis_vuln_candidate(
+            item,
+            idx=idx,
+            evidence_by_id=evidence_by_id,
+            public_set=public_set,
+            api_loc_index=api_loc_index,
+        )
         for idx, item in enumerate(inventory[:topk])
         if isinstance(item, dict)
     ]
@@ -3106,6 +3206,23 @@ def _build_selected_target_row(
     target_name = str(item.get("target_name") or item.get("name") or "").strip()
     api = str(item.get("api") or target_name).strip()
     target_type = str(item.get("target_type") or "generic").strip().lower()
+
+    # Internal sink -> nearest public entry mapping. When the requested API is
+    # non-public but the call graph shows a public caller that reaches it, fuzz
+    # the public entry instead (it's linkable) and keep the sink as an attack
+    # hint so synthesize still steers toward the dangerous path. Falls back to
+    # the escape-hatch handling below when no public caller is found.
+    _sink_remap: dict[str, str] = {}
+    if _vuln_public_api_enforce() and api:
+        _ps = _load_public_api_symbols(repo_root)
+        if _is_non_public_api(api, _ps):
+            _mapped = _nearest_public_entry(api, _ps, _load_callgraph_reverse(repo_root))
+            if _mapped and _mapped != api:
+                _sink_remap = {"original_api": api, "mapped_api": _mapped}
+                if not target_name or target_name == api:
+                    target_name = _mapped
+                api = _mapped
+
     seed_profile = _normalize_seed_profile(
         str(item.get("seed_profile") or "generic"),
         target_type=target_type,
@@ -3250,6 +3367,18 @@ def _build_selected_target_row(
             source_path=str(item.get("file") or security_candidate.get("file") or ""),
             security_reason=security_reason,
         )
+    # When we remapped an internal sink to a public entry, keep the sink on the
+    # attack-hint key code path so synthesize steers the public harness toward
+    # the dangerous internal function.
+    if _sink_remap:
+        attack_hint = dict(attack_hint or {})
+        kcp = [str(x).strip() for x in list(attack_hint.get("key_code_path") or []) if str(x).strip()]
+        sink = _sink_remap.get("original_api", "")
+        if sink and sink not in kcp:
+            kcp.insert(0, sink)
+        attack_hint["key_code_path"] = kcp
+        attack_hint["mapped_from_internal_sink"] = sink
+        attack_hint["public_entry"] = _sink_remap.get("mapped_api", "")
     signal_score = max(0.0, min(float(security_scores.get(signal_type) or 0.0), 1.0))
     scoring_source = {
         "api": api,
@@ -3286,12 +3415,15 @@ def _build_selected_target_row(
     )
     score_penalty = float(runtime_penalty.get("score_penalty") or 0.0)
     target_surface_penalty = float(surface_penalty.get("target_surface_penalty") or 0.0)
+    entrypoint_bias, coverage_potential_score = _entrypoint_risk_bias(api, target_type, repo_root)
+    non_harnessable_dropped = _is_non_harnessable_target(api)
     score_breakdown["recent_yield_penalty"] = round(score_penalty + target_surface_penalty, 4)
     score_total = (
         float(score_weights.get("vuln_likelihood", 0.50)) * float(vuln_likelihood)
         + float(score_weights.get("exploitability", 0.30)) * float(exploitability)
         + float(score_weights.get("reachability_confidence", 0.20)) * float(reachability_confidence)
         + float(execution_bias.get("execution_depth_bias") or 0.0)
+        + float(entrypoint_bias)
         - float(score_penalty)
         - float(target_surface_penalty)
     )
@@ -3305,11 +3437,42 @@ def _build_selected_target_row(
         except Exception:
             pass
     adjusted_target_score = max(0.0, float(score_total))
-    internal_api = _is_internal_api_symbol(api)
+    # Non-public/non-linkable symbols (WASM/binding shims, statics, internal)
+    # are gated here using the public-API surface oracle, not just the legacy
+    # name heuristic — so they get the internal-API penalty + escape-hatch
+    # treatment *before* a wasted build cycle exposes them as non_public_api_usage.
+    _public_set = _load_public_api_symbols(repo_root)
+    internal_api = _is_non_public_api(api, _public_set)
     internal_min = _vuln_internal_api_min_score()
     api_surface_exception = {"used": False, "reason": "", "evidence_ids": []}
+    # Structurally-unlinkable language bindings (wasm/napi/jni/emscripten shims)
+    # have no native public caller. The internal->public remap above already
+    # tried to find one; an empty `_sink_remap` means it failed. Such a symbol
+    # can never link into a native harness regardless of its vuln score, so the
+    # high-risk escape-hatch must NOT admit it — flag it for a hard drop instead
+    # (filtered in `_apply_selected_target_filters`) so it can't waste a
+    # plan/synthesize/build/repair cycle. Honour the enforce kill-switch.
+    unlinkable_binding_dropped = bool(
+        _vuln_public_api_enforce()
+        and internal_api
+        and not _sink_remap
+        and _is_unlinkable_binding_api(api)
+    )
     if internal_api:
-        if security_priority_mode and vuln_likelihood >= internal_min:
+        if unlinkable_binding_dropped:
+            adjusted_target_score = 0.0
+            api_surface_exception = {
+                "used": False,
+                "reason": f"unlinkable_binding_no_public_entry({api})",
+                "evidence_ids": list(security_candidate.get("evidence_ids") or []),
+            }
+            if not runtime_penalty.get("reason"):
+                runtime_penalty["reason"] = "unlinkable_binding_dropped"
+            elif "unlinkable_binding_dropped" not in str(runtime_penalty.get("reason") or ""):
+                runtime_penalty["reason"] = (
+                    f"{runtime_penalty.get('reason')};unlinkable_binding_dropped"
+                )
+        elif security_priority_mode and vuln_likelihood >= internal_min:
             api_surface_exception = {
                 "used": True,
                 "reason": f"risk_first_allow_internal(vuln_likelihood={vuln_likelihood:.2f})",
@@ -3353,7 +3516,8 @@ def _build_selected_target_row(
                 1.0,
                 float(priority_base)
                 - float(priority_penalty)
-                + float(execution_bias.get("execution_depth_bias") or 0.0),
+                + float(execution_bias.get("execution_depth_bias") or 0.0)
+                + float(entrypoint_bias),
             ),
         ),
         4,
@@ -3409,6 +3573,8 @@ def _build_selected_target_row(
         "priority": float(priority_base),
         "effective_priority": float(effective_priority),
         "execution_depth_bias": float(execution_bias.get("execution_depth_bias") or 0.0),
+        "entrypoint_bias": float(entrypoint_bias),
+        "coverage_potential": float(coverage_potential_score),
         "callback_penalty": float(execution_bias.get("callback_penalty") or 0.0),
         "wrapper_penalty": float(execution_bias.get("wrapper_penalty") or 0.0),
         "target_surface_penalty": float(target_surface_penalty),
@@ -3420,10 +3586,13 @@ def _build_selected_target_row(
         "candidate_origin": str(security_candidate.get("candidate_origin") or item.get("candidate_origin") or "analysis_context"),
         "validation_status": str(security_candidate.get("validation_status") or item.get("validation_status") or "pending"),
         "attack_hint": attack_hint,
+        "sink_remap": dict(_sink_remap),
         "security_priority_reason": security_reason,
         "security_signals": _top_security_signals(security_scores),
         "security_signal_scores": {k: float(v) for k, v in security_scores.items()},
         "api_surface_exception": api_surface_exception,
+        "unlinkable_binding_dropped": bool(unlinkable_binding_dropped),
+        "non_harnessable_dropped": bool(non_harnessable_dropped),
         "target_score_breakdown": score_breakdown,
         "target_score": float(adjusted_target_score),
         "target_score_penalty": float(score_penalty + target_surface_penalty),
@@ -3451,6 +3620,13 @@ def _build_selected_targets_doc(
         try:
             _vc_doc = _load_vuln_candidates_doc(repo_root)
             for _vc in _vc_doc.get("candidates") or []:
+                # Exhausted/cooling candidates have already been driven to a
+                # plateau; do not let their stale priority override re-boost the
+                # same target (and re-inject it below), or risk-first ranking
+                # keeps reselecting a target the fuzzer can't make progress on.
+                _vc_status = str(_vc.get("validation_status") or "").strip().lower()
+                if _vc_status in {"exhausted", "cooling"}:
+                    continue
                 _vc_api = str(_vc.get("api") or _vc.get("target_api") or "").strip()
                 _vc_prio = float(_vc.get("priority") or 0.0)
                 if _vc_api and _vc_prio > 0:
@@ -3510,6 +3686,44 @@ def _build_selected_targets_doc(
                 )
             )
             _seen_apis.add(_vc_api.lower())
+    # Inject the library's public entrypoints (whole-input parse/decode/load
+    # APIs) as candidates. vuln-hunt is a "sniper" that proposes risky internal
+    # helpers but rarely the top-level public entry (e.g. toml_parse), which
+    # drives the whole parser for far more coverage. With the entry present, the
+    # entrypoint bias can promote it into the execution plan. No-op when the
+    # public-API oracle is empty (degraded) or enforcement is disabled.
+    if _vuln_public_api_enforce():
+        try:
+            _public_syms = _load_public_api_symbols(repo_root)
+            _entry_syms = sorted(n for n in _public_syms if _is_library_entrypoint(n))
+            for _ep in _entry_syms:
+                if _ep.lower() in _seen_apis or len(ranked_items) >= _execution_targets_max() * 2:
+                    continue
+                _ep_item = {
+                    "name": _ep,
+                    "api": _ep,
+                    "lang": "c",
+                    "target_type": "parser",
+                    "seed_profile": "generic",
+                    "vuln_likelihood": 0.62,
+                    "exploitability": 0.5,
+                    "reachability_confidence": 0.65,
+                    "_synthetic_public_entrypoint": True,
+                }
+                ranked_items.append(
+                    _build_selected_target_row(
+                        repo_root=repo_root,
+                        item=_ep_item,
+                        security_lookup=security_lookup,
+                        security_priority_mode=security_priority_mode,
+                        degrade_reason=degrade_reason,
+                        score_weights=score_weights,
+                        vuln_priority_by_api=_vuln_priority_by_api,
+                    )
+                )
+                _seen_apis.add(_ep.lower())
+        except Exception:
+            pass
     # In risk-first mode, ranking is driven by security risk directly.
     # `score_total` is still emitted for observability/reference, not as the
     # primary ordering key.
@@ -3519,6 +3733,7 @@ def _build_selected_targets_doc(
         is_internal_api_symbol_fn=_is_internal_api_symbol,
         runtime_viability_rank_fn=_runtime_viability_rank,
         prefer_deeper=prefer_deeper,
+        selection_mode=_selection_mode(),
     )
     ranked_items = _apply_selected_target_filters(
         ranked_items,
@@ -3825,9 +4040,15 @@ def _execution_target_fuzzer_aliases(item: dict[str, Any]) -> list[str]:
             if candidate and candidate not in aliases:
                 aliases.append(candidate)
             if candidate and not re.search(r"_fuzz(?:er)?$", candidate):
-                fuzz_candidate = f"{candidate}_fuzz"
-                if fuzz_candidate not in aliases:
-                    aliases.append(fuzz_candidate)
+                # Match both common harness naming conventions: `<api>_fuzz`
+                # and `<api>_fuzzer`. Without the `_fuzzer` variant a binary
+                # named e.g. `png_read_image_fuzzer` fails to match the
+                # execution-plan target `png_read_image`, so the run stage finds
+                # "no binaries matching execution_plan" and records nothing.
+                for suffix in ("_fuzz", "_fuzzer"):
+                    fuzz_candidate = f"{candidate}{suffix}"
+                    if fuzz_candidate not in aliases:
+                        aliases.append(fuzz_candidate)
             stripped = re.sub(r"_fuzz(?:er)?$", "", candidate)
             if stripped and stripped not in aliases:
                 aliases.append(stripped)
@@ -4810,10 +5031,21 @@ def _validate_execution_plan_harness_consistency(
                 must_run_names.add(name)
     must_run_missing = [n for n in missing_all if n in must_run_names]
     if must_run_missing:
+        # A non-harnessable infra helper (CALLOC macro, expand_ptrarr, ...) that
+        # the plan wrongly marked must_run should not fail a synthesize that
+        # produced valid harnesses for the real targets — the synthesizer
+        # correctly declined to harness it. Tolerate missing must_run targets
+        # only when ALL of them are non-harnessable; genuine missing targets
+        # still fail (preserving execution_plan_harness_mismatch detection).
+        residual = [n for n in must_run_missing if not _is_non_harnessable_target(n)]
+        if not residual:
+            doc = dict(doc)
+            doc["dropped_non_harnessable_must_run"] = must_run_missing
+            return True, "", doc
         extras = [str(x).strip() for x in list(doc.get("extra_harnesses") or []) if str(x).strip()]
         msg = (
             "execution_plan_harness_mismatch: missing harness source for must_run targets="
-            + ",".join(must_run_missing)
+            + ",".join(residual)
             + (f"; extra_harnesses={','.join(extras[:8])}" if extras else "")
         )
         return False, msg, doc
@@ -6285,6 +6517,46 @@ def _render_opencode_prompt(name: str, **kwargs: object) -> str:
     return _wf_common.render_opencode_prompt(name, **kwargs)
 
 
+def _procedural_stage_for_prompt(name: str) -> str:
+    """Map an opencode prompt/template name to its pipeline stage for
+    procedural-memory lesson retrieval."""
+    n = str(name or "").lower()
+    if "synthesize" in n:
+        return "synthesize"
+    if "plan" in n:
+        return "plan"
+    if "fix_build" in n or "build" in n:
+        return "build"
+    if "vuln" in n or "hunt" in n:
+        return "vuln-hunt"
+    if "analysis" in n:
+        return "analysis"
+    if "crash" in n:
+        return "crash-triage"
+    return ""
+
+
+def _inject_procedural_lessons(name: str, kwargs: dict[str, object]) -> None:
+    """Phase 3 read path: prepend learned 'known pitfalls' for this stage into
+    the prompt hint, so cross-job lessons steer the agent away from repeating
+    past failures. No-op unless SHERPA_PROCEDURAL_MEMORY is enabled, only when
+    the template already takes a `hint`, and never raises."""
+    try:
+        if "hint" not in kwargs or not _proc_mem.memory_enabled():
+            return
+        stage = _procedural_stage_for_prompt(name)
+        if not stage:
+            return
+        lessons = _proc_mem.retrieve(stage=stage, library_class="")
+        block = _proc_mem.render_lessons_block(lessons)
+        if not block:
+            return
+        base = str(kwargs.get("hint") or "").strip()
+        kwargs["hint"] = (block + "\n\n" + base).strip() if base else block
+    except Exception:
+        return
+
+
 def _render_opencode_prompt_safe(
     name: str,
     *,
@@ -6300,6 +6572,7 @@ def _render_opencode_prompt_safe(
       (rendered_prompt, render_issue)
       render_issue is empty when primary render succeeds.
     """
+    _inject_procedural_lessons(name, kwargs)
     try:
         return _render_opencode_prompt(name, **kwargs), ""
     except Exception as e:
@@ -9933,6 +10206,9 @@ def _node_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
             build_cmd = [gen._python_runner(), "build.py"]
             fallback_cmd = [gen._python_runner(), "fuzz/build.py"]
             fallback_cwd = gen.repo_root
+            # Deterministically instrument the library + harness build (does not
+            # rely on the PATH cc-wrapper reaching `make` subprocesses).
+            _inject_coverage_instrumentation(str(build_py), cast(dict[str, Any], state))
             if _build_py_supports_clean_flag(build_py):
                 build_cmd_clean = list(build_cmd) + ["--clean"]
         elif build_sh.is_file():
@@ -14870,6 +15146,23 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
         context_parts.append("=== re_run_report.md ===\n" + _trim_feedback_text(re_run_text))
     if stderr_tail:
         context_parts.append("=== repair_stderr_tail ===\n" + stderr_tail)
+
+    # Contract-aware triage: surface documented preconditions of the crashing
+    # functions so out-of-contract crashes (harness fed input the API docs
+    # forbid) are classified as harness_bug, not upstream_bug/vulnerability.
+    if (os.environ.get("SHERPA_CONTRACT_TRIAGE") or "1").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            import contract_analysis  # local import; best-effort
+            crash_text = "\n".join(filter(None, [info_text, analysis_text, stderr_tail]))
+            contract_block = contract_analysis.build_contract_triage_context(
+                repo_root, crash_text
+            )
+            if contract_block:
+                context_parts.append(contract_block)
+                _wf_log(cast(dict[str, Any], state), "crash-triage: injected documented API preconditions (contract-aware)")
+        except Exception as _e:
+            _wf_log(cast(dict[str, Any], state), f"crash-triage contract context skipped: {_e}")
+
     context = "\n\n".join(context_parts)
 
     label = "inconclusive"
@@ -15537,6 +15830,10 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
         if (clone_root / "fuzz" / "build.py").is_file():
             build_cmd = [python_runner, "build.py"]
             build_cwd = clone_root / "fuzz"
+            # The run-stage rebuild produces the binary that is actually fuzzed;
+            # instrument its library + harness build deterministically so the
+            # fuzzed binary is not blind to the target library.
+            _inject_coverage_instrumentation(str(clone_root / "fuzz" / "build.py"), state)
         elif (clone_root / "fuzz" / "build.sh").is_file():
             build_cmd = ["bash", "build.sh"]
             build_cwd = clone_root / "fuzz"
@@ -15551,6 +15848,8 @@ def _node_re_build(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
             except Exception:
                 pass
+        # Instrument the whole library (not just the harness) for libFuzzer.
+        build_env = _apply_coverage_cc_wrapper_env(build_env, clone_root)
         if hasattr(gen, "_run_cmd"):
             rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
                 build_cmd,
@@ -15813,6 +16112,8 @@ def _node_re_run(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeState:
                 build_env = gen._compose_vcpkg_runtime_env(build_env, repo_root=clone_root)  # type: ignore[attr-defined]
             except Exception:
                 pass
+        # Instrument the whole library (not just the harness) for libFuzzer.
+        build_env = _apply_coverage_cc_wrapper_env(build_env, clone_root)
         if hasattr(gen, "_run_cmd"):
             rc, out, err = gen._run_cmd(  # type: ignore[attr-defined]
                 build_cmd,

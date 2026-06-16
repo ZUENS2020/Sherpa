@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: sherpa-staging
+labels:
+  - pairs:
+      app.kubernetes.io/env: staging
+    includeSelectors: false
+    includeTemplates: true
+resources:
+  - ../../base
+  - namespace.yaml
+  - clusterrolebinding-node-reader.yaml
+  - pv-staging.yaml
+patchesStrategicMerge:
+  - namespace-delete-patch.yaml
+  - configmap-patch.yaml
+  - ingress-delete-patch.yaml
+  - node-reader-binding-delete-patch.yaml
+  - pvc-storageclass-patch.yaml
+  - postgres-storageclass-patch.yaml

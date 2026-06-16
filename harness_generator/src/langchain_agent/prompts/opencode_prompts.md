@@ -35,6 +35,7 @@ Constraints:
   - otherwise prefer public/stable API and keep `api_surface_exception.used=false`.
 - Target selection is vulnerability-first by default (`security_priority_mode=true`):
   - ranking must be driven by risk dimensions first: `vuln_likelihood`, then `exploitability`, then `reachability_confidence`
+  - whole-input public entrypoints (e.g. `toml_parse`, `*_loads`, `*_decode`) that drive the entire library have high *reachable bug surface* — reflect that in their `reachability_confidence` and keep at least one such driver in the execution plan, alongside (not instead of) high-risk internal sinks.
   - treat `score_total` and non-security dimensions (coverage/complexity/api-relevance) as reference output only, not the primary ordering basis.
   - `score_total = 0.50*vuln_likelihood + 0.30*exploitability + 0.20*reachability_confidence - recent_yield_penalty`. Non-vuln dimensions (coverage_gap, complexity_depth, api_relevance, consumer_order_support) are NOT scored.
 - `fuzz/selected_targets.json` must include per-target:
@@ -174,6 +175,7 @@ Constraints:
 - When diagnostics/context include concrete file paths, prioritize explicit actions in the form `Read and fix <path>[:line]`.
 - if diagnostics include `non_public_api_usage`, replace offending symbols first before any broader refactor
 - Do not modify repository source files outside `fuzz/` and `./done`; upstream/demo/contrib/example code is read-only in build-repair planning.
+- when build diagnostics indicate missing system libraries (cmake/pkg-config "Could NOT find", "missing:", "not found", missing headers), note the canonical vcpkg port name in `Known Issues` and recommend a `fuzz/system_packages.txt` update
 
 Required planning sections in `fuzz/PLAN.md`:
 - `Known Issues`: concrete unresolved build blockers and missing context (must mention missing fields explicitly, e.g. `missing lib_name context`)
@@ -395,6 +397,7 @@ Build-repair constraints:
 - Do NOT run build/execute commands
 - Read-only exploration commands are allowed
 - if MCP is unavailable, continue in degraded mode and document this in `fuzz/repo_understanding.json`
+- if build diagnostics indicate missing system libraries (cmake/pkg-config "Could NOT find", "missing:", "not found", missing headers), write canonical vcpkg port names to `fuzz/system_packages.txt` (one per line, lowercase, use standard vcpkg port names like `protobuf`, `curl`, `sqlite3`, `pcre`, `gmp`, etc.)
 - if diagnostics include `non_public_api_usage`, replace offending symbols first and touch the offending harness file(s)
 
 Required notes in generated scaffold artifacts:

@@ -403,9 +403,12 @@ def test_execution_plan_harness_consistency_detects_missing_targets(tmp_path: Pa
     (fuzz_dir / "execution_plan.json").write_text(
         json.dumps(
             {
+                # Consistency now only fails when a *must_run* target lacks a
+                # harness (extra/missing optional harnesses are harmless); mark
+                # vformat must_run so the genuine missing-harness case is caught.
                 "execution_targets": [
-                    {"target_name": "println", "expected_fuzzer_name": "println_fuzz"},
-                    {"target_name": "vformat", "expected_fuzzer_name": "vformat_fuzz"},
+                    {"target_name": "println", "expected_fuzzer_name": "println_fuzz", "must_run": True},
+                    {"target_name": "vformat", "expected_fuzzer_name": "vformat_fuzz", "must_run": True},
                 ]
             }
         ),

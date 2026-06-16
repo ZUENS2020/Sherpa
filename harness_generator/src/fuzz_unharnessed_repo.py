@@ -171,12 +171,24 @@ except Exception:  # pragma: no cover
 # ────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_SANITIZER = os.environ.get("SHERPA_SANITIZER", "address")
+
+# UBSan runtime options for fuzzing runs. UBSan flags *undefined behavior* per
+# the C standard, but many categories (e.g. pointer-overflow — the pervasive
+# `(char*)0 + n` pointer-as-accumulator idiom) are NOT memory-safety bugs: they
+# fire on nearly every input, would masquerade as crashes, and abort the fuzzer
+# before the corpus can grow. We therefore run UBSan NON-FATAL by default
+# (halt_on_error=0) so it stays advisory while ASan remains the hard
+# memory-safety gate. Set SHERPA_UBSAN_HALT=1 to restore aborting UBSan.
+_UBSAN_RUN_OPTIONS = "print_stacktrace=1:halt_on_error=" + (
+    "1" if os.environ.get("SHERPA_UBSAN_HALT", "0").strip().lower() in ("1", "true", "yes", "on") else "0"
+)
+
 # Supported sanitizer configurations for multi-sanitizer fuzzing
 SANITIZER_CONFIGS: Dict[str, Dict[str, str]] = {
     "address": {
-        "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=trace-pc-guard,inline-8bit-counters",
+        "compile_flags": "-fsanitize=address,undefined,fuzzer -fsanitize-coverage=inline-8bit-counters,pc-table",
         "asan_options": "exitcode=76:detect_leaks=0",
-        "ubsan_options": "print_stacktrace=1",
+        "ubsan_options": _UBSAN_RUN_OPTIONS,
     },
     "memory": {
         "compile_flags": "-fsanitize=memory,fuzzer -fno-omit-frame-pointer -fPIE",
@@ -289,6 +301,10 @@ FMT_SEED_FAMILIES = {
 # Each entry is a raw byte-string that libFuzzer will use as a mutation hint.
 PROFILE_DICTIONARY_TOKENS: Dict[str, List[str]] = {
     "parser-structure": [
+        # key/value + table syntax shared by TOML/INI/properties (=) and the
+        # JSON/YAML family (: { }). '=' was missing, which starved TOML-style
+        # `key = value` documents.
+        '"="', '" = "', '"[["', '"]]"', '"."', '"\\"\\"\\""', "\"'''\"",
         '":"', '"{"', '"}"', '"["', '"]"', '","', '"true"', '"false"', '"null"',
         '"---"', '"..."', '": "', '"- "', '"\\n"', '"\\t"',
     ],
@@ -341,6 +357,37 @@ _C_ESCAPE_TO_HEX: Dict[str, str] = {
     r"\f": r"\x0c",
     r"\v": r"\x0b",
 }
+
+
+_FOPEN_MODES = {
+    "r", "w", "a", "rb", "wb", "ab", "r+", "w+", "a+", "rb+", "wb+", "ab+",
+    "r+b", "w+b", "a+b", "rt", "wt", "at", "rbe", "wbe",
+}
+
+
+def _is_scaffold_dict_literal(inner: str) -> bool:
+    """True for harness *scaffold* string literals that are noise for the target
+    format (header/source filenames, temp paths, fopen modes, lone format
+    specifiers). These pollute the dictionary — e.g. a TOML harness scrapes
+    "toml.h", "/tmp/tomlfuzz_XXXXXX", "rb" — and crowd out real grammar tokens,
+    so the fuzzer never gets past the 'reject invalid input' path."""
+    s = inner.strip()
+    if not s:
+        return True
+    low = s.lower()
+    # include/source filenames
+    if re.search(r"\.(h|hpp|hh|hxx|c|cc|cpp|cxx|inc)$", low):
+        return True
+    # paths / temp templates
+    if "/" in s or "\\" in s or "xxxxxx" in low:
+        return True
+    # libc fopen modes
+    if low in _FOPEN_MODES:
+        return True
+    # a lone printf/format specifier
+    if re.fullmatch(r"%[-+ #0-9.]*[sdiouxXeEfgGpcn%]", s):
+        return True
+    return False
 
 
 def _normalize_dict_token(tok: str) -> str:
@@ -692,6 +739,171 @@ _RE_SANITIZER_SUMMARY = re.compile(
 )
 _RE_RUNTIME_ERROR = re.compile(r"\bruntime error:\b", re.IGNORECASE)
 _RE_LF_DEADLY_SIGNAL = re.compile(r"ERROR: libFuzzer: deadly signal")
+
+# ── Sanitizer severity classification ───────────────────────────────────────
+# Genuine memory-safety / dangerous categories (ASan + the dangerous UBSan
+# checks). These are real, blocking crashes worth triaging/reporting.
+_RE_MEMORY_SAFETY = re.compile(
+    r"(heap-buffer-overflow|stack-buffer-overflow|global-buffer-overflow"
+    r"|heap-use-after-free|use-after-free|use-after-poison|double-free"
+    r"|stack-use-after-(?:return|scope)|alloc-dealloc-mismatch|attempting free"
+    r"|negative-size-param|dynamic-stack-buffer-overflow|SEGV|segmentation"
+    r"|deadly signal|wild pointer"
+    # dangerous UBSan: actual null *dereference*, OOB indexing, bad shifts
+    r"|member access within null pointer|member call on null pointer"
+    r"|load of null pointer|store to null pointer|reference binding to null"
+    r"|index \d+ out of bounds|out of bounds for type"
+    r"|shift exponent|left shift of negative)",
+    re.IGNORECASE,
+)
+# UBSan categories that are undefined behavior per the C standard but are NOT
+# memory-safety bugs: pervasive in real C, fire on nearly every input, and would
+# otherwise masquerade as crashes and block fuzzing. The headline example is
+# pointer-overflow — `(char*)0 + n`, the pointer-as-accumulator idiom used by
+# json-parser, tomlc99, etc. Note: applying an *offset* to a null pointer is
+# benign here; *dereferencing* null is caught by _RE_MEMORY_SAFETY above.
+_RE_UB_BENIGN = re.compile(
+    r"runtime error:\s*[^\n]*?("
+    r"offset[^\n]*\bnull pointer\b"            # applying (non-)zero offset to null pointer
+    r"|pointer index expression[^\n]*overflow"  # pointer-overflow arithmetic
+    r"|misaligned address|load of misaligned"
+    r"|not a valid value for type '(?:bool|_Bool)'"
+    r"|outside the range of representable values"  # float/implicit conversion
+    r"|implicit conversion[^\n]*chang)",
+    re.IGNORECASE,
+)
+# A non-UBSan sanitizer error line (ASan/MSan/TSan/Leak) — used to ensure a
+# "benign UB" verdict isn't masking a co-occurring real sanitizer crash.
+_RE_NON_UB_SANITIZER = re.compile(
+    r"==[0-9]+==ERROR: (Address|Memory|Thread|Leak)Sanitizer", re.IGNORECASE
+)
+
+
+def classify_sanitizer_severity(log: str) -> str:
+    """Classify sanitizer output by severity for triage/gating.
+
+    Returns:
+      - ``"memory_safety"``: a real, blocking crash (ASan overflow/UAF/SEGV,
+        null deref, OOB, bad shift) — always treated as a crash.
+      - ``"benign_ub"``: the ONLY sanitizer evidence is benign undefined
+        behavior (e.g. pointer-overflow / offset-to-null) — advisory, should
+        not block fuzzing or be reported as a vulnerability.
+      - ``"other"``: a sanitizer report we don't positively recognize as benign
+        — treated conservatively as a real crash.
+      - ``"none"``: no sanitizer evidence.
+    """
+    if not log:
+        return "none"
+    if _RE_MEMORY_SAFETY.search(log):
+        return "memory_safety"
+    has_ub = bool(_RE_RUNTIME_ERROR.search(log)) or "UndefinedBehaviorSanitizer" in log
+    if has_ub and _RE_UB_BENIGN.search(log) and not _RE_NON_UB_SANITIZER.search(log):
+        return "benign_ub"
+    if _RE_SANITIZER_ERROR.search(log) or _RE_SANITIZER_SUMMARY.search(log) or _RE_RUNTIME_ERROR.search(log):
+        return "other"
+    return "none"
+
+
+def _benign_ub_nonfatal() -> bool:
+    """Whether a benign-UB-only sanitizer report should be treated as a
+    non-blocking advisory finding rather than a crash. On by default; set
+    SHERPA_BENIGN_UB_NONFATAL=0 to treat all UBSan reports as crashes."""
+    return _env_bool("SHERPA_BENIGN_UB_NONFATAL", True)
+
+
+# ── Harness-validity gate (synthesis hardening, Phase B) ─────────────────────
+# A correct harness must not crash on KNOWN-VALID input. When it does, we must
+# tell apart two cases so we never discard a real library bug:
+#   * harness-origin  — the fault is in the generated harness code itself
+#     (e.g. an unbounded tree-walker `dump()` in <name>_fuzz.c, or a buffer the
+#     harness's reader callback leaks). These should be repaired, not reported.
+#   * library-origin  — the crash is in the target library reached via a minimal
+#     harness on valid input (e.g. json.h:1925, utf8.h:550). These are REAL
+#     findings and must be preserved.
+# We classify by the first user-code stack frame. The reliable signal is the
+# crashing FUNCTION: if it is one the harness source DEFINES, the crash is the
+# harness's own fault; otherwise it is library code (a real bug) — even when that
+# library function is compiled into the harness translation unit and the frame is
+# therefore attributed to the `*_fuzz.c` file (the single-header-library case,
+# e.g. tinyobj parseLine). We fall back to the file-name pattern only when the
+# harness function list is unavailable. A harness-caused fault that executes
+# inside a library function (e.g. invalid-free in mpc.c) reads as library-origin
+# and is left to LLM crash-triage rather than risk dropping a real bug.
+_RE_STACK_FRAME = re.compile(
+    r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][\w:]*)"
+    r"(?:\s+([^\s():]+\.(?:c|cc|cpp|cxx|h|hh|hpp)))?",
+    re.IGNORECASE,
+)
+_HARNESS_SRC_SUFFIXES = ("_fuzz.c", "_fuzz.cc", "_fuzz.cpp", "_fuzz.cxx")
+# Matches C/C++ function DEFINITIONS, to learn which functions a harness source
+# actually defines.
+_RE_C_FUNC_DEF = re.compile(
+    r"^[A-Za-z_][\w\s\*\(\),]*?\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*\{", re.MULTILINE
+)
+
+
+def crash_first_user_frame(log: str) -> tuple[str, str]:
+    """(function, file-basename) of the first user-code frame on the sanitizer
+    stack, skipping sanitizer/libfuzzer/libc internals. Either may be ""."""
+    for m in _RE_STACK_FRAME.finditer(log or ""):
+        func = m.group(1) or ""
+        path = m.group(2) or ""
+        base = path.rsplit("/", 1)[-1] if path else ""
+        if func.startswith(("__asan", "__ubsan", "__lsan", "__sanitizer",
+                            "__interceptor")) or func.startswith("operator"):
+            continue
+        # Allocator interceptors carry no user source frame — skip to the first
+        # real caller (e.g. a leak's allocation site).
+        if func in ("malloc", "calloc", "realloc", "free", "aligned_alloc",
+                    "posix_memalign", "memcpy", "memmove", "memset", "strdup"):
+            continue
+        if base == "libc.so" or "libc.so" in path:
+            continue
+        if not func and not base:
+            continue
+        return func, base
+    return "", ""
+
+
+def crash_first_user_frame_file(log: str) -> str:
+    """Basename of the first user-code source file on the sanitizer stack."""
+    return crash_first_user_frame(log)[1]
+
+
+def harness_function_names(source: str) -> set[str]:
+    """Function names DEFINED in a harness source file (best-effort, regex)."""
+    names = {"LLVMFuzzerTestOneInput"}
+    for m in _RE_C_FUNC_DEF.finditer(source or ""):
+        nm = m.group(1)
+        if nm and nm not in ("if", "for", "while", "switch", "return", "sizeof"):
+            names.add(nm)
+    return names
+
+
+def crash_is_harness_origin(
+    log: str,
+    harness_funcs: tuple[str, ...] | set[str] = (),
+    harness_basenames: tuple[str, ...] = (),
+) -> bool:
+    """True when the crash is the harness's OWN fault, not a library bug on valid
+    input. Prefer the crashing-function signal (does the harness source define
+    it?); fall back to the file-name pattern only when no function list is given."""
+    func, base = crash_first_user_frame(log)
+    if not func and not base:
+        return False
+    if harness_funcs:
+        return func in set(harness_funcs)
+    if base in harness_basenames:
+        return True
+    return base.endswith(_HARNESS_SRC_SUFFIXES)
+
+
+def _harness_validity_gate_enabled() -> bool:
+    """Phase B gate: replay known-valid seeds through a freshly built harness and,
+    if it crashes from its OWN code, skip the doomed fuzz run and flag it for
+    repair instead of wasting the budget self-crashing. On by default; set
+    SHERPA_HARNESS_VALIDITY_GATE=0 to disable."""
+    return _env_bool("SHERPA_HARNESS_VALIDITY_GATE", True)
 
 
 def _default_diff_excludes() -> set[str]:
@@ -1577,6 +1789,9 @@ def extract_crash_stack_signature(log: str, top_n: int = 3) -> Dict[str, str]:
         "crash_type": crash_type,
         "stack_signature": stack_signature,
         "top_frames": top_frames,
+        # Severity lets triage separate real memory-safety bugs from benign
+        # undefined behavior (advisory) so the latter isn't reported as a vuln.
+        "severity": classify_sanitizer_severity(log),
     }
 
 
@@ -2466,6 +2681,19 @@ class NonOssFuzzHarnessGenerator:
             vcpkg_root="$repo_root/{VCPKG_REPO_DIR}"
             vcpkg_installed="$repo_root/{VCPKG_INSTALLED_DIR}"
             skip_ports="${{SHERPA_VCPKG_SKIP_PORTS:-zlib}}"
+            # When vcpkg cannot be provisioned (e.g. native executor without a
+            # baked toolchain, or transient network), declaring ports must not
+            # hard-fail the whole stage: degrade to best-effort and let the
+            # project's own build run. A genuinely-required dependency then
+            # surfaces as an accurate build error instead of a misleading
+            # "vcpkg unavailable". Set SHERPA_VCPKG_STRICT=1 to restore the old
+            # hard-fail behavior.
+            vcpkg_strict="${{SHERPA_VCPKG_STRICT:-0}}"
+            _vcpkg_degrade() {{
+                echo "[warn] ({log_prefix}) $1 -- continuing without vcpkg (best-effort); the project build will surface a real error if these ports are genuinely required"
+                unset CMAKE_TOOLCHAIN_FILE VCPKG_ROOT VCPKG_DEFAULT_TRIPLET VCPKG_INSTALLED_DIR 2>/dev/null || true
+                pkgs=""
+            }}
 
             pkgs=""
             if [ -f "$dep_file" ]; then
@@ -2651,8 +2879,11 @@ EOF
                 fi
 
                 if [ ! -x "$vcpkg_root/vcpkg" ]; then
-                    echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
-                    exit 86
+                    if [ "$vcpkg_strict" = "1" ]; then
+                        echo "[error] ({log_prefix}) vcpkg unavailable while required ports are declared in $dep_file"
+                        exit 86
+                    fi
+                    _vcpkg_degrade "vcpkg unavailable for declared ports:$pkgs"
                 fi
 
                 missing_pkgs=""
@@ -2686,8 +2917,12 @@ EOF
                             continue
                         fi
                         rm -f "$install_log"
-                        echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
-                        exit 87
+                        if [ "$vcpkg_strict" = "1" ]; then
+                            echo "[error] ({log_prefix}) vcpkg install failed for:$missing_pkgs"
+                            exit 87
+                        fi
+                        _vcpkg_degrade "vcpkg install failed for:$missing_pkgs"
+                        break
                     done
                 fi
             fi
@@ -2707,8 +2942,11 @@ EOF
             fi
 
             if [ -n "$pkgs" ] && [ ! -f "$vcpkg_root/scripts/buildsystems/vcpkg.cmake" ]; then
-                echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
-                exit 88
+                if [ "$vcpkg_strict" = "1" ]; then
+                    echo "[error] ({log_prefix}) missing vcpkg toolchain file: $vcpkg_root/scripts/buildsystems/vcpkg.cmake"
+                    exit 88
+                fi
+                _vcpkg_degrade "missing vcpkg toolchain file"
             fi
             """
         ).strip()
@@ -2772,6 +3010,7 @@ EOF
         crash_evidence = "none"
         run_error_kind = ""
         seed_gen_failed_fuzzers: List[str] = []
+        harness_invalid_fuzzers: List[str] = []
         previous_seed_timeout = self.seed_generation_timeout_sec
         total_seed_budget = (
             int(previous_seed_timeout)
@@ -2793,7 +3032,21 @@ EOF
                     print(f"[!] Seed generation failed ({fuzzer_name}): {e}")
                     seed_gen_failed_fuzzers.append(fuzzer_name)
 
+                if _harness_validity_gate_enabled():
+                    v = self.assess_harness_validity(bin_path)
+                    if not v.get("valid", True):
+                        print(
+                            f"[harness-gate] {fuzzer_name} crashes on VALID seed from its own "
+                            f"code (severity={v.get('severity')}, frame={v.get('frame_file')}); "
+                            f"skipping fuzz run and flagging for repair."
+                        )
+                        self._record_harness_validity_defect(fuzzer_name, v)
+                        harness_invalid_fuzzers.append(fuzzer_name)
+                        continue
+
                 print(f"[*] Pass E: Running {fuzzer_name} for ~{self.time_budget}s …")
+                # The harness-validity gate runs inside _run_fuzzer (single
+                # chokepoint shared with the LangGraph run node).
                 run = self._run_fuzzer(bin_path)
                 run_rc = run.rc
                 crash_evidence = run.crash_evidence
@@ -2816,6 +3069,13 @@ EOF
                     print(f"[*] No artifacts produced by {fuzzer_name} in the time budget.")
         finally:
             self.seed_generation_timeout_sec = previous_seed_timeout
+
+        if harness_invalid_fuzzers:
+            print(
+                "[harness-gate] harnesses skipped as defective (crash on valid input "
+                f"from harness code): {', '.join(harness_invalid_fuzzers)} — repair notes "
+                f"under {self.fuzz_out_dir}/harness_validity_*.md"
+            )
 
         print("[*] Workflow complete.")
         self._write_run_summary(
@@ -3903,8 +4163,35 @@ EOF
                 return True
             return False
 
-        for rel_root in search_roots:
-            root = self.repo_root / rel_root
+        # Static roots + dynamically-discovered sample dirs. Many repos use
+        # non-standard names (tomlc99: test1/test2; others: t/, cases/,
+        # fixtures/) that the fixed list misses, so also scan the top two levels
+        # for any directory whose name looks like a test/sample/fixture set.
+        _seed_dir_name_re = re.compile(
+            r"(test|tests?\d*|example|examples|sample|samples|fixture|fixtures|"
+            r"corpus|cases|inputs?|testdata|regression|golden|data)",
+            re.IGNORECASE,
+        )
+        discovered_roots: list[Path] = []
+        try:
+            for lvl1 in self.repo_root.iterdir():
+                if not lvl1.is_dir() or lvl1.name.startswith("."):
+                    continue
+                if _seed_dir_name_re.fullmatch(lvl1.name) or _seed_dir_name_re.match(lvl1.name):
+                    discovered_roots.append(lvl1)
+                else:
+                    for lvl2 in lvl1.iterdir():
+                        if lvl2.is_dir() and not lvl2.name.startswith(".") and _seed_dir_name_re.match(lvl2.name):
+                            discovered_roots.append(lvl2)
+        except Exception:
+            pass
+        effective_roots = [self.repo_root / r for r in search_roots] + discovered_roots
+        seen_roots: set[str] = set()
+        for root in effective_roots:
+            rp = str(root)
+            if rp in seen_roots:
+                continue
+            seen_roots.add(rp)
             if not root.is_dir():
                 continue
             for path in root.rglob("*"):
@@ -5325,8 +5612,13 @@ EOF
                     # Extract C string literals (simple heuristic)
                     for m in re.finditer(r'"([^"\\]{1,64}(?:\\.[^"\\]{0,64})*)"', content):
                         literal = m.group(0)
-                        # Skip very common/useless strings
-                        if len(m.group(1)) >= 2 and literal not in {'"\\n"', '"\\0"', '""'}:
+                        inner = m.group(1)
+                        # Skip very common/useless strings and harness scaffold
+                        # noise (header names, temp paths, fopen modes, …) that
+                        # otherwise dominate the dictionary and starve real
+                        # grammar tokens.
+                        if len(inner) >= 2 and literal not in {'"\\n"', '"\\0"', '""'} \
+                                and not _is_scaffold_dict_literal(inner):
                             harness_tokens.append(_normalize_dict_token(literal))
                 except Exception:
                     pass
@@ -5353,8 +5645,11 @@ EOF
         if os.environ.get("SHERPA_VULN_HUNTING_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}:
             vuln_tokens = list(VULN_DICTIONARY_TOKENS.get(seed_profile or "generic", []))
 
-        # Merge in priority order
-        tokens: list[str] = harness_tokens + vuln_tokens + existing_dict_tokens + profile_tokens
+        # Merge in priority order. Curated grammar/format tokens (profile + vuln)
+        # come FIRST — they are the reliable target-format syntax that lets the
+        # fuzzer get past input validation. Filtered harness literals and any
+        # pre-existing dict tokens follow as project-specific fill-up.
+        tokens: list[str] = profile_tokens + vuln_tokens + harness_tokens + existing_dict_tokens
 
         # Deduplicate while preserving order
         seen: set[str] = set()
@@ -5408,7 +5703,7 @@ EOF
         env = os.environ.copy()
         env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         cmd = [str(bin_path), "-merge=1", str(merged_dir), str(corpus_dir)]
@@ -5476,7 +5771,7 @@ EOF
             env = os.environ.copy()
             env["LLVM_PROFILE_FILE"] = str(self.fuzz_dir / "coverage.profraw")
             env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-            env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+            env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
             env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
             # Sample corpus files for coverage profiling.  Prefer the most
@@ -5732,7 +6027,7 @@ EOF
         env = os.environ.copy()
         env = self._compose_vcpkg_runtime_env(env)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         cmd = [
@@ -5787,6 +6082,111 @@ EOF
                   f"exec/s={result['execs_per_sec']}")
         return result
 
+    def _harness_source_basenames(self, bin_path: Path) -> tuple[str, ...]:
+        """Candidate harness source filenames for this binary (used to attribute
+        a crash to harness vs library code)."""
+        stem = bin_path.name
+        names = {
+            f"{stem}_fuzz.c", f"{stem}_fuzz.cc", f"{stem}_fuzz.cpp", f"{stem}_fuzz.cxx",
+            f"{stem}.c", f"{stem}.cc", f"{stem}.cpp", f"{stem}.cxx",
+        }
+        try:
+            for p in self.fuzz_dir.glob("*_fuzz.*"):
+                names.add(p.name)
+        except Exception:
+            pass
+        return tuple(names)
+
+    def _harness_defined_functions(self, bin_path: Path) -> set[str]:
+        """Functions DEFINED in this harness's source file(s) — so a library
+        function compiled into the harness TU (single-header libs) is not
+        mistaken for harness code when attributing a crash."""
+        funcs: set[str] = {"LLVMFuzzerTestOneInput"}
+        stem = bin_path.name
+        candidates = [self.fuzz_dir / f"{stem}_fuzz.{e}" for e in ("c", "cc", "cpp", "cxx")]
+        candidates += [self.fuzz_dir / f"{stem}.{e}" for e in ("c", "cc", "cpp", "cxx")]
+        for src in candidates:
+            try:
+                if src.is_file():
+                    funcs |= harness_function_names(src.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue
+        return funcs
+
+    def assess_harness_validity(self, bin_path: Path) -> Dict[str, object]:
+        """Phase B validity gate: replay the KNOWN-VALID seed corpus through the
+        freshly built harness. If it crashes from its OWN code (harness-origin),
+        the harness is defective and the fuzz run would only self-crash; return
+        valid=False so the caller can skip it and flag it for repair. A crash in
+        LIBRARY code on valid input is a real finding — return valid=True so the
+        normal run still discovers/reports it. Best-effort; never raises."""
+        verdict: Dict[str, object] = {
+            "valid": True, "harness_origin": False, "severity": "none",
+            "frame_file": "", "seeds": 0, "log_tail": "",
+        }
+        try:
+            corpus_dir = self.fuzz_corpus_dir / bin_path.name
+            seeds = [p for p in corpus_dir.glob("*") if p.is_file()] if corpus_dir.is_dir() else []
+            verdict["seeds"] = len(seeds)
+            if not seeds:
+                return verdict  # no valid seeds to assess against → don't gate
+
+            env = os.environ.copy()
+            env = self._compose_vcpkg_runtime_env(env)
+            # Detect leaks here (unlike the fuzz run) so harness buffer leaks are
+            # caught; keep UBSan non-fatal so benign UB doesn't false-flag.
+            env["ASAN_OPTIONS"] = "exitcode=76:detect_leaks=1"
+            env["UBSAN_OPTIONS"] = _UBSAN_RUN_OPTIONS
+            env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
+
+            # -runs=0 replays the corpus once without fuzzing.
+            cmd = [str(bin_path), "-runs=0", str(corpus_dir)]
+            rc, out, err = self._run_cmd(cmd, cwd=self.repo_root, env=env, timeout=90)
+            log = (str(out or "") + "\n" + str(err or "")).replace("\r", "\n")
+            severity = classify_sanitizer_severity(log)
+            verdict["severity"] = severity
+            if severity in ("none", "benign_ub"):
+                return verdict  # clean (or only benign UB) on valid input → valid
+
+            base = crash_first_user_frame_file(log)
+            verdict["frame_file"] = base
+            verdict["log_tail"] = log[-4000:]
+            if crash_is_harness_origin(
+                log,
+                self._harness_defined_functions(bin_path),
+                self._harness_source_basenames(bin_path),
+            ):
+                verdict["valid"] = False
+                verdict["harness_origin"] = True
+            # else: crash is in library code on valid input → real bug → valid=True
+            return verdict
+        except Exception as exc:
+            verdict["severity"] = f"assess_error:{exc}"
+            return verdict
+
+    def _record_harness_validity_defect(self, fuzzer_name: str, verdict: Dict[str, object]) -> None:
+        """Write a repair-feedback note so the next plan/synthesize round knows the
+        harness is defective and why."""
+        try:
+            self.fuzz_out_dir.mkdir(parents=True, exist_ok=True)
+            note = self.fuzz_out_dir / f"harness_validity_{fuzzer_name}.md"
+            note.write_text(
+                f"# Harness validity gate FAILED — {fuzzer_name}\n\n"
+                f"The harness crashed on KNOWN-VALID seed input from its OWN code "
+                f"(harness-origin), so it is defective and was NOT fuzzed.\n\n"
+                f"- severity: {verdict.get('severity')}\n"
+                f"- crashing frame file: {verdict.get('frame_file')}\n"
+                f"- seeds replayed: {verdict.get('seeds')}\n\n"
+                f"Fix the harness (correct API setup/teardown — e.g. result-union "
+                f"branch, allocator pairing, callback-buffer ownership, bounds in "
+                f"any harness-side walker) so it does not crash on valid input.\n\n"
+                f"## sanitizer log (tail)\n```\n{verdict.get('log_tail') or ''}\n```\n",
+                encoding="utf-8",
+            )
+            print(f"[harness-gate] wrote repair note: {note}")
+        except Exception as exc:
+            print(f"[harness-gate] failed to write repair note: {exc}")
+
     # ────────────────────────────────────────────────────────────────────
     # Step E – Run fuzzer
     # ────────────────────────────────────────────────────────────────────
@@ -5796,6 +6196,27 @@ EOF
         Run a single local fuzzer binary with sane defaults.
         Returns a structured result including artifacts and crash evidence.
         """
+        # Phase B harness-validity gate (single chokepoint for both the CLI Pass-E
+        # loop and the LangGraph run node, which both call _run_fuzzer): if the
+        # harness crashes on KNOWN-VALID seeds from its OWN code, skip the doomed
+        # run and flag it for repair. A library-origin crash on valid input is a
+        # real bug and is NOT gated (assess_harness_validity returns valid=True).
+        if _harness_validity_gate_enabled():
+            v = self.assess_harness_validity(bin_path)
+            if not v.get("valid", True):
+                print(
+                    f"[harness-gate] {bin_path.name} crashes on VALID seed from its own "
+                    f"code (severity={v.get('severity')}, frame={v.get('frame_file')}); "
+                    f"skipping fuzz run and flagging for repair."
+                )
+                self._record_harness_validity_defect(bin_path.name, v)
+                return FuzzerRunResult(
+                    rc=0, new_artifacts=[], crash_found=False,
+                    crash_evidence="harness_invalid",
+                    first_artifact="", log_tail=str(v.get("log_tail") or "")[-2000:],
+                    error="", run_error_kind="harness_invalid_on_valid_seed",
+                )
+
         bin_dir = bin_path.parent
         artifacts_dir = bin_dir / ARTIFACT_PREFIX
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -5809,7 +6230,7 @@ EOF
                 env_key = key.upper()  # e.g. asan_options -> ASAN_OPTIONS
                 env.setdefault(env_key, val)
         env.setdefault("ASAN_OPTIONS", "exitcode=76:detect_leaks=0")
-        env.setdefault("UBSAN_OPTIONS", "print_stacktrace=1")
+        env.setdefault("UBSAN_OPTIONS", _UBSAN_RUN_OPTIONS)
         env.setdefault("LLVM_SYMBOLIZER_PATH", which("llvm-symbolizer") or "")
 
         corpus_dir = self.fuzz_corpus_dir / bin_path.name
@@ -5930,6 +6351,13 @@ EOF
             f"-rss_limit_mb={self.rss_limit_mb}",
             f"-timeout={_run_libfuzzer_timeout_sec()}",
         ]
+        # Input-to-state (poor-man's RedQueen): lets libFuzzer discover magic
+        # bytes / keyword comparisons (e.g. parser syntax) by observing compare
+        # operands, which is critical for getting past input validation when the
+        # seed corpus is weak. Disable with SHERPA_LIBFUZZER_VALUE_PROFILE=0.
+        if (os.environ.get("SHERPA_LIBFUZZER_VALUE_PROFILE", "1").strip().lower()
+                not in {"0", "false", "no", "off"}):
+            cmd.append("-use_value_profile=1")
 
         # Adaptive max_len based on seed_profile
         seed_profile = str(self.last_seed_profile_by_fuzzer.get(bin_path.name) or "generic")
@@ -6051,6 +6479,13 @@ EOF
             if _RE_ASAN_SHADOW_FAIL.search(text):
                 return False
             if _RE_FAILED_MMAP.search(text):
+                return False
+            # Benign undefined behavior (e.g. pointer-overflow / offset-to-null —
+            # the pointer-as-accumulator idiom) is advisory, not a memory-safety
+            # crash: it fires on nearly every input and must not block fuzzing or
+            # be reported as a vulnerability. Real ASan/UAF/OOB/null-deref still
+            # take precedence via classify_sanitizer_severity().
+            if _benign_ub_nonfatal() and classify_sanitizer_severity(text) == "benign_ub":
                 return False
             if _RE_SANITIZER_ERROR.search(text):
                 return True

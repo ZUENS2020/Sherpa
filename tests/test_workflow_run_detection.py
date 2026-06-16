@@ -1444,7 +1444,10 @@ def test_route_after_run_routes_fatal_error_to_plan():
     assert route == "plan"
 
 
-def test_route_after_coverage_analysis_routes_to_improve_harness():
+def test_route_after_coverage_analysis_routes_to_improve_harness(monkeypatch):
+    # With vuln-hunting enabled (default) coverage_should_improve routes through
+    # the vuln-hunt stage first; this test pins the non-hunt branch.
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "0")
     route = workflow_graph._route_after_coverage_analysis_state(
         {"failed": False, "last_error": "", "coverage_should_improve": True}
     )
@@ -1515,7 +1518,10 @@ def test_route_after_improve_harness_stops_on_ineffective_replan_in_legacy_mode(
     assert route == "stop"
 
 
-def test_route_after_improve_harness_routes_to_build_for_in_place_improve():
+def test_route_after_improve_harness_routes_to_build_for_in_place_improve(monkeypatch):
+    # With vuln-hunting enabled (default) an in_place improve re-enters vuln-hunt;
+    # this test pins the non-hunt branch where in_place goes straight to build.
+    monkeypatch.setenv("SHERPA_VULN_HUNTING_ENABLED", "0")
     route = workflow_graph._route_after_improve_harness_state(
         {
             "failed": False,
@@ -2605,10 +2611,13 @@ def test_build_selected_targets_doc_risk_ranks_above_reference_score(
 
     selected = workflow_graph._build_selected_targets_doc(tmp_path)
     assert len(selected) == 2
+    # Ranking is driven by the risk dimensions, not by the reference signals:
+    # low_risk_high_reference has far deeper depth/coverage_gap yet still loses.
     assert selected[0]["target"] == "high_risk_low_reference"
-    # Keep score as reference-only output: it may still be lower than the
-    # reference-heavy target, but must not drive the ranking in risk-first mode.
-    assert float(selected[0]["score_total"]) <= float(selected[1]["score_total"])
+    assert float(selected[0]["vuln_likelihood"]) > float(selected[1]["vuln_likelihood"])
+    # risk-first refactor: score_total is now the risk-weighted score, so the
+    # higher-risk target also carries the higher score_total.
+    assert float(selected[0]["score_total"]) >= float(selected[1]["score_total"])
     assert selected[0]["security_priority_mode"] is True
 
 

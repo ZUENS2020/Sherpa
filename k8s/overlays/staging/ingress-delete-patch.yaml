@@ -1,0 +1,8 @@
+# Staging is an internal verification environment with no external URL.
+# Remove the base Ingress entirely; access is via kubectl exec / port-forward
+# (the same path the vuln-hunt monitoring tooling already uses).
+$patch: delete
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sherpa

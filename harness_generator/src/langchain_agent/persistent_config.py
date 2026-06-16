@@ -131,7 +131,7 @@ class WebPersistentConfig(BaseModel):
     opencode_providers: list[OpencodeProviderConfig] = Field(default_factory=_default_opencode_providers)
 
     # Fuzz defaults
-    fuzz_time_budget: int = 900
+    fuzz_time_budget: int = 1800
     # Per-round cap (seconds) when both total/run budgets are unlimited (0).
     # 0 means fully unlimited.
     sherpa_run_unlimited_round_budget_sec: int = 7200
