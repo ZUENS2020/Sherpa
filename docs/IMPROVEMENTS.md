@@ -221,6 +221,19 @@ stop wasting harness slots and fuzz budget.
   in-contract memory-safety bug correctly (`upstream_bug`). Materials archived locally at
   `~/Downloads/jsonh-oob-read-2026-06-14/`.
 
+### json.h — heap-buffer-overflow READ in `json_parse_object()` (json.h:~1698)  — DUPLICATE
+- Real CWE-125 OOB read: with `allow_global_object` (also implied by
+  `allow_simplified_json`), `json_parse_object()` reads `src[state->offset]` without
+  checking `offset < size` when `is_global_object` is true (whitespace-only / EOF
+  input → offset == size). Same two-pass-asymmetry class as the json_parse_number
+  one (the sizing counterpart `json_get_object_size()` guards via
+  `json_skip_all_skippables()`; the data pass doesn't).
+- **DUPLICATE** — this is matteoalba's "Bug 1" already reported in the
+  `sheredom/json.h#113` comment thread (json_parse_object, same global-object path).
+  **Not disclosed by us.**
+- Value: re-confirmed the Phase B gate did NOT suppress it (no validity note,
+  `upstream_bug`, cov 941) — library-origin crash on valid input preserved.
+
 ### json-parser — `pointer-overflow` UBSan at json.c:437
 - Benign UB (pointer-as-accumulator idiom); **not a vulnerability** → informed S-463. Not reported.
 
