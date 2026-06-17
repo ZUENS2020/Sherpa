@@ -163,6 +163,36 @@ stop wasting harness slots and fuzz budget.
   Fixed by classifying on the crashing **function** (is it harness-defined?) with
   the file pattern only as fallback. See **S-473**.
 
+### [O-7] Triage misses *cross-call state-reuse* harness misuse → false `upstream_bug`  — OPEN
+- jsmn (prod, job `f18c6c8e`): triage labeled `upstream_bug`/`real_bug` conf 0.85 a crash
+  that is pure **harness misuse**. The crash is in `jsmn_parse` cleanup loop (jsmn.h:446,
+  `for (i = parser->toknext - 1; i >= 0; i--)`), but it only fires because the harness reuses
+  one `jsmn_parser` across calls **without `jsmn_init` between them and shrinks the buffer**:
+  line 317 parses into `tokens[MAX]` (toknext→3, pos→len), then line 319 calls `jsmn_parse`
+  again on `tiny_buf[1]` with the *same* parser → stale `toknext=3`/`pos=len` carried over →
+  cleanup loop reads `tiny_buf[1]/[2]` OOB. jsmn's contract requires `jsmn_init` per independent
+  parse; the documented re-call-after-NOMEM pattern only ever *grows* the buffer, never shrinks.
+- The triage reasoning even *quoted* the cross-call carry-over ("toknext carries stale value
+  from prior call when parser not re-initialized") yet still called it a library bug. S-465
+  contract-aware triage only models single-call preconditions (NUL-term, length, struct init);
+  it has no notion of **multi-call object lifecycle** (init-before-reuse, monotonic buffer size).
+- Fix: extend contract model with stateful-object rules — if a crash depends on reusing a
+  handle across calls without the documented reset, or on a buffer that shrank vs. a prior call
+  with the same handle, classify as `harness_bug`, not `upstream_bug`. Root cause is also H-6
+  (synthesize emits contract-violating call sequences). See findings log (jsmn cross-call).
+
+### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
+- inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
+  (harness passed `length` > buffer to `ini_parse_string_length`; `ini_reader_string` honors
+  `num_left`, so the library is correct) was re-found for **17+ rounds** (pod stuck at
+  `vuln-hunt-146`). The agent's own log: "harness_bug triage has been stable for 8+ rounds
+  (10–17)" — yet the loop kept cycling `vuln-hunt → plan → … → triage(harness_bug) → plan`
+  instead of converging. Burned a node slot with zero useful output until manually stopped.
+- Distinct from O-1 (build death-loop): this is the *triage/improve* loop. Fix: when the same
+  crash signature is triaged `harness_bug` N rounds running, converge — deterministically
+  regenerate the harness to fix the misuse, or abandon the target — don't re-enter vuln-hunt.
+  Pairs with O-2 (remember harness_bug signatures so they start suppressed).
+
 ---
 
 ## 4. Validation / findings log
@@ -239,6 +269,16 @@ stop wasting harness slots and fuzz budget.
 
 ### jsmn — heap-overflow in harness `dump()`
 - Harness bug (see H-4), not a jsmn bug; triage correctly returned `harness_bug` (conf 1.0).
+
+### jsmn — stack-buffer-overflow READ in `jsmn_parse` cleanup loop (jsmn.h:446)  — FALSE POSITIVE
+- prod job `f18c6c8e`; triage **wrongly** labeled `upstream_bug`/`real_bug` conf 0.85.
+  Crash is **harness misuse**, not a jsmn bug: harness reuses one `jsmn_parser` across calls
+  without `jsmn_init` and shrinks the buffer (line 317 `tokens[MAX]` → line 319 `tiny_buf[1]`,
+  same parser) → stale `toknext=3`/`pos=len` carry over → cleanup loop `for(i=toknext-1;…)`
+  reads `tiny_buf[1]/[2]` OOB. jsmn requires `jsmn_init` per independent parse; the NOMEM
+  re-call pattern only grows the buffer. **Not disclosed** (correctly — no real bug).
+- Triage gap logged as **O-7** (no multi-call object-lifecycle contract); root harness defect
+  is **H-6**. Contrast: inih (**O-8**) got `harness_bug` right but looped 17 rounds.
 
 ---
 
