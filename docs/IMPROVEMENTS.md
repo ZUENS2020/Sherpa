@@ -297,3 +297,12 @@ stop wasting harness slots and fuzz budget.
   (panels per task: phase/cov/exec-s/round/vuln/crash/elapsed). `node index.js`.
 - **Liveness vs stuck:** `/api/tasks` `updated_at` ticking = alive; a stage quiet for >10min
   with no artifact writes is suspect (check the run pod's codex `elapsed=` and job log).
+- **Secret patch ≠ live pod:** `kubectl patch secret sherpa-llm` only updates the secret on
+  disk; a **long-lived pod keeps its env snapshot from start time**. The 24h prod `sherpa-web`
+  pod still had the old `LLM_key=sk-…53f0` after the patch (its `OPENAI_API_KEY` was fresh only
+  because an *earlier* patch coincided with a restart). After patching any secret, `kubectl
+  rollout restart deploy/sherpa-web` so the pod picks it up. Fuzz **Job** pods are unaffected —
+  they read the secret fresh at pod-creation via `envFrom: secretRef: sherpa-llm`, so the
+  blast radius of a stale web pod is only whatever the web pod calls directly (was 0 auth
+  errors here — heavy LLM work runs in Job pods). Verify with a live call from inside the pod:
+  `exec deploy/sherpa-web -- curl …$OPENAI_BASE_URL/chat/completions` → expect HTTP 200.
