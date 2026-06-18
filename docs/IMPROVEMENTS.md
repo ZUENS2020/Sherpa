@@ -181,6 +181,27 @@ stop wasting harness slots and fuzz budget.
   with the same handle, classify as `harness_bug`, not `upstream_bug`. Root cause is also H-6
   (synthesize emits contract-violating call sequences). See findings log (jsmn cross-call).
 
+### [O-9] Triage rationalizes away an *explicit documented precondition* → false `real_bug`  — OPEN
+- parson (prod, job `5dd39318` / child `8abac3a9`): triage+analysis labeled `upstream_bug` →
+  `real_bug` conf 0.85, `recommended_action=stop_report`, for a stack-buffer-overflow WRITE
+  (85 bytes into 64-byte `num_buf`) in `json_serialize_to_buffer_r` (parson.c:1270 → `parson_sprintf`
+  → `vsprintf`). But the public API carries an **explicit precondition in the header**: parson.h:85
+  `json_set_float_serialization_format` — *"Make sure it can't serialize to a string longer than
+  PARSON_NUM_BUF_SIZE."* (PARSON_NUM_BUF_SIZE=64). The harness
+  (`json_set_float_serialization_format_fuzz.c:8`) puts `"%f"` in its format array and serializes
+  arbitrary fuzz doubles; `%f` on ~2.35e76 yields 85 chars → violates the documented contract.
+  Default format `%1.17g` (≤25 B) is safe; the crash only exists because the harness chose a
+  format the docs forbid.
+- The triage *quoted* the precondition ("parson.h:85 documents precondition") then overrode it
+  with "`%f` is a standard format specifier a reasonable caller would use." That rationalization is
+  exactly the failure: a doc-stated caller obligation is a **hard contract**, not a suggestion —
+  out-of-contract input ≠ library bug. **Not disclosed.**
+- Distinct from O-7 (multi-call lifecycle): this is a *single-call* documented precondition on a
+  setter's argument. Fix: contract model must treat header-documented preconditions ("make sure /
+  caller must / must not exceed …") as binding; if the only way to reach the crash is to break a
+  documented precondition, classify `harness_bug`. Third instance of the doc-precondition class
+  (jsmn O-7 cross-call, inih O-8 length, parson O-9 format) — promote to a first-class triage gate.
+
 ### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
 - inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
   (harness passed `length` > buffer to `ini_parse_string_length`; `ini_reader_string` honors
@@ -279,6 +300,18 @@ stop wasting harness slots and fuzz budget.
   re-call pattern only grows the buffer. **Not disclosed** (correctly — no real bug).
 - Triage gap logged as **O-7** (no multi-call object-lifecycle contract); root harness defect
   is **H-6**. Contrast: inih (**O-8**) got `harness_bug` right but looped 17 rounds.
+
+### parson — stack-buffer-overflow WRITE in `parson_sprintf`/`vsprintf` (parson.c:298,1270)  — FALSE POSITIVE
+- prod job `5dd39318` (child `8abac3a9`); triage `upstream_bug` → analysis `real_bug` conf 0.85,
+  `recommended_action=stop_report`. ASan: WRITE size 85 into 64-byte `num_buf` (parson.c:1800).
+- **Harness misuse**, not a parson bug: harness set float format to `"%f"`
+  (`json_set_float_serialization_format_fuzz.c:8,46`) then serialized a large double
+  (~2.35e76 from input `23456789012E66`); `%f` produces 85 chars > PARSON_NUM_BUF_SIZE(64).
+  The header explicitly requires the caller to guarantee the format can't exceed the buffer
+  (parson.h:85); default `%1.17g` is safe (≤25 B). Crash is reachable only by violating the
+  documented precondition. **Not disclosed** (correctly — no real bug).
+- Triage gap logged as **O-9** (rationalized away a documented single-call precondition).
+  Same class as jsmn (**O-7**) and inih (**O-8**).
 
 ---
 
