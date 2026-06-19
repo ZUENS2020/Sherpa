@@ -121,10 +121,10 @@ run → crash-triage
 ## Session State
 
 <!-- SESSION-START -->
-last_session: 2026-05-19
-last_deploy: edbe3296a — socket.setdefaulttimeout hardening, AST limit 2000, embedding retry+128 batch
-last_local_change: 2026-05-19 — P1-P4 fixes (extended include heuristic, build timeout 1800s, analysis idle 300s, batch symbol discovery hotfix); not yet pushed
-active_jobs: none — wolfssl (real_bug: memcpy32 heap-bof), libwebp (complete)
+last_session: 2026-06-19
+last_deploy: 87cd22e1e (PR #476, Deploy Dev 27800395007 ✓) — O-9 stored-config contract-gate fix: contract_analysis surfaces harness-called API funcs + broadened length_bound regex + api_contract wired into crash-analysis node + synthesize/crash_analysis SKILL guards against fuzzing printf format args
+last_local_change: 2026-06-19 — O-9 four-layer triage fix (see last_deploy)
+active_jobs: parson (Dev 74765e87) — VALIDATION run for O-9 fix; 52M+ execs 0 crashes, format-string FP eliminated, no-crash coverage path
 <!-- SESSION-END -->
 
 ## Key Env Vars

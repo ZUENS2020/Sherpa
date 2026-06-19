@@ -181,7 +181,7 @@ stop wasting harness slots and fuzz budget.
   with the same handle, classify as `harness_bug`, not `upstream_bug`. Root cause is also H-6
   (synthesize emits contract-violating call sequences). See findings log (jsmn cross-call).
 
-### [O-9] Triage rationalizes away an *explicit documented precondition* → false `real_bug`  — OPEN
+### [O-9] Triage rationalizes away an *explicit documented precondition* → false `real_bug`  — RESOLVED (fix deployed + validated 2026-06-19)
 - parson (prod, job `5dd39318` / child `8abac3a9`): triage+analysis labeled `upstream_bug` →
   `real_bug` conf 0.85, `recommended_action=stop_report`, for a stack-buffer-overflow WRITE
   (85 bytes into 64-byte `num_buf`) in `json_serialize_to_buffer_r` (parson.c:1270 → `parson_sprintf`
@@ -240,6 +240,21 @@ stop wasting harness slots and fuzz budget.
   covered; (b) broaden `_PRECONDITION_PATTERNS` (add "longer/shorter than", "make sure", macro-glued
   size tokens); (c) wire the same `api_contract` block + rule into crash_analysis; (d) synthesize
   allowlist for printf-family format args.
+- **FIX (PR [#476](https://github.com/ZUENS2020/Sherpa/pull/476), merged to `dev`, Deploy Dev
+  27800395007 ✓ 2026-06-19):** all four layers landed.
+  (a) `contract_analysis.harness_called_functions(root, fuzzer_name)` surfaces the API the harness
+  itself calls (incl. off-stack stored-config setters); wired into both call sites via new
+  `fuzzer_name` param. (b) `length_bound` regex broadened — verified parson.h:85 now yields
+  `['length_bound']`. (c) `api_contract` block injected into the crash-*analysis* node too, and
+  `crash_analysis/SKILL.md` gained the out-of-contract→`false_positive` rule (notes the precondition
+  API may be off the backtrace). (d) `synthesize/SKILL.md` forbids feeding raw fuzz bytes as a
+  printf-family / stored format string.
+- **VALIDATION (Dev job `74765e87`, repo kgabis/parson, 2026-06-19):** with the fix deployed, the
+  synthesize stage produced a harness that fuzzes parson's **actual JSON parser** (input bytes = JSON
+  data), *not* the format-string setter. Fuzzer ran clean — **52M+ execs @ ~200K exec/s, 0 crashes**,
+  `crash_found=False`, routed to the no-crash coverage path (never hit crash-triage). The recurring
+  format-string false positive is eliminated at the synthesis layer (layer (d)); layers (a)–(c)
+  remain as the triage/analysis safety net for any future stored-config crash.
 
 ### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
 - inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
