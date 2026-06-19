@@ -45,6 +45,16 @@ Use this skill in the `crash-analysis` stage after `re-run` has produced crash e
 - Use conservative verdict `unknown` when evidence is weak.
 - Do not classify `real_bug` from sanitizer keywords alone.
 - If evidence is weak or missing, output `unknown` and explain missing evidence explicitly.
+- **Out-of-contract crashes are NOT vulnerabilities → verdict `false_positive`.** If an
+  `api_contract` section is provided, check whether the crash is only reachable because the
+  harness fed input that VIOLATES a documented precondition (e.g. a non-NUL-terminated buffer
+  where the docs require NUL-termination, a NULL where the docs require non-NULL, a length or
+  buffer-size the docs forbid, a printf/format string built from raw fuzz bytes, or use
+  without the required init/allocator setup). Note that the precondition-bearing API may be a
+  *stored-config setter* the harness called earlier — it will NOT appear on the crash
+  backtrace, so do not require it there. If the crash is out-of-contract, output
+  `false_positive` and name the violated precondition in `reason`/`signals`. Only output
+  `real_bug` when the crash is reachable with input that RESPECTS every documented precondition.
 
 ## Command policy
 - Allowed: read-only commands (`find`, `grep`, `rg`, `cat`, `ls`, `sed`, `awk`, `head`, `tail`).

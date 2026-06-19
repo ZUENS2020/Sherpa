@@ -15155,7 +15155,8 @@ def _node_crash_triage(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntimeSt
             import contract_analysis  # local import; best-effort
             crash_text = "\n".join(filter(None, [info_text, analysis_text, stderr_tail]))
             contract_block = contract_analysis.build_contract_triage_context(
-                repo_root, crash_text
+                repo_root, crash_text,
+                fuzzer_name=str(state.get("last_fuzzer") or "").strip(),
             )
             if contract_block:
                 context_parts.append(contract_block)
@@ -15413,6 +15414,18 @@ def _node_crash_analysis(state: FuzzWorkflowRuntimeState) -> FuzzWorkflowRuntime
         context_parts.append("=== re_run_report.md ===\n" + _trim_feedback_text(re_run_text))
     if triage_doc:
         context_parts.append("=== crash_triage.json ===\n" + json.dumps(triage_doc, ensure_ascii=False, indent=2))
+    try:
+        import contract_analysis  # local import; best-effort
+        crash_text = "\n".join(filter(None, [info_text, re_run_text]))
+        contract_block = contract_analysis.build_contract_triage_context(
+            repo_root, crash_text,
+            fuzzer_name=str(state.get("last_fuzzer") or "").strip(),
+        )
+        if contract_block:
+            context_parts.append(contract_block)
+            _wf_log(cast(dict[str, Any], state), "crash-analysis: injected documented API preconditions (contract-aware)")
+    except Exception as _contract_exc:  # never block analysis on contract extraction
+        _wf_log(cast(dict[str, Any], state), f"crash-analysis: contract extraction skipped: {_contract_exc}")
     context = "\n\n".join(context_parts)
 
     verdict = "unknown"
