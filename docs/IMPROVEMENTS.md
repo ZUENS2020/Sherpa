@@ -214,6 +214,32 @@ stop wasting harness slots and fuzz budget.
   this one as `real_bug`. **Not disclosed.** Reinforces the fix above **and** flags a harness-gen
   defect: synthesize must never feed unconstrained fuzzer bytes into a printf-family format param
   (see H-6) — restrict such args to a fixed safe allowlist (e.g. `%g`/`%f`/`%e` with bounded width).
+- **ROOT CAUSE (verified — why the contract gate never fired):** the crash is a *stored-config /
+  deferred-trigger* dataflow — harness calls the setter `json_set_float_serialization_format(fmt)`
+  (which carries the precondition), the value is stashed in a global, and the crash detonates much
+  later in `parson_sprintf`/`json_serialize_to_buffer_r`/`json_serialization_size`. Four layers fail
+  together:
+  1. **Gate is crash-stack-scoped.** `contract_analysis.build_contract_triage_context` only inspects
+     functions returned by `crash_frame_functions(crash_text)`. The setter that owns the precondition
+     is *not* on the backtrace (verified: stack funcs = `parson_sprintf, json_serialize_to_buffer_r,
+     json_serialization_size`), so no contract is extracted → empty `api_contract` block → not
+     injected. The `extra_funcs` param exists for exactly this but the call site
+     (`workflow_graph.py:15157`) passes only `(repo_root, crash_text)`.
+  2. **Regex misses the wording even if the setter were checked.** Verified: feeding parson.h:85
+     ("Make sure it can't serialize to a string longer than PARSON_NUM_BUF_SIZE") to
+     `_PRECONDITION_PATTERNS` returns NONE — `length_bound` knows "greater/less than" not "longer
+     than", `\bsize\b` won't match SIZE glued inside the macro token, and imperative "Make sure…"
+     isn't covered.
+  3. **crash_analysis has zero contract-awareness.** The `api_contract` block is wired only into the
+     crash-*triage* node; the crash-*analysis* node (which emits `verdict=real_bug`/`stop_report`, the
+     disclosure gate) never receives it and its SKILL.md never mentions preconditions. Both parson
+     runs went `triage:upstream_bug → analysis:real_bug`, so analysis overrode with no guardrail.
+  4. **Harness-gen has no rule against fuzzing a format-string param** (Dev case) — see H-6.
+  Fixes, in priority order: (a) feed the contract gate the harness's *called* API functions
+  (parse from the fuzzer `.c` / `targets.json`), not just stack frames, so stored-config setters are
+  covered; (b) broaden `_PRECONDITION_PATTERNS` (add "longer/shorter than", "make sure", macro-glued
+  size tokens); (c) wire the same `api_contract` block + rule into crash_analysis; (d) synthesize
+  allowlist for printf-family format args.
 
 ### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
 - inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
