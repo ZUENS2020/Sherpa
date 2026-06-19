@@ -201,6 +201,19 @@ stop wasting harness slots and fuzz budget.
   caller must / must not exceed …") as binding; if the only way to reach the crash is to break a
   documented precondition, classify `harness_bug`. Third instance of the doc-precondition class
   (jsmn O-7 cross-call, inih O-8 length, parson O-9 format) — promote to a first-class triage gate.
+- **Re-confirmed on Dev (job `a04d1f07` / child `fcef55a5`, repo `parson-1edb2b6a`), worse variant:**
+  the Dev harness (`json_set_float_serialization_format.c`) reads **arbitrary fuzzer bytes as the
+  format string** (byte0=len 1–32, next bytes = raw `fmt`) and passes them straight to
+  `json_set_float_serialization_format(fmt)`. Crashing input's fmt = `…i%ng-…` i.e. contains
+  **`%n`** → `vsprintf` writes the byte-count to a non-existent pointer arg → `SEGV WRITE @ 0x0`
+  (parson.c:298). This is **format-string injection in the harness**, the textbook "never fuzz a
+  printf format argument" anti-pattern — `%n`/`%s` aren't even "a too-long float format", they're
+  invalid for a double. Yet triage again said `real_bug` conf 0.85 and *explicitly* (and wrongly)
+  asserted *"the harness correctly uses the public API … no precondition is violated."* The pipeline
+  even has a `false_positive/` dir (it self-dismissed a sibling crash `56973bd0`) but still shipped
+  this one as `real_bug`. **Not disclosed.** Reinforces the fix above **and** flags a harness-gen
+  defect: synthesize must never feed unconstrained fuzzer bytes into a printf-family format param
+  (see H-6) — restrict such args to a fixed safe allowlist (e.g. `%g`/`%f`/`%e` with bounded width).
 
 ### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
 - inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
@@ -312,6 +325,11 @@ stop wasting harness slots and fuzz budget.
   documented precondition. **Not disclosed** (correctly — no real bug).
 - Triage gap logged as **O-9** (rationalized away a documented single-call precondition).
   Same class as jsmn (**O-7**) and inih (**O-8**).
+- **Dev re-run (job `a04d1f07` / child `fcef55a5`, `parson-1edb2b6a`) — same class, worse harness:**
+  Dev harness `json_set_float_serialization_format.c` feeds **arbitrary fuzzer bytes** as the
+  format string; crashing fmt contains **`%n`** → `vsprintf` SEGV WRITE @0x0 (parson.c:298). Pure
+  **format-string injection in the harness**. Triage again `real_bug` 0.85, explicitly (wrongly)
+  claiming "no precondition violated." **Not disclosed.** Details under **O-9**.
 
 ---
 
