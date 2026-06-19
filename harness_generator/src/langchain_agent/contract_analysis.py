@@ -30,7 +30,12 @@ _PRECONDITION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.I)),
     ("length_bound", re.compile(
         r"\b(len|length|size|count|n)\b[^.\n]{0,48}\b(must|should|at\s+least|no\s+more\s+than|not\s+exceed|cannot\s+exceed|<=|>=|greater\s+than|less\s+than)\b"
-        r"|buffer\s+(of|with)\s+(at\s+least|size)|at\s+least\s+\d+\s+byte",
+        r"|buffer\s+(of|with)\s+(at\s+least|size)|at\s+least\s+\d+\s+byte"
+        # imperative caller obligations on output/buffer size, e.g. parson.h:85
+        # "Make sure it can't serialize to a string longer than PARSON_NUM_BUF_SIZE"
+        r"|\b(longer|shorter|larger|bigger|smaller)\s+than\b"
+        r"|make\s+sure[^.\n]{0,80}\b(exceed|longer|larger|bigger|smaller|fit|within|less|more|than)\b"
+        r"|\b(must|should|do\s+not|don't|never)[^.\n]{0,48}\b(exceed|overflow|fit\s+in|fit\s+within)\b",
         re.I)),
     ("must_initialize", re.compile(
         r"must\s+(be\s+)?initiali[sz]ed|must\s+call\s+[A-Za-z_][A-Za-z0-9_]*\s*(\(\))?\s*(first|before)"
@@ -123,13 +128,64 @@ def crash_frame_functions(crash_text: str, limit: int = 8) -> list[str]:
     return seen
 
 
+# Identifiers that look like function calls but are language/libc noise — never
+# library API whose contract we care about.
+_CALL_SKIP = {
+    "if", "for", "while", "switch", "return", "sizeof", "do", "else",
+    "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset",
+    "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strdup", "memcmp",
+    "printf", "fprintf", "sprintf", "snprintf", "fwrite", "fread", "fopen",
+    "fclose", "exit", "abort", "assert", "va_start", "va_end",
+    "LLVMFuzzerTestOneInput", "LLVMFuzzerInitialize", "main",
+}
+_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def harness_called_functions(root, fuzzer_name: str, *, limit: int = 12) -> list[str]:
+    """Best-effort: locate the harness source for ``fuzzer_name`` and return the
+    library API functions it calls, top-first. These may include *stored-config*
+    setters (e.g. ``json_set_float_serialization_format``) whose documented
+    precondition governs a crash that detonates later, deep in an unrelated call
+    that the API setter never appears on. Such functions are invisible to
+    crash-stack-only extraction, so we surface them explicitly. Never raises."""
+    try:
+        if not fuzzer_name:
+            return []
+        root = Path(root)
+        stem = fuzzer_name.strip()
+        # last_fuzzer is usually "<name>_fuzz"; the source is typically "<name>.c".
+        cands = {stem, stem[:-5] if stem.endswith("_fuzz") else stem}
+        src = ""
+        for p in root.rglob("*.c"):
+            if p.stem in cands and p.is_file():
+                try:
+                    src = p.read_text(encoding="utf-8", errors="replace")
+                    break
+                except Exception:
+                    continue
+        if not src:
+            return []
+        out: list[str] = []
+        for m in _CALL_RE.finditer(src):
+            fn = m.group(1)
+            if fn in _CALL_SKIP or fn in out:
+                continue
+            out.append(fn)
+            if len(out) >= limit:
+                break
+        return out
+    except Exception:
+        return []
+
+
 def build_contract_triage_context(
     repo_root,
     crash_text: str,
     *,
     extra_funcs: list[str] | None = None,
+    fuzzer_name: str | None = None,
     max_files: int = 400,
-    max_funcs: int = 6,
+    max_funcs: int = 12,
 ) -> str:
     """Build a markdown context block documenting preconditions of the functions
     on the crash stack, for the crash-triage prompt. Returns "" when nothing
@@ -137,6 +193,13 @@ def build_contract_triage_context(
     try:
         root = Path(repo_root)
         funcs = crash_frame_functions(crash_text)
+        # Stored-config / deferred-trigger crashes: the precondition lives on an
+        # API the harness called earlier (a setter), which is NOT on the crash
+        # backtrace. Add the harness's called API functions so those contracts
+        # are still checked.
+        for f in harness_called_functions(root, fuzzer_name or ""):
+            if f and f not in funcs:
+                funcs.append(f)
         for f in (extra_funcs or []):
             if f and f not in funcs:
                 funcs.append(f)

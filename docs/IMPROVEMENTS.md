@@ -163,6 +163,96 @@ stop wasting harness slots and fuzz budget.
   Fixed by classifying on the crashing **function** (is it harness-defined?) with
   the file pattern only as fallback. See **S-473**.
 
+### [O-7] Triage misses *cross-call state-reuse* harness misuse → false `upstream_bug`  — OPEN
+- jsmn (prod, job `f18c6c8e`): triage labeled `upstream_bug`/`real_bug` conf 0.85 a crash
+  that is pure **harness misuse**. The crash is in `jsmn_parse` cleanup loop (jsmn.h:446,
+  `for (i = parser->toknext - 1; i >= 0; i--)`), but it only fires because the harness reuses
+  one `jsmn_parser` across calls **without `jsmn_init` between them and shrinks the buffer**:
+  line 317 parses into `tokens[MAX]` (toknext→3, pos→len), then line 319 calls `jsmn_parse`
+  again on `tiny_buf[1]` with the *same* parser → stale `toknext=3`/`pos=len` carried over →
+  cleanup loop reads `tiny_buf[1]/[2]` OOB. jsmn's contract requires `jsmn_init` per independent
+  parse; the documented re-call-after-NOMEM pattern only ever *grows* the buffer, never shrinks.
+- The triage reasoning even *quoted* the cross-call carry-over ("toknext carries stale value
+  from prior call when parser not re-initialized") yet still called it a library bug. S-465
+  contract-aware triage only models single-call preconditions (NUL-term, length, struct init);
+  it has no notion of **multi-call object lifecycle** (init-before-reuse, monotonic buffer size).
+- Fix: extend contract model with stateful-object rules — if a crash depends on reusing a
+  handle across calls without the documented reset, or on a buffer that shrank vs. a prior call
+  with the same handle, classify as `harness_bug`, not `upstream_bug`. Root cause is also H-6
+  (synthesize emits contract-violating call sequences). See findings log (jsmn cross-call).
+
+### [O-9] Triage rationalizes away an *explicit documented precondition* → false `real_bug`  — OPEN
+- parson (prod, job `5dd39318` / child `8abac3a9`): triage+analysis labeled `upstream_bug` →
+  `real_bug` conf 0.85, `recommended_action=stop_report`, for a stack-buffer-overflow WRITE
+  (85 bytes into 64-byte `num_buf`) in `json_serialize_to_buffer_r` (parson.c:1270 → `parson_sprintf`
+  → `vsprintf`). But the public API carries an **explicit precondition in the header**: parson.h:85
+  `json_set_float_serialization_format` — *"Make sure it can't serialize to a string longer than
+  PARSON_NUM_BUF_SIZE."* (PARSON_NUM_BUF_SIZE=64). The harness
+  (`json_set_float_serialization_format_fuzz.c:8`) puts `"%f"` in its format array and serializes
+  arbitrary fuzz doubles; `%f` on ~2.35e76 yields 85 chars → violates the documented contract.
+  Default format `%1.17g` (≤25 B) is safe; the crash only exists because the harness chose a
+  format the docs forbid.
+- The triage *quoted* the precondition ("parson.h:85 documents precondition") then overrode it
+  with "`%f` is a standard format specifier a reasonable caller would use." That rationalization is
+  exactly the failure: a doc-stated caller obligation is a **hard contract**, not a suggestion —
+  out-of-contract input ≠ library bug. **Not disclosed.**
+- Distinct from O-7 (multi-call lifecycle): this is a *single-call* documented precondition on a
+  setter's argument. Fix: contract model must treat header-documented preconditions ("make sure /
+  caller must / must not exceed …") as binding; if the only way to reach the crash is to break a
+  documented precondition, classify `harness_bug`. Third instance of the doc-precondition class
+  (jsmn O-7 cross-call, inih O-8 length, parson O-9 format) — promote to a first-class triage gate.
+- **Re-confirmed on Dev (job `a04d1f07` / child `fcef55a5`, repo `parson-1edb2b6a`), worse variant:**
+  the Dev harness (`json_set_float_serialization_format.c`) reads **arbitrary fuzzer bytes as the
+  format string** (byte0=len 1–32, next bytes = raw `fmt`) and passes them straight to
+  `json_set_float_serialization_format(fmt)`. Crashing input's fmt = `…i%ng-…` i.e. contains
+  **`%n`** → `vsprintf` writes the byte-count to a non-existent pointer arg → `SEGV WRITE @ 0x0`
+  (parson.c:298). This is **format-string injection in the harness**, the textbook "never fuzz a
+  printf format argument" anti-pattern — `%n`/`%s` aren't even "a too-long float format", they're
+  invalid for a double. Yet triage again said `real_bug` conf 0.85 and *explicitly* (and wrongly)
+  asserted *"the harness correctly uses the public API … no precondition is violated."* The pipeline
+  even has a `false_positive/` dir (it self-dismissed a sibling crash `56973bd0`) but still shipped
+  this one as `real_bug`. **Not disclosed.** Reinforces the fix above **and** flags a harness-gen
+  defect: synthesize must never feed unconstrained fuzzer bytes into a printf-family format param
+  (see H-6) — restrict such args to a fixed safe allowlist (e.g. `%g`/`%f`/`%e` with bounded width).
+- **ROOT CAUSE (verified — why the contract gate never fired):** the crash is a *stored-config /
+  deferred-trigger* dataflow — harness calls the setter `json_set_float_serialization_format(fmt)`
+  (which carries the precondition), the value is stashed in a global, and the crash detonates much
+  later in `parson_sprintf`/`json_serialize_to_buffer_r`/`json_serialization_size`. Four layers fail
+  together:
+  1. **Gate is crash-stack-scoped.** `contract_analysis.build_contract_triage_context` only inspects
+     functions returned by `crash_frame_functions(crash_text)`. The setter that owns the precondition
+     is *not* on the backtrace (verified: stack funcs = `parson_sprintf, json_serialize_to_buffer_r,
+     json_serialization_size`), so no contract is extracted → empty `api_contract` block → not
+     injected. The `extra_funcs` param exists for exactly this but the call site
+     (`workflow_graph.py:15157`) passes only `(repo_root, crash_text)`.
+  2. **Regex misses the wording even if the setter were checked.** Verified: feeding parson.h:85
+     ("Make sure it can't serialize to a string longer than PARSON_NUM_BUF_SIZE") to
+     `_PRECONDITION_PATTERNS` returns NONE — `length_bound` knows "greater/less than" not "longer
+     than", `\bsize\b` won't match SIZE glued inside the macro token, and imperative "Make sure…"
+     isn't covered.
+  3. **crash_analysis has zero contract-awareness.** The `api_contract` block is wired only into the
+     crash-*triage* node; the crash-*analysis* node (which emits `verdict=real_bug`/`stop_report`, the
+     disclosure gate) never receives it and its SKILL.md never mentions preconditions. Both parson
+     runs went `triage:upstream_bug → analysis:real_bug`, so analysis overrode with no guardrail.
+  4. **Harness-gen has no rule against fuzzing a format-string param** (Dev case) — see H-6.
+  Fixes, in priority order: (a) feed the contract gate the harness's *called* API functions
+  (parse from the fuzzer `.c` / `targets.json`), not just stack frames, so stored-config setters are
+  covered; (b) broaden `_PRECONDITION_PATTERNS` (add "longer/shorter than", "make sure", macro-glued
+  size tokens); (c) wire the same `api_contract` block + rule into crash_analysis; (d) synthesize
+  allowlist for printf-family format args.
+
+### [O-8] vuln-hunt/triage loop doesn't converge on a stable `harness_bug`  — OPEN
+- inih (prod, job `cc7217d6`): a confirmed ASan crash correctly classified `harness_bug`
+  (harness passed `length` > buffer to `ini_parse_string_length`; `ini_reader_string` honors
+  `num_left`, so the library is correct) was re-found for **17+ rounds** (pod stuck at
+  `vuln-hunt-146`). The agent's own log: "harness_bug triage has been stable for 8+ rounds
+  (10–17)" — yet the loop kept cycling `vuln-hunt → plan → … → triage(harness_bug) → plan`
+  instead of converging. Burned a node slot with zero useful output until manually stopped.
+- Distinct from O-1 (build death-loop): this is the *triage/improve* loop. Fix: when the same
+  crash signature is triaged `harness_bug` N rounds running, converge — deterministically
+  regenerate the harness to fix the misuse, or abandon the target — don't re-enter vuln-hunt.
+  Pairs with O-2 (remember harness_bug signatures so they start suppressed).
+
 ---
 
 ## 4. Validation / findings log
@@ -240,6 +330,33 @@ stop wasting harness slots and fuzz budget.
 ### jsmn — heap-overflow in harness `dump()`
 - Harness bug (see H-4), not a jsmn bug; triage correctly returned `harness_bug` (conf 1.0).
 
+### jsmn — stack-buffer-overflow READ in `jsmn_parse` cleanup loop (jsmn.h:446)  — FALSE POSITIVE
+- prod job `f18c6c8e`; triage **wrongly** labeled `upstream_bug`/`real_bug` conf 0.85.
+  Crash is **harness misuse**, not a jsmn bug: harness reuses one `jsmn_parser` across calls
+  without `jsmn_init` and shrinks the buffer (line 317 `tokens[MAX]` → line 319 `tiny_buf[1]`,
+  same parser) → stale `toknext=3`/`pos=len` carry over → cleanup loop `for(i=toknext-1;…)`
+  reads `tiny_buf[1]/[2]` OOB. jsmn requires `jsmn_init` per independent parse; the NOMEM
+  re-call pattern only grows the buffer. **Not disclosed** (correctly — no real bug).
+- Triage gap logged as **O-7** (no multi-call object-lifecycle contract); root harness defect
+  is **H-6**. Contrast: inih (**O-8**) got `harness_bug` right but looped 17 rounds.
+
+### parson — stack-buffer-overflow WRITE in `parson_sprintf`/`vsprintf` (parson.c:298,1270)  — FALSE POSITIVE
+- prod job `5dd39318` (child `8abac3a9`); triage `upstream_bug` → analysis `real_bug` conf 0.85,
+  `recommended_action=stop_report`. ASan: WRITE size 85 into 64-byte `num_buf` (parson.c:1800).
+- **Harness misuse**, not a parson bug: harness set float format to `"%f"`
+  (`json_set_float_serialization_format_fuzz.c:8,46`) then serialized a large double
+  (~2.35e76 from input `23456789012E66`); `%f` produces 85 chars > PARSON_NUM_BUF_SIZE(64).
+  The header explicitly requires the caller to guarantee the format can't exceed the buffer
+  (parson.h:85); default `%1.17g` is safe (≤25 B). Crash is reachable only by violating the
+  documented precondition. **Not disclosed** (correctly — no real bug).
+- Triage gap logged as **O-9** (rationalized away a documented single-call precondition).
+  Same class as jsmn (**O-7**) and inih (**O-8**).
+- **Dev re-run (job `a04d1f07` / child `fcef55a5`, `parson-1edb2b6a`) — same class, worse harness:**
+  Dev harness `json_set_float_serialization_format.c` feeds **arbitrary fuzzer bytes** as the
+  format string; crashing fmt contains **`%n`** → `vsprintf` SEGV WRITE @0x0 (parson.c:298). Pure
+  **format-string injection in the harness**. Triage again `real_bug` 0.85, explicitly (wrongly)
+  claiming "no precondition violated." **Not disclosed.** Details under **O-9**.
+
 ---
 
 ## 5. Process notes / gotchas
@@ -257,3 +374,12 @@ stop wasting harness slots and fuzz budget.
   (panels per task: phase/cov/exec-s/round/vuln/crash/elapsed). `node index.js`.
 - **Liveness vs stuck:** `/api/tasks` `updated_at` ticking = alive; a stage quiet for >10min
   with no artifact writes is suspect (check the run pod's codex `elapsed=` and job log).
+- **Secret patch ≠ live pod:** `kubectl patch secret sherpa-llm` only updates the secret on
+  disk; a **long-lived pod keeps its env snapshot from start time**. The 24h prod `sherpa-web`
+  pod still had the old `LLM_key=sk-…53f0` after the patch (its `OPENAI_API_KEY` was fresh only
+  because an *earlier* patch coincided with a restart). After patching any secret, `kubectl
+  rollout restart deploy/sherpa-web` so the pod picks it up. Fuzz **Job** pods are unaffected —
+  they read the secret fresh at pod-creation via `envFrom: secretRef: sherpa-llm`, so the
+  blast radius of a stale web pod is only whatever the web pod calls directly (was 0 auth
+  errors here — heavy LLM work runs in Job pods). Verify with a live call from inside the pod:
+  `exec deploy/sherpa-web -- curl …$OPENAI_BASE_URL/chat/completions` → expect HTTP 200.
