@@ -73,3 +73,30 @@ build 阶段通过 `_inject_coverage_instrumentation()` 自动向 `build.py` 注
 - `harness_generator/src/langchain_agent/workflow_graph.py` — 注入逻辑
 - `harness_generator/src/langchain_agent/opencode_skills/synthesize/SKILL.md` — AI 契约
 - `harness_generator/src/langchain_agent/coverage_replay.py` — 逐种子回放分析
+
+## Cursor Cloud specific instructions
+
+本节面向后续 Cloud Agent（启动脚本已跑过、依赖已装好）。启动脚本只做依赖刷新：Python venv (`.venv/`，装 `docker/requirements.web.txt` + `pytest`) 与 `frontend-next` 的 npm 依赖。系统依赖（PostgreSQL 16）由 VM 快照携带，不在启动脚本内。
+
+### 本地可运行 / 不可运行的范围
+- 可本地运行：控制面后端 API（FastAPI）、PostgreSQL、Next.js 前端、pytest、前端 lint/build。
+- 不可本地端到端运行的部分：真正的 fuzz 阶段执行。`_executor_mode()` 只支持 `k8s_job`，每个阶段以 Kubernetes Job 执行；本 VM 无 `kubectl`/集群，因此提交任务后子任务会停在 `plan`，日志反复出现 `k8s job submit failed: ... No such file or directory: 'kubectl'`。这是预期边界，不是 bug。完整 fuzz 还需外部 LLM key（`LLM_key`/`OPENAI_API_KEY`）与 Docker/DinD。
+
+### 启动服务（非显而易见项）
+- PostgreSQL 需手动启动，且被特意配置为监听 **55432** 端口（与 CI `test.yml` 的 `55432:5432` 一致，后端测试 `tests/test_api_stability.py` 硬编码连 `127.0.0.1:55432`）：
+  - `sudo pg_ctlcluster 16 main start`
+  - 账号/库：`sherpa` / `sherpa` / `sherpa`。
+- 后端（在 `harness_generator/src/langchain_agent/` 下）：
+  - `HOST=0.0.0.0 PORT=8001 DATABASE_URL="postgresql://sherpa:sherpa@127.0.0.1:55432/sherpa" ../../../.venv/bin/python main.py`
+  - 直接 `python main.py` 默认绑 `127.0.0.1:8000`；缺 `DATABASE_URL` 会直接拒绝启动（Postgres-only）。
+  - 健康检查：`GET /healthz` 返回 `{"ok":true,...,"db":{"ok":true}}`。
+- 前端（`frontend-next/`）独立跑时需把 API 指向后端（默认是 `/api`，靠 gateway）：
+  - `NEXT_PUBLIC_API_BASE="http://localhost:8001/api" npm run dev`（端口 3000）。后端 CORS 允许 `*`。
+
+### 测试 / lint / build
+- 后端测试：仓库根目录 `.venv/bin/python -m pytest tests/`（需 Postgres 在 55432）。命令见 `.github/workflows/test.yml`。
+- 前端：`cd frontend-next && npx next lint` / `npm run build`。CI 里 `npx vitest run` 目前无测试文件（正常）。
+
+### 已知非环境导致 / 环境导致的测试失败（勿误判为回归）
+- `tests/test_opencode_skill_contracts.py::test_fix_build_contract_keeps_vcpkg_and_compiler_rules` 与 `tests/test_run_cmd_streaming.py::test_run_cmd_fails_when_declared_ports_require_missing_vcpkg`：在 `main`/`dev` 的 CI 上同样失败，属既有仓库问题。
+- `tests/test_codex_helper_sentinel.py` 的约 15 个用例在本 VM 失败：`done` sentinel 判新旧用 `mtime < attempt_start - 1e-3`，而本机 `/tmp`（overlayfs）文件 mtime 比 wall-clock 落后约 3ms，超过 1ms 容差被误判为 stale。这是本环境 mtime/时钟粒度问题（CI 的 ext4 不触发），非代码回归；请勿为此改代码。
